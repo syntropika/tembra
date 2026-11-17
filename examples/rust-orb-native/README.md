@@ -10,7 +10,7 @@ code, run natively, without an artifact or a WebAssembly engine.
 | ------------------------------ | --------------------------------------------------------------------------------------------------- |
 | `wit/greeter.wit`              | The shared contract: the `greeting` interface with `hello`                                          |
 | `english/src/lib.rs`           | One greeter: `#[service("example:greeter/greeting@1.0.0")]`, in English                             |
-| `italian/src/lib.rs`           | The other greeter of the same interface, in Italian                                                 |
+| `italian/src/lib.rs`           | The other greeter of the same interface, in Italian, naming the facade `sdk`                        |
 | `english/contract/english.wit` | The contract `cargo tembra build` wrote, the shared package nested; `italian/` has its own          |
 | `host/src/main.rs`             | The native host: depends on both crates, installs `english::orb()` and `italian::orb()`, calls both |
 | `run.sh`                       | Build both crates as components, show their contracts, then build and run the native host           |
@@ -36,9 +36,10 @@ the component's exports, symbols named after the interface, such as
 `example:greeter/greeting@1.0.0#hello`. Two crates exporting one interface would define the same
 symbols, which one native binary cannot link, so the macro defines them only for `wasm32`: a native
 build of the crate has none. A native host gets the module's `orb()` instead, which exists only
-where the `tembra` facade links the runtime. The greeters depend on `tembra` with `macros` only;
-the host depends on it with its default `host` feature, and Cargo unifies the features of one
-build, so the greeters' `tembra` links the runtime too when the host compiles them.
+where the `tembra` facade links the runtime. The greeters depend on `tembra` with `macros` only,
+`italian` under another name, `sdk`, which its attribute gives with `crate = "sdk"`; the host
+depends on it with its default `host` feature, and Cargo unifies the features of one build, so the
+greeters' facade links the runtime too when the host compiles them, whatever name each gives it.
 
 ## The host
 

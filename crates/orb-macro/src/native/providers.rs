@@ -25,12 +25,12 @@
 //! with `Orb::contribute_portable`, whose callback reads the hook's input with the codec, runs the
 //! author's function in the Orb's root, as a component's contribution runs, and writes its answer.
 use super::{
-    Kind, Refused, Scopes, Uncovered, argument, boundary, decode, encode, kind, refused, spelled,
-    wit_kind,
+    Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode, kind, refused,
+    spelled, wit_kind,
 };
 use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident, wit};
 use heck::ToSnakeCase;
-use proc_macro2::TokenStream;
+use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 use std::collections::BTreeSet;
 use syn::Ident;
@@ -202,12 +202,14 @@ pub(super) fn contribution_ident(contribution: &Contribution) -> Ident {
 /// an `Option` when it has one and none when it has none, and the value otherwise. It runs in the
 /// Orb's root, as a component's contribution does: in the scope of the call, which the native
 /// `context` reads, with the `context` option, of the Orb's root resources, with some, and of its
-/// imports, `imported`, but on no object, so it reaches no state.
+/// imports, `imported`, but on no object, so it reaches no state. The function is the registry's of
+/// the contribution's module, which `orb(..)` reaches whatever the visibility of the module.
 pub(super) fn contribution(
     contributed: &Contributed<'_>,
     analysis: &Analysis,
     imported: bool,
 ) -> TokenStream {
+    let facade = &analysis.options.facade();
     let contribution = contributed.contribution;
     let scope = contribution.scope;
     let root = crate::supers(analysis.modules[scope].len());
@@ -229,6 +231,7 @@ pub(super) fn contribution(
             .unwrap_or_else(|_| unreachable!("a contribution's input is covered")),
         quote! { value },
         &boundary,
+        facade,
     );
     let answer = match &contribution.result {
         None => quote! {
@@ -240,7 +243,7 @@ pub(super) fn contribution(
                 .unwrap_or_else(|_| unreachable!("a contribution's result is covered"))
             {
                 Kind::Option(inner) => {
-                    let item = encode(&inner, quote! { item }, &boundary);
+                    let item = encode(&inner, quote! { item }, &boundary, facade);
                     quote! {
                         match value {
                             ::core::option::Option::None => {
@@ -253,18 +256,18 @@ pub(super) fn contribution(
                     }
                 }
                 kind => {
-                    let value = encode(&kind, quote! { value }, &boundary);
+                    let value = encode(&kind, quote! { value }, &boundary, facade);
                     quote! { #value.map(::core::option::Option::Some) }
                 }
             };
             quote! {
                 let value = #ident(#param);
                 let write = |value: #result| -> ::core::result::Result<
-                    ::core::option::Option<::tembra::serde_json::Value>,
+                    ::core::option::Option<::#facade::serde_json::Value>,
                     ::std::string::String,
                 > { #written };
                 write(value).map_err(|message| {
-                    ::tembra::Error::invalid(::tembra::core::Reason::Result, message)
+                    ::#facade::Error::invalid(::#facade::core::Reason::Result, message)
                 })
             }
         }
@@ -272,18 +275,18 @@ pub(super) fn contribution(
     let future = scopes.around(quote! {
         async move {
             __tembra_context.check()?;
-            let read = |value: ::tembra::serde_json::Value| -> ::core::result::Result<
+            let read = |value: ::#facade::serde_json::Value| -> ::core::result::Result<
                 #input,
                 ::std::string::String,
             > { #read };
             let #param = read(__tembra_input).map_err(|message| {
-                ::tembra::Error::invalid(::tembra::core::Reason::Arguments, message)
+                ::#facade::Error::invalid(::#facade::core::Reason::Arguments, message)
             })?;
             #answer
         }
     });
     let handle = scopes.handle(quote! {
-        |__tembra_context: ::tembra::Context, __tembra_input: ::tembra::serde_json::Value| #future
+        |__tembra_context: ::#facade::Context, __tembra_input: ::#facade::serde_json::Value| #future
     });
     let function = contribution_ident(contribution);
     let hook = &contribution.hook;
@@ -298,15 +301,19 @@ pub(super) fn contribution(
     let doc = format!(
         " The contribution of `{ident}` to the hook `{hook}`, which `orb(..)` adds to the native Orb, with the Orb that declares the hook, `target`."
     );
+    let registry = format_ident!("{REGISTRY}");
+    let registered = Literal::usize_unsuffixed(scope);
     quote! {
-        #[doc = #doc]
-        pub(crate) fn #function(
-            orb: ::tembra::Orb,
-            target: &str
-            #resources
-            #imports
-        ) -> ::tembra::Orb {
-            orb.contribute_portable(target, #hook, #signature, #priority, #handle)
+        impl #root #registry<#registered> {
+            #[doc = #doc]
+            pub(crate) fn #function(
+                orb: ::#facade::Orb,
+                target: &str
+                #resources
+                #imports
+            ) -> ::#facade::Orb {
+                orb.contribute_portable(target, #hook, #signature, #priority, #handle)
+            }
         }
     }
 }
@@ -365,8 +372,12 @@ fn served(analysis: &Analysis, identity: &str, by_key: bool) -> Result<(), Refus
 }
 
 /// `Providers`, the argument of `orb(..)` naming the Orb that answers each import, and the Orb
-/// that declares each hook the module contributes to.
-pub(super) fn providers(imports: &[Import<'_>], contributions: &[Contributed<'_>]) -> TokenStream {
+/// that declares each hook the module contributes to, as the facade named `facade` names them.
+pub(super) fn providers(
+    imports: &[Import<'_>],
+    contributions: &[Contributed<'_>],
+    facade: &Ident,
+) -> TokenStream {
     let hooks = contributions.iter().map(|contributed| {
         let field = &contributed.field;
         let doc = format!(
@@ -375,7 +386,7 @@ pub(super) fn providers(imports: &[Import<'_>], contributions: &[Contributed<'_>
         );
         quote! {
             #[doc = #doc]
-            pub #field: ::tembra::Provider,
+            pub #field: ::#facade::Provider,
         }
     });
     let fields = imports.iter().map(|import| {
@@ -392,7 +403,7 @@ pub(super) fn providers(imports: &[Import<'_>], contributions: &[Contributed<'_>
         };
         quote! {
             #[doc = #doc]
-            pub #field: ::tembra::Provider,
+            pub #field: ::#facade::Provider,
         }
     });
     quote! {
@@ -410,10 +421,11 @@ pub(super) fn providers(imports: &[Import<'_>], contributions: &[Contributed<'_>
 /// requirement per Orb, as the plan of a compiled Orb requires the providers an installation
 /// selects: the signature of each interface imported from it and the functions of the interface,
 /// and each hook it contributes to with the signature of the hook's callback. Two imports or hooks
-/// from one Orb name one API version of it.
+/// from one Orb name one API version of it. The runtime is the facade named `facade`.
 pub(super) fn requirements(
     imports: &[Import<'_>],
     contributions: &[Contributed<'_>],
+    facade: &Ident,
 ) -> TokenStream {
     let hooks = contributions.iter().map(|contributed| {
         let field = &contributed.field;
@@ -455,7 +467,7 @@ pub(super) fn requirements(
             /// installs the Orb.
             pub(crate) fn requirements(
                 providers: &super::Providers,
-            ) -> ::tembra::Result<::std::vec::Vec<::tembra::core::Requirement>> {
+            ) -> ::#facade::Result<::std::vec::Vec<::#facade::core::Requirement>> {
                 let mut requirements = ::std::collections::BTreeMap::new();
                 #({ #required })*
                 #({ #hooks })*
@@ -466,13 +478,13 @@ pub(super) fn requirements(
             fn entry<'a>(
                 requirements: &'a mut ::std::collections::BTreeMap<
                     ::std::string::String,
-                    ::tembra::core::Requirement,
+                    ::#facade::core::Requirement,
                 >,
-                provider: &::tembra::Provider,
-            ) -> ::tembra::Result<&'a mut ::tembra::core::Requirement> {
+                provider: &::#facade::Provider,
+            ) -> ::#facade::Result<&'a mut ::#facade::core::Requirement> {
                 let requirement = requirements
                     .entry(::core::clone::Clone::clone(&provider.name))
-                    .or_insert_with(|| ::tembra::core::Requirement {
+                    .or_insert_with(|| ::#facade::core::Requirement {
                         signatures: ::core::default::Default::default(),
                         hook_signatures: ::core::default::Default::default(),
                         orb: ::core::clone::Clone::clone(&provider.name),
@@ -481,8 +493,8 @@ pub(super) fn requirements(
                         hooks: ::core::default::Default::default(),
                     });
                 if requirement.api_version != provider.api_version {
-                    return ::core::result::Result::Err(::tembra::Error::invalid(
-                        ::tembra::core::Reason::ApiVersion,
+                    return ::core::result::Result::Err(::#facade::Error::invalid(
+                        ::#facade::core::Reason::ApiVersion,
                         ::std::format!("inconsistent API version for provider {}", provider.name),
                     ));
                 }
@@ -499,8 +511,8 @@ pub(super) fn requirements(
 /// refuses, ends the method that made it with the failure, as a trap ends a component's call. A
 /// call the method stops awaiting is cancelled, and the method ends once it has ended, unless its
 /// own call is cancelled, as a component's executor joins an import its callback abandons; then it
-/// releases the claims of the views dropped in it.
-pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
+/// releases the claims of the views dropped in it. The runtime is the facade named `facade`.
+pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
     let (plain, keyed): (Vec<&Import<'_>>, Vec<&Import<'_>>) =
         imports.iter().partition(|import| import.view.is_none());
     let plain_fields: Vec<&Ident> = plain.iter().map(|import| &import.field).collect();
@@ -518,8 +530,8 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                 /// import's provider, in the Orb's create.
                 pub(crate) fn declare(
                     &self,
-                    declaration: &::tembra::Declaration,
-                ) -> ::tembra::Result<()> {
+                    declaration: &::#facade::Declaration,
+                ) -> ::#facade::Result<()> {
                     #(self.#plain_fields.declare(declaration)?;)*
                     ::core::result::Result::Ok(())
                 }
@@ -530,7 +542,7 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
             pub(crate) struct Plain {
                 service: ::std::string::String,
                 reference: ::core::cell::RefCell<
-                    ::core::option::Option<::std::rc::Rc<::tembra::Reference>>,
+                    ::core::option::Option<::std::rc::Rc<::#facade::Reference>>,
                 >,
             }
 
@@ -542,7 +554,7 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                     }
                 }
 
-                fn declare(&self, declaration: &::tembra::Declaration) -> ::tembra::Result<()> {
+                fn declare(&self, declaration: &::#facade::Declaration) -> ::#facade::Result<()> {
                     let reference = declaration.get(
                         &self.service,
                         ::std::vec![::std::string::String::from("main")],
@@ -552,7 +564,7 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                 }
 
                 /// The reference of the Orb's root to the provider's `main` object.
-                pub(crate) fn reference(&self) -> ::std::rc::Rc<::tembra::Reference> {
+                pub(crate) fn reference(&self) -> ::std::rc::Rc<::#facade::Reference> {
                     self.reference
                         .borrow()
                         .clone()
@@ -567,14 +579,14 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
             /// objects it acquires.
             pub(crate) struct Keyed {
                 service: ::std::string::String,
-                options: ::tembra::AcquisitionOptions,
+                options: ::#facade::AcquisitionOptions,
             }
 
             impl Keyed {
                 fn new(service: ::std::string::String, api_version: u32, methods: &[&str]) -> Self {
                     Self {
                         service,
-                        options: ::tembra::AcquisitionOptions {
+                        options: ::#facade::AcquisitionOptions {
                             api_version,
                             methods: methods
                                 .iter()
@@ -590,9 +602,9 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                 /// once. Cancelling the call ends the wait.
                 pub(crate) async fn get(
                     &self,
-                    context: &::tembra::Context,
+                    context: &::#facade::Context,
                     key: ::std::vec::Vec<::std::string::String>,
-                ) -> ::tembra::Result<Claim> {
+                ) -> ::#facade::Result<Claim> {
                     let mut claim = Claim {
                         reference: context
                             .get_wait(&self.service, key, ::core::clone::Clone::clone(&self.options))
@@ -625,13 +637,13 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
             /// when the call that drops the view settles, as a component releases its view's claim
             /// once the guest dropped the view, so the root keeps none after it.
             pub(crate) struct Claim {
-                reference: ::std::rc::Rc<::tembra::Reference>,
+                reference: ::std::rc::Rc<::#facade::Reference>,
                 held: bool,
             }
 
             impl Claim {
                 /// The reference of the claim, which calls the object.
-                pub(crate) fn reference(&self) -> &::tembra::Reference {
+                pub(crate) fn reference(&self) -> &::#facade::Reference {
                     &self.reference
                 }
             }
@@ -696,11 +708,11 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
             /// awaiting, which it joins before it ends, and the claims of the views dropped in it,
             /// which it releases as it ends.
             pub(crate) struct Call {
-                pub(crate) context: ::tembra::Context,
+                pub(crate) context: ::#facade::Context,
                 pub(crate) imports: ::std::rc::Rc<Imports>,
-                failed: ::core::cell::RefCell<::core::option::Option<::tembra::Error>>,
-                abandoned: ::core::cell::RefCell<::std::vec::Vec<::tembra::IssuedCall>>,
-                dropped: ::core::cell::RefCell<::std::vec::Vec<::std::rc::Rc<::tembra::Reference>>>,
+                failed: ::core::cell::RefCell<::core::option::Option<::#facade::Error>>,
+                abandoned: ::core::cell::RefCell<::std::vec::Vec<::#facade::IssuedCall>>,
+                dropped: ::core::cell::RefCell<::std::vec::Vec<::std::rc::Rc<::#facade::Reference>>>,
             }
 
             /// Run a method's future for its call: while it is polled, the import modules call
@@ -709,12 +721,12 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
             /// calls of the imports it stopped awaiting have ended, and releases the claims of the
             /// views dropped in it.
             pub(crate) fn scoped<T, F>(
-                context: ::tembra::Context,
+                context: ::#facade::Context,
                 imports: ::std::rc::Rc<Imports>,
                 future: F,
-            ) -> impl ::core::future::Future<Output = ::tembra::Result<T>>
+            ) -> impl ::core::future::Future<Output = ::#facade::Result<T>>
             where
-                F: ::core::future::Future<Output = ::tembra::Result<T>>,
+                F: ::core::future::Future<Output = ::#facade::Result<T>>,
             {
                 let call = ::std::rc::Rc::new(Call {
                     context,
@@ -782,14 +794,14 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                 /// call.
                 pub(crate) async fn call<R>(
                     &self,
-                    reference: &::tembra::Reference,
+                    reference: &::#facade::Reference,
                     method: &str,
                     arguments: ::core::result::Result<
-                        ::tembra::serde_json::Value,
+                        ::#facade::serde_json::Value,
                         ::std::string::String,
                     >,
                     read: impl ::core::ops::FnOnce(
-                        ::tembra::serde_json::Value,
+                        ::#facade::serde_json::Value,
                     ) -> ::core::result::Result<R, ::std::string::String>,
                 ) -> R {
                     let answered = match arguments {
@@ -797,8 +809,8 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                             match self.issue(reference, method, arguments).await {
                                 ::core::result::Result::Ok(value) => {
                                     read(value).map_err(|message| {
-                                        ::tembra::Error::invalid(
-                                            ::tembra::core::Reason::Result,
+                                        ::#facade::Error::invalid(
+                                            ::#facade::core::Reason::Result,
                                             message,
                                         )
                                     })
@@ -809,7 +821,7 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                             }
                         }
                         ::core::result::Result::Err(message) => ::core::result::Result::Err(
-                            ::tembra::Error::invalid(::tembra::core::Reason::Arguments, message),
+                            ::#facade::Error::invalid(::#facade::core::Reason::Arguments, message),
                         ),
                     };
                     match answered {
@@ -827,12 +839,12 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                 /// to join.
                 async fn issue(
                     &self,
-                    reference: &::tembra::Reference,
+                    reference: &::#facade::Reference,
                     method: &str,
-                    arguments: ::tembra::serde_json::Value,
-                ) -> ::tembra::Result<::tembra::serde_json::Value> {
+                    arguments: ::#facade::serde_json::Value,
+                ) -> ::#facade::Result<::#facade::serde_json::Value> {
                     let (issued, result) = reference
-                        .issue_portable::<::tembra::serde_json::Value, ::tembra::serde_json::Value>(
+                        .issue_portable::<::#facade::serde_json::Value, ::#facade::serde_json::Value>(
                             &self.context,
                             method,
                             arguments,
@@ -879,7 +891,7 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
             /// cancels the call and leaves it to the method's call, which joins it.
             struct Awaited<'a> {
                 call: &'a Call,
-                issued: ::core::option::Option<::tembra::IssuedCall>,
+                issued: ::core::option::Option<::#facade::IssuedCall>,
             }
 
             impl ::core::ops::Drop for Awaited<'_> {
@@ -900,6 +912,7 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
 /// returns, whose methods call that object. Each function is `async`, as the bindings of an
 /// `async func` are, and takes its parameters owned.
 pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStream {
+    let facade = &analysis.options.facade();
     let types = &analysis.consumed_types;
     let boundary = super::boundary_at(1);
     let modules = imports.iter().map(|import| {
@@ -920,13 +933,13 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
             let spelled = function.params.iter().map(|param| types.owned(param.ty, 1));
             let encoded = function.params.iter().zip(&params).map(|(param, name)| {
                 let kind = wit_kind(param.ty, types, 1).expect("a served import's types are covered");
-                encode(&kind, quote! { #name }, &boundary)
+                encode(&kind, quote! { #name }, &boundary, facade)
             });
             let (result, read) = match function.result {
                 Some(ty) => {
                     let kind: Kind<'static> =
                         wit_kind(ty, types, 1).expect("a served import's types are covered");
-                    (types.owned(ty, 1), decode(&kind, quote! { value }, &boundary))
+                    (types.owned(ty, 1), decode(&kind, quote! { value }, &boundary, facade))
                 }
                 None => (quote! { () }, quote! { ::core::result::Result::Ok(()) }),
             };
@@ -942,10 +955,10 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
                 pub async fn #name(#receiver #(#params: #spelled),*) -> #result {
                     let __tembra_call = super::__tembra_import::current();
                     let __tembra_arguments = (|| -> ::core::result::Result<
-                        ::tembra::serde_json::Value,
+                        ::#facade::serde_json::Value,
                         ::std::string::String,
                     > {
-                        ::core::result::Result::Ok(::tembra::serde_json::Value::Array(
+                        ::core::result::Result::Ok(::#facade::serde_json::Value::Array(
                             ::std::vec![#(#encoded?),*],
                         ))
                     })();

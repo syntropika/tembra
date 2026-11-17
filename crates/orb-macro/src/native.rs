@@ -1,11 +1,13 @@
 //! The native side of the module: `orb()`, the Orb a native host installs, written from the same
 //! analysis as the component. Every item goes inside `::tembra::__host!`, the facade's hidden
 //! macro that expands its input only where the facade links the runtime, so a component build
-//! gets none of it and the host crate's `tembra` decides.
+//! gets none of it and the host crate's `tembra` decides. Every path through the facade names it
+//! as the crate depends on it, `crate = ".."` on the attribute, `tembra` without it.
 //!
 //! Each service is registered by a hidden function in the module that declares it, next to its
 //! typed client, where the author's types and functions resolve as written, whatever their
-//! visibility; `orb()`, in the Orb module, collects the registrations. A method's portable
+//! visibility, as a function of a hidden type of the Orb module, through which `orb()` collects
+//! the registrations whatever the visibility of the modules between. A method's portable
 //! arguments and result cross as the boundary's JSON, the form `tembra_contracts` validates,
 //! through a codec written from the WIT types, kind by kind: each type of the module that enters
 //! the WIT reads and writes its own JSON through a hidden trait of the Orb module, implemented in
@@ -32,7 +34,7 @@ use crate::{
     camel_ident, foreign::Role, metadata::Metadata, rust_ident, wit,
 };
 use heck::{ToShoutySnakeCase, ToSnakeCase};
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::{Literal, Span, TokenStream};
 use quote::{format_ident, quote};
 use std::{
     borrow::Cow,
@@ -61,10 +63,11 @@ pub(crate) struct Native {
 /// `metadata` could not be read. With the `context` option, the native `context` too, which the
 /// author's code calls either way.
 pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>) -> Native {
-    let context = analysis.options.context.then(context_module);
+    let facade = &analysis.options.facade();
+    let context = analysis.options.context.then(|| context_module(facade));
     // The items the native side writes in place of the Orb, beside `context`.
     let alone = |items: TokenStream| Native {
-        root: wrapped(quote! { #items #context }),
+        root: wrapped(facade, quote! { #items #context }),
         nested: Vec::new(),
         served: BTreeSet::new(),
     };
@@ -78,7 +81,8 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         .inputs
         .as_ref()
         .map(|inputs| crate::from_root(&analysis.modules[inputs.scope], &inputs.ident));
-    let refusal = |Refused(message)| alone(unsupported(metadata, inputs.as_ref(), &message));
+    let refusal =
+        |Refused(message)| alone(unsupported(metadata, inputs.as_ref(), &message, facade));
     // The interfaces the module imports from other Orbs and the hooks it contributes to, which
     // `orb(..)` takes the providers of.
     let consumed = providers::imports(analysis).and_then(|imports| {
@@ -109,14 +113,18 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
     // The resources of the Orb's root, which `orb(..)` keeps for the Orb, for the methods of every
     // service, and so are its imports.
     let resources = !analysis.resources.is_empty();
+    // Each registration is a function of the registry of the module it is written in.
+    let registry = format_ident!("{REGISTRY}");
     for (service, items) in analysis.services.iter().zip(registrations) {
-        let path = &analysis.modules[service.scope];
+        let registered = Literal::usize_unsuffixed(service.scope);
         let function = service_ident(service);
         // A service its create builds takes the inputs `orb(..)` shares.
         let inputs = service.create.is_some().then(|| quote! { , &inputs });
         let table = resources.then(|| quote! { , &resources });
         let imports = imported.then(|| quote! { , &imports });
-        calls.push(quote! { self::#(#path::)* #function(name #inputs #table #imports) });
+        calls.push(quote! {
+            self::#registry::<#registered>::#function(name #inputs #table #imports)
+        });
         by_scope.entry(service.scope).or_default().extend(items);
     }
     // Each contribution, which `orb(..)` adds to the Orb after its services, with the Orb that
@@ -124,13 +132,13 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
     let mut contributed = Vec::new();
     for hook in &contributions {
         let scope = hook.contribution.scope;
-        let path = &analysis.modules[scope];
+        let registered = Literal::usize_unsuffixed(scope);
         let function = providers::contribution_ident(hook.contribution);
         let field = &hook.field;
         let table = resources.then(|| quote! { , &resources });
         let imports = imported.then(|| quote! { , &imports });
         contributed.push(quote! {
-            self::#(#path::)* #function(orb, &providers.#field.name #table #imports)
+            self::#registry::<#registered>::#function(orb, &providers.#field.name #table #imports)
         });
         by_scope
             .entry(scope)
@@ -171,7 +179,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         .consumed_types
         .data_types()
         .into_iter()
-        .filter_map(|id| consumed_codec(id, &analysis.consumed_types))
+        .filter_map(|id| consumed_codec(id, &analysis.consumed_types, facade))
         .collect();
     // The Orb's `#[root]` is its create, which takes the inputs too.
     let create = analysis
@@ -192,29 +200,41 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         &imports,
         &calls,
         &contributed,
+        facade,
     );
+    // The registries, for an Orb that registers a service or adds a contribution.
+    let declared_registry = (!calls.is_empty() || !contributed.is_empty()).then(|| {
+        quote! {
+            /// The registry of each module of the Orb, by its scope: its functions register the
+            /// services of the module and add its contributions, written there, where the items
+            /// resolve as written, and `orb()` reaches them through it, whatever the visibility of
+            /// the module.
+            struct #registry<const SCOPE: usize>;
+        }
+    });
     let boundary =
         (!analysis.shapes.is_empty() || !analysis.newtypes.is_empty() || !consumed.is_empty())
-            .then(boundary_trait);
+            .then(|| boundary_trait(facade));
     // The providers `orb(..)` takes and what the Orb requires of them, and the table of the
     // imports and the module of each, in place of the bindings'.
     let provided = (imported || !contributions.is_empty()).then(|| {
-        let providers = providers::providers(&imports, &contributions);
-        let requirements = providers::requirements(&imports, &contributions);
+        let providers = providers::providers(&imports, &contributions, facade);
+        let requirements = providers::requirements(&imports, &contributions, facade);
         quote! { #providers #requirements }
     });
     let imported = imported.then(|| {
-        let table = providers::table(&imports);
+        let table = providers::table(&imports, facade);
         let modules = providers::modules(&imports, analysis);
         quote! { #table #modules }
     });
     Native {
         root: wrapped(
-            quote! { #orb #provided #imported #boundary #(#root)* #(#consumed)* #context },
+            facade,
+            quote! { #orb #declared_registry #provided #imported #boundary #(#root)* #(#consumed)* #context },
         ),
         nested: by_scope
             .into_iter()
-            .map(|(scope, items)| (scope, wrapped(quote! { #(#items)* })))
+            .map(|(scope, items)| (scope, wrapped(facade, quote! { #(#items)* })))
             .collect(),
         served: imports
             .iter()
@@ -223,10 +243,10 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
     }
 }
 
-/// The items, inside the facade's wrapper, through the absolute path: the module may hold its own
-/// `tembra` module of bindings.
-fn wrapped(items: TokenStream) -> TokenStream {
-    quote! { ::tembra::__host! { #items } }
+/// The items, inside the wrapper of the facade named `facade`, through the absolute path: the module
+/// may hold its own `tembra` module of bindings.
+fn wrapped(facade: &Ident, items: TokenStream) -> TokenStream {
+    quote! { ::#facade::__host! { #items } }
 }
 
 /// `orb()`, the Orb named and versioned by the manifest, and `orb_named`, which builds it with
@@ -245,7 +265,7 @@ fn wrapped(items: TokenStream) -> TokenStream {
 ///
 /// Cargo does not rebuild a crate when only `[package.metadata.tembra]` changes, so the generated
 /// code includes the manifest, which makes the compiler track the file: the next build then reads
-/// the table again.
+/// the table again. The runtime's types are reached through the facade named `facade`.
 #[allow(clippy::too_many_arguments)]
 fn orb(
     metadata: &Metadata,
@@ -256,6 +276,7 @@ fn orb(
     imports: &[providers::Import<'_>],
     calls: &[TokenStream],
     contributions: &[TokenStream],
+    facade: &Ident,
 ) -> TokenStream {
     let name = &metadata.name;
     let version = metadata.api_version;
@@ -304,7 +325,7 @@ fn orb(
     let built = if consumes {
         quote! {
             {
-                let mut orb = ::tembra::Orb::new(name, api_version);
+                let mut orb = ::#facade::Orb::new(name, api_version);
                 for requirement in self::__tembra_providers::requirements(&providers)? {
                     orb = orb.requires(requirement);
                 }
@@ -312,7 +333,7 @@ fn orb(
             }
         }
     } else {
-        quote! { ::tembra::Orb::new(name, api_version) }
+        quote! { ::#facade::Orb::new(name, api_version) }
     };
     let declared = imports.iter().any(|import| import.view.is_none());
     let create = if declared {
@@ -379,7 +400,7 @@ fn orb(
         ));
 
         #[doc = #doc]
-        pub fn orb(#parameter) -> ::tembra::Result<::tembra::Orb> {
+        pub fn orb(#parameter) -> ::#facade::Result<::#facade::Orb> {
             orb_named(#name, #version #argument #provided)
         }
 
@@ -389,7 +410,7 @@ fn orb(
             api_version: u32
             #named_parameter
             #named_providers
-        ) -> ::tembra::Result<::tembra::Orb> {
+        ) -> ::#facade::Result<::#facade::Orb> {
             #shared
             #table
             #imports_table
@@ -402,10 +423,16 @@ fn orb(
 /// writes its JSON, declared in the Orb module.
 const BOUNDARY: &str = "__TembraBoundary";
 
+/// The name of the type of the Orb module whose functions register its services and add its
+/// contributions, one type per module, by its scope, so that each module keeps its own names: each
+/// function is written in its item's module, and `orb()` reaches it through the type.
+const REGISTRY: &str = "__TembraRegistry";
+
 /// The trait through which each type of the module that enters the WIT reads and writes its JSON:
 /// private to the Orb module, so its sub-modules implement it and every codec names it, and no
-/// other crate sees it. A type only taken or only returned leaves one function unused.
-fn boundary_trait() -> TokenStream {
+/// other crate sees it. A type only taken or only returned leaves one function unused. Its JSON is
+/// that of the facade named `facade`.
+fn boundary_trait(facade: &Ident) -> TokenStream {
     let boundary = format_ident!("{BOUNDARY}");
     quote! {
         /// How a type of the module that enters the WIT crosses the boundary: as the JSON a
@@ -414,13 +441,13 @@ fn boundary_trait() -> TokenStream {
         trait #boundary: ::core::marker::Sized {
             /// Read a value from its JSON, or refuse it with a message.
             fn decode(
-                value: ::tembra::serde_json::Value,
+                value: ::#facade::serde_json::Value,
             ) -> ::core::result::Result<Self, ::std::string::String>;
 
             /// Write the value as its JSON, or refuse it with a message.
             fn encode(
                 self,
-            ) -> ::core::result::Result<::tembra::serde_json::Value, ::std::string::String>;
+            ) -> ::core::result::Result<::#facade::serde_json::Value, ::std::string::String>;
         }
     }
 }
@@ -428,8 +455,8 @@ fn boundary_trait() -> TokenStream {
 /// `context` with the `context` option, in place of the component's, with the functions and
 /// types of the kernel's interface: each function reads the call of the method being polled, which
 /// the method's scope sets around each poll of its future, as the executor answers a component
-/// from the call it serves.
-fn context_module() -> TokenStream {
+/// from the call it serves. The runtime's types are reached through the facade named `facade`.
+fn context_module(facade: &Ident) -> TokenStream {
     quote! {
         /// The kernel's view of the call a method serves: its principal and cancellation, the
         /// address of the object running it, and the host's log.
@@ -439,7 +466,7 @@ fn context_module() -> TokenStream {
             /// The call of the method being polled on this thread, with the principal it was
             /// admitted with.
             struct Call {
-                context: ::tembra::Context,
+                context: ::#facade::Context,
                 principal: ::std::string::String,
             }
 
@@ -451,7 +478,7 @@ fn context_module() -> TokenStream {
             /// Run a method's future in the scope of its call: while it is polled, the functions
             /// of this module read that call, and an outer poll's call comes back after.
             pub(crate) fn __scoped<F: ::core::future::Future>(
-                context: ::tembra::Context,
+                context: ::#facade::Context,
                 future: F,
             ) -> impl ::core::future::Future<Output = F::Output> {
                 // Read as the call starts: the call keeps this principal once its root is
@@ -555,14 +582,14 @@ fn context_module() -> TokenStream {
 /// executor reads a component's, every negative zero written as zero. As in a component, a value
 /// the rule refuses never reaches the kernel, `update` answers a call cancelled before the kernel
 /// stored its value with the value kept, and a reload reads the value it inherits as the state's
-/// type and runs the rule on it.
-pub(crate) fn state_access() -> TokenStream {
-    wrapped(quote! {
+/// type and runs the rule on it. The runtime's types are reached through the facade named `facade`.
+pub(crate) fn state_access(facade: &Ident) -> TokenStream {
+    let items = quote! {
         /// The object a method runs on, for its state: the state its factory declared, and the
         /// call, which the kernel checks before it stores a value.
         struct Object {
-            context: ::tembra::Context,
-            state: ::tembra::State<::tembra::serde_json::Value>,
+            context: ::#facade::Context,
+            state: ::#facade::State<::#facade::serde_json::Value>,
         }
 
         ::std::thread_local! {
@@ -573,8 +600,8 @@ pub(crate) fn state_access() -> TokenStream {
         /// Run a method's future on its object: while it is polled, `read` and `update` reach the
         /// object's state, and an outer poll's object comes back after.
         pub(crate) fn scoped<F: ::core::future::Future>(
-            context: ::tembra::Context,
-            state: ::tembra::State<::tembra::serde_json::Value>,
+            context: ::#facade::Context,
+            state: ::#facade::State<::#facade::serde_json::Value>,
             future: F,
         ) -> impl ::core::future::Future<Output = F::Output> {
             let object = ::std::rc::Rc::new(Object { context, state });
@@ -650,11 +677,11 @@ pub(crate) fn state_access() -> TokenStream {
         /// rule accepts before it adopts it. A `Default` whose JSON would not read back fails the
         /// object's creation.
         pub(crate) fn declare<T>(
-            declaration: &::tembra::Declaration,
+            declaration: &::#facade::Declaration,
             version: u32,
             name: &'static str,
             rule: impl ::core::ops::Fn(&T) -> ::core::result::Result<(), String> + 'static,
-        ) -> ::tembra::Result<::tembra::State<::tembra::serde_json::Value>>
+        ) -> ::#facade::Result<::#facade::State<::#facade::serde_json::Value>>
         where
             T: ::core::default::Default
                 + ::serde::Serialize
@@ -662,7 +689,7 @@ pub(crate) fn state_access() -> TokenStream {
                 + 'static,
         {
             let json = storable(&T::default(), name)
-                .map_err(|refusal| ::tembra::Error::invalid("state", refusal))?;
+                .map_err(|refusal| ::#facade::Error::invalid("state", refusal))?;
             let state = declaration.state(kept(&json), version, |_| ::core::result::Result::Ok(()))?;
             let retained = state.clone();
             declaration.validate_on_reload(move || {
@@ -674,7 +701,7 @@ pub(crate) fn state_access() -> TokenStream {
                     ),
                 };
                 accepted.map_err(|refusal| {
-                    ::tembra::Error::invalid("state", format!("the state was refused: {}", refusal))
+                    ::#facade::Error::invalid("state", format!("the state was refused: {}", refusal))
                 })
             })?;
             ::core::result::Result::Ok(state)
@@ -682,35 +709,36 @@ pub(crate) fn state_access() -> TokenStream {
 
         /// The value the kernel keeps for a state's JSON, every negative zero written as zero, as
         /// the executor keeps a component's: the platform hosts' value profile has none.
-        fn kept(json: &str) -> ::tembra::serde_json::Value {
-            let mut value = ::tembra::serde_json::from_str(json)
+        fn kept(json: &str) -> ::#facade::serde_json::Value {
+            let mut value = ::#facade::serde_json::from_str(json)
                 .expect("the JSON of a state reads back as JSON");
             unsigned_zeros(&mut value);
             value
         }
 
-        fn unsigned_zeros(value: &mut ::tembra::serde_json::Value) {
+        fn unsigned_zeros(value: &mut ::#facade::serde_json::Value) {
             match value {
-                ::tembra::serde_json::Value::Number(number) => {
+                ::#facade::serde_json::Value::Number(number) => {
                     if number
                         .as_f64()
                         .is_some_and(|float| float == 0.0 && float.is_sign_negative())
                     {
-                        *value = ::tembra::serde_json::Value::from(0);
+                        *value = ::#facade::serde_json::Value::from(0);
                     }
                 }
-                ::tembra::serde_json::Value::Array(items) => {
+                ::#facade::serde_json::Value::Array(items) => {
                     items.iter_mut().for_each(unsigned_zeros);
                 }
-                ::tembra::serde_json::Value::Object(fields) => {
+                ::#facade::serde_json::Value::Object(fields) => {
                     fields.values_mut().for_each(unsigned_zeros);
                 }
-                ::tembra::serde_json::Value::Null
-                | ::tembra::serde_json::Value::Bool(_)
-                | ::tembra::serde_json::Value::String(_) => {}
+                ::#facade::serde_json::Value::Null
+                | ::#facade::serde_json::Value::Bool(_)
+                | ::#facade::serde_json::Value::String(_) => {}
             }
         }
-    })
+    };
+    wrapped(facade, items)
 }
 
 /// The resources of the Orb's root natively, in the component's `__tembra_resource`: the table of
@@ -725,7 +753,12 @@ pub(crate) fn state_access() -> TokenStream {
 /// component. After a reload to another module whose resource keeps its name and version, the host
 /// keeps the old code's value, of another Rust type, which `with` could not reach: the scope
 /// answers each call with the runtime's refusal of it, `invalid/rust_type`, before the method runs.
-pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) -> TokenStream {
+/// The runtime's types are reached through the facade named `facade`.
+pub(crate) fn resource_access(
+    resources: &[Resource],
+    modules: &[Vec<Ident>],
+    facade: &Ident,
+) -> TokenStream {
     let fields: Vec<Ident> = resources
         .iter()
         .map(|resource| rust_ident(&wit::kebab(&resource.ident)))
@@ -796,11 +829,11 @@ pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) ->
                 }
             }
         });
-    wrapped(quote! {
+    let items = quote! {
         /// The resources of the root of one Orb `orb(..)` builds, which its create declares.
         #[derive(Default)]
         pub struct Resources {
-            #(#fields: ::core::cell::OnceCell<::tembra::Resource<Slot<#paths>>>,)*
+            #(#fields: ::core::cell::OnceCell<::#facade::Resource<Slot<#paths>>>,)*
         }
 
         impl Resources {
@@ -808,8 +841,8 @@ pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) ->
             /// `#[open]` function once the create returns, and closes it when it removes the Orb.
             pub(crate) fn declare(
                 &self,
-                declaration: &::tembra::Declaration,
-            ) -> ::tembra::Result<()> {
+                declaration: &::#facade::Declaration,
+            ) -> ::#facade::Result<()> {
                 #(#declarations)*
                 ::core::result::Result::Ok(())
             }
@@ -819,13 +852,13 @@ pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) ->
             /// the value as its type: a reload keeps a resource whose name and version stay the
             /// same, and the struct of another module is another type. A resource the host has not
             /// opened, or is closing, is left to `with`.
-            fn typed(&self) -> ::tembra::Result<()> {
+            fn typed(&self) -> ::#facade::Result<()> {
                 #(
                     if let ::core::option::Option::Some(error) = self
                         .#fields
                         .get()
                         .and_then(|resource| resource.value().err())
-                        .filter(|error| error.reason == ::tembra::core::Reason::RustType.as_str())
+                        .filter(|error| error.reason == ::#facade::core::Reason::RustType.as_str())
                     {
                         return ::core::result::Result::Err(error);
                     }
@@ -844,10 +877,10 @@ pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) ->
         /// that Orb, and an outer poll's come back after. A call to code whose resource the host
         /// keeps as a value of another Rust type answers the runtime's refusal instead, before the
         /// future runs.
-        pub(crate) fn scoped<T, F: ::core::future::Future<Output = ::tembra::Result<T>>>(
+        pub(crate) fn scoped<T, F: ::core::future::Future<Output = ::#facade::Result<T>>>(
             resources: ::std::rc::Rc<Resources>,
             future: F,
-        ) -> impl ::core::future::Future<Output = ::tembra::Result<T>> {
+        ) -> impl ::core::future::Future<Output = ::#facade::Result<T>> {
             let mut future = ::std::boxed::Box::pin(future);
             async move {
                 resources.typed()?;
@@ -886,7 +919,8 @@ pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) ->
         }
 
         #(#accessors)*
-    })
+    };
+    wrapped(facade, items)
 }
 
 /// The trait of `boundary_trait`, as the module `scope` names it.
@@ -913,8 +947,14 @@ fn refused(message: &str) -> Refused {
 /// with the code `unsupported`, the reason `native` and `message`, naming what. The module compiles
 /// where the runtime is linked, as it must: Cargo enables the facade's `host` for a guest whenever
 /// another crate of the build does, and only a host that builds the Orb fails. They take the inputs
-/// of an `#[inputs]` struct, as they would otherwise, and no providers.
-fn unsupported(metadata: &Metadata, inputs: Option<&TokenStream>, message: &str) -> TokenStream {
+/// of an `#[inputs]` struct, as they would otherwise, and no providers. The runtime's types are
+/// reached through the facade named `facade`.
+fn unsupported(
+    metadata: &Metadata,
+    inputs: Option<&TokenStream>,
+    message: &str,
+    facade: &Ident,
+) -> TokenStream {
     let name = &metadata.name;
     let version = metadata.api_version;
     let doc = format!(
@@ -926,7 +966,7 @@ fn unsupported(metadata: &Metadata, inputs: Option<&TokenStream>, message: &str)
     let unused = inputs.map(|_| quote! { let _ = inputs; });
     quote! {
         #[doc = #doc]
-        pub fn orb(#parameter) -> ::tembra::Result<::tembra::Orb> {
+        pub fn orb(#parameter) -> ::#facade::Result<::#facade::Orb> {
             orb_named(#name, #version #argument)
         }
 
@@ -935,11 +975,11 @@ fn unsupported(metadata: &Metadata, inputs: Option<&TokenStream>, message: &str)
             name: &str,
             api_version: u32
             #named_parameter
-        ) -> ::tembra::Result<::tembra::Orb> {
+        ) -> ::#facade::Result<::#facade::Orb> {
             let _ = (name, api_version);
             #unused
-            ::core::result::Result::Err(::tembra::Error::new(
-                ::tembra::core::Code::Unsupported,
+            ::core::result::Result::Err(::#facade::Error::new(
+                ::#facade::core::Code::Unsupported,
                 "native",
                 #message
             ))
@@ -991,12 +1031,14 @@ fn codec_ident(function: &Function) -> Ident {
 /// environment, for the scope each method's future runs in, where the state's `read` and `update`
 /// reach it. With root resources, the service takes the table of its Orb's too, which each
 /// method's future runs with, where their `with` reaches them, and so with the Orb's imports,
-/// `imported`, whose functions call with the call of the method.
+/// `imported`, whose functions call with the call of the method. The function is the registry's of
+/// the service's module, which `orb()` reaches whatever the visibility of the module.
 fn registration(
     service: &Service,
     analysis: &Analysis,
     imported: bool,
 ) -> Result<TokenStream, Refused> {
+    let facade = &analysis.options.facade();
     let depth = analysis.modules[service.scope].len();
     let root = crate::supers(depth);
     let signature = crate::signature_ident(service);
@@ -1020,7 +1062,7 @@ fn registration(
             quote! { ::core::result::Result::Ok(()) },
         ),
     };
-    let guard = guard(service, &identity);
+    let guard = guard(service, &identity, facade);
     let state = analysis
         .states
         .iter()
@@ -1048,7 +1090,7 @@ fn registration(
                 None => (quote! {}, quote! { () }),
             };
             (
-                quote! { (#environment, ::tembra::State<::tembra::serde_json::Value>) },
+                quote! { (#environment, ::#facade::State<::#facade::serde_json::Value>) },
                 quote! {
                     #capture |declaration| {
                         #guard
@@ -1071,7 +1113,7 @@ fn registration(
             quote! { Referenced }
         };
         let linger = policy.linger_ms;
-        quote! { .lifetime(::tembra::core::Lifetime::#lifetime, #linger) }
+        quote! { .lifetime(::#facade::core::Lifetime::#lifetime, #linger) }
     });
     // A service without methods or resources exports an empty interface, of which a contract
     // plans no service: it has no signature.
@@ -1113,17 +1155,17 @@ fn registration(
         }
         let codec = codec_ident(method);
         codecs.push(self::codec(service, method, &codec, analysis)?);
-        methods.push(self::method(service, method, Some(&codec), &scopes));
+        methods.push(self::method(service, method, Some(&codec), &scopes, facade));
     }
     for local in &service.locals {
-        methods.push(self::method(service, local, None, &scopes));
+        methods.push(self::method(service, local, None, &scopes, facade));
     }
     let doc = format!(
         " The service `{}` of the native Orb named `orb`, as `orb()` registers it.",
         service.ident
     );
     let built = quote! {
-        ::tembra::Service::new(::std::format!("{}::{}", orb, #identity), #factory)
+        ::#facade::Service::new(::std::format!("{}::{}", orb, #identity), #factory)
         #signed
         #lifetime
         #(#methods)*
@@ -1142,15 +1184,19 @@ fn registration(
         );
         quote! { #glue(#built #state_of #resources #imported) }
     });
+    let registry = format_ident!("{REGISTRY}");
+    let registered = Literal::usize_unsuffixed(service.scope);
     Ok(quote! {
-        #[doc = #doc]
-        pub(crate) fn #function(
-            orb: &str #parameter #table #imports
-        ) -> ::tembra::Service<#environment> {
-            #(#codecs)*
+        impl #root #registry<#registered> {
+            #[doc = #doc]
+            pub(crate) fn #function(
+                orb: &str #parameter #table #imports
+            ) -> ::#facade::Service<#environment> {
+                #(#codecs)*
 
-            #shared
-            #built
+                #shared
+                #built
+            }
         }
     })
 }
@@ -1200,10 +1246,11 @@ fn issuing(
     }
     let awaited = function.asynchronous.then(|| quote! { .await });
     let (environment, receiver) = scopes.environment(target, function.receiver);
-    let call = match receiver {
-        Some(receiver) => quote! { #receiver.#ident(#(#arguments),*) #awaited },
-        None => quote! { #target::#ident(#(#arguments),*) #awaited },
-    };
+    // Through the service's type, its receiver first, as `method` calls a method.
+    if let Some(receiver) = receiver {
+        arguments.insert(0, receiver);
+    }
+    let call = quote! { #target::#ident(#(#arguments),*) #awaited };
     // A method returning `tembra::Result<T>` answers with it: its failure is the call's error.
     let call = if function.fallible {
         quote! { #call? }
@@ -1220,6 +1267,7 @@ fn issuing(
         call,
         &boundary(service.scope, analysis),
         scopes,
+        &analysis.options.facade(),
     ))
 }
 
@@ -1264,7 +1312,8 @@ fn signature<'a>(
 /// result's type and kind, as the result's data, issuing each resource it holds into the result.
 /// An argument the codec refuses fails the call as its arguments, before the function runs, and a
 /// value it cannot write fails it as its result, which closes what was issued. The call's future
-/// runs in the `scopes` of the service whose objects answer it.
+/// runs in the `scopes` of the service whose objects answer it. The runtime is the facade named
+/// `facade`.
 #[allow(clippy::too_many_arguments)]
 fn payload_method(
     name: &str,
@@ -1276,10 +1325,11 @@ fn payload_method(
     call: TokenStream,
     boundary: &TokenStream,
     scopes: &Scopes,
+    facade: &Ident,
 ) -> TokenStream {
     let names: Vec<&Ident> = params.iter().map(|(name, _, _)| name).collect();
     let types: Vec<&Type> = params.iter().map(|(_, ty, _)| ty).collect();
-    let decode = decode_arguments(kinds, boundary);
+    let decode = decode_arguments(kinds, boundary, facade);
     let (payload, receiver) = match receiver {
         Some(resource) => (
             quote! { mut __tembra_payload },
@@ -1290,29 +1340,29 @@ fn payload_method(
     let write = match result {
         None => quote! {
             #call;
-            ::core::result::Result::Ok(::tembra::portable::Payload::data(
-                ::tembra::serde_json::Value::Null,
+            ::core::result::Result::Ok(::#facade::portable::Payload::data(
+                ::#facade::serde_json::Value::Null,
             ))
         },
         // The value is written by a closure returning the codec's `Result<Value, String>`, the
         // error type the `?` of its parts converts to.
         Some((ty, kind)) => {
-            let encode = encode(kind, quote! { value }, boundary);
+            let encode = encode(kind, quote! { value }, boundary, facade);
             let written = quote! {
-                ::core::result::Result<::tembra::serde_json::Value, ::std::string::String>
+                ::core::result::Result<::#facade::serde_json::Value, ::std::string::String>
             };
             let failed = quote! {
-                |message| ::tembra::Error::invalid(::tembra::core::Reason::Result, message)
+                |message| ::#facade::Error::invalid(::#facade::core::Reason::Result, message)
             };
             if kind.resource().is_some() {
                 let result = result_payload();
                 quote! {
                     let value = #call;
-                    let encode = |value: #ty, #result: &mut ::tembra::portable::Payload| -> #written {
+                    let encode = |value: #ty, #result: &mut ::#facade::portable::Payload| -> #written {
                         #encode
                     };
-                    let mut #result = ::tembra::portable::Payload::data(
-                        ::tembra::serde_json::Value::Null,
+                    let mut #result = ::#facade::portable::Payload::data(
+                        ::#facade::serde_json::Value::Null,
                     );
                     let written = encode(value, &mut #result).map_err(#failed)?;
                     #result.map_value(|_| ::core::result::Result::Ok(written))
@@ -1322,7 +1372,7 @@ fn payload_method(
                     let value = #call;
                     let encode = |value: #ty| -> #written { #encode };
                     let written = encode(value).map_err(#failed)?;
-                    ::core::result::Result::Ok(::tembra::portable::Payload::data(written))
+                    ::core::result::Result::Ok(::#facade::portable::Payload::data(written))
                 }
             }
         }
@@ -1331,20 +1381,20 @@ fn payload_method(
         async move {
             __tembra_context.check()?;
             #receiver
-            let decode = |value: ::tembra::serde_json::Value| -> ::core::result::Result<
+            let decode = |value: ::#facade::serde_json::Value| -> ::core::result::Result<
                 (#(#types,)*),
                 ::std::string::String,
             > { #decode };
             let (#(#names,)*): (#(#types,)*) = decode(__tembra_payload.into_data()?)
                 .map_err(|message| {
-                    ::tembra::Error::invalid(::tembra::core::Reason::Arguments, message)
+                    ::#facade::Error::invalid(::#facade::core::Reason::Arguments, message)
                 })?;
             #write
         }
     };
     let future = scopes.around(future);
     let handle = scopes.handle(quote! {
-        |#environment, __tembra_context: ::tembra::Context, #payload: ::tembra::portable::Payload| #future
+        |#environment, __tembra_context: ::#facade::Context, #payload: ::#facade::portable::Payload| #future
     });
     quote! {
         .payload_method(
@@ -1395,6 +1445,7 @@ fn resource_glue(
     analysis: &Analysis,
     imported: bool,
 ) -> Result<TokenStream, Refused> {
+    let facade = &analysis.options.facade();
     let ident = &resource.ident;
     let name = wit::kebab(ident);
     let service = analysis
@@ -1447,6 +1498,7 @@ fn resource_glue(
             quote! { #ident::#function(#(#params),*) },
             &boundary,
             &scopes,
+            facade,
         ));
     }
     for method in &resource.methods {
@@ -1479,6 +1531,7 @@ fn resource_glue(
             call,
             &boundary,
             &scopes,
+            facade,
         ));
     }
     for function in &resource.statics {
@@ -1499,6 +1552,7 @@ fn resource_glue(
             quote! { #ident::#static_ident(#(#params),*) #awaited },
             &boundary,
             &scopes,
+            facade,
         ));
     }
     let glue = glue_ident(resource);
@@ -1510,7 +1564,7 @@ fn resource_glue(
     // the service's registration gives the way to reach.
     let state_of = stated.then(|| {
         quote! {
-            , __tembra_state_of: fn(&E) -> ::tembra::State<::tembra::serde_json::Value>
+            , __tembra_state_of: fn(&E) -> ::#facade::State<::#facade::serde_json::Value>
         }
     });
     // With root resources, the table of the Orb's, which each function's scope sets.
@@ -1523,9 +1577,9 @@ fn resource_glue(
     let handle = resource_handle(resource, analysis)?;
     let client = resource_client(resource, service, analysis)?;
     Ok(quote! {
-        impl ::tembra::portable::Issuable for #ident {
-            fn nominal() -> ::tembra::portable::Nominal {
-                ::tembra::portable::Nominal {
+        impl ::#facade::portable::Issuable for #ident {
+            fn nominal() -> ::#facade::portable::Nominal {
+                ::#facade::portable::Nominal {
                     interface: ::std::string::String::from(#identity),
                     name: ::std::string::String::from(#name),
                 }
@@ -1534,11 +1588,11 @@ fn resource_glue(
 
         #[doc = #doc]
         pub(crate) fn #glue<E: 'static>(
-            service: ::tembra::Service<E>
+            service: ::#facade::Service<E>
             #state_of
             #resources
             #imports
-        ) -> ::tembra::Service<E> {
+        ) -> ::#facade::Service<E> {
             service #(#functions)*
         }
 
@@ -1557,6 +1611,7 @@ fn resource_glue(
 /// owned handle back, to move the resource into a call's arguments. The context's name is
 /// hygienic: a parameter of the same name stays the author's.
 fn resource_handle(resource: &WitResource, analysis: &Analysis) -> Result<TokenStream, Refused> {
+    let facade = &analysis.options.facade();
     let ident = &resource.ident;
     let handle = handle_ident(resource);
     let name = wit::kebab(ident);
@@ -1576,6 +1631,7 @@ fn resource_handle(resource: &WitResource, analysis: &Analysis) -> Result<TokenS
             result.as_ref().map(|(ty, kind)| (*ty, kind)),
             &context,
             &boundary,
+            facade,
         );
         let docs = &method.docs;
         let params = method
@@ -1586,9 +1642,9 @@ fn resource_handle(resource: &WitResource, analysis: &Analysis) -> Result<TokenS
             #(#[doc = #docs])*
             pub async fn #function(
                 &self,
-                #context: &::tembra::Context
+                #context: &::#facade::Context
                 #(, #params)*
-            ) -> ::tembra::Result<#returned> {
+            ) -> ::#facade::Result<#returned> {
                 #body
             }
         });
@@ -1599,29 +1655,29 @@ fn resource_handle(resource: &WitResource, analysis: &Analysis) -> Result<TokenS
     Ok(quote! {
         #[doc = #doc]
         pub struct #handle {
-            owned: ::tembra::portable::Owned,
+            owned: ::#facade::portable::Owned,
         }
 
         impl #handle {
             #(#methods)*
         }
 
-        impl ::core::convert::TryFrom<::tembra::portable::Owned> for #handle {
-            type Error = ::tembra::portable::Owned;
+        impl ::core::convert::TryFrom<::#facade::portable::Owned> for #handle {
+            type Error = ::#facade::portable::Owned;
 
             /// Wrap an owned handle of the resource; one of another resource type comes back as
             /// the error, still open, for the handle type of its own.
             fn try_from(
-                owned: ::tembra::portable::Owned,
-            ) -> ::core::result::Result<Self, ::tembra::portable::Owned> {
-                if *owned.nominal() != <#ident as ::tembra::portable::Issuable>::nominal() {
+                owned: ::#facade::portable::Owned,
+            ) -> ::core::result::Result<Self, ::#facade::portable::Owned> {
+                if *owned.nominal() != <#ident as ::#facade::portable::Issuable>::nominal() {
                     return ::core::result::Result::Err(owned);
                 }
                 ::core::result::Result::Ok(Self { owned })
             }
         }
 
-        impl ::core::convert::From<#handle> for ::tembra::portable::Owned {
+        impl ::core::convert::From<#handle> for ::#facade::portable::Owned {
             /// The owned handle, to call the resource by name or move it into a call's arguments.
             fn from(handle: #handle) -> Self {
                 handle.owned
@@ -1640,6 +1696,7 @@ fn resource_client(
     service: &Service,
     analysis: &Analysis,
 ) -> Result<TokenStream, Refused> {
+    let facade = &analysis.options.facade();
     let ident = &resource.ident;
     let name = wit::kebab(ident);
     let snake = ident.to_string().to_snake_case();
@@ -1667,6 +1724,7 @@ fn resource_client(
             Some((&built, &kind)),
             &context,
             &boundary,
+            facade,
         );
         let method = format_ident!("new_{snake}", span = constructor.ident.span());
         let doc = format!(" A new `{ident}`, from its constructor, as its handle.");
@@ -1678,9 +1736,9 @@ fn resource_client(
             #[doc = #doc]
             pub async fn #method(
                 &self,
-                #context: &::tembra::Context
+                #context: &::#facade::Context
                 #(, #params)*
-            ) -> ::tembra::Result<#returned> {
+            ) -> ::#facade::Result<#returned> {
                 #body
             }
         });
@@ -1698,6 +1756,7 @@ fn resource_client(
             result.as_ref().map(|(ty, kind)| (*ty, kind)),
             &context,
             &boundary,
+            facade,
         );
         let method = format_ident!("{snake}_{}", function.ident, span = function.ident.span());
         let docs = &function.docs;
@@ -1709,9 +1768,9 @@ fn resource_client(
             #(#[doc = #docs])*
             pub async fn #method(
                 &self,
-                #context: &::tembra::Context
+                #context: &::#facade::Context
                 #(, #params)*
-            ) -> ::tembra::Result<#returned> {
+            ) -> ::#facade::Result<#returned> {
                 #body
             }
         });
@@ -1726,12 +1785,12 @@ fn resource_client(
 /// The guard of a service's objects, first in its factory, if its attribute has one: an object at
 /// another key than `main`, or of another principal, is refused as forbidden, with the reason
 /// `key` or `principal` as a hand-written factory gives it, before the create runs. `identity`
-/// names the service's interface in the errors.
-fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
+/// names the service's interface in the errors, and `facade` the facade.
+fn guard(service: &Service, identity: &str, facade: &Ident) -> Option<TokenStream> {
     let refusal = |reason: &str, message: String| {
         quote! {
-            return ::core::result::Result::Err(::tembra::Error::new(
-                ::tembra::Code::Forbidden,
+            return ::core::result::Result::Err(::#facade::Error::new(
+                ::#facade::Code::Forbidden,
                 #reason,
                 #message
             ));
@@ -1787,9 +1846,9 @@ struct ObjectState {
 }
 
 impl Scopes {
-    /// How a handle takes the object's environment, and the expression a function borrowing
-    /// `&self` is called on, if it does: the service's environment, or the object of a service
-    /// whose objects own a state, which holds the environment beside the state.
+    /// How a handle takes the object's environment, and the reference to it a function borrowing
+    /// `&self` takes, if it does: the service's environment, or the object of a service whose
+    /// objects own a state, which holds the environment beside the state.
     fn environment(&self, target: &Ident, receiver: bool) -> (TokenStream, Option<TokenStream>) {
         // The index is a token of its own: `0.` written before an interpolation would lex as a
         // float.
@@ -1797,14 +1856,14 @@ impl Scopes {
         match (&self.state, receiver) {
             (None, true) => (
                 quote! { __tembra_self: ::std::rc::Rc<#target> },
-                Some(quote! { __tembra_self }),
+                Some(quote! { &*__tembra_self }),
             ),
             (None, false) => (quote! { _ }, None),
             (Some(state), receiver) => {
                 let object = &state.object;
                 (
                     quote! { __tembra_object: ::std::rc::Rc<#object> },
-                    receiver.then(|| quote! { __tembra_object.#environment_field }),
+                    receiver.then(|| quote! { &__tembra_object.#environment_field }),
                 )
             }
         }
@@ -1874,12 +1933,15 @@ impl Scopes {
 /// takes `&Context`, and answering with its value, or with the `tembra::Result` it returns, whose
 /// failure is the call's error; its future runs in the `scopes` of the service: the scope of its
 /// call for the native `context`, that of its object, for the object's state, and that of its Orb,
-/// for the root's resources.
+/// for the root's resources. The function is called through the service's type, so a method named
+/// as one of the `Rc` holding the environment, such as `clone`, is the service's, and the runtime
+/// through the facade named `facade`.
 fn method(
     service: &Service,
     function: &Function,
     codec: Option<&Ident>,
     scopes: &Scopes,
+    facade: &Ident,
 ) -> TokenStream {
     let name = wit::kebab(&function.ident);
     let target = &service.ident;
@@ -1892,10 +1954,12 @@ fn method(
     }
     let awaited = function.asynchronous.then(|| quote! { .await });
     let (environment, receiver) = scopes.environment(target, function.receiver);
-    let call = match receiver {
-        Some(receiver) => quote! { #receiver.#ident(#(#arguments),*) #awaited },
-        None => quote! { #target::#ident(#(#arguments),*) #awaited },
-    };
+    // Through the service's type, its receiver first: called on the `Rc` holding the environment,
+    // a method named as one of `Rc`'s, such as `clone`, would be `Rc`'s.
+    if let Some(receiver) = receiver {
+        arguments.insert(0, receiver);
+    }
+    let call = quote! { #target::#ident(#(#arguments),*) #awaited };
     // A method returning `tembra::Result<T>` answers with it: its failure is the call's error.
     let body = match (&function.result, function.fallible) {
         (_, true) => call,
@@ -1913,7 +1977,7 @@ fn method(
         None => (quote! { local_method }, quote! {}),
     };
     let handle = scopes.handle(quote! {
-        |#environment, __tembra_context: ::tembra::Context, (#(#params,)*): (#(#types,)*)| #future
+        |#environment, __tembra_context: ::#facade::Context, (#(#params,)*): (#(#types,)*)| #future
     });
     quote! {
         .#register(
@@ -1985,6 +2049,7 @@ fn client_names(service: &Service, analysis: &Analysis) -> Result<(), Refused> {
 /// hygienic: a parameter of the same name stays the author's.
 fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
     client_names(service, analysis)?;
+    let facade = &analysis.options.facade();
     let vis = &service.vis;
     let ident = client_ident(service);
     let context = Ident::new("context", Span::mixed_site());
@@ -2013,6 +2078,7 @@ fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused
                 result.as_ref().map(|(ty, kind)| (*ty, kind)),
                 &context,
                 &boundary,
+                facade,
             )
         } else {
             let params: Vec<&Ident> = function.params.iter().map(|(name, _, _)| name).collect();
@@ -2037,9 +2103,9 @@ fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused
             #(#[doc = #docs])*
             pub async fn #method(
                 &self,
-                #context: &::tembra::Context
+                #context: &::#facade::Context
                 #(, #params)*
-            ) -> ::tembra::Result<#returned> {
+            ) -> ::#facade::Result<#returned> {
                 #body
             }
         });
@@ -2051,12 +2117,12 @@ fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused
     Ok(quote! {
         #[doc = #doc]
         #vis struct #ident {
-            pub(crate) reference: ::std::rc::Rc<::tembra::Reference>,
+            pub(crate) reference: ::std::rc::Rc<::#facade::Reference>,
         }
 
         impl #ident {
             /// A client of the object `reference` holds.
-            pub fn new(reference: ::std::rc::Rc<::tembra::Reference>) -> Self {
+            pub fn new(reference: ::std::rc::Rc<::#facade::Reference>) -> Self {
                 Self { reference }
             }
 
@@ -2072,7 +2138,9 @@ fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused
 /// its handle type: a bare one from the `Owned` handle the call delivers, nested ones from the
 /// `Delivered` result, each the handle at the index the value names. An argument the codec cannot
 /// write fails the call as its arguments, before it is issued, and a result it cannot read fails it
-/// as its result, which closes every handle the result held.
+/// as its result, which closes every handle the result held. The runtime is the facade named
+/// `facade`.
+#[allow(clippy::too_many_arguments)]
 fn portable_call(
     callee: TokenStream,
     name: &str,
@@ -2081,22 +2149,23 @@ fn portable_call(
     result: Option<(&Type, &Kind<'_>)>,
     context: &Ident,
     boundary: &TokenStream,
+    facade: &Ident,
 ) -> (TokenStream, TokenStream) {
     let encoded = kinds
         .iter()
         .zip(params)
-        .map(|(kind, (name, _, _))| encode(kind, quote! { #name }, boundary));
+        .map(|(kind, (name, _, _))| encode(kind, quote! { #name }, boundary, facade));
     let arguments = quote! {
         let __tembra_encode = || -> ::core::result::Result<
-            ::tembra::serde_json::Value,
+            ::#facade::serde_json::Value,
             ::std::string::String,
         > {
-            ::core::result::Result::Ok(::tembra::serde_json::Value::Array(
+            ::core::result::Result::Ok(::#facade::serde_json::Value::Array(
                 ::std::vec![#(#encoded?),*],
             ))
         };
         let __tembra_arguments = __tembra_encode().map_err(|message| {
-            ::tembra::Error::invalid(::tembra::core::Reason::Arguments, message)
+            ::#facade::Error::invalid(::#facade::core::Reason::Arguments, message)
         })?;
     };
     let call = |answer: TokenStream| {
@@ -2107,11 +2176,11 @@ fn portable_call(
         }
     };
     let failed = quote! {
-        |message| ::tembra::Error::invalid(::tembra::core::Reason::Result, message)
+        |message| ::#facade::Error::invalid(::#facade::core::Reason::Result, message)
     };
     let (returned, read) = match result {
         None => {
-            let called = call(quote! { ::tembra::serde_json::Value });
+            let called = call(quote! { ::#facade::serde_json::Value });
             (
                 quote! { () },
                 quote! {
@@ -2121,37 +2190,37 @@ fn portable_call(
             )
         }
         Some((_, Kind::Resource { handle, .. })) => {
-            let called = call(quote! { ::tembra::portable::Owned });
+            let called = call(quote! { ::#facade::portable::Owned });
             (
                 quote! { #handle },
                 quote! {
-                    <#handle as ::core::convert::TryFrom<::tembra::portable::Owned>>::try_from(#called)
-                        .map_err(|_| ::tembra::Error::invalid(
-                            ::tembra::core::Reason::Result,
+                    <#handle as ::core::convert::TryFrom<::#facade::portable::Owned>>::try_from(#called)
+                        .map_err(|_| ::#facade::Error::invalid(
+                            ::#facade::core::Reason::Result,
                             "the result holds a resource of another type",
                         ))
                 },
             )
         }
         Some((ty, kind)) if kind.resource().is_none() => {
-            let called = call(quote! { ::tembra::serde_json::Value });
-            let decode = decode(kind, quote! { __tembra_value }, boundary);
+            let called = call(quote! { ::#facade::serde_json::Value });
+            let decode = decode(kind, quote! { __tembra_value }, boundary, facade);
             (
                 quote! { #ty },
                 quote! {
                     let __tembra_value = #called;
-                    let __tembra_decode = |__tembra_value: ::tembra::serde_json::Value|
+                    let __tembra_decode = |__tembra_value: ::#facade::serde_json::Value|
                         -> ::core::result::Result<#ty, ::std::string::String> { #decode };
                     __tembra_decode(__tembra_value).map_err(#failed)
                 },
             )
         }
         Some((_, kind)) => {
-            let called = call(quote! { ::tembra::portable::Delivered });
+            let called = call(quote! { ::#facade::portable::Delivered });
             let delivered = delivered_type(kind);
-            let decode = decode(kind, quote! { __tembra_value }, boundary);
+            let decode = decode(kind, quote! { __tembra_value }, boundary, facade);
             let owned = quote! {
-                ::std::vec::Vec<::core::option::Option<::tembra::portable::Owned>>
+                ::std::vec::Vec<::core::option::Option<::#facade::portable::Owned>>
             };
             (
                 delivered.clone(),
@@ -2162,14 +2231,14 @@ fn portable_call(
                         .into_iter()
                         .map(::core::option::Option::Some)
                         .collect();
-                    let __tembra_decode = |__tembra_value: ::tembra::serde_json::Value,
+                    let __tembra_decode = |__tembra_value: ::#facade::serde_json::Value,
                                            __tembra_owned: &mut #owned|
                         -> ::core::result::Result<#delivered, ::std::string::String> { #decode };
                     let __tembra_read = __tembra_decode(__tembra_delivered.value, &mut __tembra_owned)
                         .map_err(#failed)?;
                     if __tembra_owned.iter().any(::core::option::Option::is_some) {
-                        return ::core::result::Result::Err(::tembra::Error::invalid(
-                            ::tembra::core::Reason::Result,
+                        return ::core::result::Result::Err(::#facade::Error::invalid(
+                            ::#facade::core::Reason::Result,
                             "the result holds a resource its value does not name",
                         ));
                     }
@@ -2224,6 +2293,7 @@ fn codec(
     ident: &Ident,
     analysis: &Analysis,
 ) -> Result<TokenStream, Refused> {
+    let facade = &analysis.options.facade();
     let place = |role: &str, ty: &Type, uncovered: Uncovered| {
         refused(&format!(
             "`{}::{}` {role} `{}`{}",
@@ -2242,21 +2312,21 @@ fn codec(
         );
     }
     let types: Vec<&Type> = function.params.iter().map(|(_, ty, _)| ty).collect();
-    let decode = decode_arguments(&kinds, &boundary);
+    let decode = decode_arguments(&kinds, &boundary, facade);
     let (result, encode) = match &function.result {
         Some((ty, _)) => {
             let kind = kind(ty, service.scope, analysis)
                 .map_err(|uncovered| place("returns", ty, uncovered))?;
-            let encode = encode(&kind, quote! { value }, &boundary);
+            let encode = encode(&kind, quote! { value }, &boundary, facade);
             (quote! { #ty }, quote! { |value| { #encode } })
         }
         None => (
             quote! { () },
-            quote! { |()| ::core::result::Result::Ok(::tembra::serde_json::Value::Null) },
+            quote! { |()| ::core::result::Result::Ok(::#facade::serde_json::Value::Null) },
         ),
     };
     Ok(quote! {
-        const #ident: ::tembra::Codec<(#(#types,)*), #result> = ::tembra::Codec {
+        const #ident: ::#facade::Codec<(#(#types,)*), #result> = ::#facade::Codec {
             decode: |value| { #decode },
             encode: #encode,
         };
@@ -2497,14 +2567,14 @@ fn elements(count: usize) -> Vec<Ident> {
 }
 
 /// Read the arguments, `value`, into the tuple of the parameters: a JSON array of as many
-/// elements as there are parameters, or `null` for none.
-fn decode_arguments(kinds: &[Kind<'_>], boundary: &TokenStream) -> TokenStream {
+/// elements as there are parameters, or `null` for none, the JSON of the facade named `facade`.
+fn decode_arguments(kinds: &[Kind<'_>], boundary: &TokenStream, facade: &Ident) -> TokenStream {
     let count = kinds.len();
     let names = elements(count);
     let decoded = kinds
         .iter()
         .zip(&names)
-        .map(|(kind, name)| decode(kind, quote! { #name }, boundary));
+        .map(|(kind, name)| decode(kind, quote! { #name }, boundary, facade));
     let expected = match count {
         0 => "expected no arguments, got {}".to_owned(),
         1 => "expected 1 argument, got {}".to_owned(),
@@ -2512,15 +2582,15 @@ fn decode_arguments(kinds: &[Kind<'_>], boundary: &TokenStream) -> TokenStream {
     };
     quote! {
         let items = match value {
-            ::tembra::serde_json::Value::Array(items) => items,
-            ::tembra::serde_json::Value::Null => ::std::vec::Vec::new(),
+            ::#facade::serde_json::Value::Array(items) => items,
+            ::#facade::serde_json::Value::Null => ::std::vec::Vec::new(),
             _ => {
                 return ::core::result::Result::Err(
                     ::std::string::String::from("expected the arguments as a list")
                 );
             }
         };
-        let [#(#names),*] = <[::tembra::serde_json::Value; #count]>::try_from(items)
+        let [#(#names),*] = <[::#facade::serde_json::Value; #count]>::try_from(items)
             .map_err(|items| ::std::format!(#expected, items.len()))?;
         ::core::result::Result::Ok((#(#decoded?,)*))
     }
@@ -2535,22 +2605,28 @@ fn carried(number: TokenStream) -> TokenStream {
 /// Read a value of a kind from `value`, a JSON value: an expression of `Result<T, String>` over
 /// the author's type `T`, which the boundary trait, as `boundary` names it there, reads for a type
 /// of the module. A resource, which only a native caller reads, is its handle type in `T`, taken
-/// from the owned handles of the result, `__tembra_owned`, which must then be in scope.
-fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenStream {
+/// from the owned handles of the result, `__tembra_owned`, which must then be in scope. The JSON is
+/// that of the facade named `facade`.
+fn decode(
+    kind: &Kind<'_>,
+    value: TokenStream,
+    boundary: &TokenStream,
+    facade: &Ident,
+) -> TokenStream {
     match kind {
         Kind::Plain(ty) => quote! {
-            ::tembra::serde_json::from_value::<#ty>(#value).map_err(|error| error.to_string())
+            ::#facade::serde_json::from_value::<#ty>(#value).map_err(|error| error.to_string())
         },
         Kind::Signed(ty) => quote! {
             match #value {
-                ::tembra::serde_json::Value::Number(number)
+                ::#facade::serde_json::Value::Number(number)
                     if number.as_f64().is_some_and(|wide| wide == 0.0 && wide.is_sign_negative()) =>
                 {
                     ::core::result::Result::Err(::std::string::String::from(
                         "expected an integer, got -0",
                     ))
                 }
-                item => ::tembra::serde_json::from_value::<#ty>(item).map_err(|error| error.to_string()),
+                item => ::#facade::serde_json::from_value::<#ty>(item).map_err(|error| error.to_string()),
             }
         },
         Kind::Float { ty, single } => {
@@ -2577,11 +2653,11 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
             };
             quote! {
                 match #value {
-                    ::tembra::serde_json::Value::Number(number) => match number.as_f64() {
+                    ::#facade::serde_json::Value::Number(number) => match number.as_f64() {
                         ::core::option::Option::Some(wide) if #wide_carried => #read,
                         _ => ::core::result::Result::Err(::std::format!(#expected, number)),
                     },
-                    item => ::tembra::serde_json::from_value::<#ty>(item).map_err(|error| error.to_string()),
+                    item => ::#facade::serde_json::from_value::<#ty>(item).map_err(|error| error.to_string()),
                 }
             }
         }
@@ -2591,10 +2667,10 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
                 Some(_) => quote! { ::std::vec::Vec<_> },
                 None => quote! { #ty },
             };
-            let element = decode(element, quote! { item }, boundary);
+            let element = decode(element, quote! { item }, boundary, facade);
             quote! {
                 match #value {
-                    ::tembra::serde_json::Value::Array(items) => items
+                    ::#facade::serde_json::Value::Array(items) => items
                         .into_iter()
                         .map(|item| #element)
                         .collect::<::core::result::Result<#list, ::std::string::String>>(),
@@ -2603,10 +2679,10 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
             }
         }
         Kind::Option(inner) => {
-            let inner = decode(inner, quote! { item }, boundary);
+            let inner = decode(inner, quote! { item }, boundary, facade);
             quote! {
                 match #value {
-                    ::tembra::serde_json::Value::Null => {
+                    ::#facade::serde_json::Value::Null => {
                         ::core::result::Result::Ok(::core::option::Option::None)
                     }
                     item => #inner.map(::core::option::Option::Some),
@@ -2619,12 +2695,12 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
             let decoded = kinds
                 .iter()
                 .zip(&names)
-                .map(|(kind, name)| decode(kind, quote! { #name }, boundary));
+                .map(|(kind, name)| decode(kind, quote! { #name }, boundary, facade));
             let expected = format!("expected a tuple of {count} elements, got {{}}");
             quote! {
                 match #value {
-                    ::tembra::serde_json::Value::Array(items) => {
-                        match <[::tembra::serde_json::Value; #count]>::try_from(items) {
+                    ::#facade::serde_json::Value::Array(items) => {
+                        match <[::#facade::serde_json::Value; #count]>::try_from(items) {
                             ::core::result::Result::Ok([#(#names),*]) => {
                                 ::core::result::Result::Ok((#(#decoded?,)*))
                             }
@@ -2642,7 +2718,7 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
         Kind::Result(ok, err) => {
             let side = |side: &Option<Box<Kind<'_>>>, wrap: TokenStream| match side {
                 Some(kind) => {
-                    let read = decode(kind, quote! { item }, boundary);
+                    let read = decode(kind, quote! { item }, boundary, facade);
                     Read::Carried(quote! { #read.map(#wrap) })
                 }
                 None => Read::Bare(quote! { ::core::result::Result::Ok(#wrap(())) }),
@@ -2660,13 +2736,14 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
                         side(err, quote! { ::core::result::Result::Err }),
                     ),
                 ],
+                facade,
             )
         }
         Kind::Named(ty) => quote! { <#ty as #boundary>::decode(#value) },
         Kind::Json(ty) => quote! {
             match #value {
-                ::tembra::serde_json::Value::String(text) => {
-                    ::tembra::serde_json::from_str::<#ty>(&text)
+                ::#facade::serde_json::Value::String(text) => {
+                    ::#facade::serde_json::from_str::<#ty>(&text)
                         .map_err(|error| ::std::format!("expected JSON text: {}", error))
                 }
                 _ => ::core::result::Result::Err(::std::string::String::from(
@@ -2685,7 +2762,7 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
                 .and_then(::core::option::Option::take)
             {
                 ::core::option::Option::Some(owned) => {
-                    <#handle as ::core::convert::TryFrom<::tembra::portable::Owned>>::try_from(owned)
+                    <#handle as ::core::convert::TryFrom<::#facade::portable::Owned>>::try_from(owned)
                         .map_err(|_| ::std::string::String::from(
                             "the result holds a resource of another type",
                         ))
@@ -2700,20 +2777,25 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
 
 /// Write a value of a kind, `value`, of the author's type, as its JSON: an expression of
 /// `Result<Value, String>`, which the boundary trait, as `boundary` names it there, writes for a
-/// type of the module.
-fn encode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenStream {
+/// type of the module. The JSON is that of the facade named `facade`.
+fn encode(
+    kind: &Kind<'_>,
+    value: TokenStream,
+    boundary: &TokenStream,
+    facade: &Ident,
+) -> TokenStream {
     match kind {
         Kind::Plain(_) | Kind::Signed(_) => quote! {
-            ::tembra::serde_json::to_value(#value).map_err(|error| error.to_string())
+            ::#facade::serde_json::to_value(#value).map_err(|error| error.to_string())
         },
         Kind::Float { .. } => {
             let wide_carried = carried(quote! { wide });
             quote! {
                 {
                     let wide = ::core::convert::Into::<f64>::into(#value);
-                    match ::tembra::serde_json::Number::from_f64(wide) {
+                    match ::#facade::serde_json::Number::from_f64(wide) {
                         ::core::option::Option::Some(number) if #wide_carried => {
-                            ::core::result::Result::Ok(::tembra::serde_json::Value::Number(number))
+                            ::core::result::Result::Ok(::#facade::serde_json::Value::Number(number))
                         }
                         _ => ::core::result::Result::Err(::std::format!(
                             "cannot write {}: the boundary carries finite numbers other than -0",
@@ -2724,24 +2806,24 @@ fn encode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
             }
         }
         Kind::List(_, element) => {
-            let element = encode(element, quote! { item }, boundary);
+            let element = encode(element, quote! { item }, boundary, facade);
             quote! {
                 #value
                     .into_iter()
                     .map(|item| #element)
                     .collect::<::core::result::Result<
-                        ::std::vec::Vec<::tembra::serde_json::Value>,
+                        ::std::vec::Vec<::#facade::serde_json::Value>,
                         ::std::string::String
                     >>()
-                    .map(::tembra::serde_json::Value::Array)
+                    .map(::#facade::serde_json::Value::Array)
             }
         }
         Kind::Option(inner) => {
-            let inner = encode(inner, quote! { item }, boundary);
+            let inner = encode(inner, quote! { item }, boundary, facade);
             quote! {
                 match #value {
                     ::core::option::Option::None => {
-                        ::core::result::Result::Ok(::tembra::serde_json::Value::Null)
+                        ::core::result::Result::Ok(::#facade::serde_json::Value::Null)
                     }
                     ::core::option::Option::Some(item) => #inner,
                 }
@@ -2752,24 +2834,24 @@ fn encode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
             let encoded = kinds
                 .iter()
                 .zip(&names)
-                .map(|(kind, name)| encode(kind, quote! { #name }, boundary));
-            let written = written();
+                .map(|(kind, name)| encode(kind, quote! { #name }, boundary, facade));
+            let written = written(facade);
             quote! {
                 {
                     let (#(#names,)*) = #value;
-                    #written(::tembra::serde_json::Value::Array(::std::vec![#(#encoded?),*]))
+                    #written(::#facade::serde_json::Value::Array(::std::vec![#(#encoded?),*]))
                 }
             }
         }
         Kind::Result(ok, err) => {
             let side = |side: &Option<Box<Kind<'_>>>, tag: &str, wrap: TokenStream| match side {
                 Some(kind) => {
-                    let written = encode(kind, quote! { item }, boundary);
-                    let tagged = tagged_encode(tag, Some(quote! { #written? }));
+                    let written = encode(kind, quote! { item }, boundary, facade);
+                    let tagged = tagged_encode(tag, Some(quote! { #written? }), facade);
                     quote! { #wrap(item) => #tagged }
                 }
                 None => {
-                    let tagged = tagged_encode(tag, None);
+                    let tagged = tagged_encode(tag, None, facade);
                     quote! { #wrap(()) => #tagged }
                 }
             };
@@ -2779,13 +2861,13 @@ fn encode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
         }
         Kind::Named(ty) => quote! { <#ty as #boundary>::encode(#value) },
         Kind::Json(_) => quote! {
-            ::tembra::serde_json::to_string(&#value)
-                .map(::tembra::serde_json::Value::String)
+            ::#facade::serde_json::to_string(&#value)
+                .map(::#facade::serde_json::Value::String)
                 .map_err(|error| error.to_string())
         },
         Kind::Resource { .. } => {
-            let issued = issued(value);
-            let written = written();
+            let issued = issued(value, facade);
+            let written = written(facade);
             quote! { #written(#issued) }
         }
     }
@@ -2797,20 +2879,21 @@ fn result_payload() -> Ident {
 }
 
 /// Issue `value`, a resource, into the call's result: the JSON of its index there, which names it
-/// in the result's data.
-fn issued(value: TokenStream) -> TokenStream {
+/// in the result's data, through the facade named `facade`.
+fn issued(value: TokenStream, facade: &Ident) -> TokenStream {
     let result = result_payload();
     quote! {
-        ::tembra::serde_json::Value::from(
-            <u32 as ::core::convert::From<::tembra::portable::Slot>>::from(#result.issue(#value))
+        ::#facade::serde_json::Value::from(
+            <u32 as ::core::convert::From<::#facade::portable::Slot>>::from(#result.issue(#value))
         )
     }
 }
 
 /// `Ok` of what writing a value evaluates to, `Result<Value, String>`, spelled whole: `?` on an
-/// expression that never fails needs its error type.
-fn written() -> TokenStream {
-    quote! { ::core::result::Result::<::tembra::serde_json::Value, ::std::string::String>::Ok }
+/// expression that never fails needs its error type. The `Value` is that of the facade named
+/// `facade`.
+fn written(facade: &Ident) -> TokenStream {
+    quote! { ::core::result::Result::<::#facade::serde_json::Value, ::std::string::String>::Ok }
 }
 
 /// How the value of a tagged case is read: from its payload, `item`, or from nothing.
@@ -2823,8 +2906,14 @@ enum Read {
 
 /// Read a value tagged as the boundary writes a variant or a result from `value`: an object of
 /// its case's `tag` and, when the case carries one, its payload, `val`, and nothing else. `what`
-/// names the type for the errors, "a result". An expression of `Result<T, String>`.
-fn tagged_decode(value: TokenStream, what: &str, cases: Vec<(String, Read)>) -> TokenStream {
+/// names the type for the errors, "a result". An expression of `Result<T, String>`, over the JSON
+/// of the facade named `facade`.
+fn tagged_decode(
+    value: TokenStream,
+    what: &str,
+    cases: Vec<(String, Read)>,
+    facade: &Ident,
+) -> TokenStream {
     let expected = format!("expected {what} as an object of a tag and its value");
     let arms = cases.iter().map(|(tag, read)| match read {
         Read::Carried(read) => {
@@ -2848,7 +2937,7 @@ fn tagged_decode(value: TokenStream, what: &str, cases: Vec<(String, Read)>) -> 
     });
     quote! {
         match #value {
-            ::tembra::serde_json::Value::Object(mut object) => {
+            ::#facade::serde_json::Value::Object(mut object) => {
                 let tag = object.remove("tag");
                 let payload = object.remove("val");
                 match (tag, payload, object.keys().next()) {
@@ -2856,7 +2945,7 @@ fn tagged_decode(value: TokenStream, what: &str, cases: Vec<(String, Read)>) -> 
                         ::std::format!("unexpected field `{}`", key)
                     ),
                     (
-                        ::core::option::Option::Some(::tembra::serde_json::Value::String(tag)),
+                        ::core::option::Option::Some(::#facade::serde_json::Value::String(tag)),
                         payload,
                         ::core::option::Option::None,
                     ) => match (tag.as_str(), payload) {
@@ -2875,18 +2964,18 @@ fn tagged_decode(value: TokenStream, what: &str, cases: Vec<(String, Read)>) -> 
 
 /// The JSON of a tagged case, `{"tag": .., "val": ..}`, the payload left out for a case that
 /// carries nothing: an expression of `Result<Value, String>`, where `payload` is an expression of
-/// `Value`.
-fn tagged_encode(tag: &str, payload: Option<TokenStream>) -> TokenStream {
+/// `Value`, the JSON of the facade named `facade`.
+fn tagged_encode(tag: &str, payload: Option<TokenStream>, facade: &Ident) -> TokenStream {
     let payload = payload.map(|payload| {
         quote! { (::std::string::String::from("val"), #payload), }
     });
-    let written = written();
+    let written = written(facade);
     quote! {
-        #written(::tembra::serde_json::Value::Object(
+        #written(::#facade::serde_json::Value::Object(
             ::core::iter::FromIterator::from_iter([
                 (
                     ::std::string::String::from("tag"),
-                    ::tembra::serde_json::Value::String(::std::string::String::from(#tag)),
+                    ::#facade::serde_json::Value::String(::std::string::String::from(#tag)),
                 ),
                 #payload
             ])
@@ -2904,16 +2993,18 @@ struct Member<'a> {
 
 /// Read a record from `value`, a JSON object of exactly its members' keys, into `built`, the path
 /// of the struct or of the case with named fields: an expression of `Result<T, String>`, inside a
-/// function returning that type, which a member the object misses returns from.
+/// function returning that type, which a member the object misses returns from. The JSON is that
+/// of the facade named `facade`.
 fn record_decode(
     value: TokenStream,
     built: TokenStream,
     members: &[Member<'_>],
     boundary: &TokenStream,
+    facade: &Ident,
 ) -> TokenStream {
     let fields = members.iter().map(|Member { field, key, kind }| {
         let missing = format!("missing the field `{key}`");
-        let read = decode(kind, quote! { item }, boundary);
+        let read = decode(kind, quote! { item }, boundary, facade);
         quote! {
             #field: match object.remove(#key) {
                 ::core::option::Option::Some(item) => #read?,
@@ -2925,7 +3016,7 @@ fn record_decode(
     });
     quote! {
         match #value {
-            ::tembra::serde_json::Value::Object(mut object) => {
+            ::#facade::serde_json::Value::Object(mut object) => {
                 let record = #built { #(#fields)* };
                 match object.keys().next() {
                     ::core::option::Option::Some(key) => ::core::result::Result::Err(
@@ -2942,16 +3033,21 @@ fn record_decode(
 }
 
 /// Write a record whose members' values are bound to `bound`, in order, as a JSON object of their
-/// keys: an expression of `Result<Value, String>`.
-fn record_encode(bound: &[Ident], members: &[Member<'_>], boundary: &TokenStream) -> TokenStream {
+/// keys: an expression of `Result<Value, String>`, the JSON of the facade named `facade`.
+fn record_encode(
+    bound: &[Ident],
+    members: &[Member<'_>],
+    boundary: &TokenStream,
+    facade: &Ident,
+) -> TokenStream {
     let entries = bound.iter().zip(members).map(|(name, member)| {
         let key = &member.key;
-        let written = encode(&member.kind, quote! { #name }, boundary);
+        let written = encode(&member.kind, quote! { #name }, boundary, facade);
         quote! { (::std::string::String::from(#key), #written?), }
     });
-    let written = written();
+    let written = written(facade);
     quote! {
-        #written(::tembra::serde_json::Value::Object(
+        #written(::#facade::serde_json::Value::Object(
             ::core::iter::FromIterator::from_iter([#(#entries)*])
         ))
     }
@@ -3031,6 +3127,7 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
         inner,
         scope,
     } = newtype;
+    let facade = &analysis.options.facade();
     let boundary = boundary(*scope, analysis);
     let kind = kind(inner, *scope, analysis).map_err(|uncovered| {
         refused(&format!(
@@ -3039,13 +3136,19 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
             uncovered.described(inner)
         ))
     })?;
-    let read = decode(&kind, quote! { value }, &boundary);
-    let written = encode(&kind, quote! { self.0 }, &boundary);
+    let read = decode(&kind, quote! { value }, &boundary, facade);
+    let written = encode(&kind, quote! { self.0 }, &boundary, facade);
     let decode = quote! {
         <Self as ::core::convert::TryFrom<#inner>>::try_from(#read?)
             .map_err(|error| ::std::string::ToString::to_string(&error))
     };
-    Ok(boundary_impl(&boundary, quote! { #ident }, decode, written))
+    Ok(boundary_impl(
+        &boundary,
+        quote! { #ident },
+        decode,
+        written,
+        facade,
+    ))
 }
 
 /// The JSON of a type of the module that enters the WIT, as its impl of the boundary trait, in its
@@ -3057,6 +3160,7 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
 /// macro converts and of a flags, which stay the author's. A member the codec does not cover is
 /// refused, naming it.
 fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refused> {
+    let facade = &analysis.options.facade();
     let ident = &shape.ident;
     let boundary = boundary(shape.scope, analysis);
     let converted = analysis.converted.contains_key(&ident.to_string());
@@ -3068,8 +3172,14 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
             let members = members(fields, ident.to_string(), converted)?;
             let bound = elements(members.len());
             let fields = members.iter().map(|member| &member.field);
-            let decode = record_decode(quote! { value }, quote! { Self }, &members, &boundary);
-            let encode = record_encode(&bound, &members, &boundary);
+            let decode = record_decode(
+                quote! { value },
+                quote! { Self },
+                &members,
+                &boundary,
+                facade,
+            );
+            let encode = record_encode(&bound, &members, &boundary, facade);
             (
                 decode,
                 quote! { let Self { #(#fields: #bound),* } = self; #encode },
@@ -3077,7 +3187,7 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
         }
         ShapeKind::Enum(cases) => {
             let tags: Vec<String> = cases.iter().map(wit::kebab).collect();
-            enum_codec(&tags)
+            enum_codec(&tags, facade)
         }
         ShapeKind::Variant(cases) => {
             let mut reads = Vec::new();
@@ -3091,13 +3201,14 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
                 };
                 match payload {
                     Payload::None => {
-                        let (read, written) = variant_case(&tag, &named, None, &boundary);
+                        let (read, written) = variant_case(&tag, &named, None, &boundary, facade);
                         reads.push(read);
                         writes.push(written);
                     }
                     Payload::Unnamed(ty) => {
                         let kind = member(ty, format!("the case `{ident}::{case}` carries"))?;
-                        let (read, written) = variant_case(&tag, &named, Some(&kind), &boundary);
+                        let (read, written) =
+                            variant_case(&tag, &named, Some(&kind), &boundary, facade);
                         reads.push(read);
                         writes.push(written);
                     }
@@ -3109,17 +3220,18 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
                             quote! { Self::#named },
                             &members,
                             &boundary,
+                            facade,
                         );
                         reads.push((tag.clone(), Read::Carried(read)));
                         let bound = elements(members.len());
                         let fields = members.iter().map(|member| &member.field);
-                        let record = record_encode(&bound, &members, &boundary);
-                        let written = tagged_encode(&tag, Some(quote! { #record? }));
+                        let record = record_encode(&bound, &members, &boundary, facade);
+                        let written = tagged_encode(&tag, Some(quote! { #record? }), facade);
                         writes.push(quote! { Self::#named { #(#fields: #bound),* } => #written });
                     }
                 }
             }
-            let decode = tagged_decode(quote! { value }, "a variant", reads);
+            let decode = tagged_decode(quote! { value }, "a variant", reads, facade);
             (decode, quote! { match self { #(#writes,)* } })
         }
         ShapeKind::Flags(item) => {
@@ -3134,7 +3246,7 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
                 .collect();
             let decode = quote! {
                 match value {
-                    ::tembra::serde_json::Value::Object(object) => {
+                    ::#facade::serde_json::Value::Object(object) => {
                         let mut flags = Self { #(#fields: false),* };
                         for (key, set) in object {
                             let flag = match key.as_str() {
@@ -3146,7 +3258,7 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
                                 }
                             };
                             match set {
-                                ::tembra::serde_json::Value::Bool(set) => *flag = set,
+                                ::#facade::serde_json::Value::Bool(set) => *flag = set,
                                 _ => {
                                     return ::core::result::Result::Err(::std::format!(
                                         "expected the flag `{}` as a boolean",
@@ -3163,42 +3275,49 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
                 }
             };
             let encode = quote! {
-                let mut flags = ::tembra::serde_json::Map::new();
+                let mut flags = ::#facade::serde_json::Map::new();
                 #(
                     if self.#fields {
                         flags.insert(
                             ::std::string::String::from(#keys),
-                            ::tembra::serde_json::Value::Bool(true),
+                            ::#facade::serde_json::Value::Bool(true),
                         );
                     }
                 )*
-                ::core::result::Result::Ok(::tembra::serde_json::Value::Object(flags))
+                ::core::result::Result::Ok(::#facade::serde_json::Value::Object(flags))
             };
             (decode, encode)
         }
     };
-    Ok(boundary_impl(&boundary, quote! { #ident }, decode, encode))
+    Ok(boundary_impl(
+        &boundary,
+        quote! { #ident },
+        decode,
+        encode,
+        facade,
+    ))
 }
 
 /// The impl of the boundary trait, as `boundary` names it, for `target`, with `decode`, which
-/// reads `value`, and `encode`, which writes `self`.
+/// reads `value`, and `encode`, which writes `self`, the JSON of the facade named `facade`.
 fn boundary_impl(
     boundary: &TokenStream,
     target: TokenStream,
     decode: TokenStream,
     encode: TokenStream,
+    facade: &Ident,
 ) -> TokenStream {
     quote! {
         impl #boundary for #target {
             fn decode(
-                value: ::tembra::serde_json::Value,
+                value: ::#facade::serde_json::Value,
             ) -> ::core::result::Result<Self, ::std::string::String> {
                 #decode
             }
 
             fn encode(
                 self,
-            ) -> ::core::result::Result<::tembra::serde_json::Value, ::std::string::String> {
+            ) -> ::core::result::Result<::#facade::serde_json::Value, ::std::string::String> {
                 #encode
             }
         }
@@ -3206,12 +3325,13 @@ fn boundary_impl(
 }
 
 /// The JSON of an enum whose cases' WIT names are `tags`, which the bindings name in
-/// UpperCamelCase: the WIT name of its case, read from `value` and written from `self`.
-fn enum_codec(tags: &[String]) -> (TokenStream, TokenStream) {
+/// UpperCamelCase: the WIT name of its case, read from `value` and written from `self`, the JSON of
+/// the facade named `facade`.
+fn enum_codec(tags: &[String], facade: &Ident) -> (TokenStream, TokenStream) {
     let cases: Vec<Ident> = tags.iter().map(|tag| camel_ident(tag)).collect();
     let decode = quote! {
         match value {
-            ::tembra::serde_json::Value::String(case) => match case.as_str() {
+            ::#facade::serde_json::Value::String(case) => match case.as_str() {
                 #(#tags => ::core::result::Result::Ok(Self::#cases),)*
                 other => ::core::result::Result::Err(
                     ::std::format!("unknown case `{}`", other)
@@ -3223,7 +3343,7 @@ fn enum_codec(tags: &[String]) -> (TokenStream, TokenStream) {
         }
     };
     let encode = quote! {
-        ::core::result::Result::Ok(::tembra::serde_json::Value::String(
+        ::core::result::Result::Ok(::#facade::serde_json::Value::String(
             ::std::string::String::from(match self { #(Self::#cases => #tags,)* })
         ))
     };
@@ -3231,26 +3351,28 @@ fn enum_codec(tags: &[String]) -> (TokenStream, TokenStream) {
 }
 
 /// How the case `named` of a variant, `tag` in the WIT, crosses: the case read for
-/// `tagged_decode`, and the arm writing it, with its payload of the kind given, if it carries one.
+/// `tagged_decode`, and the arm writing it, with its payload of the kind given, if it carries one,
+/// in the JSON of the facade named `facade`.
 fn variant_case(
     tag: &str,
     named: &Ident,
     payload: Option<&Kind<'_>>,
     boundary: &TokenStream,
+    facade: &Ident,
 ) -> ((String, Read), TokenStream) {
     match payload {
         None => {
             let read = quote! { ::core::result::Result::Ok(Self::#named) };
-            let written = tagged_encode(tag, None);
+            let written = tagged_encode(tag, None, facade);
             (
                 (tag.to_owned(), Read::Bare(read)),
                 quote! { Self::#named => #written },
             )
         }
         Some(kind) => {
-            let read = decode(kind, quote! { item }, boundary);
-            let written = encode(kind, quote! { item }, boundary);
-            let written = tagged_encode(tag, Some(quote! { #written? }));
+            let read = decode(kind, quote! { item }, boundary, facade);
+            let written = encode(kind, quote! { item }, boundary, facade);
+            let written = tagged_encode(tag, Some(quote! { #written? }), facade);
             (
                 (
                     tag.to_owned(),
@@ -3269,8 +3391,9 @@ fn variant_case(
 /// an object of its case's `tag` and payload, `val`; a flags, which the bindings generate with
 /// `bitflags`, as an object of the flags set, each `true`, which reads a flag left out as unset.
 /// The members are named as the bindings generate them. None for a type holding what the codec
-/// does not cover, which a method that takes or returns it refuses.
-fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes) -> Option<TokenStream> {
+/// does not cover, which a method that takes or returns it refuses. The JSON is that of the facade
+/// named `facade`.
+fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes, facade: &Ident) -> Option<TokenStream> {
     let boundary = format_ident!("{BOUNDARY}");
     let boundary = quote! { #boundary };
     let kind = |ty: wit_parser::Type| wit_kind(ty, types, 0).ok();
@@ -3292,8 +3415,14 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes) -> Option<TokenStream>
                 .collect::<Option<Vec<_>>>()?;
             let bound = elements(members.len());
             let fields = members.iter().map(|member| &member.field);
-            let decode = record_decode(quote! { value }, quote! { Self }, &members, &boundary);
-            let encode = record_encode(&bound, &members, &boundary);
+            let decode = record_decode(
+                quote! { value },
+                quote! { Self },
+                &members,
+                &boundary,
+                facade,
+            );
+            let encode = record_encode(&bound, &members, &boundary, facade);
             (
                 decode,
                 quote! { let Self { #(#fields: #bound),* } = self; #encode },
@@ -3305,7 +3434,7 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes) -> Option<TokenStream>
                 .iter()
                 .map(|case| case.name.clone())
                 .collect();
-            enum_codec(&tags)
+            enum_codec(&tags, facade)
         }
         TypeDefKind::Variant(variant) => {
             let mut reads = Vec::new();
@@ -3316,11 +3445,12 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes) -> Option<TokenStream>
                     None => None,
                 };
                 let named = camel_ident(&case.name);
-                let (read, written) = variant_case(&case.name, &named, payload.as_ref(), &boundary);
+                let (read, written) =
+                    variant_case(&case.name, &named, payload.as_ref(), &boundary, facade);
                 reads.push(read);
                 writes.push(written);
             }
-            let decode = tagged_decode(quote! { value }, "a variant", reads);
+            let decode = tagged_decode(quote! { value }, "a variant", reads, facade);
             (decode, quote! { match self { #(#writes,)* } })
         }
         TypeDefKind::Flags(flags) => {
@@ -3336,7 +3466,7 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes) -> Option<TokenStream>
                 .collect();
             let decode = quote! {
                 match value {
-                    ::tembra::serde_json::Value::Object(object) => {
+                    ::#facade::serde_json::Value::Object(object) => {
                         let mut flags = Self::empty();
                         for (key, set) in object {
                             let flag = match key.as_str() {
@@ -3348,7 +3478,7 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes) -> Option<TokenStream>
                                 }
                             };
                             match set {
-                                ::tembra::serde_json::Value::Bool(set) => flags.set(flag, set),
+                                ::#facade::serde_json::Value::Bool(set) => flags.set(flag, set),
                                 _ => {
                                     return ::core::result::Result::Err(::std::format!(
                                         "expected the flag `{}` as a boolean",
@@ -3365,22 +3495,28 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes) -> Option<TokenStream>
                 }
             };
             let encode = quote! {
-                let mut flags = ::tembra::serde_json::Map::new();
+                let mut flags = ::#facade::serde_json::Map::new();
                 #(
                     if self.contains(Self::#names) {
                         flags.insert(
                             ::std::string::String::from(#keys),
-                            ::tembra::serde_json::Value::Bool(true),
+                            ::#facade::serde_json::Value::Bool(true),
                         );
                     }
                 )*
-                ::core::result::Result::Ok(::tembra::serde_json::Value::Object(flags))
+                ::core::result::Result::Ok(::#facade::serde_json::Value::Object(flags))
             };
             (decode, encode)
         }
         _ => return None,
     };
-    Some(boundary_impl(&boundary, types.path(id, 0), decode, encode))
+    Some(boundary_impl(
+        &boundary,
+        types.path(id, 0),
+        decode,
+        encode,
+        facade,
+    ))
 }
 
 /// The kind of a WIT type of a consumed interface, as its bindings generate it, read in a module

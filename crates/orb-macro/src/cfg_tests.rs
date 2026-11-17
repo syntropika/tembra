@@ -213,7 +213,7 @@ fn a_cfg_on_a_service_or_a_method_expands_one_copy_per_combination() {
         for registered in [
             "fn archive () -> u32 { Notes :: archive () }",
             ". method_with (\"archive\"",
-            ". service (self :: __tembra_service_shelf (name))",
+            ". service (self :: __TembraRegistry :: < 0 > :: __tembra_service_shelf (name))",
         ] {
             assert_eq!(
                 tokens.contains(registered),
@@ -303,7 +303,9 @@ fn each_copy_keeps_the_items_whose_predicates_hold() {
         let module = quote!(#module).to_string();
         let built = guard.ends_with(", feature = \"b\")");
         assert_eq!(
-            module.contains("self :: __tembra_service_notes (name , & inputs)"),
+            module.contains(
+                "self :: __TembraRegistry :: < 0 > :: __tembra_service_notes (name , & inputs)"
+            ),
             built,
             "{guard}\n{module}"
         );

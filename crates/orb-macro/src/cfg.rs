@@ -24,12 +24,14 @@ const CONFIGURATION: &str = "__tembra_configuration";
 
 /// The copies of the module `item`, one per combination of the predicates of the `#[cfg]`s on the
 /// items the macro reads, each under the `#[cfg]` of its combination and the macro's attribute
-/// with its options, `attribute`. None for a module without such a `#[cfg]`, which the macro
-/// expands at once, and for an item that is no module, which the expansion reports. More than
-/// `MOST` distinct predicates are an error at the first `#[cfg]` beyond them.
+/// with its options, `attribute`, through the facade named `facade`. None for a module without such
+/// a `#[cfg]`, which the macro expands at once, and for an item that is no module, which the
+/// expansion reports. More than `MOST` distinct predicates are an error at the first `#[cfg]`
+/// beyond them.
 pub(crate) fn combinations(
     attribute: &TokenStream,
     item: &TokenStream,
+    facade: &syn::Ident,
 ) -> syn::Result<Option<TokenStream>> {
     let Ok(mut module) = syn::parse2::<ItemMod>(item.clone()) else {
         return Ok(None);
@@ -103,7 +105,7 @@ pub(crate) fn combinations(
         }
         quote! {
             #[cfg(all(#(#guard),*))]
-            #[::tembra::orb(#attribute)]
+            #[::#facade::orb(#attribute)]
             #[#marker(all(#(#guard),*))]
             #copy
         }

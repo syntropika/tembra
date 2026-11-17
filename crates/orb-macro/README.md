@@ -1133,11 +1133,12 @@ build: a native host that depends on the Orb crate and on `tembra` with `host`, 
 `orb()`; a component build enables only `macros`, gets none of it, and the component stays the
 same. A build for wasm32 is a component whatever the features, as the macro's `export!` is, so a
 guest whose `tembra` keeps the default features, or gets `host` from another crate of the build,
-gets none of it either. The generated code names the facade as `::tembra`, so an Orb crate depends
-on it under that name and needs no dependency of its own for the runtime or its JSON; a host whose
-`tembra` lacks `host` finds no `orb()`. The crate is rebuilt when its manifest changes, so `orb()`
-follows the table. See [rust-orb-native](../../examples/rust-orb-native/README.md), where one host
-links two Orb crates that export the same interface.
+gets none of it either. The generated code names the facade as `::tembra`, or by the name
+`crate = ".."` gives it, so an Orb crate needs no dependency of its own for the runtime or its
+JSON; a host whose `tembra` lacks `host` finds no `orb()`. The crate is rebuilt when its manifest
+changes, so `orb()` follows the table. See
+[rust-orb-native](../../examples/rust-orb-native/README.md), where one host links two Orb crates
+that export the same interface.
 
 A native host can lend the Orb values a component cannot be given. The struct marked `#[inputs]`
 is the argument of `orb(..)`, and of `orb_named(..)` after the name and API version, one value for
@@ -1603,7 +1604,7 @@ predicate as `feature = "archive"`, turned over. A module takes at most 4 distin
 copies; a 5th is a compile error at its `#[cfg]`. A copy left with nothing to export, every
 service of the module under a `#[cfg]` that does not hold, is a compile error that names the
 configuration of the build. The copies name the macro as `::tembra::orb`, through the facade the
-crate depends on.
+crate depends on, by the name `crate = ".."` gives it if any.
 
 Any other `#[cfg]` is left to the compiler. On a field of the `#[inputs]` struct, which `orb(..)`
 takes whole, or on a sub-module holding no service, root or hook, such as `#[cfg(test)] mod tests`,

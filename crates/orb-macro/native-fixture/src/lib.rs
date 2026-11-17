@@ -15,7 +15,8 @@
 //! and `reframed` that Orb after a reload that gives only its package a new version. `dice`,
 //! `turnstile`, `checkpoint` and `desk` hold what the native side does not cover yet, a WASI
 //! import, a synchronous import, a hook declaration and a record holding a resource: they compile
-//! here all the same, and their `orb()` answers an error naming it.
+//! here all the same, and their `orb()` answers an error naming it. `trail` holds a service two
+//! private modules down, and one whose method is named `clone`, as a method of `Rc`.
 //! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
@@ -1791,6 +1792,60 @@ pub mod desk {
                 session: exports::example::desk::sessions::Session::new(Session::new(n)),
                 count: 1,
             }
+        }
+    }
+}
+
+/// A trail whose services `orb()` reaches wherever the module puts them: the walker two private
+/// modules below the Orb module, and the guide, whose method shares its name with a method of the
+/// `Rc` each guide object is kept in, which `orb()` calls as the guide's. Native only, as
+/// `notebook`: the guide's create takes inputs.
+#[cfg(not(target_arch = "wasm32"))]
+#[tembra::orb(package = "example:trail@1.0.0")]
+pub mod trail {
+    use tembra::Declaration;
+
+    /// What the host lends the Orb.
+    #[inputs]
+    pub struct Inputs {
+        /// The name of the trail.
+        pub name: String,
+    }
+
+    pub mod a {
+        mod b {
+            /// A walker, which the Orb module cannot name: the module `b` is private to `a`.
+            #[service]
+            pub struct Walker;
+
+            impl Walker {
+                /// How many steps a walk takes.
+                pub fn steps() -> u32 {
+                    1
+                }
+            }
+        }
+    }
+
+    /// A guide of the trail the host names.
+    #[service]
+    pub struct Guide {
+        name: String,
+    }
+
+    impl Guide {
+        /// Build a guide of the trail.
+        #[create]
+        fn create(inputs: &Inputs, _declaration: &Declaration) -> tembra::Result<Self> {
+            Ok(Self {
+                name: inputs.name.clone(),
+            })
+        }
+
+        /// A copy of the trail's name, named as `Rc::clone` is.
+        #[allow(clippy::should_implement_trait)]
+        pub fn clone(&self) -> String {
+            format!("a copy of {}", self.name)
         }
     }
 }

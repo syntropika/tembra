@@ -82,20 +82,18 @@ fn expansion(
         .into_iter()
         .any(|token| matches!(&token, proc_macro2::TokenTree::Ident(ident) if ident == "no_std"));
     let crate_dir = primary_crate_dir(|name| std::env::var_os(name));
-    let expanded = match cfg::combinations(&attribute, &item) {
-        Ok(Some(copies)) => Ok(copies),
-        Ok(None) => options(attribute)
-            .and_then(|options| Ok((options, syn::parse2::<ItemMod>(item)?)))
-            .and_then(|(options, module)| {
-                expand(
-                    options,
-                    module,
-                    metadata::Metadata::read(),
-                    crate_dir.as_deref(),
-                )
-            }),
-        Err(error) => Err(error),
-    };
+    // The copies go through the macro again by the name the crate depends on the facade under.
+    let expanded = options(attribute.clone()).and_then(|options| {
+        match cfg::combinations(&attribute, &item, &options.facade())? {
+            Some(copies) => Ok(copies),
+            None => expand(
+                options,
+                syn::parse2::<ItemMod>(item)?,
+                metadata::Metadata::read(),
+                crate_dir.as_deref(),
+            ),
+        }
+    });
     match expanded {
         Ok(tokens) => tokens,
         Err(error) => {
@@ -194,6 +192,15 @@ struct Options {
     /// Interfaces of other Orbs the module imports by key, as written on the attribute: the world
     /// imports a view of each, whose `get` selects an object of the provider by key.
     keyed: Vec<LitStr>,
+}
+
+impl Options {
+    /// The name the generated code reaches the facade under, `tembra` without `crate = ".."`.
+    fn facade(&self) -> Ident {
+        self.facade
+            .clone()
+            .unwrap_or_else(|| Ident::new("tembra", Span::call_site()))
+    }
 }
 
 /// A type declared in the module, with its WIT definition and the module types it refers to, each
@@ -1908,6 +1915,8 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         own_types,
         ..
     } = scan;
+    // A method's error channel is spelled through the name the crate depends on the facade under.
+    let facade = options.facade();
     // A service's methods are the pub fn of the impl blocks of its own module, but its create;
     // those marked #[local] are for native callers only, and stay out of the WIT.
     for (scope, item) in &impls {
@@ -1947,7 +1956,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 )?;
                 unconditional_marked(&function.attrs, "function", &names, "calls it", true)?;
                 unconditional_params(&function.sig, "function", &names)?;
-                let read = method(function, local.is_some())?;
+                let read = method(function, local.is_some(), &facade)?;
                 // In a module with a `Context` of its own, `&Context` names that type, which no
                 // WIT parameter takes by reference, not the call's context.
                 if read.context.is_some() && declares(&mut tree, &candidates, *scope, "Context") {
@@ -1993,7 +2002,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 }
                 if let (true, ReturnType::Type(_, ty)) = (read.fallible, &function.sig.output) {
                     native_only.push(NativeOnly {
-                        name: "tembra::Result".to_owned(),
+                        name: format!("{facade}::Result"),
                         span: ty.span(),
                     });
                 }
@@ -3224,6 +3233,8 @@ fn component(
         ..
     } = analysis;
     let declarations = analysis.declarations();
+    // The name the crate depends on the facade under, which every path through it takes.
+    let facade = options.facade();
     // The generated items go in the module of the item each serves: a copy of the tree takes
     // them, so the analysis stays as it is for the other side.
     let mut tree = analysis.tree.clone();
@@ -3408,7 +3419,7 @@ fn component(
     // the native side writes in place of an import module it serves.
     let guest_only = |module: &Ident, reexport: proc_macro2::TokenStream| {
         if served.contains(&module.to_string()) {
-            quote! { ::tembra::__guest! { #reexport } }
+            quote! { ::#facade::__guest! { #reexport } }
         } else {
             reexport
         }
@@ -3438,7 +3449,7 @@ fn component(
     // `context` instead.
     let context_module = options
         .context
-        .then(|| quote! { ::tembra::__guest! { pub use self::tembra::guest::context; } });
+        .then(|| quote! { ::#facade::__guest! { pub use self::tembra::guest::context; } });
     // Each hook's generated module is re-exported under its interface name: the export module
     // of a contributed hook, whose callback forwards to the author's function, and the import
     // module of a hook declared from a consumed package, whose types `run` takes and returns.
@@ -3626,8 +3637,8 @@ fn component(
             &import_module(0, path),
         )
     });
-    let state_code = state_code(states, modules);
-    let resource_code = resource_code(resources, modules);
+    let state_code = state_code(states, modules, &facade);
+    let resource_code = resource_code(resources, modules, &facade);
     // The native side's items of each sub-module, after the component's, with the services they
     // register and the types whose JSON they write; a component build expands them to nothing.
     for (scope, items) in nested {
@@ -3729,10 +3740,6 @@ fn component(
     // version, so the facade picks it, not the author's crate: the bindings come from its
     // re-export, and their runtime and the bitflags they name are reached there as well, under the
     // name the crate depends on the facade under.
-    let facade = options
-        .facade
-        .clone()
-        .unwrap_or_else(|| Ident::new("tembra", Span::call_site()));
     let runtime = LitStr::new(&format!("::{facade}::__wit_bindgen::rt"), Span::call_site());
     let bitflags = LitStr::new(
         &format!("::{facade}::__wit_bindgen::rt::bitflags"),
@@ -7487,10 +7494,11 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
 
 /// Read one public function of a service: a plain name for each owned parameter, `&self` when
 /// the service's create builds it, and at most one `&Context`, the call's, which stays out of the
-/// WIT. A result spelled `tembra::Result<T>` is the method's error channel, so its WIT result is
-/// `T`. A `local` method stays out of the WIT whole, so its types need no WIT spelling; its
-/// documentation goes to its client's method, as any method's does.
-fn method(function: &syn::ImplItemFn, local: bool) -> syn::Result<Function> {
+/// WIT. A result spelled `tembra::Result<T>`, through `facade`, the name the crate depends on the
+/// facade under, is the method's error channel, so its WIT result is `T`. A `local` method stays
+/// out of the WIT whole, so its types need no WIT spelling; its documentation goes to its client's
+/// method, as any method's does.
+fn method(function: &syn::ImplItemFn, local: bool, facade: &Ident) -> syn::Result<Function> {
     let spelled = |ty: &Type| {
         if local {
             Ok(String::new())
@@ -7536,7 +7544,7 @@ fn method(function: &syn::ImplItemFn, local: bool) -> syn::Result<Function> {
         }
     }
     let output = result(&function.sig.output);
-    let value = output.and_then(tembra_result);
+    let value = output.and_then(|ty| tembra_result(ty, facade));
     let result = match value.or(output) {
         Some(Type::Tuple(unit)) if unit.elems.is_empty() => None,
         Some(ty) => Some((ty.clone(), spelled(ty)?)),
@@ -7554,9 +7562,10 @@ fn method(function: &syn::ImplItemFn, local: bool) -> syn::Result<Function> {
     })
 }
 
-/// The value of a result spelled `tembra::Result<T>`, the runtime's, `T`: a native method's error
-/// channel rather than a WIT `result`, which only `Result<T, E>` spells.
-fn tembra_result(ty: &Type) -> Option<&Type> {
+/// The value of a result spelled `tembra::Result<T>`, the runtime's, `T`, through `facade`, the
+/// name the crate depends on the facade under: a native method's error channel rather than a WIT
+/// `result`, which only `Result<T, E>` spells.
+fn tembra_result<'a>(ty: &'a Type, facade: &Ident) -> Option<&'a Type> {
     let Type::Path(path) = ty else {
         return None;
     };
@@ -7570,7 +7579,7 @@ fn tembra_result(ty: &Type) -> Option<&Type> {
     let mut arguments = arguments.args.iter();
     match (arguments.next(), arguments.next()) {
         (Some(syn::GenericArgument::Type(value)), None)
-            if tembra.ident == "tembra"
+            if tembra.ident == *facade
                 && tembra.arguments.is_empty()
                 && result.ident == "Result" =>
         {
@@ -8810,12 +8819,17 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
 /// The Rust side of the states: the kernel's `state-init` callback answering one declaration per
 /// owning service, the accessors on each state type, and the JSON helpers they share, with the
 /// kernel's `read` and `update` of a component, and the native side's in their place where the
-/// facade links the runtime, which the accessors call in both.
-fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStream {
+/// facade, `facade` the name the crate depends on it under, links the runtime, which the accessors
+/// call in both.
+fn state_code(
+    states: &[State],
+    modules: &[Vec<Ident>],
+    facade: &Ident,
+) -> proc_macro2::TokenStream {
     if states.is_empty() {
         return quote! {};
     }
-    let native = native::state_access();
+    let native = native::state_access(facade);
     // Every state is validated: the value a reload hands the new instance must at least read as
     // the state's type, or the first `read` would trap. The initial value is held to the same
     // rule before the kernel keeps it.
@@ -8952,7 +8966,7 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
 
             // A component reaches the kernel through the bindings' import; a native host gets
             // `read` and `update` of its own, below, over the state of each method's object.
-            ::tembra::__guest! {
+            ::#facade::__guest! {
                 pub fn read<T: ::serde::de::DeserializeOwned>() -> T {
                     parse(&super::tembra::guest::state::read())
                 }
@@ -9036,8 +9050,13 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
 /// The Rust side of the resources: the kernel's `resources-init` callbacks listing, opening and
 /// closing them, one slot in the component's memory per resource, and `with` on each type, which
 /// reaches the component's slot in a component build and the Orb's resource natively, where the
-/// native side declares each in the Orb's create and writes its own `with`.
-fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2::TokenStream {
+/// native side declares each in the Orb's create and writes its own `with`, through the facade
+/// named `facade`.
+fn resource_code(
+    resources: &[Resource],
+    modules: &[Vec<Ident>],
+    facade: &Ident,
+) -> proc_macro2::TokenStream {
     if resources.is_empty() {
         return quote! {};
     }
@@ -9094,7 +9113,7 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
         // runs for.
         quote! {
             static #slot: __tembra_resource::Slot<#path> = __tembra_resource::Slot::new();
-            ::tembra::__guest! {
+            ::#facade::__guest! {
                 impl #path {
                     #[doc = #doc]
                     pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
@@ -9105,7 +9124,7 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
             }
         }
     });
-    let native = native::resource_access(resources, modules);
+    let native = native::resource_access(resources, modules, facade);
     quote! {
         // The kernel lists the root's resources when it creates the root, then opens and closes
         // each of them in its own order through these callbacks.
