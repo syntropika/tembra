@@ -8,8 +8,9 @@
 //! value among its objects, and `worker` only runs its root and a resource of it. The module
 //! `metering` imports the meter interface of the package in `wit/deps/`, which `meters`
 //! implements, and its `orb(..)` takes the provider of each import; `filter` contributes to the
-//! hook of a gate there, and its `orb(..)` takes the gate. The manifest names every Orb of the
-//! crate `calculator` at API version 2, which `orb()` reports.
+//! hook of a gate there, and its `orb(..)` takes the gate. The module `counters` rewrites with the
+//! macro a native Orb its test also writes by hand against the runtime's API. The manifest names
+//! every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
 //!
@@ -1307,5 +1308,207 @@ pub mod filter {
             };
         }
         input
+    }
+}
+
+/// Counters for the host, and the board that sums them up: a native Orb as a host writes it by hand
+/// against the runtime's API, as the test `counters` does, rewritten with the macro. The host lends
+/// it inputs; the Orb's root creates what every object shares, with a resource of the root; the
+/// create of `Counter` declares the state, a resource and a task of each object; its `#[local]`
+/// method takes a closure; and the board's guard admits one address. Native only, as `notebook`.
+#[cfg(not(target_arch = "wasm32"))]
+#[tembra::orb(package = "example:counter@1.0.0")]
+pub mod counters {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+    use tembra::{Context, Declaration, Resource, State, core::Address};
+
+    /// What the host lends every service of the Orb.
+    #[inputs]
+    pub struct Inputs {
+        /// What happened, in order, for the host to read back.
+        pub events: Rc<RefCell<Vec<String>>>,
+        /// The highest count of a counter, resolved from its address.
+        pub limit: Box<dyn Fn(&Address) -> u32>,
+    }
+
+    /// What every counter of the Orb shares: how many steps they counted in all, and the tape each
+    /// count they reach is written on, a resource of the Orb's root.
+    pub struct Tally {
+        steps: Cell<u32>,
+        tape: Resource<RefCell<Vec<String>>>,
+    }
+
+    /// Create the tally, once for the Orb, and report it to the host: its tape opens once this
+    /// returns, and closes when the host removes the Orb.
+    #[root]
+    fn tally(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Tally> {
+        inputs.events.borrow_mut().push("root".to_string());
+        let (opened, closed) = (inputs.events.clone(), inputs.events.clone());
+        let tape = declaration.resource(
+            "tape",
+            1,
+            move || {
+                opened.borrow_mut().push("open tape".to_string());
+                Ok(RefCell::default())
+            },
+            move |tape: Rc<RefCell<Vec<String>>>, _| {
+                Box::pin(async move {
+                    let counts = tape.borrow().len();
+                    closed
+                        .borrow_mut()
+                        .push(format!("close tape of {counts} counts"));
+                    Ok(())
+                })
+            },
+        )?;
+        Ok(Tally {
+            steps: Cell::new(0),
+            tape,
+        })
+    }
+
+    /// A counter, an object per key and principal, which counts up to the limit the host resolves
+    /// from its address.
+    #[service]
+    pub struct Counter {
+        /// The object's key and principal, as `a/alice`.
+        name: String,
+        /// The count, the object's state.
+        count: State<u32>,
+        /// What the counter shows its count on, a resource of the object.
+        display: Resource<String>,
+        /// What every counter shares.
+        tally: Rc<Tally>,
+    }
+
+    impl Counter {
+        /// Build a counter, reported to the host, and declare what the object holds: its state,
+        /// the count, from zero, which its rule keeps within the counter's limit; its display,
+        /// opened once this returns and closed with the object; and a task, which runs while the
+        /// object is active.
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            let address = declaration.address()?;
+            let name = format!("{}/{}", address.key.join("/"), address.principal);
+            inputs.events.borrow_mut().push(format!("create {name}"));
+            let limit = (inputs.limit)(&address);
+            let count = declaration.state(0, 1, move |count: &u32| {
+                if *count <= limit {
+                    Ok(())
+                } else {
+                    Err(tembra::Error::invalid(
+                        "limit",
+                        format!("{count} is past the limit of {limit}"),
+                    ))
+                }
+            })?;
+            let (opened, closed) = (inputs.events.clone(), inputs.events.clone());
+            let label = name.clone();
+            let display = declaration.resource(
+                "display",
+                1,
+                move || {
+                    opened.borrow_mut().push(format!("open display of {label}"));
+                    Ok(format!("display of {label}"))
+                },
+                move |display, _| {
+                    Box::pin(async move {
+                        closed.borrow_mut().push(format!("close {display}"));
+                        Ok(())
+                    })
+                },
+            )?;
+            let (events, task) = (inputs.events.clone(), name.clone());
+            declaration.task(move |scope| {
+                Box::pin(async move {
+                    events.borrow_mut().push(format!("task of {task} starts"));
+                    scope.signal().cancelled().await;
+                    events.borrow_mut().push(format!("task of {task} stops"));
+                    Ok(())
+                })
+            })?;
+            Ok(Self {
+                name,
+                count,
+                display,
+                tally: declaration.orb::<Tally>()?,
+            })
+        }
+
+        /// Count a step and return the count, or fail past the counter's limit.
+        pub fn step(&self, context: &Context) -> tembra::Result<u32> {
+            self.step_by(context, 1)
+        }
+
+        /// Count `steps` steps at once and return the count, or fail past the counter's limit,
+        /// counting none.
+        pub fn step_by(&self, context: &Context, steps: u32) -> tembra::Result<u32> {
+            let count = *self.count.update(context, |count| Ok(count + steps))?;
+            self.tally.steps.set(self.tally.steps.get() + steps);
+            self.tally
+                .tape
+                .value()?
+                .borrow_mut()
+                .push(format!("{} at {count}", self.name));
+            Ok(count)
+        }
+
+        /// The count.
+        pub fn count(&self) -> tembra::Result<u32> {
+            Ok(*self.count.value()?)
+        }
+
+        /// The count, as the counter's display shows it.
+        pub fn display(&self) -> tembra::Result<String> {
+            Ok(format!(
+                "{}: {}",
+                self.display.value()?,
+                self.count.value()?
+            ))
+        }
+
+        /// Set the count to what the host's operation makes of it, and return it, or fail past
+        /// the counter's limit: a closure, which only exists natively and has no serde, so the
+        /// method is `#[local]` and the WIT leaves it out.
+        #[local]
+        pub fn apply(
+            &self,
+            context: &Context,
+            operation: Rc<dyn Fn(u32) -> u32>,
+        ) -> tembra::Result<u32> {
+            Ok(*self.count.update(context, |count| Ok(operation(*count)))?)
+        }
+    }
+
+    /// The board of the counters: one object, of key `main` and principal `host`, which its
+    /// factory guards.
+    #[service(key = main, principal = "host")]
+    pub struct Board {
+        tally: Rc<Tally>,
+    }
+
+    impl Board {
+        /// Build the board on the tally the root created, reported to the host: an address the
+        /// guard refuses never gets here.
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            inputs.events.borrow_mut().push("create board".to_string());
+            Ok(Self {
+                tally: declaration.orb::<Tally>()?,
+            })
+        }
+
+        /// How many steps the counters counted in all.
+        pub fn steps(&self) -> u32 {
+            self.tally.steps.get()
+        }
+
+        /// What the tape holds: each count the counters reached, in order.
+        pub fn tape(&self) -> tembra::Result<Vec<String>> {
+            Ok(self.tally.tape.value()?.borrow().clone())
+        }
     }
 }
