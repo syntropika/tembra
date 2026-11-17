@@ -4428,7 +4428,9 @@ fn known_trait(
 /// a flags struct, of a trait the bindings implement for the generated type replacing it
 /// (`implemented`), or of `serde`'s, which they derive on it in an Orb with a state: the generated
 /// type would implement it twice. `hands` are the impls, each with the module it is written in,
-/// whose trait the macro follows from there (`known_trait`).
+/// whose trait the macro follows from there (`known_trait`); one of the trait with another
+/// right-hand type, `PartialEq<u8>`, is another impl, which coexists with the derived `PartialEq`
+/// (`overlaps`).
 fn clashing(
     shape: &Shape,
     generated: &wit::Generated,
@@ -4445,6 +4447,13 @@ fn clashing(
         let Some(name) = known_trait(path, *scope, uses, modules, owner) else {
             continue;
         };
+        if !path
+            .segments
+            .last()
+            .is_some_and(|last| overlaps(last, block, owner))
+        {
+            continue;
+        }
         let reason = match own.iter().find(|(known, _)| *known == name) {
             Some((_, reason)) => *reason,
             None if generated.serialized && serde_name(&name) => {
@@ -4463,6 +4472,36 @@ fn clashing(
         ));
     }
     Ok(())
+}
+
+/// Whether a trait impl's trait, by the last segment of its path with the segment's arguments, is
+/// the one the bindings implement under that name for `owner`: with no type argument, or with
+/// `Self`, the type itself or a type parameter of the impl as each type argument, as
+/// `PartialEq<Self>` is the derived `PartialEq`, which `flags::traits_implemented` reads of `BitOr`
+/// too. `PartialEq<u8>` is another impl of the trait, which coexists with the derived one; a
+/// lifetime argument, `Deserialize<'de>`, changes nothing.
+fn overlaps(last: &syn::PathSegment, block: &syn::ItemImpl, owner: &Ident) -> bool {
+    let arguments = match &last.arguments {
+        syn::PathArguments::None => return true,
+        syn::PathArguments::AngleBracketed(arguments) => &arguments.args,
+        syn::PathArguments::Parenthesized(_) => return false,
+    };
+    arguments.iter().all(|argument| match argument {
+        syn::GenericArgument::Lifetime(_) => true,
+        syn::GenericArgument::Type(Type::Path(path)) if path.qself.is_none() => {
+            path.path.is_ident("Self")
+                || path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == *owner && segment.arguments.is_none())
+                || block
+                    .generics
+                    .type_params()
+                    .any(|param| path.path.is_ident(&param.ident))
+        }
+        _ => false,
+    })
 }
 
 /// The traits of `serde`, by name, that a `#[cfg_attr(..)]` derives where its configuration holds,

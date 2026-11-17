@@ -4829,9 +4829,12 @@ fn a_standard_derive_is_decided_from_the_fields() {
 /// function's result, and they derive `serde`'s traits on it in an Orb with a state; the macro
 /// implements `BitOr` for a flags struct. An impl of one of those traits that the Orb's modules
 /// write for such a type, under `#[cfg(..)]` too, or a derive implementing `BitOr` on a flags
-/// struct, would implement it twice, so it is refused, saying what implements it already. The same
-/// module without it expands, and so do an impl of a trait the bindings do not implement for that
-/// type and an impl whose trait the macro cannot follow to a crate.
+/// struct, would implement it twice, so it is refused, saying what implements it already; so is an
+/// impl of the trait with `Self`, the type or a type parameter as its type argument,
+/// `PartialEq<Self>`, which the derived `PartialEq` is. The same module without it expands, and so
+/// do an impl of a trait the bindings do not implement for that type, one of the trait with another
+/// right-hand type, `PartialEq<u8>`, which coexists with the derived one, and an impl whose trait
+/// the macro cannot follow to a crate.
 #[test]
 fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
     let module = |items: &str| {
@@ -4890,6 +4893,18 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
             "`impl PartialEq for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
         ),
         (
+            module(
+                "impl PartialEq<Self> for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }",
+            ),
+            "`impl PartialEq<Self> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
+        ),
+        (
+            module(
+                "impl<T> PartialEq<T> for Heading { fn eq(&self, other: &T) -> bool { todo!() } }",
+            ),
+            "`impl PartialEq<T> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
+        ),
+        (
             module(&format!(
                 "{state} impl serde::Serialize for Point {{ {serialize} }}"
             )),
@@ -4907,6 +4922,9 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
         String::new(),
         format!("impl fmt::Display for Point {{ {fmt} }}"),
         "impl PartialEq for Point { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
+        "impl core::cmp::PartialEq<u8> for Heading { fn eq(&self, other: &u8) -> bool { todo!() } }".to_owned(),
+        "impl PartialOrd<u8> for Heading { fn partial_cmp(&self, other: &u8) -> Option<core::cmp::Ordering> { todo!() } }
+        impl PartialEq<u8> for Heading { fn eq(&self, other: &u8) -> bool { todo!() } }".to_owned(),
         "impl Clone for Lease { fn clone(&self) -> Self { todo!() } }".to_owned(),
         format!("impl serde::Serialize for Point {{ {serialize} }}"),
         "impl crate::walk::Display for Fault {} pub trait Display {}".to_owned(),
