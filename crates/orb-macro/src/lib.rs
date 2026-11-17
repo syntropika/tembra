@@ -2588,6 +2588,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let copies = wit::bundled_copies(&parsed)?;
     let (standard, nested) = wasi::packages(&parsed, &options.imports, &copies)?;
     let guest = kernel && wit::guest_package_needed(&parsed, &copies)?;
+    if let Some(literal) = &options.package {
+        wit::claim_package(literal, &parsed, guest, &nested)?;
+    }
     let inline = if guest {
         LitStr::new(
             &format!("{wit}\n{}{standard}", wit::guest_package()?),

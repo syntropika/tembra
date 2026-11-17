@@ -12,6 +12,17 @@ const DICE: &str = "mod dice {
     }
 }";
 
+/// `DICE` with a state, which the kernel keeps: the bindings read the kernel's package.
+const DICE_WITH_STATE: &str = "mod dice {
+    #[state]
+    pub struct Rolls { pub count: u32 }
+    #[service]
+    pub struct Chance;
+    impl Chance {
+        pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
+    }
+}";
+
 fn importing(imports: &[&str], wit: Option<&Path>) -> Options {
     Options {
         package: Some(literal("example:dice@1.0.0")),
@@ -241,6 +252,44 @@ fn two_imports_of_one_interface_name_are_refused() {
     for identity in both {
         expanded(importing(&[identity], None), DICE)
             .unwrap_or_else(|error| panic!("{identity}: {error}"));
+    }
+}
+
+/// The bindings read the Orb's package beside the bundled packages the inline WIT nests, and one
+/// WIT holds one package of a name: an Orb's package named like one of them, a WASI package an
+/// import builds on or the kernel's package a state uses, is an error on the package, whether the
+/// macro reads the bindings' types, as for a state, or not. The same modules under a package of
+/// their own expand, and so does an Orb's package named like a bundled package the expansion does
+/// not nest.
+#[test]
+fn an_orb_package_named_like_a_nested_package_is_refused() {
+    let named = |package: &str, imports: &[&str]| Options {
+        package: Some(literal(package)),
+        ..importing(imports, None)
+    };
+    let filesystem: &[&str] = &["wasi:filesystem/types@0.3.0"];
+    let wasi = "the Orb's package cannot be named wasi:clocks@0.3.0: the bindings read the WASI package Tembra serves of that name beside it, for the WASI imports; give the Orb a package name of its own";
+    let kernel = "the Orb's package cannot be named tembra:guest@1.0.0: the bindings read the kernel's package of that name beside it, for a state, a resource or the context; give the Orb a package name of its own";
+    for (package, imports, module, message) in [
+        ("wasi:clocks@0.3.0", filesystem, DICE_WITH_STATE, wasi),
+        ("wasi:clocks@0.3.0", filesystem, DICE, wasi),
+        ("tembra:guest@1.0.0", &[][..], DICE_WITH_STATE, kernel),
+    ] {
+        let error = expanded(named(package, imports), module)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(message), "{package}, {imports:?}: {error}");
+        expanded(named("example:dice@1.0.0", imports), module)
+            .unwrap_or_else(|error| panic!("{imports:?}: {error}"));
+    }
+    for (package, imports, module) in [
+        ("wasi:clocks@0.3.0", &[][..], DICE_WITH_STATE),
+        ("wasi:http@0.3.0", filesystem, DICE_WITH_STATE),
+        ("tembra:guest@1.0.0", filesystem, DICE),
+    ] {
+        expanded(named(package, imports), module)
+            .unwrap_or_else(|error| panic!("{package}, {imports:?}: {error}"));
     }
 }
 

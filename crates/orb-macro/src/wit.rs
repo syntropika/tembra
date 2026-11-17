@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use syn::{
-    Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, ext::IdentExt,
+    Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, LitStr, Meta, Type, ext::IdentExt,
     spanned::Spanned,
 };
 use wit_parser::{
@@ -580,6 +580,46 @@ pub(crate) fn guest_package() -> syn::Result<String> {
 /// directory holds a copy already, one of its bundled `copies` (`bundled_copies`).
 pub(crate) fn guest_package_needed(parsed: &Parsed, copies: &Copies) -> syn::Result<bool> {
     Ok(!copies.contains_key(&parsed.guest()?.main.name))
+}
+
+/// Claim the Orb's package name, the attribute's `package`, in the WIT the bindings read, which
+/// holds one package of a name: an error on the package when the inline WIT nests a bundled
+/// package of that name beside it, the kernel's, when `guest`, or a WASI package of `wasi`
+/// (`wasi::packages`), each as `parsed` holds it parsed.
+pub(crate) fn claim_package(
+    package: &LitStr,
+    parsed: &Parsed,
+    guest: bool,
+    wasi: &[PackageId],
+) -> syn::Result<()> {
+    let name = package.value();
+    let refused = |what: &str, why: &str| {
+        syn::Error::new(
+            package.span(),
+            format!(
+                "the Orb's package cannot be named {name}: the bindings read {what} of that name beside it, for {why}; give the Orb a package name of its own"
+            ),
+        )
+    };
+    if guest && parsed.guest()?.main.name.to_string() == name {
+        return Err(refused(
+            "the kernel's package",
+            "a state, a resource or the context",
+        ));
+    }
+    if !wasi.is_empty() {
+        let (bundled, _) = parsed.bundled()?;
+        if wasi
+            .iter()
+            .any(|id| bundled.packages[*id].name.to_string() == name)
+        {
+            return Err(refused(
+                "the WASI package Tembra serves",
+                "the WASI imports",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The bundled packages the consumed directory holds copies of, each with the encoded files of
