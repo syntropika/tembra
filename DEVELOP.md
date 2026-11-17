@@ -227,7 +227,9 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
   lockfiles beside the examples must not change;
 - `just test-orb-macro`, which runs the macro's guests as components in the executor;
 - `just test-cargo-tembra`, which runs `cargo tembra new`, `build --out`, `wit` and `inspect` on
-  scratch crates that build as components and natively.
+  scratch crates that build as components and natively;
+- `just test-orb-parity`, which builds the parity fixture's Orb natively and as a component and
+  requires the same answers from both.
 
 Then it runs `just check-clean-tree`, which fails when the parts left a modified file or a new
 file that `.gitignore` does not list.

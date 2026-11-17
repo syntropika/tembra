@@ -12,6 +12,7 @@ members = [
   "crates/mobile",
   "crates/orb-macro",
   "crates/orb-macro/native-fixture",
+  "crates/orb-macro/parity-fixture",
   "crates/cargo-tembra",
 ]
 resolver = "2"

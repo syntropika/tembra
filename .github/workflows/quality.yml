@@ -34,6 +34,10 @@ jobs:
           # 9.5 with the setup and the cache save. A cold run took 1.7 minutes with 6 jobs on 32
           # cores; the estimate allows for 4 vCPUs and for downloading the crates.
           - { recipe: test-cargo-tembra, timeout: 15 }
+          # One Orb built natively and as a component must answer alike. Estimated on a cold cache:
+          # 6 minutes, 11.5 with the setup and the cache save. A cold run took 2.7 minutes with 6
+          # jobs on 32 loaded cores; the estimate allows for 4 vCPUs.
+          - { recipe: test-orb-parity, timeout: 20 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

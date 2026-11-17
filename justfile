@@ -186,6 +186,22 @@ test-orb-macro:
     TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \
         cargo test --locked -p tembra-executor-wasm --test orb_macro_async --test orb_macro_runtime -- --ignored
 
+# Build the parity fixture's Orb as a component into one reusable target directory. Overflow checks
+# are on, as in the test profile of its native build, so an overflow panics in both builds.
+build-orb-parity target-dir:
+    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true cargo rustc --locked --release --target wasm32-unknown-unknown --crate-type cdylib --manifest-path crates/orb-macro/parity-fixture/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+
+# Require the same answers from the parity fixture's Orb built natively and as a component, scenario
+# by scenario; acceptance uses the same fixture builder.
+test-orb-parity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fixture_target="${CARGO_TARGET_DIR:-target}/orb-parity"
+    just build-orb-parity "$fixture_target"
+    fixture_target="$(cd "$fixture_target" && pwd)"
+    TEMBRA_WASM_ORB_PARITY="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_parity_fixture.wasm" \
+        cargo test --locked -p tembra-executor-wasm --test orb_macro_parity -- --ignored
+
 check: fmt-check build-node build-wasm build-sdk
     bun run typecheck
     just lint
@@ -207,6 +223,7 @@ ci: check \
     test-orb-examples \
     test-orb-macro \
     test-cargo-tembra \
+    test-orb-parity \
     check-clean-tree
 
 # Fail when the checks changed the tree: a modified or deleted file, or a new file that .gitignore does not list.

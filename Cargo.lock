@@ -1885,6 +1885,7 @@ dependencies = [
  "sha2",
  "tembra-contracts",
  "tembra-orb-native-fixture",
+ "tembra-orb-parity-fixture",
  "tembra-runtime",
  "tempfile",
  "tokio",
@@ -1962,6 +1963,15 @@ dependencies = [
  "serde_json",
  "tembra",
  "wit-bindgen",
+]
+
+[[package]]
+name = "tembra-orb-parity-fixture"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tembra",
 ]
 
 [[package]]
