@@ -524,6 +524,84 @@ fn a_path_into_the_bindings_import_of_an_implemented_interface_is_refused() {
     }
 }
 
+/// A path is read where it leads, through the `use` declarations of the modules it passes: a
+/// `use` of the bindings' import module of an implemented interface makes a path through its name
+/// the import's, and one of the bindings' `exports` module makes a path through it the export's,
+/// whatever the path's own text says.
+#[test]
+fn a_path_into_the_bindings_import_is_followed_through_uses() {
+    let dir = consumed("used-import", COUNTERS);
+    let proxy = |uses: &str, relayed: &str| {
+        format!(
+            "mod proxy {{
+                #[service(\"example:counters/counter@1.0.0\")]
+                pub struct Counter;
+                impl Counter {{
+                    pub fn add(amount: u32) -> u32 {{ amount }}
+                    pub async fn read() -> counter::Tally {{ counter::Tally {{ key: vec![], count: 0 }} }}
+                }}
+                pub mod relay {{
+                    {uses}
+                    #[service]
+                    pub struct Relay;
+                    impl Relay {{ pub fn relayed(last: {relayed}) -> u32 {{ last.count }} }}
+                }}
+            }}"
+        )
+    };
+    for (uses, relayed) in [
+        ("use super::example::counters::counter;", "counter::Tally"),
+        ("use super::example::counters;", "counters::counter::Tally"),
+        (
+            "use super::example as bindings;",
+            "bindings::counters::counter::Tally",
+        ),
+    ] {
+        let refusal = refused(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &proxy(uses, relayed),
+        );
+        assert!(
+            refusal.contains(&format!(
+                "`Relay::relayed` takes `Tally`, a record of the implemented interface example:counters/counter@1.0.0, through the bindings' module of its import: a derived interface takes the types of an implemented interface from its export, as `counter::Tally` names them; `{relayed}` is the import's, a `use` leading it to `example::counters::counter::Tally` of the Orb module"
+            )),
+            "{uses}\n{refusal}"
+        );
+    }
+    for (uses, relayed) in [
+        (
+            "use super::exports as ex;",
+            "ex::example::counters::counter::Tally",
+        ),
+        (
+            "use super::exports::example::counters::counter;",
+            "counter::Tally",
+        ),
+        ("use super::counter;", "counter::Tally"),
+        ("use super::*;", "counter::Tally"),
+        (
+            "use super::*;",
+            "exports::example::counters::counter::Tally",
+        ),
+    ] {
+        expanded(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &proxy(uses, relayed),
+        );
+    }
+    // A name a glob brings from the bindings' modules keeps the path's own text.
+    let refusal = refused(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        &proxy("use super::*;", "example::counters::counter::Tally"),
+    );
+    assert!(
+        refusal.contains(
+            "as `counter::Tally` names them; `example::counters::counter::Tally` is the import's"
+        ),
+        "{refusal}"
+    );
+}
+
 /// An implemented interface may `use` its types from an interface the world only imports: the
 /// bindings alias the implemented interface's import and export, and the view of its keyed
 /// import, to the type of that import, so the view and the bindings' module of the import name

@@ -789,8 +789,9 @@ the type that names it:
 - a type of a hook the module declares from a consumed package, whose `run` speaks the import's
   types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook));
 - a type of an implemented interface or of a hook the module contributes to named through the
-  bindings' module of its import, `self::example::counters::counter::Tally`, the import's copy,
-  where a derived interface takes the export's, which the interface's own module names,
+  bindings' module of its import, `self::example::counters::counter::Tally`, or through a name a
+  `use` binds to it, `counter::Tally` after `use super::example::counters::counter;`, the import's
+  copy, where a derived interface takes the export's, which the interface's own module names,
   `counter::Tally`; a type the interface `use`s from an interface the world only imports has one
   copy, that interface's, which every module names;
 - a type or a handle of a WASI interface, named through that interface's module or through a

@@ -622,7 +622,7 @@ struct Scan {
 /// the paths it imports by glob, `use path::*;`: what the macro follows to name a derive the
 /// author writes in that module from another module, the bindings'. With the names of the items
 /// the module declares, which the bindings' module does not reach.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Uses {
     names: BTreeMap<String, Named>,
     globs: Vec<Named>,
@@ -1713,6 +1713,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &contributions,
         &declared,
         &modules,
+        &uses,
         &own_names,
     )?;
     for candidate in &mut candidates {

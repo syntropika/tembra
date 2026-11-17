@@ -90,12 +90,14 @@ pub(crate) struct Modules {
     reexported: BTreeMap<String, Reexported>,
     /// The path of each module of the Orb from the Orb module, by scope; scope 0 is the Orb module.
     paths: Vec<Vec<Ident>>,
+    /// What each module of the Orb imports, by scope, which a path written there is read through.
+    uses: Vec<crate::Uses>,
 }
 
 /// A name a type path reaches through a consumed interface's module, `greeting::Entry`: the
 /// interface, the module's name, the name and the path itself, for the errors, and whether the
 /// path is the value of an `Option`, `Option<greeting::Entry>`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Named<'m, 't> {
     pub interface: &'m Reexported,
     pub module: &'m str,
@@ -106,6 +108,18 @@ pub(crate) struct Named<'m, 't> {
     /// `self::example::counters::counter::Tally`, rather than through the module the Orb module
     /// re-exports: the import's copy of the type, whatever that module holds.
     pub through_import: bool,
+    /// Where the `use` declarations of the modules the path passes lead it, when they do, for the
+    /// errors: "`example::counters::counter::Tally` of the Orb module" for `counter::Tally` after
+    /// `use super::example::counters::counter;`.
+    pub led: Option<String>,
+}
+
+/// Where a type path leads, read as far as `Modules::leads` follows it: what is left of the path,
+/// and whether a `use` declaration led it there and the walk stopped in the Orb module.
+struct Leads {
+    segments: Vec<Ident>,
+    used: bool,
+    rooted: bool,
 }
 
 /// What a walk through a type reaches: a name through a consumed interface's module, or the last
@@ -119,8 +133,9 @@ impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
     /// interface imported by key under its view's, and with `context`, the attribute's option, the
     /// kernel's context interface under `context`. `imports` are the attribute's literals, read as
-    /// identities already; `paths` are the Orb's own modules, by scope; `own` are the names the
-    /// Orb module's items take where a module takes its name (`own_names`). Another interface
+    /// identities already; `paths` are the Orb's own modules and `uses` what each imports, by
+    /// scope; `own` are the names the Orb module's items take where a module takes its name
+    /// (`own_names`). Another interface
     /// under a name already taken is an error on it, naming both, and so is a second role of an
     /// interface, or one role twice, which the world cannot hold, an import of the kernel's context
     /// interface beside the option, and a plain import of an interface the module implements, which
@@ -135,6 +150,7 @@ impl Modules {
         contributions: &[Contribution],
         declared: &[Declared],
         paths: &[Vec<Ident>],
+        uses: &[crate::Uses],
         own: &[(Ident, &str)],
     ) -> syn::Result<Self> {
         let mut modules = BTreeMap::new();
@@ -270,6 +286,7 @@ impl Modules {
         Ok(Self {
             reexported: modules,
             paths: paths.to_vec(),
+            uses: uses.to_vec(),
         })
     }
 
@@ -299,16 +316,31 @@ impl Modules {
             return None;
         }
         // The bindings put an interface's import in `namespace::package::interface` and its export
-        // under `exports`: a path through the namespace and the package, not under `exports`, is
-        // the import module's, `self::example::counters::counter::Tally`.
+        // under `exports`: a path that leads through the namespace and the package, not under
+        // `exports`, is the import module's, `self::example::counters::counter::Tally`, or
+        // `counter::Tally` after `use super::example::counters::counter;`.
         let identity = crate::Identity::of(&interface.identity);
+        let leads = self.leads(&path.path, scope);
         let through_import = matches!(
-            segments.as_slice(),
+            leads.segments.as_slice(),
             [before @ .., namespace, package, _, _]
-                if namespace.ident == crate::rust_ident(identity.namespace)
-                    && package.ident == crate::rust_ident(identity.package)
-                    && before.last().is_none_or(|exports| exports.ident != "exports")
+                if *namespace == crate::rust_ident(identity.namespace)
+                    && *package == crate::rust_ident(identity.package)
+                    && before.last().is_none_or(|exports| exports != "exports")
         );
+        let led = leads.used.then(|| {
+            let reached = leads
+                .segments
+                .iter()
+                .map(Ident::to_string)
+                .collect::<Vec<_>>()
+                .join("::");
+            if leads.rooted {
+                format!("`{reached}` of the Orb module")
+            } else {
+                format!("`{reached}`")
+            }
+        });
         Some(Named {
             interface,
             module,
@@ -316,7 +348,82 @@ impl Modules {
             ty,
             in_option: false,
             through_import,
+            led,
         })
+    }
+
+    /// Where a type path written in the module `scope` leads, read as far as the macro follows
+    /// it: through `self::`, `super::` and the sub-modules of the Orb, the names the `use`
+    /// declarations of each module it passes bind, and the glob imports from the Orb's modules
+    /// that bind them. It stops at the type's own name, at a crate, `crate::` or a module above
+    /// the Orb module, and at a name nothing it reads binds, such as the modules the bindings
+    /// declare in the Orb module, where what is left is the path from the module it stopped in.
+    fn leads(&self, path: &syn::Path, scope: usize) -> Leads {
+        let mut leads = Leads {
+            segments: path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.clone())
+                .collect(),
+            used: false,
+            rooted: false,
+        };
+        if path.leading_colon.is_some() {
+            return leads;
+        }
+        let mut scope = Some(scope);
+        // Each step consumes a name or replaces one by what a declaration binds it to;
+        // declarations binding one another in a circle would never end.
+        for _ in 0..64 {
+            let (Some(at), [first, rest @ ..]) = (scope, leads.segments.as_slice()) else {
+                break;
+            };
+            if rest.is_empty() {
+                break;
+            }
+            let (first, rest) = (first.clone(), rest.to_vec());
+            if first == "self" {
+                leads.segments = rest;
+                continue;
+            }
+            if first == "super" {
+                scope = crate::parent(at, &self.paths);
+                if scope.is_some() {
+                    leads.segments = rest;
+                }
+                continue;
+            }
+            if first == "crate" || first == "Self" {
+                scope = None;
+                continue;
+            }
+            if let Some(bound) = self.uses[at].names.get(&first.to_string()) {
+                // `use name;` brings the crate `name` into scope.
+                if bound.global || (bound.segments.len() == 1 && bound.segments[0] == first) {
+                    scope = None;
+                    continue;
+                }
+                leads.segments = bound.segments.iter().cloned().chain(rest).collect();
+                leads.used = true;
+                continue;
+            }
+            let mut child = self.paths[at].clone();
+            child.push(first.clone());
+            if let Some(index) = self.paths.iter().position(|module| *module == child) {
+                scope = Some(index);
+                leads.segments = rest;
+                continue;
+            }
+            match crate::through_globs(&first, at, &self.uses, &self.paths) {
+                crate::Globbed::In(module) => {
+                    scope = Some(module);
+                    leads.used = true;
+                }
+                crate::Globbed::Outside | crate::Globbed::Nowhere => break,
+            }
+        }
+        leads.rooted = scope == Some(0);
+        leads
     }
 
     /// Walk a type written in the module `scope`: itself, then the type parameters of a path and
@@ -964,8 +1071,13 @@ fn checked<'a>(
     {
         let module = named.module;
         let written = named.ty.to_token_stream().to_string().replace(' ', "");
+        let led = named
+            .led
+            .as_ref()
+            .map(|led| format!(", a `use` leading it to {led}"))
+            .unwrap_or_default();
         return refuse(format!(
-            "{what} of {of}, through the bindings' module of its import: a derived interface takes the types of {takes} from its export, as `{module}::{ident}` names them; `{written}` is the import's"
+            "{what} of {of}, through the bindings' module of its import: a derived interface takes the types of {takes} from its export, as `{module}::{ident}` names them; `{written}` is the import's{led}"
         ));
     }
     // The `run` of a hook the module declares, for the errors.
