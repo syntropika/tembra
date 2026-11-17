@@ -10,7 +10,8 @@
 //! implements, and its `orb(..)` takes the provider of each import; `filter` contributes to the
 //! hook of a gate there, and its `orb(..)` takes the gate. The module `counters` rewrites with the
 //! macro a native Orb its test also writes by hand against the runtime's API. `abacus` and
-//! `restrung` are one Orb before and after a reload that gives its root's resource a new version.
+//! `restrung` are one Orb before and after a reload that gives its root's resource a new version,
+//! and `reframed` that Orb after a reload that gives only its package a new version.
 //! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
@@ -1579,6 +1580,49 @@ pub mod restrung {
         #[close]
         fn close(self) {
             super::note(format!("beads 2 closed at {}", self.slid));
+        }
+    }
+
+    /// Slides the beads.
+    #[service]
+    pub struct Rod;
+
+    impl Rod {
+        /// Slide the beads by `by` and return how far they were slid in all.
+        pub fn slide(by: i64) -> i64 {
+            Beads::with(|beads| {
+                beads.slid += by;
+                beads.slid
+            })
+        }
+    }
+}
+
+/// The abacus a revision later, in a new frame: its package is at 1.1.0, and its beads, a resource
+/// of the Orb's root, stay at version 1, so a native host's reload from `abacus` keeps the beads
+/// slid there, as their version alone decides. These beads are another Rust type than `abacus`'s,
+/// as the struct of any other module is, even with the same fields, so this code cannot reach the
+/// value kept for it, and each call of its rod answers `invalid/rust_type`.
+#[tembra::orb(package = "example:abacus@1.1.0")]
+pub mod reframed {
+    /// The beads, a resource of the Orb's root, at the default version, 1, as `abacus`'s are.
+    #[resource]
+    pub struct Beads {
+        slid: i64,
+    }
+
+    impl Beads {
+        /// Set the beads at zero, as the host opens them.
+        #[open]
+        fn open() -> Self {
+            super::note("reframed beads open".to_owned());
+            Beads { slid: 0 }
+        }
+
+        /// Note how far the beads were slid, as the host closes them.
+        #[close]
+        fn close(self) {
+            super::note(format!("reframed beads closed at {}", self.slid));
         }
     }
 

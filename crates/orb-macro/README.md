@@ -444,8 +444,10 @@ first. The value lives in the component, one per instance, as the TypeScript gue
 resources do: a reload gives the Orb a fresh instance whose resources the kernel opens again. A
 native host keeps the value across a reload instead, while the resource's name and version stay
 the same, as it keeps the resources of every native Orb: nothing closes or opens, and the new
-code's `with` gives the value the old code opened. A reload to another module whose resource of
-that name has another type therefore needs a new version, or the new `with` panics. At a new
+code's `with` gives the value the old code opened. The struct of another module is another Rust
+type, even with the same fields, so a reload to another module whose resource keeps that name
+needs a new version: otherwise each call of the new code answers `invalid/rust_type` before it
+runs, as the runtime answers a hand-written Orb that reads the value as another type. At a new
 version, `#[resource(version = 2)]`, the host opens the new code's resource with its `#[open]`
 function, then closes the old value, once, through the old code's `#[close]` function. A resource
 struct enters the WIT only when a service method uses it; a resource may hold types the WIT has no

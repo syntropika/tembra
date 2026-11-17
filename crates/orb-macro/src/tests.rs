@@ -8925,9 +8925,11 @@ fn the_factory_of_its_service_declares_a_state_natively() {
 /// the Orb's create fills, declaring each with its version, `#[open]` and `#[close]` before the
 /// `#[root]` runs, and which every service takes, and hands the functions of its WIT resources;
 /// each method's future, local ones too, and each of those functions', runs in the scope of its
-/// Orb, where the resources' `with` reaches the table, in a sub-module through `super::`. The
-/// component's `with`, over its slot and the bindings' import, is a component build's only, and a
-/// native host gets its own in the component's `__tembra_resource`.
+/// Orb, where the resources' `with` reaches the table, in a sub-module through `super::`, once the
+/// scope has found no resource the host keeps as a value of another Rust type, which the runtime
+/// refuses and the call answers. The component's `with`, over its slot and the bindings' import,
+/// is a component build's only, and a native host gets its own in the component's
+/// `__tembra_resource`.
 #[test]
 fn the_orbs_create_declares_its_root_resources_natively() {
     let module = expanded(
@@ -9003,7 +9005,8 @@ fn the_orbs_create_declares_its_root_resources_natively() {
         "pub struct Resources { counts : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: Counts >> > , banner : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: banner :: Banner >> > , }",
         "let resource = declaration . resource (\"counts\" , 1u32 , || { let slot = Slot :: new () ; slot . open (super :: Counts :: open ()) ; :: core :: result :: Result :: Ok (slot) } , | slot , _ | { if let :: core :: option :: Option :: Some (value) = slot . close () { value . close () ; } :: std :: boxed :: Box :: pin (async { :: core :: result :: Result :: Ok (()) }) } ,) ? ; let _ = self . counts . set (resource) ;",
         "let resource = declaration . resource (\"banner\" , 2u32 , || { let slot = Slot :: new () ; slot . open (super :: banner :: Banner :: open ()) ; :: core :: result :: Result :: Ok (slot) } , | slot , _ | { slot . close () ; :: std :: boxed :: Box :: pin (async { :: core :: result :: Result :: Ok (()) }) } ,) ? ; let _ = self . banner . set (resource) ;",
-        "pub (crate) fn scoped < F : :: core :: future :: Future > (resources : :: std :: rc :: Rc < Resources > , future : F ,) -> impl :: core :: future :: Future < Output = F :: Output > {",
+        "fn typed (& self) -> :: tembra :: Result < () > { if let :: core :: option :: Option :: Some (error) = self . counts . get () . and_then (| resource | resource . value () . err ()) . filter (| error | error . reason == :: tembra :: core :: Reason :: RustType . as_str ()) { return :: core :: result :: Result :: Err (error) ; } if let :: core :: option :: Option :: Some (error) = self . banner . get () . and_then (| resource | resource . value () . err ()) . filter (| error | error . reason == :: tembra :: core :: Reason :: RustType . as_str ()) { return :: core :: result :: Result :: Err (error) ; } :: core :: result :: Result :: Ok (()) }",
+        "pub (crate) fn scoped < T , F : :: core :: future :: Future < Output = :: tembra :: Result < T >> > (resources : :: std :: rc :: Rc < Resources > , future : F ,) -> impl :: core :: future :: Future < Output = :: tembra :: Result < T >> { let mut future = :: std :: boxed :: Box :: pin (future) ; async move { resources . typed () ? ; :: core :: future :: poll_fn (| cx | {",
         "impl super :: Counts {",
         "pub fn with < R > (use_ : impl :: core :: ops :: FnOnce (& mut Self) -> R) -> R { let slot = current () . counts . get () . and_then (| resource | resource . value () . ok ()) . expect (\"the resource `counts` of the Orb's root is open\") ; slot . with (use_) }",
     ] {

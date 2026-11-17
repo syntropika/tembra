@@ -712,7 +712,9 @@ pub(crate) fn state_access() -> TokenStream {
 /// removes the Orb; the value lives in a `Slot`, as in a component, filled by the `#[open]`
 /// function and emptied, through the `#[close]` one, if any, as the host closes it. Before the host
 /// opens it and once it has closed it, or outside a method of the Orb, `with` panics, as it traps a
-/// component.
+/// component. After a reload to another module whose resource keeps its name and version, the host
+/// keeps the old code's value, of another Rust type, which `with` could not reach: the scope
+/// answers each call with the runtime's refusal of it, `invalid/rust_type`, before the method runs.
 pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) -> TokenStream {
     let fields: Vec<Ident> = resources
         .iter()
@@ -801,6 +803,25 @@ pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) ->
                 #(#declarations)*
                 ::core::result::Result::Ok(())
             }
+
+            /// The runtime's refusal of a value the host keeps for a resource of the table as
+            /// another Rust type, `invalid/rust_type`, as it refuses a hand-written Orb that reads
+            /// the value as its type: a reload keeps a resource whose name and version stay the
+            /// same, and the struct of another module is another type. A resource the host has not
+            /// opened, or is closing, is left to `with`.
+            fn typed(&self) -> ::tembra::Result<()> {
+                #(
+                    if let ::core::option::Option::Some(error) = self
+                        .#fields
+                        .get()
+                        .and_then(|resource| resource.value().err())
+                        .filter(|error| error.reason == ::tembra::core::Reason::RustType.as_str())
+                    {
+                        return ::core::result::Result::Err(error);
+                    }
+                )*
+                ::core::result::Result::Ok(())
+            }
         }
 
         ::std::thread_local! {
@@ -810,16 +831,22 @@ pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) ->
         }
 
         /// Run a method's future for its Orb: while it is polled, `with` reaches the resources of
-        /// that Orb, and an outer poll's come back after.
-        pub(crate) fn scoped<F: ::core::future::Future>(
+        /// that Orb, and an outer poll's come back after. A call to code whose resource the host
+        /// keeps as a value of another Rust type answers the runtime's refusal instead, before the
+        /// future runs.
+        pub(crate) fn scoped<T, F: ::core::future::Future<Output = ::tembra::Result<T>>>(
             resources: ::std::rc::Rc<Resources>,
             future: F,
-        ) -> impl ::core::future::Future<Output = F::Output> {
+        ) -> impl ::core::future::Future<Output = ::tembra::Result<T>> {
             let mut future = ::std::boxed::Box::pin(future);
-            ::core::future::poll_fn(move |cx| {
-                let _entered = Entered::enter(resources.clone());
-                ::core::future::Future::poll(future.as_mut(), cx)
-            })
+            async move {
+                resources.typed()?;
+                ::core::future::poll_fn(|cx| {
+                    let _entered = Entered::enter(resources.clone());
+                    ::core::future::Future::poll(future.as_mut(), cx)
+                })
+                .await
+            }
         }
 
         /// The resources set for one poll, which puts the previous ones back when dropped, also
