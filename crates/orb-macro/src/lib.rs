@@ -1812,11 +1812,11 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             .unwrap_or_default();
         let derived = attrs
             .iter()
-            .filter(|attribute| {
-                let applied = applied(&attribute.meta);
-                !applied.is_empty() && derives(&[attrs, &applied].concat(), "Default")
+            .filter_map(|attribute| {
+                applying(&attribute.meta, &|applied| {
+                    derives(&[attrs, applied].concat(), "Default")
+                })
             })
-            .filter_map(|attribute| applying(&attribute.meta))
             .collect();
         if let Some(refusal) = uncovered(&hands, derived, "Default", &state.ident, &tree) {
             return Err(refusal);
@@ -1976,13 +1976,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 }
                 let under = attrs
                     .iter()
-                    .filter(|attribute| {
-                        let applied = applied(&attribute.meta);
-                        serde_derived(&applied, scope, &uses, &modules, &ident, true)
-                            .iter()
-                            .any(|has| has == name)
+                    .filter_map(|attribute| {
+                        applying(&attribute.meta, &|applied| {
+                            serde_derived(applied, scope, &uses, &modules, &ident, true)
+                                .iter()
+                                .any(|has| has == name)
+                        })
                     })
-                    .filter_map(|attribute| applying(&attribute.meta))
                     .collect();
                 if let Some(refusal) = uncovered(&hands, under, name, &ident, &tree) {
                     return Err(refusal);
@@ -4184,10 +4184,11 @@ fn keeping(meta: &syn::Meta) -> Predicate {
     ])
 }
 
-/// The predicate of a `#[cfg_attr(..)]`, where it applies the attributes it wraps; one under
-/// another `#[cfg_attr(..)]` in it applies in some of those configurations only, which the macro
-/// takes for all of them.
-fn applying(meta: &syn::Meta) -> Option<Predicate> {
+/// Where a `#[cfg_attr(..)]` applies attributes that `give` what the caller looks for: where its
+/// predicate holds, when the attributes it wraps directly give it, and otherwise where the
+/// predicate of another `#[cfg_attr(..)]` in it holds too, whose attributes give it with those;
+/// none where no configuration applies such attributes.
+fn applying(meta: &syn::Meta, give: &dyn Fn(&[Attribute]) -> bool) -> Option<Predicate> {
     if !meta.path().is_ident("cfg_attr") {
         return None;
     }
@@ -4199,7 +4200,22 @@ fn applying(meta: &syn::Meta) -> Option<Predicate> {
             )
         })
         .ok()?;
-    Some(Predicate::of(wrapped.first()?))
+    let mut wrapped = wrapped.into_iter();
+    let predicate = Predicate::of(&wrapped.next()?);
+    let (nested, direct): (Vec<syn::Meta>, Vec<syn::Meta>) =
+        wrapped.partition(|meta| meta.path().is_ident("cfg_attr"));
+    let direct: Vec<Attribute> = direct
+        .iter()
+        .map(|meta| syn::parse_quote!(#[#meta]))
+        .collect();
+    if !direct.is_empty() && give(&direct) {
+        return Some(predicate);
+    }
+    let nested: Vec<Predicate> = nested
+        .iter()
+        .filter_map(|meta| applying(meta, &|more| give(&[direct.as_slice(), more].concat())))
+        .collect();
+    (!nested.is_empty()).then(|| Predicate::All(vec![predicate, Predicate::Any(nested)]))
 }
 
 /// The configuration names a configuration may give several values at once, or none: the
@@ -4216,7 +4232,8 @@ const SEVERAL_VALUES: [&str; 4] = [
 /// sets each option they read or not, but gives a name other than those of `SEVERAL_VALUES` one of
 /// the values they write for it, when they write two or more, which may be all it takes, as
 /// `target_endian = "little"` and `target_endian = "big"` are. Past 4096 configurations, twelve
-/// options set or not, which the macro does not try one by one, it takes them for holding.
+/// options set or not, which the macro does not try one by one, it takes them for holding: a
+/// limit, which leaves impls under more options to the compiler.
 fn always(predicates: &[Predicate]) -> bool {
     let mut options = BTreeMap::new();
     for predicate in predicates {

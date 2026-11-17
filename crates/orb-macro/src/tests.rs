@@ -5128,6 +5128,49 @@ fn impls_split_across_the_values_of_one_name_give_the_trait() {
     }
 }
 
+/// A derive under a `#[cfg_attr(..)]` inside another applies where both predicates hold, so it
+/// covers what impls under `#[cfg(..)]` leave out of a state's `Default` or serde traits only
+/// there: `#[cfg_attr(feature = "a", cfg_attr(feature = "b", derive(Default)))]` beside an impl
+/// under `#[cfg(not(feature = "a"))]` leaves out the configurations with `a` and without `b`, and is
+/// refused, while an impl under `#[cfg(not(all(feature = "a", feature = "b")))]` covers them.
+#[test]
+fn a_derive_under_nested_cfg_attr_covers_where_both_predicates_hold() {
+    let ledger = |trait_name: &str, condition: &str, body: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                #[cfg_attr(feature = \"a\", cfg_attr(feature = \"b\", derive({trait_name})))]
+                pub struct Balance {{ pub total: i64 }}
+                #[cfg({condition})]
+                impl {trait_name} for Balance {{ {body} }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let default = "fn default() -> Self { Balance { total: 100 } }";
+    let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
+    for (trait_name, body) in [("Default", default), ("serde::Serialize", serialize)] {
+        let error = refused(
+            "example:ledger@1.0.0",
+            &ledger(trait_name, "not(feature = \"a\")", body),
+        );
+        assert!(
+            error.contains(&format!("`#[cfg(..)]` on `impl {trait_name} for Balance`: the macro reads the impl before the compiler evaluates the attribute and counts on it")),
+            "{trait_name}: {error}"
+        );
+        expanded(
+            "example:ledger@1.0.0",
+            &ledger(
+                trait_name,
+                "not(all(feature = \"a\", feature = \"b\"))",
+                body,
+            ),
+        );
+    }
+}
+
 /// The bindings' module reads the helper attributes the generated type takes, so one it would not
 /// know there is refused on the author's type: one whose arguments name what the type's module
 /// declares or imports, which a path from `crate::` names from anywhere; an attribute macro the
