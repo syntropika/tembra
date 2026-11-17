@@ -7,7 +7,10 @@
 use crate::wit::{Copies, error};
 use std::collections::BTreeSet;
 use syn::LitStr;
-use wit_parser::{InterfaceId, PackageId, Resolve, Type, TypeDefKind, TypeOwner, WorldItem};
+use wit_parser::{
+    InterfaceId, PackageId, Resolve, Type, TypeDefKind, TypeOwner, UnresolvedPackageGroup,
+    WorldItem,
+};
 
 /// Whether an imported interface is one of WASI, by its namespace, rather than another Orb's.
 pub(crate) fn is_wasi(identity: &str) -> bool {
@@ -22,8 +25,12 @@ thread_local! {
 }
 
 /// The bundled WASI packages, resolved from their sources in dependency order, and each package
-/// with its source, in that order.
-pub(crate) type Bundled = (Resolve, Vec<(PackageId, &'static str)>);
+/// with its source and its parse, in that order: a reader that adds a package to packages of its
+/// own pushes the parse there, which resolves it without parsing the source again.
+pub(crate) type Bundled = (
+    Resolve,
+    Vec<(PackageId, &'static str, UnresolvedPackageGroup)>,
+);
 
 /// The bundled WASI packages, resolved, which `wit::Parsed` holds for an expansion.
 pub(crate) fn bundled() -> syn::Result<Bundled> {
@@ -32,33 +39,38 @@ pub(crate) fn bundled() -> syn::Result<Bundled> {
     let mut resolve = Resolve::default();
     let mut sources = Vec::new();
     for (file, source) in tembra_contracts::WASI_SOURCES {
+        let failed = |cause: &dyn std::fmt::Display| {
+            error(format!("the bundled WASI package {file}: {cause:#}"))
+        };
+        let parse =
+            UnresolvedPackageGroup::parse(file, source).map_err(|(_, cause)| failed(&cause))?;
         let id = resolve
-            .push_str(file, source)
-            .map_err(|cause| error(format!("the bundled WASI package {file}: {cause:#}")))?;
-        sources.push((id, *source));
+            .push_group(parse.clone())
+            .map_err(|cause| failed(&cause))?;
+        sources.push((id, *source, parse));
     }
     Ok((resolve, sources))
 }
 
-/// The WASI packages the Orb's imports need, nested for the inline WIT: the package of each
-/// imported WASI interface and the bundled packages it builds on, in dependency order, read from
-/// the bundled packages `parsed` holds. A package the consumed directory holds a copy of already,
-/// one of its bundled `copies` (`wit::bundled_copies`), is left out. An import in the `wasi`
-/// namespace that names no interface of the bundled packages, another version or an unstable
-/// interface, is an error on its literal, and so is an interface no host serves as an import, one
-/// a component exports instead, and an import that needs what a copy decoded from an encoded file
-/// lacks (`partial`).
+/// The WASI packages the Orb's imports need, nested for the inline WIT, and the ids those packages
+/// have in the bundled packages, in the same order: the package of each imported WASI interface
+/// and the bundled packages it builds on, in dependency order, read from the bundled packages
+/// `parsed` holds. A package the consumed directory holds a copy of already, one of its bundled
+/// `copies` (`wit::bundled_copies`), is left out. An import in the `wasi` namespace that names no
+/// interface of the bundled packages, another version or an unstable interface, is an error on
+/// its literal, and so is an interface no host serves as an import, one a component exports
+/// instead, and an import that needs what a copy decoded from an encoded file lacks (`partial`).
 pub(crate) fn packages(
     parsed: &crate::wit::Parsed,
     imports: &[LitStr],
     copies: &Copies,
-) -> syn::Result<String> {
+) -> syn::Result<(String, Vec<PackageId>)> {
     let imported: Vec<&LitStr> = imports
         .iter()
         .filter(|import| is_wasi(&import.value()))
         .collect();
     if imported.is_empty() {
-        return Ok(String::new());
+        return Ok((String::new(), Vec::new()));
     }
     let (bundled, sources) = parsed.bundled()?;
     let mut needed = BTreeSet::new();
@@ -99,7 +111,8 @@ pub(crate) fn packages(
         needed.extend(wanted);
     }
     let mut nested = String::new();
-    for (id, source) in sources.iter().filter(|(id, _)| needed.contains(id)) {
+    let mut packages = Vec::new();
+    for (id, source, _) in sources.iter().filter(|(id, ..)| needed.contains(id)) {
         let name = &bundled.packages[*id].name;
         if copies.contains_key(name) {
             continue;
@@ -110,8 +123,9 @@ pub(crate) fn packages(
                 "the bundled WASI package {name} has no `package ..;` declaration"
             ))
         })?);
+        packages.push(*id);
     }
-    Ok(nested)
+    Ok((nested, packages))
 }
 
 /// What the bindings would miss for an import in the consumed directory: a copy there of a bundled
@@ -227,7 +241,11 @@ fn partial(
 
 /// Why an identity of the `wasi` namespace names no bundled interface: the interfaces its package
 /// has, when the package is bundled, else the bundled packages.
-fn unknown(bundled: &Resolve, sources: &[(PackageId, &str)], identity: &str) -> String {
+fn unknown(
+    bundled: &Resolve,
+    sources: &[(PackageId, &str, UnresolvedPackageGroup)],
+    identity: &str,
+) -> String {
     let wanted = crate::Identity {
         interface: None,
         ..crate::Identity::of(identity)
@@ -235,14 +253,14 @@ fn unknown(bundled: &Resolve, sources: &[(PackageId, &str)], identity: &str) -> 
     .to_string();
     let names: Vec<String> = sources
         .iter()
-        .map(|(id, _)| bundled.packages[*id].name.to_string())
+        .map(|(id, ..)| bundled.packages[*id].name.to_string())
         .collect();
     match sources
         .iter()
         .zip(&names)
         .find(|(_, name)| **name == wanted)
     {
-        Some(((id, _), name)) => {
+        Some(((id, ..), name)) => {
             let interfaces: Vec<&str> = bundled.packages[*id]
                 .interfaces
                 .keys()

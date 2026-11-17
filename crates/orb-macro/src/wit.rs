@@ -13,7 +13,9 @@ use syn::{
     Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, ext::IdentExt,
     spanned::Spanned,
 };
-use wit_parser::{PackageName, PackageSourceMap, Resolve, TypeDefKind};
+use wit_parser::{
+    PackageId, PackageName, PackageSourceMap, Resolve, TypeDefKind, UnresolvedPackageGroup,
+};
 
 /// WIT names are kebab-case; Rust identifiers map to them one by one, a raw identifier without
 /// its `r#`.
@@ -576,12 +578,8 @@ pub(crate) fn guest_package() -> syn::Result<String> {
 
 /// Whether the inline WIT needs the kernel's bundled package nested in it: not when the consumed
 /// directory holds a copy already, one of its bundled `copies` (`bundled_copies`).
-pub(crate) fn guest_package_needed(copies: &Copies) -> syn::Result<bool> {
-    let mut bundled = Resolve::default();
-    let bundled_id = bundled
-        .push_str("guest.wit", GUEST)
-        .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
-    Ok(!copies.contains_key(&bundled.packages[bundled_id].name))
+pub(crate) fn guest_package_needed(parsed: &Parsed, copies: &Copies) -> syn::Result<bool> {
+    Ok(!copies.contains_key(&parsed.guest()?.main.name))
 }
 
 /// The bundled packages the consumed directory holds copies of, each with the encoded files of
@@ -600,9 +598,9 @@ pub(crate) type Copies = BTreeMap<PackageName, Vec<PathBuf>>;
 /// file of `deps/` itself: a copy in a directory of `deps/` or in the directory itself, even line
 /// for line, is `from_dir`'s error naming that directory. And that file must be the bundled file
 /// line for line, whatever its line endings (`tembra_contracts::bundled`): a copy nested in a
-/// file of another package, even line for line, is `from_dir`'s error naming that file, and a
-/// file of the package that differs, if only in its comments, is an error naming the file, the
-/// package and what it is.
+/// file of another package, the one its `package` line declares as wit-parser reads it, even line
+/// for line, is `from_dir`'s error naming that file, and a file of the package that differs, if
+/// only in its comments, is an error naming the file, the package and what it is.
 pub(crate) fn bundled_copies(parsed: &Parsed) -> syn::Result<Copies> {
     let Some(dir) = parsed.dir() else {
         return Ok(Copies::new());
@@ -666,11 +664,13 @@ pub(crate) fn bundled_copies(parsed: &Parsed) -> syn::Result<Copies> {
             copies.insert(name.clone(), Vec::new());
             continue;
         }
-        if source
+        // The file's own package, as wit-parser reads the line declaring it, whatever else that
+        // line holds, a comment included.
+        let own = source
             .as_deref()
-            .and_then(|source| source.lines().find_map(declared))
-            .is_some_and(|package| package != name.to_string())
-        {
+            .and_then(|source| UnresolvedPackageGroup::parse(file, source).ok())
+            .map(|parse| parse.main.name);
+        if own.is_some_and(|own| own != *name) {
             return Err(duplicate(name, file));
         }
         let what = if name.namespace == "wasi" {
@@ -700,7 +700,7 @@ fn merged(parsed: &Parsed, deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec
     };
     let mut standard = parsed.bundled()?.0.clone();
     standard
-        .push_str("guest.wit", GUEST)
+        .push_group(parsed.guest()?.clone())
         .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
     let mut files = std::fs::read_dir(deps)
         .and_then(|entries| {
@@ -849,12 +849,13 @@ fn resolve(dir: &Path) -> syn::Result<(Resolve, PackageSourceMap)> {
 }
 
 /// The WIT packages an expansion parses, each set once, the first time something asks for it: the
-/// consumed packages of `wit = "<dir>"`, when the attribute names a directory, and the bundled
-/// WASI packages, which an import in the `wasi` namespace names. An expansion that asks for none
-/// parses none.
+/// consumed packages of `wit = "<dir>"`, when the attribute names a directory, the bundled WASI
+/// packages, which an import in the `wasi` namespace names, and the kernel's package, which a
+/// state, a resource or the context uses. An expansion that asks for none parses none.
 pub(crate) struct Parsed {
     dir: Option<Directory>,
     bundled: OnceCell<syn::Result<crate::wasi::Bundled>>,
+    guest: OnceCell<syn::Result<UnresolvedPackageGroup>>,
 }
 
 /// The consumed directory, `wit = "<dir>"`, and its packages with the files they were read from,
@@ -873,6 +874,7 @@ impl Parsed {
                 packages: OnceCell::new(),
             }),
             bundled: OnceCell::new(),
+            guest: OnceCell::new(),
         }
     }
 
@@ -881,11 +883,24 @@ impl Parsed {
         self.dir.as_ref()
     }
 
-    /// The bundled WASI packages, resolved, and each package with its source, in dependency
-    /// order.
+    /// The bundled WASI packages, resolved, and each package with its source and its parse, in
+    /// dependency order.
     pub(crate) fn bundled(&self) -> syn::Result<&crate::wasi::Bundled> {
         self.bundled
             .get_or_init(crate::wasi::bundled)
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// The kernel's bundled `tembra:guest` package, parsed: its name, and what a reader that adds
+    /// it to packages of its own pushes there.
+    pub(crate) fn guest(&self) -> syn::Result<&UnresolvedPackageGroup> {
+        self.guest
+            .get_or_init(|| {
+                UnresolvedPackageGroup::parse("guest.wit", GUEST).map_err(|(_, cause)| {
+                    error(format!("the bundled tembra:guest package: {cause:#}"))
+                })
+            })
             .as_ref()
             .map_err(Clone::clone)
     }
@@ -1447,17 +1462,63 @@ pub(crate) enum Held {
     },
 }
 
-/// Read the WIT the bindings read, `inline` added to the consumed packages `parsed` holds, which
-/// makes this their last reader, for what they make of its types, where a state, `serde`, makes
-/// them derive serde's traits on the types that can carry them; a WIT the bindings would refuse
-/// yields nothing, and the bindings report it.
-pub(crate) fn bindings(parsed: Parsed, inline: &str, serde: bool) -> Bindings {
+/// Read the WIT the bindings read, for what they make of its types, where a state, `serde`, makes
+/// them derive serde's traits on the types that can carry them: the consumed packages `parsed`
+/// holds, which makes this their last reader, the bundled packages the inline WIT nests, the
+/// kernel's when `guest` and the WASI packages `wasi` (`wasi::packages`), each as `parsed` holds
+/// it parsed, and the module's own WIT, `wit`, which the inline WIT starts with. A WIT the bindings
+/// would refuse yields nothing, and the bindings report it.
+pub(crate) fn bindings(
+    parsed: Parsed,
+    wit: &str,
+    guest: bool,
+    wasi: &[PackageId],
+    serde: bool,
+) -> Bindings {
+    let mut nested = Vec::new();
+    if guest {
+        let Ok(parse) = parsed.guest() else {
+            return Bindings::default();
+        };
+        nested.push(parse.clone());
+    }
+    if !wasi.is_empty() {
+        let Ok((_, sources)) = parsed.bundled() else {
+            return Bindings::default();
+        };
+        nested.extend(
+            sources
+                .iter()
+                .filter(|(id, ..)| wasi.contains(id))
+                .map(|(.., parse)| parse.clone()),
+        );
+    }
     let Ok(mut resolve) = parsed.into_consumed() else {
         return Bindings::default();
     };
-    let Ok(own) = resolve.push_str("orb.wit", inline) else {
+    // The nested packages resolve after the consumed ones, as the bindings resolve the inline WIT,
+    // each after the packages it builds on.
+    for parse in nested {
+        if resolve.push_group(parse).is_err() {
+            return Bindings::default();
+        }
+    }
+    #[cfg(test)]
+    let before = resolve.packages.len();
+    let Ok(own) = resolve.push_str("orb.wit", wit) else {
         return Bindings::default();
     };
+    // The text parsed here holds no bundled WASI package, which the expansion parsed once and the
+    // loop above pushed parsed; a test build counts it as a second parse of them if it does.
+    #[cfg(test)]
+    if resolve
+        .packages
+        .iter()
+        .skip(before)
+        .any(|(_, package)| package.name.namespace == "wasi")
+    {
+        crate::wasi::BUNDLED_PARSES.set(crate::wasi::BUNDLED_PARSES.get() + 1);
+    }
     // The bindings generate the types of every interface the world imports or exports, and the
     // derives reach those alone.
     let generated: BTreeSet<wit_parser::InterfaceId> = resolve.packages[own]

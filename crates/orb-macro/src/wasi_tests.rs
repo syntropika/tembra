@@ -305,8 +305,9 @@ fn a_consumed_contract_may_bring_the_wasi_packages() {
 /// interface and has no state, is an error naming its file and what the package is, a copy in a
 /// directory of `deps/`, even line for line, or nested in a file of the directory itself, is
 /// `from_dir`'s error naming that directory, and a copy nested in a file of `deps/` that holds
-/// another package, even line for line, is `from_dir`'s error naming that file. The same copies,
-/// line for line in `deps/` itself, expand, and so does that file without the nested copy.
+/// another package, even line for line, is `from_dir`'s error naming that file, a comment on that
+/// file's `package` line included. The same copies, line for line in `deps/` itself, expand, and
+/// so does that file without the nested copy.
 #[test]
 fn every_copy_of_a_bundled_package_is_checked() {
     let clocks = bundled("wasi-clocks.wit");
@@ -409,25 +410,34 @@ fn every_copy_of_a_bundled_package_is_checked() {
         assert!(error.contains(&message), "{imports:?}: {error}");
     }
     std::fs::remove_dir_all(dir).unwrap();
-    let ledger = "package example:ledger@1.0.0;\n\ninterface book {\n  total: func() -> u32;\n}\n";
-    for (name, copy) in [("identical", random), ("edited", edited_random.as_str())] {
-        let dir = contract(
-            &format!("nested-random-{name}"),
-            &[("wasi-clocks.wit", clocks), ("ledger.wit", ledger)],
-        );
-        for imports in imports {
-            expanded(importing(imports, Some(&dir)), DICE)
-                .unwrap_or_else(|error| panic!("{name}, {imports:?}: {error}"));
+    let book = "\n\ninterface book {\n  total: func() -> u32;\n}\n";
+    for (line, header) in [
+        ("plain", "package example:ledger@1.0.0;"),
+        ("commented", "package example:ledger@1.0.0; // the ledger"),
+    ] {
+        let ledger = format!("{header}{book}");
+        for (name, copy) in [("identical", random), ("edited", edited_random.as_str())] {
+            let dir = contract(
+                &format!("nested-random-{line}-{name}"),
+                &[("wasi-clocks.wit", clocks), ("ledger.wit", &ledger)],
+            );
+            for imports in imports {
+                expanded(importing(imports, Some(&dir)), DICE)
+                    .unwrap_or_else(|error| panic!("{line} {name}, {imports:?}: {error}"));
+            }
+            let file = dir.join("deps").join("ledger.wit");
+            let nested = crate::wit::nested(copy).unwrap();
+            std::fs::write(&file, format!("{ledger}\n{nested}")).unwrap();
+            let message = provided("wasi:random@0.3.0", &file);
+            for imports in imports {
+                let error = refused(imports, &dir);
+                assert!(
+                    error.contains(&message),
+                    "{line} {name}, {imports:?}: {error}"
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
         }
-        let file = dir.join("deps").join("ledger.wit");
-        let nested = crate::wit::nested(copy).unwrap();
-        std::fs::write(&file, format!("{ledger}\n{nested}")).unwrap();
-        let message = provided("wasi:random@0.3.0", &file);
-        for imports in imports {
-            let error = refused(imports, &dir);
-            assert!(error.contains(&message), "{name}, {imports:?}: {error}");
-        }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

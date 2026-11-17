@@ -118,12 +118,7 @@ impl PreparedContract {
                     },
                 );
                 continue;
-            } else if interface.explicit
-                && self.model().exports.iter().any(|entry| {
-                    matches!(&entry.item, Item::Interface(exported)
-                        if exported.contract.as_deref() == Some(contract.as_str()))
-                })
-            {
+            } else if self.model().pairs(interface) {
                 // An import of an interface this world also exports, with no provider required
                 // for it, is the Orb's typed entry to a hook it declares: the kernel runs its plan.
                 // The world imports a hook itself; an interface it imports only because another

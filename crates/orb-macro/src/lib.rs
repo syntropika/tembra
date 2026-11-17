@@ -2480,8 +2480,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // the consumed directory. Foreign interfaces need `generate_all`.
     let kernel = !states.is_empty() || !resources.is_empty() || options.context;
     let copies = wit::bundled_copies(&parsed)?;
-    let standard = wasi::packages(&parsed, &options.imports, &copies)?;
-    let inline = if kernel && wit::guest_package_needed(&copies)? {
+    let (standard, nested) = wasi::packages(&parsed, &options.imports, &copies)?;
+    let guest = kernel && wit::guest_package_needed(&parsed, &copies)?;
+    let inline = if guest {
         LitStr::new(
             &format!("{wit}\n{}{standard}", wit::guest_package()?),
             Span::call_site(),
@@ -2495,10 +2496,11 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     });
     // What the bindings make of the WIT, read when a generated type carries more than they give
     // it: the serde derives of a state, or the author's derives and the attributes they read. The
-    // bindings add the inline WIT to the consumed packages, so they read them last.
+    // bindings add the inline WIT to the consumed packages, so they read them last, and the
+    // bundled packages it nests as the expansion parsed them.
     let serde = !states.is_empty();
     let bindings = if serde || shapes.iter().any(|shape| !shape.carried.is_empty()) {
-        wit::bindings(parsed, &inline.value(), serde)
+        wit::bindings(parsed, &wit, guest, &nested, serde)
     } else {
         wit::Bindings::default()
     };

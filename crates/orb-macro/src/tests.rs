@@ -6178,3 +6178,39 @@ interface counter {
         "the consumed directory and the bundled WASI packages are read once each"
     );
 }
+
+/// A module whose expansion reads the bundled WASI packages in every place that reads them: a WASI
+/// import, which nests the packages it needs in the inline WIT, a state holding a WASI record,
+/// which the expansion looks up in the bundled packages, and the state's serde derives, which make
+/// the expansion read the WIT as the bindings do, the packages the inline WIT nests included. A
+/// test build counts a parse of the bundled packages wherever the expansion parses them, the WIT the
+/// bindings read included.
+#[test]
+fn every_reader_of_the_bundled_packages_takes_them_parsed_once() {
+    let options = Options {
+        imports: vec![literal("wasi:clocks/system-clock@0.3.0")],
+        ..options("example:watch@1.0.0", None)
+    };
+    let bundled = super::wasi::BUNDLED_PARSES.get();
+    let module = expanded_with(
+        options,
+        "mod watch {
+            #[state(service = Clock)]
+            pub struct Seen { pub last: Option<system_clock::Instant> }
+            #[service]
+            pub struct Clock;
+            impl Clock {
+                pub fn seconds() -> i64 { system_clock::now().seconds }
+            }
+        }",
+    );
+    assert!(
+        tokens(&module)
+            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]")
+    );
+    assert_eq!(
+        super::wasi::BUNDLED_PARSES.get() - bundled,
+        1,
+        "the bundled WASI packages are parsed once"
+    );
+}

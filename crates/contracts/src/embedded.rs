@@ -60,11 +60,11 @@ impl EmbeddedManifest {
 /// component declares or contributes to is an interface the world both imports and exports, and
 /// takes one of the two roles; a service policy names an interface the world exports and does
 /// not import; a reference view names an interface the world imports and does not export. An
-/// import pairs with an export only when the world imports the interface itself: one elaboration
-/// added because a view `use`s its types, the view of the interface the component implements, is
-/// no hook, and the kernel binds it to nothing, or to the provider the installer names when it
-/// holds a resource. The contract checks the roles themselves, a view's shape included, when the
-/// component is packaged.
+/// import pairs with an export only when the world imports the interface itself (`Model::pairs`):
+/// one elaboration added because a view `use`s its types, the view of the interface the component
+/// implements, is no hook, and the kernel binds it to nothing, or to the provider the installer
+/// names when it holds a resource. The contract checks the roles themselves, a view's shape
+/// included, when the component is packaged.
 #[cfg(feature = "authoring")]
 pub(crate) fn roles(
     contract: &PreparedContract,
@@ -84,11 +84,7 @@ pub(crate) fn roles(
     };
     let exported = interfaces(&contract.model().exports, false);
     let imported = interfaces(&contract.model().imports, true);
-    let paired: BTreeSet<String> = imported
-        .iter()
-        .filter(|identity| exported.contains(*identity))
-        .cloned()
-        .collect();
+    let paired = contract.model().paired();
     if let Some(identity) = manifest
         .declares
         .keys()
