@@ -583,26 +583,43 @@ pub(crate) fn guest_package_needed(parsed: &Parsed, copies: &Copies) -> syn::Res
 }
 
 /// Claim the Orb's package name, the attribute's `package`, in the WIT the bindings read, which
-/// holds one package of a name: an error on the package when the inline WIT nests a bundled
-/// package of that name beside it, the kernel's, when `guest`, or a WASI package of `wasi`
-/// (`wasi::packages`), each as `parsed` holds it parsed.
+/// holds one package of a name: an error on the package when the bindings read a bundled package
+/// of that name beside it, a copy the consumed directory holds, one of its bundled `copies`
+/// (`bundled_copies`), or one the inline WIT nests, the kernel's, when `guest`, or a WASI package
+/// of `wasi` (`wasi::packages`), each as `parsed` holds it parsed.
 pub(crate) fn claim_package(
     package: &LitStr,
     parsed: &Parsed,
+    copies: &Copies,
     guest: bool,
     wasi: &[PackageId],
 ) -> syn::Result<()> {
     let name = package.value();
-    let refused = |what: &str, why: &str| {
+    let refused = |reason: String| {
         syn::Error::new(
             package.span(),
             format!(
-                "the Orb's package cannot be named {name}: the bindings read {what} of that name beside it, for {why}; give the Orb a package name of its own"
+                "the Orb's package cannot be named {name}: {reason}; give the Orb a package name of its own"
             ),
         )
     };
+    if let Some(copy) = copies.keys().find(|copy| copy.to_string() == name) {
+        let what = if copy.namespace == "wasi" {
+            "the WASI package Tembra serves"
+        } else {
+            "the kernel's package"
+        };
+        return Err(refused(format!(
+            "the consumed directory holds a copy of {what} of that name, which the bindings read beside it"
+        )));
+    }
+    let nested = |what: &str, why: &str| {
+        refused(format!(
+            "the bindings read {what} of that name beside it, for {why}"
+        ))
+    };
     if guest && parsed.guest()?.main.name.to_string() == name {
-        return Err(refused(
+        return Err(nested(
             "the kernel's package",
             "a state, a resource or the context",
         ));
@@ -613,10 +630,7 @@ pub(crate) fn claim_package(
             .iter()
             .any(|id| bundled.packages[*id].name.to_string() == name)
         {
-            return Err(refused(
-                "the WASI package Tembra serves",
-                "the WASI imports",
-            ));
+            return Err(nested("the WASI package Tembra serves", "the WASI imports"));
         }
     }
     Ok(())

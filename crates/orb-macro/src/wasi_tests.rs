@@ -304,6 +304,73 @@ fn an_orb_package_named_like_a_nested_package_is_refused() {
     }
 }
 
+/// The bindings read the Orb's package beside the consumed packages too, and a copy of a bundled
+/// package the consumed directory holds, which the inline WIT leaves out, is one of them: an Orb's
+/// package named like such a copy, a WASI package's, whole or encoded, or the kernel's, is an error
+/// on the package, as when the inline WIT nests that package, whether the macro reads the
+/// bindings' types, as for a state, or not. The same modules under a package of their own expand.
+#[test]
+fn an_orb_package_named_like_a_copy_the_consumed_directory_holds_is_refused() {
+    let clocks = bundled("wasi-clocks.wit");
+    let guest = tembra_contracts::guest::SOURCE;
+    let wasi = "the Orb's package cannot be named wasi:clocks@0.3.0: the consumed directory holds a copy of the WASI package Tembra serves of that name, which the bindings read beside it; give the Orb a package name of its own";
+    let kernel = "the Orb's package cannot be named tembra:guest@1.0.0: the consumed directory holds a copy of the kernel's package of that name, which the bindings read beside it; give the Orb a package name of its own";
+    let encoded_clocks = encoded(&[clocks]);
+    let whole_copy: &[(&str, &[u8])] = &[("wasi-clocks.wit", clocks.as_bytes())];
+    let encoded_copy: &[(&str, &[u8])] = &[("wasi-clocks.wasm", &encoded_clocks)];
+    let kernel_copy: &[(&str, &[u8])] = &[
+        ("wasi-clocks.wit", clocks.as_bytes()),
+        ("tembra-guest.wit", guest.as_bytes()),
+    ];
+    for (name, deps, package, module, message) in [
+        (
+            "whole",
+            whole_copy,
+            "wasi:clocks@0.3.0",
+            DICE_WITH_STATE,
+            wasi,
+        ),
+        (
+            "whole-stateless",
+            whole_copy,
+            "wasi:clocks@0.3.0",
+            DICE,
+            wasi,
+        ),
+        (
+            "encoded",
+            encoded_copy,
+            "wasi:clocks@0.3.0",
+            DICE_WITH_STATE,
+            wasi,
+        ),
+        (
+            "kernel",
+            kernel_copy,
+            "tembra:guest@1.0.0",
+            DICE_WITH_STATE,
+            kernel,
+        ),
+    ] {
+        let dir = contract(&format!("named-like-{name}"), &[]);
+        for (file, copy) in deps {
+            std::fs::write(dir.join("deps").join(file), copy).unwrap();
+        }
+        let named = |package: &str| Options {
+            package: Some(literal(package)),
+            ..importing(&["example:timer/timer@1.0.0"], Some(&dir))
+        };
+        let error = expanded(named(package), module)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(message), "{name}: {error}");
+        expanded(named("example:dice@1.0.0"), module)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 /// A contract `cargo tembra build` wrote for an Orb that imports WASI holds the WASI packages in
 /// `deps/`: an Orb consuming it reads each such package once, from there, the bundled copy left out
 /// of its inline WIT, and nests only the WASI packages the directory lacks. A copy is the bundled
