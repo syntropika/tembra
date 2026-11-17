@@ -889,10 +889,11 @@ thread_local! {
 }
 
 /// Read the WIT packages of a directory, with the files each was read from
-/// (`Directory::sources`).
+/// (`Directory::sources`), once `held_twice` finds none they hold twice.
 fn resolve(dir: &Path) -> syn::Result<(Resolve, PackageSourceMap)> {
     #[cfg(test)]
     DIRECTORY_PARSES.set(DIRECTORY_PARSES.get() + 1);
+    held_twice(dir)?;
     let mut resolve = Resolve::default();
     let (_, sources) = resolve.push_dir(dir).map_err(|cause| {
         error(format!(
@@ -901,6 +902,72 @@ fn resolve(dir: &Path) -> syn::Result<(Resolve, PackageSourceMap)> {
         ))
     })?;
     Ok((resolve, sources))
+}
+
+/// Refuse a package a directory of WIT packages holds both inside an encoded file of `deps/` and
+/// as text, in a `.wit` file or a directory of `deps/` or in the directory itself:
+/// `Resolve::push_dir`, with which the bindings read the directory too, merges the encoded files
+/// first, then adds the text packages, asserting that each is new, and panics. Only when `deps/`
+/// holds an encoded file, as `merged` tells one, is each encoded file decoded apart and each text
+/// package parsed apart; one that does not read is left to `push_dir`, which reports it. The
+/// error names the package and both places.
+fn held_twice(dir: &Path) -> syn::Result<()> {
+    let Ok(entries) = std::fs::read_dir(dir.join("deps")) else {
+        return Ok(());
+    };
+    let mut entries: Vec<PathBuf> = entries
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .collect();
+    entries.sort();
+    let mut encoded: Vec<(PathBuf, Vec<PackageName>)> = Vec::new();
+    let mut text = vec![dir.to_path_buf()];
+    for path in entries {
+        if path.is_dir() {
+            text.push(path);
+            continue;
+        }
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        if !matches!(extension, Some("wit" | "wasm" | "wat")) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if extension == Some("wat") || bytes.starts_with(b"\0asm") {
+            let mut packages = Resolve::default();
+            if packages.push_file(&path).is_ok() {
+                encoded.push((path, packages.package_names.into_keys().collect()));
+            }
+        } else {
+            text.push(path);
+        }
+    }
+    if encoded.is_empty() {
+        return Ok(());
+    }
+    for place in text {
+        let group = if place.is_dir() {
+            UnresolvedPackageGroup::parse_dir(&place).ok()
+        } else {
+            std::fs::read_to_string(&place)
+                .ok()
+                .and_then(|source| UnresolvedPackageGroup::parse(&place, &source).ok())
+        };
+        let Some(group) = group else {
+            continue;
+        };
+        for package in std::iter::once(&group.main).chain(&group.nested) {
+            let name = &package.name;
+            if let Some((file, _)) = encoded.iter().find(|(_, names)| names.contains(name)) {
+                return Err(error(format!(
+                    "WIT package {name} is held twice in the consumed directory, in {} and, encoded, in {}: the bindings cannot read a package held both ways; remove one of them",
+                    place.display(),
+                    file.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The WIT packages an expansion parses, each set once, the first time something asks for it: the

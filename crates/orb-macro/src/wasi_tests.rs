@@ -790,3 +790,88 @@ fn an_encoded_copy_must_hold_what_a_wasi_import_needs() {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+/// `Resolve::push_dir`, with which the macro and the bindings read the consumed directory, merges
+/// each encoded file of `deps/` first, then adds the text packages, a `.wit` file or a directory
+/// of `deps/` and the directory's own, asserting that each is new: a package held both ways, even
+/// as the bundled file line for line beside an encoded package that holds part of it, made the
+/// macro panic. It is an error naming both places, read before the directory, and the same
+/// directory without the encoded file expands.
+#[test]
+fn a_package_held_as_text_and_encoded_is_refused() {
+    let guest = tembra_contracts::guest::SOURCE;
+    let clocks = bundled("wasi-clocks.wit");
+    let span = "package example:span@1.0.0;\n\ninterface span {\n  type width = u32;\n}\n";
+    let span_clocks = "package example:span@1.0.0;\n\ninterface span {\n  use wasi:clocks/types@0.3.0.{duration};\n  type width = duration;\n}\n";
+    let timer = "package example:timer@1.0.0;\n\ninterface timer {\n  now: func() -> u64;\n}\n\nworld timer-world {\n  export timer;\n}\n";
+    // Each directory's text packages in `deps/`, its encoded file and the sources it encodes, the
+    // package held twice and where its text is, the directory itself when none is given.
+    let layouts = [
+        (
+            "guest",
+            vec![("tembra-guest.wit", guest)],
+            "tembra-guest.wasm",
+            vec![guest],
+            "tembra:guest@1.0.0",
+            "deps/tembra-guest.wit",
+        ),
+        (
+            "span",
+            vec![("span.wit", span)],
+            "span.wasm",
+            vec![span],
+            "example:span@1.0.0",
+            "deps/span.wit",
+        ),
+        (
+            "clocks",
+            vec![("wasi-clocks.wit", clocks)],
+            "span.wasm",
+            vec![clocks, span_clocks],
+            "wasi:clocks@0.3.0",
+            "deps/wasi-clocks.wit",
+        ),
+        (
+            "span-directory",
+            vec![("span/span.wit", span)],
+            "span.wasm",
+            vec![span],
+            "example:span@1.0.0",
+            "deps/span",
+        ),
+        (
+            "timer",
+            vec![],
+            "timer.wasm",
+            vec![timer],
+            "example:timer@1.0.0",
+            "",
+        ),
+    ];
+    let imports: &[&str] = &["example:timer/timer@1.0.0"];
+    for (name, text, file, sources, package, held) in layouts {
+        let dir = contract(&format!("held-twice-{name}"), &text);
+        std::fs::write(dir.join("timer.wit"), timer).unwrap();
+        let file = dir.join("deps").join(file);
+        std::fs::write(&file, encoded(&sources)).unwrap();
+        let place = if held.is_empty() {
+            dir.clone()
+        } else {
+            dir.join(held)
+        };
+        let message = format!(
+            "WIT package {package} is held twice in the consumed directory, in {} and, encoded, in {}: the bindings cannot read a package held both ways; remove one of them",
+            place.display(),
+            file.display()
+        );
+        let error = expanded(importing(imports, Some(&dir)), DICE)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&message), "{name}: {error}");
+        std::fs::remove_file(&file).unwrap();
+        expanded(importing(imports, Some(&dir)), DICE)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
