@@ -1221,8 +1221,9 @@ tembra = { version = "0.2.2", default-features = false, features = ["macros", "h
 `#[service(key = main)]` and `#[service(principal = "name")]`, alone or together, guard the
 address of the service's objects: the native factory refuses an object at another key than
 `["main"]` with the code `forbidden` and the reason `key`, or of another principal with the reason
-`principal`, before the create runs. A component does not check them. A host-lifetime object
-belongs to the principal `host`, so `lifetime = host` takes no other principal.
+`principal`, before the create runs. A component could not check them, so they make the module
+native only. A host-lifetime object belongs to the principal `host`, so `lifetime = host` takes no
+other principal.
 
 A method that returns `tembra::Result<T>` answers `T`, which is all its WIT result carries, or
 fails the call with its error, for a local and a portable caller alike: `tembra::Result` is the
@@ -1243,6 +1244,11 @@ the name it would have in WIT, so a local caller passes its arguments as for any
 it through the service's client, and a portable caller is refused with `LocalValue`. No other
 method of the service, local or portable, may take that name, and a service without a `#[create]`
 keeps at least one portable method for its interface. Such a module is native only too.
+
+A component build refuses a native-only module: in a build for `wasm32`, each marker that makes it
+native only, `#[inputs]`, `#[create]`, `#[root]`, an address guard, a method's `&Context` parameter
+or `tembra::Result` result, and `#[local]`, is a compile error at the marker, all reported at once.
+Compile such a module for native targets only, as above.
 
 The codec reads and writes the JSON form compiled and TypeScript callers send and validate: the
 arguments as an array, `null` too without parameters; a record as an object of its fields, keyed by

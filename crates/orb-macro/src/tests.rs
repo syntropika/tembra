@@ -10295,8 +10295,30 @@ fn a_root_is_refused_when_ill_formed() {
     }
 }
 
-/// The analysis lists what makes a module native only, each marker as the module writes it, in
-/// the order the scan finds them; a module a component could serve has none.
+/// A module with every marker that makes a module native only.
+const NATIVE_ONLY: &str = "mod book {
+    #[inputs]
+    pub struct Inputs { pub base: u32 }
+    #[root]
+    fn shared(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<u32> { Ok(0) }
+    #[service(key = main, principal = \"host\")]
+    pub struct Ledger { base: u32 }
+    impl Ledger {
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            Ok(Self { base: inputs.base })
+        }
+        pub fn count(&self) -> u32 { self.base }
+        pub fn owner(context: &Context) -> String { String::new() }
+        pub fn divide(a: u32, b: u32) -> tembra::Result<u32> { Ok(a / b) }
+        #[local]
+        pub fn rewind(&self) {}
+    }
+}";
+
+/// The analysis lists what makes a module native only, each marker as the guide names it: those
+/// the scan finds, in its order, then those of the services' methods, in the order written; a
+/// module a component could serve has none.
 #[test]
 fn the_analysis_lists_what_makes_a_module_native_only() {
     let markers = |module: &str| {
@@ -10310,32 +10332,108 @@ fn the_analysis_lists_what_makes_a_module_native_only() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        markers(
-            "mod book {
-                #[inputs]
-                pub struct Inputs { pub base: u32 }
-                #[root]
-                fn shared(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<u32> { Ok(0) }
-                #[service(key = main, principal = \"host\")]
-                pub struct Ledger { base: u32 }
-                impl Ledger {
-                    #[create]
-                    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-                        Ok(Self { base: inputs.base })
-                    }
-                    pub fn count(&self) -> u32 { self.base }
-                }
-            }"
-        ),
+        markers(NATIVE_ONLY),
         [
             "#[inputs]",
             "#[root]",
             "key = main",
             "principal = \"host\"",
-            "#[create]"
+            "#[create]",
+            "&Context",
+            "tembra::Result",
+            "#[local]"
         ]
     );
     assert!(markers(&ledger("#[service]")).is_empty());
+}
+
+/// A component build refuses a native-only module: under the wasm32 gate, each marker that makes
+/// it native only is a compile error at the marker, which names it, and a module with several
+/// markers gets one for each, all reported at once. A module a component serves gets none.
+#[test]
+fn a_component_build_refuses_each_marker_of_a_native_only_module() {
+    let refusal = |marker: &str| {
+        let message = format!(
+            "`{marker}` makes this module native only, which a component build refuses: leave it out of a component, or compile the module for native targets only, under `#[cfg(not(target_arch = \"wasm32\"))]`"
+        );
+        quote::quote!(#[cfg(target_arch = "wasm32")] ::core::compile_error!(#message);).to_string()
+    };
+    let inputs = "#[inputs] pub struct Inputs { pub base: u32 }";
+    let count = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    let create = "#[service] pub struct Ledger { base: u32 } impl Ledger {
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            Ok(Self { base: inputs.base })
+        }
+        pub fn count(&self) -> u32 { self.base }
+    }";
+    let root = "#[root] fn shared(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<u32> { Ok(0) }";
+    let method = |method: &str| count.replace("pub fn count() -> u32 { 0 }", method);
+    for (items, markers) in [
+        (format!("{inputs} {count}"), &["#[inputs]"][..]),
+        (format!("{inputs} {create}"), &["#[inputs]", "#[create]"]),
+        (
+            format!("{inputs} {root} {count}"),
+            &["#[inputs]", "#[root]"],
+        ),
+        (
+            count.replace("#[service]", "#[service(key = main)]"),
+            &["key = main"],
+        ),
+        (
+            count.replace("#[service]", "#[service(principal = \"host\")]"),
+            &["principal = \"host\""],
+        ),
+        (
+            method("pub fn owner(context: &Context) -> String { String::new() }"),
+            &["&Context"],
+        ),
+        (
+            method("pub fn divide(a: u32, b: u32) -> tembra::Result<u32> { Ok(a / b) }"),
+            &["tembra::Result"],
+        ),
+        (
+            method("pub fn count() -> u32 { 0 } #[local] pub fn rewind() {}"),
+            &["#[local]"],
+        ),
+    ] {
+        let generated = tokens(&expanded(PACKAGE, &format!("mod book {{ {items} }}")));
+        assert_eq!(
+            generated.matches("compile_error").count(),
+            markers.len(),
+            "{items}\n{generated}"
+        );
+        for marker in markers {
+            assert!(
+                generated.contains(&refusal(marker)),
+                "{marker}\n{generated}"
+            );
+        }
+    }
+    let generated = tokens(&expanded(PACKAGE, NATIVE_ONLY));
+    let markers = [
+        "#[inputs]",
+        "#[root]",
+        "key = main",
+        "principal = \"host\"",
+        "#[create]",
+        "&Context",
+        "tembra::Result",
+        "#[local]",
+    ];
+    assert_eq!(
+        generated.matches("compile_error").count(),
+        markers.len(),
+        "{generated}"
+    );
+    for marker in markers {
+        assert!(
+            generated.contains(&refusal(marker)),
+            "{marker}\n{generated}"
+        );
+    }
+    let generated = tokens(&expanded(PACKAGE, &ledger("#[service]")));
+    assert!(!generated.contains("compile_error"), "{generated}");
 }
 
 /// A native-only module may export nothing when what it runs is its root or its root resources:

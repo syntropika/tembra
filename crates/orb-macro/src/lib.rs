@@ -595,14 +595,10 @@ struct Root {
 }
 
 /// A marker that makes the module native only, where it is written: something only a native host
-/// gives an Orb, which a component could not serve.
-#[allow(
-    dead_code,
-    reason = "kept for the refusal of a component build of a native-only module, which names each marker"
-)]
+/// gives an Orb, which a component could not serve. A component build refuses the module at each.
 struct NativeOnly {
-    /// The marker as the module writes it: `#[inputs]`, `#[create]`, `#[root]`, `key = main` or
-    /// `principal = "name"`.
+    /// The marker as the guide names it: `#[inputs]`, `#[create]`, `#[root]`, `key = main`,
+    /// `principal = "name"`, a method's `&Context` or `tembra::Result`, or `#[local]`.
     name: String,
     span: Span,
 }
@@ -1699,12 +1695,10 @@ struct Analysis {
     inputs: Option<Inputs>,
     /// The function marked `#[root]`, if any: the Orb's create, natively.
     root: Option<Root>,
-    /// The markers that make the module native only, in the order the scan finds them: its
-    /// `#[inputs]`, its creates and its root, which take the inputs, and the address guards.
-    #[allow(
-        dead_code,
-        reason = "kept for the refusal of a component build of a native-only module, which names each marker"
-    )]
+    /// The markers that make the module native only, which a component build refuses: in the
+    /// order the scan finds them, its `#[inputs]`, its creates and its root, which take the
+    /// inputs, and the address guards; then, in the order written, what a service's method takes
+    /// from a native host alone: the call's `&Context`, the runtime's `tembra::Result`, `#[local]`.
     native_only: Vec<NativeOnly>,
     /// The states, each resolved to the service whose objects own it.
     states: Vec<State>,
@@ -1901,7 +1895,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         mut wit_resources,
         inputs,
         root,
-        native_only,
+        mut native_only,
         newtypes,
         impls,
         default_impls,
@@ -1975,6 +1969,29 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                             RESERVED_MEMBERS.join(", ")
                         ),
                     ));
+                }
+                // What only a native host gives a method makes the module native only.
+                if let Some(local) = local {
+                    native_only.push(NativeOnly {
+                        name: "#[local]".to_owned(),
+                        span: local.span,
+                    });
+                }
+                for input in &function.sig.inputs {
+                    if let FnArg::Typed(typed) = input
+                        && is_context(&typed.ty)
+                    {
+                        native_only.push(NativeOnly {
+                            name: "&Context".to_owned(),
+                            span: typed.ty.span(),
+                        });
+                    }
+                }
+                if let (true, ReturnType::Type(_, ty)) = (read.fallible, &function.sig.output) {
+                    native_only.push(NativeOnly {
+                        name: "tembra::Result".to_owned(),
+                        span: ty.span(),
+                    });
                 }
                 match local {
                     Some(_) => service.locals.push(read),
@@ -3732,7 +3749,23 @@ fn component(
         });
     };
     let runtime_prelude = options.no_std.then(prelude);
+    // A component cannot serve a native-only module, so its build refuses the module at each
+    // marker, every one at once; a host build compiles none of these errors.
+    let refusals = analysis.native_only.iter().map(|NativeOnly { name, span }| {
+        let message = LitStr::new(
+            &format!(
+                "`{name}` makes this module native only, which a component build refuses: leave it out of a component, or compile the module for native targets only, under `#[cfg(not(target_arch = \"wasm32\"))]`"
+            ),
+            *span,
+        );
+        quote_spanned! { *span =>
+            #[cfg(target_arch = "wasm32")]
+            ::core::compile_error!(#message);
+        }
+    });
     Ok(quote! {
+        #(#refusals)*
+
         #runtime_prelude
 
         // The exact WIT of this module travels inside the component as a custom section, so
