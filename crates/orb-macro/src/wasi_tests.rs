@@ -68,6 +68,17 @@ fn contract(name: &str, deps: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
+/// The last of the sources as an encoded WIT package, as `wit_component::encode` writes it, with
+/// the parts of the packages before it that it uses.
+fn encoded(sources: &[&str]) -> Vec<u8> {
+    let mut resolve = wit_parser::Resolve::default();
+    let mut package = None;
+    for source in sources {
+        package = Some(resolve.push_str("encoded.wit", source).unwrap());
+    }
+    wit_component::encode(&resolve, package.unwrap(), false).unwrap()
+}
+
 /// The bundled source of a WASI package, by its file name.
 fn bundled(file: &str) -> &'static str {
     tembra_contracts::WASI_SOURCES
@@ -494,21 +505,10 @@ fn every_copy_of_a_bundled_package_is_checked() {
 /// has no source to compare line for line: `Contract::from_dir` merges each encoded file into the
 /// bundled packages. An exact copy merges, so it is a copy whether the Orb imports its package or
 /// not: the inline WIT leaves the bundled one out and resolves after the consumed directory, as
-/// the bindings read them. A copy the merge refuses is `from_dir`'s error naming its file. The
-/// kernel's package the macro brings itself: a copy of it decoded from an encoded file, an exact
-/// one or the part another encoded package uses, is an error asking to remove it.
+/// the bindings read them. A copy the merge refuses is `from_dir`'s error naming its file.
 #[test]
 fn an_encoded_copy_of_a_bundled_package_is_merged_as_from_dir_merges_it() {
     let clocks = bundled("wasi-clocks.wit");
-    // The last of the sources, encoded with the packages before it that it uses.
-    let encoded = |sources: &[&str]| {
-        let mut resolve = wit_parser::Resolve::default();
-        let mut package = None;
-        for source in sources {
-            package = Some(resolve.push_str("encoded.wit", source).unwrap());
-        }
-        wit_component::encode(&resolve, package.unwrap(), false).unwrap()
-    };
     let imports: [&[&str]; 2] = [
         &[
             "example:timer/timer@1.0.0",
@@ -559,26 +559,102 @@ fn an_encoded_copy_of_a_bundled_package_is_merged_as_from_dir_merges_it() {
         assert!(error.contains(&message), "{imports:?}: {error}");
     }
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The kernel's package the macro brings itself, for a state, a resource or the context, nested in
+/// the inline WIT unless the consumed directory holds it whole: a copy of it there decoded from an
+/// encoded file, an exact one or the part another encoded package uses, is then an error asking
+/// to remove it, and the same modules expand without it. An Orb with none of them nests no kernel
+/// package, and its bindings read that copy from the consumed directory, as `Contract::from_dir`
+/// accepts it: a stateless Orb consuming `example:timer`, whose `now` returns the `width` of
+/// `deps/span.wasm`, which `use`s the kernel's `level`, expands, and its inline WIT resolves after
+/// the directory.
+#[test]
+fn an_encoded_copy_of_the_kernel_package_is_refused_where_the_macro_brings_it() {
+    let clocks = bundled("wasi-clocks.wit");
     let guest = tembra_contracts::guest::SOURCE;
     let span = "package example:span@1.0.0;\n\ninterface span {\n  use tembra:guest/context@1.0.0.{level};\n  type width = level;\n}\n";
+    let imports: [&[&str]; 2] = [
+        &[
+            "example:timer/timer@1.0.0",
+            "wasi:clocks/monotonic-clock@0.3.0",
+        ],
+        &["example:timer/timer@1.0.0"],
+    ];
+    let with_resource = "mod dice {
+        #[resource]
+        pub struct Cup { pub size: u32 }
+        impl Cup {
+            #[open]
+            pub fn open() -> Cup { Cup { size: 2 } }
+        }
+        #[service]
+        pub struct Chance;
+        impl Chance {
+            pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
+        }
+    }";
+    // The modules whose bindings read the kernel's package, by what reads it.
+    let kernel = |imports: &[&str], dir: &Path| {
+        [
+            ("a state", importing(imports, Some(dir)), DICE_WITH_STATE),
+            ("a resource", importing(imports, Some(dir)), with_resource),
+            (
+                "the context",
+                Options {
+                    context: true,
+                    ..importing(imports, Some(dir))
+                },
+                DICE,
+            ),
+        ]
+    };
     for (name, sources) in [("tembra-guest", vec![guest]), ("span", vec![guest, span])] {
         let dir = contract(&format!("encoded-{name}"), &[("wasi-clocks.wit", clocks)]);
-        for imports in imports {
-            expanded(importing(imports, Some(&dir)), DICE)
-                .unwrap_or_else(|error| panic!("{name}, {imports:?}: {error}"));
-        }
         let file = dir.join("deps").join(format!("{name}.wasm"));
         std::fs::write(&file, encoded(&sources)).unwrap();
+        let timer = dir.join("timer.wit");
+        let own = std::fs::read_to_string(&timer).unwrap();
+        if name == "span" {
+            let uses = own.replace(
+                "  now: func() -> u64;",
+                "  use example:span/span@1.0.0.{width};\n  now: func() -> width;",
+            );
+            std::fs::write(&timer, uses).unwrap();
+        }
         let message = format!(
             "{}: this copy of tembra:guest@1.0.0, the kernel's package, is encoded; remove it, since the macro brings the kernel's package",
             file.display()
         );
         for imports in imports {
-            let error = expanded(importing(imports, Some(&dir)), DICE)
-                .map(|_| ())
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(&message), "{name}, {imports:?}: {error}");
+            let generated = expanded(importing(imports, Some(&dir)), DICE)
+                .unwrap_or_else(|error| panic!("{name}, {imports:?}: {error}"));
+            let inline = inline(&generated);
+            assert!(
+                !inline.contains("package tembra:guest"),
+                "{name}, {imports:?}: {inline}"
+            );
+            let mut consumed = wit_parser::Resolve::default();
+            consumed.push_dir(&dir).unwrap();
+            super::tests::resolved_with(consumed, &inline);
+            for (what, options, module) in kernel(imports, &dir) {
+                let error = expanded(options, module)
+                    .map(|_| ())
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains(&message),
+                    "{name}, {what}, {imports:?}: {error}"
+                );
+            }
+        }
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(&timer, &own).unwrap();
+        for imports in imports {
+            for (what, options, module) in kernel(imports, &dir) {
+                expanded(options, module)
+                    .unwrap_or_else(|error| panic!("{name}, {what}, {imports:?}: {error}"));
+            }
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

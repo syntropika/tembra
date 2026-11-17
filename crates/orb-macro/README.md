@@ -662,16 +662,17 @@ packages it builds on, in the WIT the bindings read. A consumed directory may ho
 already, as a contract `cargo tembra build` wrote holds those it depends on in its `deps/`: the
 bindings read those from there. As the tools that load the directory require, every copy of a
 bundled package the directory holds, whether the Orb uses it or not, must be a file of `deps/`
-itself, either the bundled file line for line, comments included, whatever its line endings, or,
-for a WASI package, an encoded WIT package that the tools merge with the bundled one: another copy
-there is an error naming its file, and a copy in a directory of `deps/` or nested in the file of
-another package, even line for line, or a copy of the kernel's package an encoded package holds,
-which the macro brings itself, is an error asking to remove it. An encoded package holds only
-the parts of the bundled packages it uses, and the bindings read those from it: an import that
-needs a part it lacks, the imported interface whole or what a nested package uses, is an error on
-the import naming the copy, its file and the part. The `wasi` namespace holds the bundled
-packages and nothing else: an identity naming none of their interfaces, of another version or
-unstable like `wasi:clocks/timezone`, is a compile error listing what there is.
+itself, either the bundled file line for line, comments included, whatever its line endings, or
+an encoded WIT package that the tools merge with the bundled one: another copy there is an error
+naming its file, and a copy in a directory of `deps/` or nested in the file of another package,
+even line for line, is an error asking to remove it, and so is a copy of the kernel's package an
+encoded package holds, in an Orb with a state, a resource or the context, for which the macro
+brings that package itself. An encoded package holds only the parts of the bundled packages it
+uses, and the bindings read those from it: an import that needs a part it lacks, the imported
+interface whole or what a nested package uses, is an error on the import naming the copy, its
+file and the part. The `wasi` namespace holds the bundled packages and nothing else: an identity
+naming none of their interfaces, of another version or unstable like `wasi:clocks/timezone`, is a
+compile error listing what there is.
 
 WASI 0.3 is asynchronous where it waits: a clock's waits, files, sockets and HTTP are `async func`,
 whose bindings are `async fn` a method awaits, as `throw_after` does, and standard input and output

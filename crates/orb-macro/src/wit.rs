@@ -633,15 +633,16 @@ pub(crate) type Copies = BTreeMap<PackageName, Vec<PathBuf>>;
 /// WASI package Tembra serves or the kernel's, is checked as `Contract::from_dir` checks it,
 /// whether the Orb uses it or not. One decoded from an encoded file of `deps/` has no source to
 /// compare: it is a copy, with the files it was decoded from, once `from_dir`'s merge of the
-/// encoded files accepts it (`merged`), but for the kernel's package, which the macro brings
-/// itself: a copy of it decoded so is an error asking to remove it. Any other must be read from a
-/// file of `deps/` itself: a copy in a directory of `deps/` or in the directory itself, even line
-/// for line, is `from_dir`'s error naming that directory. And that file must be the bundled file
-/// line for line, whatever its line endings (`tembra_contracts::bundled`): a copy nested in a
-/// file of another package, the one its `package` line declares as wit-parser reads it, even line
-/// for line, is `from_dir`'s error naming that file, and a file of the package that differs, if
-/// only in its comments, is an error naming the file, the package and what it is.
-pub(crate) fn bundled_copies(parsed: &Parsed) -> syn::Result<Copies> {
+/// encoded files accepts it (`merged`), but for the kernel's package where the macro brings it
+/// itself, for a state, a resource or the context, `kernel`: a copy of it decoded so is then an
+/// error asking to remove it. Any other must be read from a file of `deps/` itself: a copy in a
+/// directory of `deps/` or in the directory itself, even line for line, is `from_dir`'s error
+/// naming that directory. And that file must be the bundled file line for line, whatever its line
+/// endings (`tembra_contracts::bundled`): a copy nested in a file of another package, the one its
+/// `package` line declares as wit-parser reads it, even line for line, is `from_dir`'s error
+/// naming that file, and a file of the package that differs, if only in its comments, is an error
+/// naming the file, the package and what it is.
+pub(crate) fn bundled_copies(parsed: &Parsed, kernel: bool) -> syn::Result<Copies> {
     let Some(dir) = parsed.dir() else {
         return Ok(Copies::new());
     };
@@ -683,7 +684,7 @@ pub(crate) fn bundled_copies(parsed: &Parsed) -> syn::Result<Copies> {
     for (name, file) in named {
         let Some(file) = file else {
             let files = decoded.get(name).cloned().unwrap_or_default();
-            if name.namespace != "wasi" {
+            if kernel && name.namespace != "wasi" {
                 let files: Vec<String> = files
                     .iter()
                     .map(|file| file.display().to_string())

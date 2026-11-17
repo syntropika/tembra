@@ -2585,7 +2585,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // bundled package there checked whether the Orb uses it or not; the hook packages come from
     // the consumed directory. Foreign interfaces need `generate_all`.
     let kernel = !states.is_empty() || !resources.is_empty() || options.context;
-    let copies = wit::bundled_copies(&parsed)?;
+    let copies = wit::bundled_copies(&parsed, kernel)?;
     let (standard, nested) = wasi::packages(&parsed, &options.imports, &copies)?;
     let guest = kernel && wit::guest_package_needed(&parsed, &copies)?;
     if let Some(literal) = &options.package {
