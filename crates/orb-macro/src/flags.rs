@@ -153,6 +153,7 @@ pub(crate) fn shape(item: &syn::ItemStruct) -> syn::Result<Shape> {
         kind: ShapeKind::Flags(Box::new(item.clone())),
         scope: 0,
         carried: Default::default(),
+        item: Item::Struct(item.clone()),
     })
 }
 
@@ -199,6 +200,7 @@ pub(crate) fn check_modules(shapes: &[Shape], tree: &Module) -> syn::Result<()> 
                 &format!("module `{ident}` holding the flags"),
                 &shape.ident,
                 "maps the WIT flags onto it",
+                false,
             )?;
         }
     }

@@ -28,6 +28,7 @@ mod events;
 mod execution;
 #[cfg(feature = "hooks")]
 mod hooks;
+mod log;
 #[cfg(feature = "hooks")]
 mod observation;
 mod reference;
@@ -43,12 +44,14 @@ mod values;
 pub use acquisition::AcquisitionOptions;
 pub use context::Context;
 pub use declaration::Declaration;
+pub use log::LogRecord;
 pub use reference::{IssuedCall, Reference};
 pub use resources::{Cancellation, Resource, ResourceKey, ResourceSignal};
 pub use signals::ForeignNotification;
 pub use tasks::TaskScope;
 
 type ForeignNotifier = Rc<dyn Fn(ForeignNotification)>;
+type LogObserver = Rc<dyn Fn(&LogRecord)>;
 type ForeignDispatcher = Rc<dyn Fn(Value) -> LocalBoxFuture<'static, Result<Value>>>;
 type Encoder = Rc<dyn Fn() -> Result<Value>>;
 struct ValueRecord {
@@ -60,6 +63,9 @@ struct Environment {
     environment: Data,
     implementation: Implementation,
     scope: core::Id,
+    /// The owner of the native resources this version issues; its drop, with the version,
+    /// closes those still held.
+    issuer: Rc<crate::portable::Issuer>,
 }
 
 struct Object {
@@ -121,6 +127,7 @@ struct Inner {
     driver_wake: RefCell<Option<Rc<dyn Fn()>>>,
     foreign_dispatcher: RefCell<Option<ForeignDispatcher>>,
     foreign_notifier: RefCell<Option<ForeignNotifier>>,
+    log_observer: RefCell<Option<LogObserver>>,
     flushing: Cell<bool>,
     active: Cell<usize>,
     settled_waker: futures::task::AtomicWaker,
@@ -189,6 +196,7 @@ impl Host {
             driver_wake: RefCell::new(None),
             foreign_dispatcher: RefCell::new(None),
             foreign_notifier: RefCell::new(None),
+            log_observer: RefCell::new(None),
             flushing: Cell::new(false),
             active: Cell::new(0),
             settled_waker: futures::task::AtomicWaker::new(),
@@ -324,6 +332,7 @@ impl Host {
         self.0.scope_activations.borrow_mut().clear();
         self.0.host_resources.borrow_mut().clear();
         self.0.foreign_notifier.borrow_mut().take();
+        self.0.log_observer.borrow_mut().take();
         #[cfg(feature = "hooks")]
         self.clear_hooks();
         self.0.scope_objects.borrow_mut().clear();

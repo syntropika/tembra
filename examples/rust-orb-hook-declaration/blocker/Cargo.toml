@@ -6,9 +6,6 @@ publish = false
 
 [workspace]
 
-[lib]
-crate-type = ["cdylib"]
-
 # Read by `cargo tembra build`: the Orb name and API version, which the WIT does not carry. The
 # priority of the hook contribution is on the #[hook] attribute and travels in the component.
 [package.metadata.tembra]

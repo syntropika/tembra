@@ -1,7 +1,9 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
 use crate::foreign::{Foreign, Modules};
 use crate::resource_params::{self, Derived};
-use crate::{Composition, Declared, Function, Handles, Service, Shape, ShapeKind, WitResource};
+use crate::{
+    Composition, Declared, Function, Handles, Payload, Service, Shape, ShapeKind, WitResource,
+};
 use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use std::{
@@ -10,9 +12,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use syn::{
-    Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, LitStr, Meta, Type, ext::IdentExt,
-    spanned::Spanned,
+    Attribute, Expr, Fields, Ident, Item, ItemEnum, ItemStruct, Lit, LitStr, Meta, Type,
+    ext::IdentExt, spanned::Spanned,
 };
+use tembra_contracts::guest;
 use wit_parser::{
     PackageId, PackageName, PackageSourceMap, Resolve, TypeDefKind, UnresolvedPackageGroup,
 };
@@ -78,9 +81,15 @@ impl Namespace {
                 format!("{item} has no WIT name: its kebab-case form `{name}` {problem}"),
             ));
         }
+        self.claim_named(name, ident.span(), item)
+    }
+
+    /// Claim the WIT name `name`, a WIT identifier already, for `item`, described for the errors,
+    /// which point at `span`.
+    fn claim_named(&mut self, name: String, span: Span, item: String) -> syn::Result<()> {
         if let Some(previous) = self.claimed.insert(name.clone(), item.clone()) {
             return Err(syn::Error::new(
-                ident.span(),
+                span,
                 format!(
                     "{previous} and {item} are both `{name}` in {}{}; rename one of them",
                     self.scope, self.rule
@@ -358,8 +367,22 @@ pub(crate) fn render<'a>(
             }
         }
         uses.retain(|(_, names)| !names.is_empty());
+        // A case with named fields defines the record of its payload next to its variant.
         for shape in &defined {
             namespace.claim(&shape.ident, format!("the type `{}`", shape.ident))?;
+            let ShapeKind::Variant(cases) = &shape.kind else {
+                continue;
+            };
+            for (case, _) in cases
+                .iter()
+                .filter(|(_, payload)| matches!(payload, Payload::Named(_)))
+            {
+                namespace.claim_named(
+                    case_record(&shape.ident, case),
+                    case.span(),
+                    format!("the record of the case `{}::{case}`", shape.ident),
+                )?;
+            }
         }
         match derived_hooks.iter().find(|hook| &hook.ident == *ident) {
             Some(hook) => {
@@ -460,16 +483,20 @@ pub(crate) fn render<'a>(
     wit.push_str(&format!("\nworld {} {{\n", escaped(world)));
     if kernel.state {
         wit.push_str(&format!(
-            "  import {GUEST_STATE};\n  export {GUEST_STATE_INIT};\n"
+            "  import {};\n  export {};\n",
+            guest::STATE,
+            guest::STATE_INIT
         ));
     }
     if kernel.resources {
         wit.push_str(&format!(
-            "  import {GUEST_RESOURCES};\n  export {GUEST_RESOURCES_INIT};\n"
+            "  import {};\n  export {};\n",
+            guest::RESOURCE,
+            guest::RESOURCE_INIT
         ));
     }
     if kernel.context {
-        wit.push_str(&format!("  import {GUEST_CONTEXT};\n"));
+        wit.push_str(&format!("  import {};\n", guest::CONTEXT));
     }
     for import in imports {
         wit.push_str(&format!("  import {import};\n"));
@@ -559,15 +586,8 @@ fn resource_text(resource: &WitResource) -> String {
     text
 }
 
-/// The kernel's interfaces, as the world names them.
-const GUEST_STATE: &str = "tembra:guest/state@1.0.0";
-const GUEST_STATE_INIT: &str = "tembra:guest/state-init@1.0.0";
-const GUEST_RESOURCES: &str = "tembra:guest/resources@1.0.0";
-const GUEST_RESOURCES_INIT: &str = "tembra:guest/resources-init@1.0.0";
-pub(crate) const GUEST_CONTEXT: &str = "tembra:guest/context@1.0.0";
-
 /// The kernel's `tembra:guest` package, as `tembra-contracts` bundles it for every host.
-const GUEST: &str = tembra_contracts::guest::SOURCE;
+const GUEST: &str = guest::SOURCE;
 
 /// The kernel's `tembra:guest` package in nested form, appended to the inline WIT so the bindings
 /// of a state, a resource or the context resolve it.
@@ -1027,14 +1047,11 @@ impl Parsed {
             .map_err(Clone::clone)
     }
 
-    /// The consumed packages, owned, for the one reader that adds to them: the directory's,
+    /// The consumed packages, owned, for a reader that adds to them: a copy of the directory's,
     /// parsed now if nothing asked for them yet, or none without a directory.
-    pub(crate) fn into_consumed(self) -> syn::Result<Resolve> {
-        match self.dir {
-            Some(Directory { path, packages }) => packages
-                .into_inner()
-                .unwrap_or_else(|| resolve(&path))
-                .map(|(packages, _)| packages),
+    pub(crate) fn consumed(&self) -> syn::Result<Resolve> {
+        match &self.dir {
+            Some(dir) => dir.packages().cloned(),
             None => Ok(Resolve::default()),
         }
     }
@@ -1177,6 +1194,195 @@ pub(crate) fn consumed<'a>(
             Ok((identity.clone(), consumed))
         })
         .collect()
+}
+
+/// The data types of consumed interfaces as their bindings generate them, which a native codec
+/// reads and writes: the interfaces read from the consumed packages, by identity, with those the
+/// world exports, whose types the bindings generate under `exports`; they generate the types of
+/// every other interface at the root, where the world imports it. An interface the module
+/// implements is read as exported, one it imports would be read as imported.
+#[derive(Default)]
+pub(crate) struct ConsumedTypes {
+    resolve: Resolve,
+    interfaces: BTreeMap<String, wit_parser::InterfaceId>,
+    exported: BTreeSet<String>,
+}
+
+impl ConsumedTypes {
+    /// Read the interfaces `interfaces` of the packages of `dir`, parsed once for the expansion,
+    /// each with whether the world exports it.
+    pub(crate) fn read<'a>(
+        dir: &Directory,
+        interfaces: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> syn::Result<Self> {
+        let resolve = dir.packages()?.clone();
+        let mut read = BTreeMap::new();
+        let mut exported = BTreeSet::new();
+        for (identity, exports) in interfaces {
+            let id = resolve
+                .interfaces
+                .iter()
+                .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(identity))
+                .map(|(id, _)| id)
+                .ok_or_else(|| {
+                    error(format!(
+                        "{identity} is not an interface of the WIT packages in {}",
+                        dir.path().display()
+                    ))
+                })?;
+            read.insert(identity.to_owned(), id);
+            if exports {
+                exported.insert(identity.to_owned());
+            }
+        }
+        Ok(Self {
+            resolve,
+            interfaces: read,
+            exported,
+        })
+    }
+
+    /// The interface `identity`, when it was read.
+    pub(crate) fn interface(&self, identity: &str) -> Option<&wit_parser::Interface> {
+        Some(&self.resolve.interfaces[*self.interfaces.get(identity)?])
+    }
+
+    /// A type as the bindings spell it where they take it owned, in the parameters of an async
+    /// import and in every result, as a module `depth` levels below the Orb module names it: a
+    /// named type by its path, a string, a list, an option, a result or a tuple by its structure.
+    /// Only for a type `native::wit_kind` accepted, which holds no resource, stream or future.
+    pub(crate) fn owned(&self, ty: wit_parser::Type, depth: usize) -> proc_macro2::TokenStream {
+        use wit_parser::Type as Wit;
+        let spelled = |ty: Wit| self.owned(ty, depth);
+        match ty {
+            Wit::Bool => quote::quote! { bool },
+            Wit::U8 => quote::quote! { u8 },
+            Wit::U16 => quote::quote! { u16 },
+            Wit::U32 => quote::quote! { u32 },
+            Wit::U64 => quote::quote! { u64 },
+            Wit::S8 => quote::quote! { i8 },
+            Wit::S16 => quote::quote! { i16 },
+            Wit::S32 => quote::quote! { i32 },
+            Wit::S64 => quote::quote! { i64 },
+            Wit::F32 => quote::quote! { f32 },
+            Wit::F64 => quote::quote! { f64 },
+            Wit::Char => quote::quote! { char },
+            Wit::String => quote::quote! { ::std::string::String },
+            Wit::ErrorContext => unreachable!("an error context has no native codec"),
+            Wit::Id(id) => {
+                let definition = &self.resolve.types[id];
+                if definition.name.is_some() {
+                    return self.path(id, depth);
+                }
+                match &definition.kind {
+                    TypeDefKind::List(inner) => {
+                        let inner = spelled(*inner);
+                        quote::quote! { ::std::vec::Vec<#inner> }
+                    }
+                    TypeDefKind::Option(inner) => {
+                        let inner = spelled(*inner);
+                        quote::quote! { ::core::option::Option<#inner> }
+                    }
+                    TypeDefKind::Result(result) => {
+                        let side = |ty: Option<Wit>| ty.map_or(quote::quote! { () }, spelled);
+                        let (ok, err) = (side(result.ok), side(result.err));
+                        quote::quote! { ::core::result::Result<#ok, #err> }
+                    }
+                    TypeDefKind::Tuple(tuple) => {
+                        let types = tuple.types.iter().map(|ty| spelled(*ty));
+                        quote::quote! { (#(#types,)*) }
+                    }
+                    TypeDefKind::Type(inner) => spelled(*inner),
+                    _ => unreachable!("only a type with a native codec is spelled"),
+                }
+            }
+        }
+    }
+
+    /// The type of the interface `identity` the bindings name `ident`, `Entry` in the author's
+    /// `book::Entry`: one the interface defines or `use`s.
+    pub(crate) fn named(&self, identity: &str, ident: &Ident) -> Option<wit_parser::Type> {
+        let interface = &self.resolve.interfaces[*self.interfaces.get(identity)?];
+        interface
+            .types
+            .iter()
+            .find(|(name, _)| crate::type_ident(name) == *ident)
+            .map(|(_, id)| wit_parser::Type::Id(*id))
+    }
+
+    /// What a type is, through its aliases: a primitive, or the definition of a type.
+    pub(crate) fn definition(
+        &self,
+        ty: wit_parser::Type,
+    ) -> Result<(wit_parser::TypeId, &TypeDefKind), wit_parser::Type> {
+        match dealias(&self.resolve, ty) {
+            wit_parser::Type::Id(id) => Ok((id, &self.resolve.types[id].kind)),
+            primitive => Err(primitive),
+        }
+    }
+
+    /// The bindings' type of a record, a variant, an enum or a flags, as a module `depth` levels
+    /// below the Orb module names it: the module of the interface that defines it, under `exports`
+    /// when the world exports that interface and at the root when it imports it, then its name.
+    pub(crate) fn path(&self, id: wit_parser::TypeId, depth: usize) -> proc_macro2::TokenStream {
+        let definition = &self.resolve.types[id];
+        let identity = match definition.owner {
+            wit_parser::TypeOwner::Interface(owner) => self.resolve.id_of(owner),
+            _ => None,
+        }
+        .unwrap_or_default();
+        let ident = crate::type_ident(definition.name.as_deref().unwrap_or_default());
+        let path = crate::hook_path(&identity);
+        let module = if self.exported.contains(&identity) {
+            crate::export_module(depth, &path)
+        } else {
+            crate::import_module(depth, &path)
+        };
+        quote::quote! { #module::#ident }
+    }
+
+    /// Every record, variant, enum and flags the interfaces read define or `use`, and every one
+    /// those hold, each once, in the order the interfaces list them.
+    pub(crate) fn data_types(&self) -> Vec<wit_parser::TypeId> {
+        let mut found = Vec::new();
+        let mut pending: Vec<wit_parser::Type> = self
+            .interfaces
+            .values()
+            .flat_map(|id| self.resolve.interfaces[*id].types.values())
+            .map(|id| wit_parser::Type::Id(*id))
+            .rev()
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            let Ok((id, kind)) = self.definition(ty) else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            if matches!(
+                kind,
+                TypeDefKind::Record(_)
+                    | TypeDefKind::Variant(_)
+                    | TypeDefKind::Enum(_)
+                    | TypeDefKind::Flags(_)
+            ) {
+                found.push(id);
+            }
+            let held: Vec<wit_parser::Type> = match kind {
+                TypeDefKind::Record(record) => record.fields.iter().map(|field| field.ty).collect(),
+                TypeDefKind::Variant(variant) => {
+                    variant.cases.iter().filter_map(|case| case.ty).collect()
+                }
+                TypeDefKind::Tuple(tuple) => tuple.types.clone(),
+                TypeDefKind::Option(inner) | TypeDefKind::List(inner) => vec![*inner],
+                TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).collect(),
+                _ => Vec::new(),
+            };
+            pending.extend(held.into_iter().rev());
+        }
+        found
+    }
 }
 
 /// What a consumed interface defines, as the bindings name it: each of its types and resources, in
@@ -1640,7 +1846,7 @@ pub(crate) enum Held {
 /// it parsed, and the module's own WIT, `wit`, which the inline WIT starts with. A WIT the bindings
 /// would refuse yields nothing, and the bindings report it.
 pub(crate) fn bindings(
-    parsed: Parsed,
+    parsed: &Parsed,
     wit: &str,
     guest: bool,
     wasi: &[PackageId],
@@ -1664,7 +1870,7 @@ pub(crate) fn bindings(
                 .map(|(.., parse)| parse.clone()),
         );
     }
-    let Ok(mut resolve) = parsed.into_consumed() else {
+    let Ok(mut resolve) = parsed.consumed() else {
         return Bindings::default();
     };
     // The nested packages resolve after the consumed ones, as the bindings resolve the inline WIT,
@@ -2288,9 +2494,12 @@ pub(crate) fn error(message: impl std::fmt::Display) -> syn::Error {
     syn::Error::new(Span::call_site(), message.to_string())
 }
 
-/// A struct with named fields becomes a `record`; the module types its fields name are the
-/// caller's to give it.
-pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
+/// A struct with named fields becomes a `record`, each field's type spelled by `spelled`; the
+/// module types its fields name are the caller's to give it.
+pub(crate) fn record(
+    item: &ItemStruct,
+    spelled: &dyn Fn(&Type) -> syn::Result<String>,
+) -> syn::Result<Shape> {
     let Fields::Named(fields) = &item.fields else {
         return Err(syn::Error::new(item.span(), "a record needs named fields"));
     };
@@ -2307,7 +2516,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         wit.push_str(&format!(
             "    {}: {},\n",
             escaped(&kebab(ident)),
-            wit_type(&field.ty)?
+            spelled(&field.ty)?
         ));
         named.push((ident.clone(), field.ty.clone()));
     }
@@ -2319,16 +2528,28 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         kind: ShapeKind::Record(named),
         scope: 0,
         carried: Default::default(),
+        item: Item::Struct(item.clone()),
     })
 }
 
+/// The WIT name of the record a case with named fields carries: `<enum>-<case>`.
+pub(crate) fn case_record(enumeration: &Ident, case: &Ident) -> String {
+    format!("{}-{}", kebab(enumeration), kebab(case))
+}
+
 /// An enum becomes an `enum` when every variant is empty, otherwise a `variant` with one payload
-/// per case; the module types the payloads name are the caller's to give it.
-pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
+/// per case, each type spelled by `spelled`; the module types the payloads name are the caller's
+/// to give it. A case with named fields carries a record of its own, `<enum>-<case>`, defined
+/// before the variant.
+pub(crate) fn enumeration(
+    item: &ItemEnum,
+    spelled: &dyn Fn(&Type) -> syn::Result<String>,
+) -> syn::Result<Shape> {
     let plain = item
         .variants
         .iter()
         .all(|variant| matches!(variant.fields, Fields::Unit));
+    let mut records = String::new();
     let mut wit = String::new();
     for doc in docs(&item.attrs)? {
         wit.push_str(&format!("  ///{doc}\n"));
@@ -2344,19 +2565,55 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
         match &variant.fields {
             Fields::Unit => {
                 wit.push_str(&format!("    {case},\n"));
-                cases.push((variant.ident.clone(), None));
+                cases.push((variant.ident.clone(), Payload::None));
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 wit.push_str(&format!(
                     "    {case}({}),\n",
-                    wit_type(&fields.unnamed[0].ty)?
+                    spelled(&fields.unnamed[0].ty)?
                 ));
-                cases.push((variant.ident.clone(), Some(fields.unnamed[0].ty.clone())));
+                cases.push((
+                    variant.ident.clone(),
+                    Payload::Unnamed(fields.unnamed[0].ty.clone()),
+                ));
             }
-            _ => {
+            Fields::Named(fields) if !fields.named.is_empty() => {
+                let record = case_record(&item.ident, &variant.ident);
+                records.push_str(&format!("  record {record} {{\n"));
+                let mut named = Vec::new();
+                for field in &fields.named {
+                    let Some(ident) = &field.ident else {
+                        continue;
+                    };
+                    records.push_str(&format!(
+                        "    {}: {},\n",
+                        escaped(&kebab(ident)),
+                        spelled(&field.ty)?
+                    ));
+                    named.push((ident.clone(), field.ty.clone()));
+                }
+                records.push_str("  }\n");
+                wit.push_str(&format!("    {case}({record}),\n"));
+                cases.push((variant.ident.clone(), Payload::Named(named)));
+            }
+            Fields::Named(_) => {
                 return Err(syn::Error::new(
                     variant.span(),
-                    "a variant carries at most one unnamed payload",
+                    format!(
+                        "`{}::{} {{}}` has no field: a case carries nothing, one unnamed payload or named fields, at least one, which enter the WIT as a record of their own",
+                        item.ident, variant.ident
+                    ),
+                ));
+            }
+            Fields::Unnamed(fields) => {
+                return Err(syn::Error::new(
+                    variant.span(),
+                    format!(
+                        "`{}::{}` carries {} unnamed payloads: a case carries nothing, one unnamed payload or named fields, which enter the WIT as a record of their own",
+                        item.ident,
+                        variant.ident,
+                        fields.unnamed.len()
+                    ),
                 ));
             }
         }
@@ -2369,11 +2626,12 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
     };
     Ok(Shape {
         ident: item.ident.clone(),
-        wit,
+        wit: format!("{records}{wit}"),
         references: Vec::new(),
         kind,
         scope: 0,
         carried: Default::default(),
+        item: Item::Enum(item.clone()),
     })
 }
 
@@ -2389,8 +2647,52 @@ fn unit(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(tuple) if tuple.elems.is_empty())
 }
 
+/// Whether a Rust type is free JSON, `serde_json::Value`, by the end of its path: a WIT `string`
+/// that holds JSON text, which each side of the boundary reads and writes.
+pub(crate) fn free_json(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let segments: Vec<&syn::PathSegment> = path.path.segments.iter().collect();
+    path.qself.is_none()
+        && matches!(segments.as_slice(), [.., json, value]
+            if json.ident == "serde_json"
+                && value.ident == "Value"
+                && json.arguments.is_none()
+                && value.arguments.is_none())
+}
+
+/// Whether a Rust type holds free JSON: is it, or holds it in its type parameters or its tuple's
+/// elements.
+pub(crate) fn holds_free_json(ty: &Type) -> bool {
+    free_json(ty)
+        || match ty {
+            Type::Path(path) => path.path.segments.last().is_some_and(|segment| {
+                matches!(&segment.arguments, syn::PathArguments::AngleBracketed(arguments)
+                if arguments.args.iter().any(|argument| {
+                    matches!(argument, syn::GenericArgument::Type(ty) if holds_free_json(ty))
+                }))
+            }),
+            Type::Tuple(tuple) => tuple.elems.iter().any(holds_free_json),
+            _ => false,
+        }
+}
+
 /// Translate an owned Rust type into its WIT spelling.
 pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
+    wit_type_with(ty, &|_| Ok(None))
+}
+
+/// Translate an owned Rust type into its WIT spelling, where `newtype` spells a path that names a
+/// newtype of the module, as its field's type, and answers `None` for any other type of the module.
+pub(crate) fn wit_type_with(
+    ty: &Type,
+    newtype: &dyn Fn(&Type) -> syn::Result<Option<String>>,
+) -> syn::Result<String> {
+    if free_json(ty) {
+        return Ok("string".into());
+    }
+    let wit_type = |ty: &Type| wit_type_with(ty, newtype);
     match ty {
         Type::Path(path) => {
             let segment = path
@@ -2416,10 +2718,17 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
                     })
                     .collect::<syn::Result<Vec<_>>>()?;
                 if types.len() != count {
+                    // The runtime's `Result<T>`, imported by `use`, is a service method's error
+                    // channel only by its path.
+                    let hint = if name == "Result" && types.len() == 1 {
+                        "; for a service method's error channel, spell the runtime's by its path, `tembra::Result<T>`"
+                    } else {
+                        ""
+                    };
                     return Err(syn::Error::new(
                         segment.span(),
                         format!(
-                            "the macro reads `{name}` by its name as {}, so another `{name}`, such as a module's own alias, cannot stand for it here",
+                            "the macro reads `{name}` by its name as {}, so another `{name}`, such as a module's own alias, cannot stand for it here{hint}",
                             if count == 1 {
                                 format!("`{name}<T>`")
                             } else {
@@ -2475,8 +2784,12 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
                         (false, false) => format!("result<{}, {}>", wit_type(ok)?, wit_type(err)?),
                     }
                 }
-                // A type of the module, by its WIT name.
-                _ => escaped(&kebab(&segment.ident)),
+                // A newtype of the module as its field's type, any other type of the module by
+                // its WIT name.
+                _ => match newtype(ty)? {
+                    Some(spelling) => spelling,
+                    None => escaped(&kebab(&segment.ident)),
+                },
             })
         }
         Type::Tuple(tuple) if tuple.elems.is_empty() => Err(syn::Error::new(

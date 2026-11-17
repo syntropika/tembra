@@ -90,6 +90,18 @@ fn the_guest_names_no_wit_bindgen() {
 }
 
 #[test]
+fn the_library_keeps_the_default_crate_type() {
+    // `cargo tembra build` asks for the cdylib, so the crate keeps the default library type, which
+    // a native host can depend on.
+    let facade = Facade::Path("/home/ada/tembra/crates/tembra".to_owned());
+    let manifest: toml::Value = toml::from_str(&manifest("greeter", &facade)).unwrap();
+    assert_eq!(
+        manifest.get("lib").and_then(|lib| lib.get("crate-type")),
+        None
+    );
+}
+
+#[test]
 fn a_checkout_is_found_from_any_directory_inside_it() {
     let dir = scratch("checkout-above");
     let checkout = dir.join("tembra");

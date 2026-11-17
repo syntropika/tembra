@@ -229,6 +229,51 @@ fn reference_roles_derive_the_provider_requirement_and_round_trip() {
     );
 }
 
+/// A native consumer requires of an import's provider what the plan requires of the Orb an
+/// installation selects for it, read from the world alone: for a plain import, the interface with
+/// its digest and functions, and for a view, the provider interface it addresses, with the digest
+/// and the methods derived from its resource. A world function that is no import is refused.
+#[test]
+fn an_import_requirement_is_the_plan_s_for_an_orb_provider() {
+    let importer = contract(&wit(SERVICE_BODY, VIEW_BODY), "mixed");
+    let mut bindings = orb_binding();
+    bindings.insert(
+        SERVICE.into(),
+        Binding::Orb {
+            name: "keyed".into(),
+            api_version: 1,
+        },
+    );
+    let plan = importer
+        .prepared()
+        .clone()
+        .with_references(&roles(VIEW, SERVICE).references)
+        .unwrap()
+        .plan("router", 1, &bindings)
+        .unwrap();
+    let requirement = &plan.orb.requires[0];
+    let methods = BTreeSet::from(["add".to_owned(), "who".to_owned()]);
+    let expected = (
+        SERVICE.to_owned(),
+        requirement.signatures[QUALIFIED].clone(),
+        requirement.methods[QUALIFIED].clone(),
+    );
+    assert_eq!(expected.2, methods);
+    assert_eq!(
+        importer.import_requirement(SERVICE, None).unwrap(),
+        expected
+    );
+    assert_eq!(
+        importer.import_requirement(VIEW, Some(SERVICE)).unwrap(),
+        expected
+    );
+    assert!(
+        importer
+            .import_requirement("example:keyed/router@1.0.0", None)
+            .is_err()
+    );
+}
+
 #[test]
 fn view_method_slots_carry_only_data_while_resource_wire_keeps_the_receiver() {
     let importer = contract(&wit(SERVICE_BODY, VIEW_BODY), "compiled-router");

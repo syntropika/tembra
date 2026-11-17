@@ -514,3 +514,90 @@ fn host_close_and_reload_wait_for_the_producer() {
         fixture.close();
     });
 }
+
+#[path = "support/components.rs"]
+mod components;
+
+/// An interface with a resource and a `stream<u8>` export, provided by a component encoded from a
+/// core module, so it runs without a guest toolchain. The module only constructs sessions: its
+/// `frames` traps if it ever runs.
+const SESSIONS_WIT: &str = "package example:sessions@1.0.0;
+
+interface frames {
+  resource session {
+    constructor();
+  }
+  frames: async func() -> stream<u8>;
+}
+
+world provider {
+  export frames;
+}
+";
+
+const SESSIONS_MODULE: &str = r#"(module
+  (import "[export]example:sessions/frames@1.0.0" "[resource-new]session"
+    (func $new (param i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 1024)
+  (func (export "example:sessions/frames@1.0.0#[constructor]session") (result i32)
+    i32.const 1
+    call $new)
+  (func (export "[async-lift]example:sessions/frames@1.0.0#frames") (result i32)
+    unreachable)
+  (func (export "[callback][async-lift]example:sessions/frames@1.0.0#frames")
+    (param i32 i32 i32) (result i32)
+    unreachable))"#;
+
+/// A stream export takes no `self`: one lent to it through the handle of a session of its interface
+/// is refused as a data export refuses any capability, `Invalid/local_value`, before the export
+/// runs.
+#[test]
+fn a_stream_export_refuses_a_lent_self_as_a_data_export_does() {
+    let engine = Engine::new(Limits::default()).unwrap();
+    let artifact = components::encode(
+        SESSIONS_WIT,
+        "provider",
+        SESSIONS_MODULE,
+        "sessions",
+        &Default::default(),
+    );
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![engine.load(&artifact, Install::default()).unwrap()])
+        .unwrap();
+    let reference = Rc::new(
+        host.get(
+            "sessions::example:sessions/frames@1.0.0",
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(reference.ready()).unwrap();
+    let called = reference.clone();
+    let refused = pool
+        .run_until(host.root("alice", move |context| {
+            async move {
+                let session: tembra::portable::Owned = called
+                    .call_portable(&context, "[constructor]session", serde_json::json!([]))
+                    .await?;
+                Ok(session
+                    .call_portable::<_, ByteStream>(&context, "frames", serde_json::json!([]))
+                    .await
+                    .err()
+                    .expect("a stream export refuses a lent self"))
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(
+        (refused.code, refused.reason.as_str()),
+        (core::Code::Invalid, "local_value"),
+        "{refused}"
+    );
+    reference.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}

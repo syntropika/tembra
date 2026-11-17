@@ -161,12 +161,12 @@ impl PreparedContract {
             .then_some(HTTP_HANDLER)
     }
 
-    /// Lower named exported interfaces; executors check their supported transport separately.
-    ///
-    /// The incoming HTTP handler is skipped: it is served only through the host-local ingress
-    /// adapter and never becomes portable service metadata.
-    pub(crate) fn services(&self, provider: &str) -> Result<Vec<Service>, Error> {
-        let mut services = Vec::new();
+    /// The exported interfaces that become services, each with its identity, in world order:
+    /// named interfaces with functions, exported under their own identity. The kernel callbacks
+    /// are answered to the kernel and the incoming HTTP handler is served only through the
+    /// host-local ingress adapter; neither becomes portable service metadata.
+    fn service_interfaces(&self) -> Result<Vec<(String, &Interface)>, Error> {
+        let mut interfaces = Vec::new();
         let mut aliases = BTreeMap::new();
         for entry in &self.model().exports {
             if is_ingress(entry) {
@@ -210,15 +210,7 @@ impl PreparedContract {
                         ));
                     }
                     if !interface.functions.is_empty() {
-                        let mut service = Service::new(
-                            service_name(provider, &contract),
-                            interface
-                                .functions
-                                .iter()
-                                .map(|function| function.name.clone()),
-                        );
-                        service.signature = Some(self.digest(interface)?);
-                        services.push(service);
+                        interfaces.push((contract, interface));
                     }
                 }
                 Item::Type(_) => {}
@@ -229,7 +221,75 @@ impl PreparedContract {
                 }
             }
         }
-        Ok(services)
+        Ok(interfaces)
+    }
+
+    /// Lower named exported interfaces; executors check their supported transport separately.
+    pub(crate) fn services(&self, provider: &str) -> Result<Vec<Service>, Error> {
+        self.service_interfaces()?
+            .into_iter()
+            .map(|(contract, interface)| {
+                let mut service = Service::new(
+                    service_name(provider, &contract),
+                    interface
+                        .functions
+                        .iter()
+                        .map(|function| function.name.clone()),
+                );
+                service.signature = Some(self.digest(interface)?);
+                Ok(service)
+            })
+            .collect()
+    }
+
+    /// The signature of each exported interface that becomes a service, by the interface's
+    /// identity: the digest [`Self::plan`] gives the service named `service_name(orb, identity)`.
+    /// A native provider of the interface declares it on its `Service`, and the kernel admits it
+    /// against the same contract.
+    pub fn service_signatures(&self) -> Result<BTreeMap<String, String>, Error> {
+        self.service_interfaces()?
+            .into_iter()
+            .map(|(contract, interface)| Ok((contract, self.digest(interface)?)))
+            .collect()
+    }
+
+    /// What an Orb provider of the import `binding` offers, as [`Self::plan`] requires it of the
+    /// provider an installation selects: the identity of the interface the provider exports, the
+    /// signature of that interface and the names of its functions. A reference view, which
+    /// `reference` maps to the provider interface it addresses, requires that interface, with the
+    /// signature and the methods derived from the view's resource. A native consumer of the import
+    /// requires the same of its provider, so the kernel admits both against one contract.
+    pub fn import_requirement(
+        &self,
+        binding: &str,
+        reference: Option<&str>,
+    ) -> Result<(String, String, std::collections::BTreeSet<String>), Error> {
+        if let Some(target) = reference {
+            let view = self.reference_binding(binding, target)?;
+            return Ok((
+                view.interface,
+                view.signature,
+                view.methods.into_values().collect(),
+            ));
+        }
+        let (_, interface) = self
+            .provided_imports()?
+            .into_iter()
+            .find(|(key, _)| *key == binding)
+            .ok_or_else(|| Error(format!("{binding} is no import of the world")))?;
+        let contract = interface
+            .contract
+            .clone()
+            .ok_or_else(|| Error("anonymous import needs an explicit provider mapping".into()))?;
+        Ok((
+            contract,
+            self.digest(interface)?,
+            interface
+                .functions
+                .iter()
+                .map(|function| function.name.clone())
+                .collect(),
+        ))
     }
 
     /// Derive kernel metadata after selecting installed Orb and host providers explicitly.
