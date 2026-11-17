@@ -4562,7 +4562,7 @@ fn a_native_service_gets_a_typed_client() {
     );
     let root = native(&module, &[]);
     for expected in [
-        "pub struct MathClient { reference : :: std :: rc :: Rc < :: tembra :: Reference > , }",
+        "pub struct MathClient { pub (crate) reference : :: std :: rc :: Rc < :: tembra :: Reference > , }",
         "impl MathClient {",
         "pub fn new (reference : :: std :: rc :: Rc < :: tembra :: Reference >) -> Self { Self { reference } }",
         "# [doc = \" The sum of two numbers.\"] pub async fn add (& self , context : & :: tembra :: Context , a : u32 , b : u32) -> :: tembra :: Result < u32 > { self . reference . call :: < (u32 , u32 ,) , u32 > (context , \"add\" , (a , b ,)) . await }",
@@ -4936,7 +4936,7 @@ fn the_native_context_reads_the_call_each_method_runs_for() {
 /// it builds into the call's result, whose data is its index there, a method reads its `self` from
 /// the call through a `Receiver`, and a static function or a service function whose result holds
 /// the resource issues what it returns, also inside a container. Such a function has no local
-/// entrypoint, so the service's client has no method for it.
+/// entrypoint, so the service's client calls it portably.
 #[test]
 fn a_wit_resource_is_issued_natively_and_read_as_self() {
     let module = expanded(
@@ -4985,8 +4985,8 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
     ] {
         assert!(native.contains(expected), "{expected}\n{native}");
     }
-    // A function handing out a resource has no local entrypoint, and no method of the client.
-    for absent in ["pub async fn open", "pub async fn many", "\"open\" , (n ,)"] {
+    // A function handing out a resource has no local entrypoint: its client calls it portably.
+    for absent in [". method_with (\"open\"", "\"open\" , (n ,)"] {
         assert!(!native.contains(absent), "{absent}\n{native}");
     }
     // With the `context` option, the resource's functions and a function handing it out run in
@@ -5011,6 +5011,150 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
             ". payload_method (\"{function}\" , | _ , __tembra_context : :: tembra :: Context , {receiver} : :: tembra :: portable :: Payload {scoped}"
         );
         assert!(in_context.contains(&expected), "{expected}\n{in_context}");
+    }
+}
+
+/// A native caller's typed calls of a WIT resource: the resource's handle type, `SessionHandle`,
+/// owns an `Owned` handle and has one async method per method of the resource, which takes the
+/// call's context first and calls the method through the handle; the service's client gets the
+/// constructor, `new_session`, and the static functions, `session_make`, and calls a function
+/// handing the resource out portably. Each answers a bare resource as its handle, from the `Owned`
+/// handle the call delivers, and nested ones from the `Delivered` result, each handle at the index
+/// the value names.
+#[test]
+fn a_wit_resource_gets_a_typed_handle_and_client_calls() {
+    let module = expanded(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) }
+            pub fn many(n: u32) -> (Vec<Session>, u32) { (Vec::new(), n) }",
+        ),
+    );
+    let native = native(&module, &[]);
+    let arguments = "let __tembra_arguments = __tembra_encode () . map_err (| message | { :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }) ? ;";
+    let wrapped = "< SessionHandle as :: core :: convert :: TryFrom < :: tembra :: portable :: Owned >> :: try_from";
+    for expected in [
+        "pub struct SessionHandle { owned : :: tembra :: portable :: Owned , }",
+        "# [doc = \" The number.\"] pub async fn get (& self , context : & :: tembra :: Context) -> :: tembra :: Result < u32 > {",
+        arguments,
+        "let __tembra_value = self . owned . call_portable :: < _ , :: tembra :: serde_json :: Value > (context , \"[method]session.get\" , __tembra_arguments) . await ? ;",
+        "pub async fn twin (& self , context : & :: tembra :: Context) -> :: tembra :: Result < SessionHandle > {",
+        &format!(
+            "{wrapped} (self . owned . call_portable :: < _ , :: tembra :: portable :: Owned > (context , \"[method]session.twin\" , __tembra_arguments) . await ?)"
+        ),
+        // A handle of another resource type comes back as the error, still open.
+        "impl :: core :: convert :: TryFrom < :: tembra :: portable :: Owned > for SessionHandle { type Error = :: tembra :: portable :: Owned ;",
+        "if * owned . nominal () != < Session as :: tembra :: portable :: Issuable > :: nominal () { return :: core :: result :: Result :: Err (owned) ; }",
+        "impl :: core :: convert :: From < SessionHandle > for :: tembra :: portable :: Owned {",
+        "impl SessionsClient { # [doc = \" A new `Session`, from its constructor, as its handle.\"] pub async fn new_session (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < SessionHandle > {",
+        ":: tembra :: serde_json :: Value :: Array (:: std :: vec ! [:: tembra :: serde_json :: to_value (n) . map_err (| error | error . to_string ()) ?] ,)",
+        &format!(
+            "{wrapped} (self . reference . call_portable :: < _ , :: tembra :: portable :: Owned > (context , \"[constructor]session\" , __tembra_arguments) . await ?)"
+        ),
+        "pub async fn session_make (& self , context : & :: tembra :: Context) -> :: tembra :: Result < SessionHandle > {",
+        "pub async fn open (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < SessionHandle > {",
+        "pub async fn many (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < (:: std :: vec :: Vec < SessionHandle > , u32 ,) > {",
+        "let __tembra_delivered = self . reference . call_portable :: < _ , :: tembra :: portable :: Delivered > (context , \"many\" , __tembra_arguments) . await ? ;",
+        ". and_then (| index : usize | __tembra_owned . get_mut (index)) . and_then (:: core :: option :: Option :: take)",
+        ". collect :: < :: core :: result :: Result < :: std :: vec :: Vec < _ > , :: std :: string :: String >> ()",
+        "if __tembra_owned . iter () . any (:: core :: option :: Option :: is_some) {",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
+    }
+    // A resource in a sub-module of its service's module: its handle sits there, and so do the
+    // client's calls of its constructor, on the client of the service's module.
+    let module = expanded(
+        "example:desk@1.0.0",
+        "mod desk {
+            #[service]
+            pub struct Sessions;
+            impl Sessions {
+                pub fn open(n: u32) -> kinds::Session { kinds::Session::new(n) }
+            }
+            pub mod kinds {
+                #[wit_resource(service = Sessions)]
+                pub struct Session { n: u32 }
+                impl Session {
+                    #[constructor]
+                    pub fn new(n: u32) -> Session { Session { n } }
+                    pub fn get(&self) -> u32 { self.n }
+                }
+            }
+        }",
+    );
+    let root = self::native(&module, &[]);
+    assert!(
+        root.contains("pub async fn open (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < kinds :: SessionHandle > {"),
+        "{root}"
+    );
+    let kinds = self::native(&module, &["kinds"]);
+    for expected in [
+        "pub struct SessionHandle {",
+        "impl super :: SessionsClient { # [doc = \" A new `Session`, from its constructor, as its handle.\"] pub async fn new_session (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < super :: kinds :: SessionHandle > {",
+    ] {
+        assert!(kinds.contains(expected), "{expected}\n{kinds}");
+    }
+}
+
+/// The client of a service names each function of its interface, and the constructor and static
+/// functions of each of its resources, `new_<resource>` and `<resource>_<function>`: two methods of
+/// one name, which the compiler would refuse as one method defined twice, are refused natively,
+/// naming both, a function of the service and a resource's, or the functions of two resources. A
+/// component build, which has no client, takes them.
+#[test]
+fn the_native_client_refuses_two_methods_of_one_name() {
+    // The constructor of `Kind` and the static function `kind` of `New`.
+    let two = "mod desk {
+        #[wit_resource]
+        pub struct Kind { n: u32 }
+        impl Kind {
+            #[constructor]
+            pub fn new(n: u32) -> Kind { Kind { n } }
+            pub fn get(&self) -> u32 { self.n }
+        }
+        #[wit_resource]
+        pub struct New { n: u32 }
+        impl New {
+            pub fn kind() -> u32 { 0 }
+            pub fn get(&self) -> u32 { self.n }
+        }
+        #[service]
+        pub struct Sessions;
+        impl Sessions {
+            pub fn open(n: u32) -> New { New { n } }
+        }
+    }";
+    for (module, message) in [
+        (
+            DESK.replace(
+                "pub fn open(n: u32) -> Session { Session::new(n) }",
+                "pub fn open(n: u32) -> Session { Session::new(n) }
+                pub fn new_session(n: u32) -> u32 { n }",
+            ),
+            "the client of `Sessions` would name both the function `Sessions::new_session` and the constructor of `Session` `new_session`; rename one of them",
+        ),
+        (
+            DESK.replace(
+                "pub fn open(n: u32) -> Session { Session::new(n) }",
+                "pub fn open(n: u32) -> Session { Session::new(n) }
+                pub fn session_make() -> u32 { 0 }",
+            ),
+            "the client of `Sessions` would name both the function `Sessions::session_make` and the static function `Session::make` `session_make`; rename one of them",
+        ),
+        (
+            two.to_owned(),
+            "the client of `Sessions` would name both the constructor of `Kind` and the static function `New::kind` `new_kind`; rename one of them",
+        ),
+    ] {
+        let module = orb_with(options("example:desk@1.0.0", None), &module)
+            .unwrap_or_else(|error| panic!("{message}: {error}"));
+        assert_eq!(
+            native(&module, &[]),
+            format!(":: core :: compile_error ! (\"{message}\") ;"),
+            "{message}"
+        );
+        assert!(wit(&module).starts_with("package "), "{message}");
     }
 }
 

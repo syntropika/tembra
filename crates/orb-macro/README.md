@@ -1003,13 +1003,14 @@ tuple of the parameters in WIT order, `()` without parameters, and gets the Rust
 `Reference::call` checks the types only at run time, and another type fails the call with
 `rust_type`. So for each service the macro also generates a typed client in the service's module,
 as visible as its struct, `MathClient` for `Math`: `MathClient::new(reference)` wraps an
-`Rc<Reference>` to one of the service's objects, and each function of the interface is an async
-method that takes the call's `&Context` first and then the function's parameters, which the
-compiler checks. A function named `new` is `new_` on the client, since `new` builds the client; its
-WIT name stays `new`. The client of a service in a private module is as unreachable as the module:
-make the module `pub` for a host to use it, or re-export the client where the runtime is linked,
-since a component build has none. A portable caller's JSON array of arguments goes through a codec
-the macro writes from the WIT, so the author's types need no serde. The Orb's name and API version
+`Rc<Reference>` to one of the service's objects, and each function of the interface, and the
+constructor and static functions of its WIT resources, as below, is an async method that takes the
+call's `&Context` first and then the function's parameters, which the compiler checks. A function
+named `new` is `new_` on the client, since `new` builds the client; its WIT name stays `new`. The
+client of a service in a private module is as unreachable as the module: make the module `pub` for
+a host to use it, or re-export the client where the runtime is linked, since a component build has
+none. A portable caller's JSON array of arguments goes through a codec the macro writes from the
+WIT, so the author's types need no serde. The Orb's name and API version
 come from `[package.metadata.tembra]` of the crate manifest, with the defaults of
 `cargo tembra build`: the crate name and 1. `orb_named(name, api_version, ..)` builds the same Orb
 under a name and API version the host chooses at run time, so that a host can also install the
@@ -1224,12 +1225,37 @@ The value belongs to the object that issued it, as a compiled exporter's belongs
 closes, running its `Drop`, with its last owner, or when that object is reloaded or released or the
 host closes. A method may be `async`: its call holds the value until it ends, through the guard of
 `Receiver::guard`, so `&self` stays valid across its awaits, as in a component, also when the Orb is
-reloaded meanwhile, after which the value closes once the call has ended. These functions have no
-local entrypoint, so a native caller calls them with `call_portable` and holds the resource as an
-`Owned` handle, and the service's client has no method for them; see
-[owned WIT resources](../../docs/rust.md#owned-wit-resources). Natively a resource is only
-returned, or borrowed as a method's `self`: a function taking one is a compile error where the
+reloaded meanwhile, after which the value closes once the call has ended. Natively a resource is
+only returned, or borrowed as a method's `self`: a function taking one is a compile error where the
 runtime is linked.
+
+These functions have no local entrypoint, so the service's client calls them portably, through the
+codec, and answers each resource as its handle type, `<Resource>Handle`, `BuilderHandle` for
+`Builder`, public in the resource's module. A handle owns the resource's `Owned` handle, whose drop
+drops the resource, and has one async method per method of the resource, which takes the call's
+`&Context` first, as the client's do. The client offers the resource's constructor as
+`new_<resource>` and each static function as `<resource>_<function>`, and a function whose result
+holds the resource answers a handle in its place, alone or nested in a list, an option, a result or
+a tuple, each handle naming its own value:
+
+```rust,ignore
+// In a native host, under a root context, with a reference to the `texts` object.
+let texts = text::TextsClient::new(reference);
+let builder: text::BuilderHandle = texts.new_builder(&context).await?;
+assert_eq!(builder.push(&context, 'a').await?, 1);
+let (labelled, label): (text::BuilderHandle, String) =
+    texts.labelled(&context, "b".into()).await?;
+assert_eq!((labelled.text(&context).await?, label), (String::new(), "b".into()));
+drop(builder); // drops the resource: the Orb's value closes
+```
+
+Two methods of one name on a client, such as a function `new_builder` of the service beside the
+constructor of `Builder`, are a compile error where the runtime is linked, naming both.
+`BuilderHandle::try_from(owned)` wraps an `Owned` handle of the resource, such as one
+`call_portable` delivers. An `Owned` handle of another resource type comes back as the error, still
+open, so a caller holding a resource of an interface with several resource types can try the
+handle type of each in turn; `Owned::from(handle)` gives the owned handle back, to move the
+resource into a call's arguments. See [owned WIT resources](../../docs/rust.md#owned-wit-resources).
 
 A [`#[state]`](#kernel-managed-state) serves a native host as it serves a component. The factory of
 the service that owns it declares it with `Declaration::state`, from the state's `Default` at its
@@ -1449,7 +1475,8 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
     runs its `#[root]`, from one
     hidden function per service, written in the service's module and declaring the codec of each
     of its methods, and the state of its objects, if they own one, next to the service's typed
-    client, `<Service>Client`, an `include_bytes!` of the manifest, and a hidden trait that each
+    client, `<Service>Client`, the handle type of each WIT resource, `<Resource>Handle`, in the
+    resource's module, an `include_bytes!` of the manifest, and a hidden trait that each
     type of the module entering the WIT implements in its own module, reading and writing its JSON;
     with the `context` option, the native `context`, whose functions read the call each method's
     future runs for, see [using the Orb natively](#using-the-orb-natively).

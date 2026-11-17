@@ -14,7 +14,9 @@
 //! the bindings' type. A `#[wit_resource]` struct is issued as a capability of its resource type:
 //! a function whose result holds one issues it into the call's result, as a portable method
 //! without a local entrypoint, and each method of the resource reads its `self` back from the
-//! call; the resource's functions are registered from its own module. With the `context` option,
+//! call; the resource's functions are registered from its own module, with the handle type a
+//! native caller holds the resource as, whose methods are the resource's, and the calls of its
+//! constructor and static functions on the service's client. With the `context` option,
 //! the Orb module gets a native `context`, whose functions read the call each method's future runs
 //! for. A service whose objects own a `#[state]` declares it in its factory, and its methods run in
 //! the scope of their object, whose state the state's `read` and `update` reach natively. The Orb's
@@ -77,7 +79,12 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
     let registrations = analysis
         .services
         .iter()
-        .map(|service| registration(service, analysis, imported))
+        .map(|service| {
+            Ok([
+                registration(service, analysis, imported)?,
+                client(service, analysis)?,
+            ])
+        })
         .collect::<Result<Vec<_>, _>>();
     let registrations = match registrations {
         Ok(registrations) => registrations,
@@ -96,10 +103,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         let table = resources.then(|| quote! { , &resources });
         let imports = imported.then(|| quote! { , &imports });
         calls.push(quote! { self::#(#path::)* #function(name #inputs #table #imports) });
-        by_scope
-            .entry(service.scope)
-            .or_default()
-            .extend([items, client(service, analysis)]);
+        by_scope.entry(service.scope).or_default().extend(items);
     }
     // Each contribution, which `orb(..)` adds to the Orb after its services, with the Orb that
     // declares the hook, from its module.
@@ -1102,9 +1106,8 @@ fn issues(function: &Function, scope: usize, analysis: &Analysis) -> bool {
 /// The `payload_method` call binding a function of a service whose result holds a resource, under
 /// its WIT name: the call issues each resource of the value into its result, passing the context
 /// itself where the function takes `&Context`; its future runs in the `scopes` of the service, as
-/// a method's does. The function has no local entrypoint, so a native caller calls it with
-/// `call_portable`, holding the resources as `Owned` handles, and the service's client has no
-/// method for it.
+/// a method's does. The function has no local entrypoint, so the service's client calls it
+/// portably, and holds the resources as their handle types.
 fn issuing(
     service: &Service,
     function: &Function,
@@ -1292,6 +1295,20 @@ fn glue_ident(resource: &WitResource) -> Ident {
     )
 }
 
+/// The handle type of a WIT resource for native callers, `CursorHandle` for `Cursor`.
+fn handle_ident(resource: &WitResource) -> Ident {
+    format_ident!("{}Handle", resource.ident)
+}
+
+/// The handle type of a WIT resource, as the module `scope` names it.
+fn handle_path(resource: &WitResource, scope: usize, analysis: &Analysis) -> TokenStream {
+    crate::relative(
+        analysis.modules[scope].len(),
+        &analysis.modules[resource.scope],
+        &handle_ident(resource),
+    )
+}
+
 /// The native side of a WIT resource, in its own module: its struct is `Issuable` as the resource
 /// of its service's interface, and a function adds its functions to the service, each bound with
 /// `payload_method` under its WIT name: the constructor, `[constructor]<resource>`, which issues
@@ -1303,7 +1320,8 @@ fn glue_ident(resource: &WitResource) -> Ident {
 /// call, with the `context` option, that of its object, when the service's objects own a state,
 /// which the function adding them is given the way to reach, as the object's environment is the
 /// service's, and that of its Orb, with root resources, whose table that function is given too, as
-/// it is the table of the Orb's imports.
+/// it is the table of the Orb's imports. For native callers, the resource's handle type and the
+/// service's client calls of its constructor and static functions come with it.
 fn resource_glue(
     resource: &WitResource,
     analysis: &Analysis,
@@ -1351,7 +1369,13 @@ fn resource_glue(
             None,
             &constructor.params,
             &kinds,
-            Some((&built, &Kind::Resource(&built))),
+            Some((
+                &built,
+                &Kind::Resource {
+                    ty: &built,
+                    handle: handle_path(resource, resource.scope, analysis),
+                },
+            )),
             quote! { #ident::#function(#(#params),*) },
             &boundary,
             &scopes,
@@ -1428,6 +1452,8 @@ fn resource_glue(
     let imports = scopes.imports.is_some().then(|| {
         quote! { , imports: &::std::rc::Rc<self::#root __tembra_import::Imports> }
     });
+    let handle = resource_handle(resource, analysis)?;
+    let client = resource_client(resource, service, analysis)?;
     Ok(quote! {
         impl ::tembra::portable::Issuable for #ident {
             fn nominal() -> ::tembra::portable::Nominal {
@@ -1446,6 +1472,185 @@ fn resource_glue(
             #imports
         ) -> ::tembra::Service<E> {
             service #(#functions)*
+        }
+
+        #handle
+        #client
+    })
+}
+
+/// The handle type of a WIT resource for native callers, `CursorHandle` for `Cursor`, public in
+/// the resource's module: it owns an `Owned` handle of the resource, whose drop is the WIT drop,
+/// and each method of the resource is an async method of it that takes the call's `&Context` first
+/// and then the method's parameters, which the compiler checks, and calls the method through the
+/// handle portably, answering a resource as its handle type. `TryFrom<Owned>` wraps an owned
+/// handle of the resource's type and gives one of another type back as its error, still open, so
+/// a caller can try the handle type of each resource of an interface; `Owned::from` gives the
+/// owned handle back, to move the resource into a call's arguments. The context's name is
+/// hygienic: a parameter of the same name stays the author's.
+fn resource_handle(resource: &WitResource, analysis: &Analysis) -> Result<TokenStream, Refused> {
+    let ident = &resource.ident;
+    let handle = handle_ident(resource);
+    let name = wit::kebab(ident);
+    let boundary = boundary(resource.scope, analysis);
+    let context = Ident::new("context", Span::mixed_site());
+    let mut methods = Vec::new();
+    for method in &resource.methods {
+        let function = &method.ident;
+        let owner = format!("{ident}::{function}");
+        let result = method.result.as_ref().map(|(ty, _)| ty);
+        let (kinds, result) = signature(&owner, &method.params, result, resource.scope, analysis)?;
+        let (returned, body) = portable_call(
+            quote! { self.owned },
+            &format!("[method]{name}.{}", wit::kebab(function)),
+            &method.params,
+            &kinds,
+            result.as_ref().map(|(ty, kind)| (*ty, kind)),
+            &context,
+            &boundary,
+        );
+        let docs = &method.docs;
+        let params = method
+            .params
+            .iter()
+            .map(|(name, ty, _)| quote! { #name: #ty });
+        methods.push(quote! {
+            #(#[doc = #docs])*
+            pub async fn #function(
+                &self,
+                #context: &::tembra::Context
+                #(, #params)*
+            ) -> ::tembra::Result<#returned> {
+                #body
+            }
+        });
+    }
+    let doc = format!(
+        " A handle of the WIT resource `{ident}` for a native caller: one async method per method of the resource, which takes the call's context first and then the method's parameters. Dropping it drops the resource's handle."
+    );
+    Ok(quote! {
+        #[doc = #doc]
+        pub struct #handle {
+            owned: ::tembra::portable::Owned,
+        }
+
+        impl #handle {
+            #(#methods)*
+        }
+
+        impl ::core::convert::TryFrom<::tembra::portable::Owned> for #handle {
+            type Error = ::tembra::portable::Owned;
+
+            /// Wrap an owned handle of the resource; one of another resource type comes back as
+            /// the error, still open, for the handle type of its own.
+            fn try_from(
+                owned: ::tembra::portable::Owned,
+            ) -> ::core::result::Result<Self, ::tembra::portable::Owned> {
+                if *owned.nominal() != <#ident as ::tembra::portable::Issuable>::nominal() {
+                    return ::core::result::Result::Err(owned);
+                }
+                ::core::result::Result::Ok(Self { owned })
+            }
+        }
+
+        impl ::core::convert::From<#handle> for ::tembra::portable::Owned {
+            /// The owned handle, to call the resource by name or move it into a call's arguments.
+            fn from(handle: #handle) -> Self {
+                handle.owned
+            }
+        }
+    })
+}
+
+/// The calls of a WIT resource's constructor and static functions on the client of its service,
+/// in the resource's module, where their types are written: an `impl` block of the client, with
+/// `new_<resource>` for the constructor, `new_cursor` for `Cursor`, and `<resource>_<function>`
+/// for each static function, `cursor_open` for `Cursor::open`, each called portably, as the
+/// client's functions whose result holds a resource are, answering the resource as its handle type.
+fn resource_client(
+    resource: &WitResource,
+    service: &Service,
+    analysis: &Analysis,
+) -> Result<TokenStream, Refused> {
+    let ident = &resource.ident;
+    let name = wit::kebab(ident);
+    let snake = ident.to_string().to_snake_case();
+    let client = crate::relative(
+        analysis.modules[resource.scope].len(),
+        &analysis.modules[service.scope],
+        &client_ident(service),
+    );
+    let boundary = boundary(resource.scope, analysis);
+    let context = Ident::new("context", Span::mixed_site());
+    let mut methods = Vec::new();
+    if let Some(constructor) = &resource.constructor {
+        let owner = format!("{ident}::{}", constructor.ident);
+        let (kinds, _) = signature(&owner, &constructor.params, None, resource.scope, analysis)?;
+        let built: Type = syn::parse_quote!(#ident);
+        let kind = Kind::Resource {
+            ty: &built,
+            handle: handle_path(resource, resource.scope, analysis),
+        };
+        let (returned, body) = portable_call(
+            quote! { self.reference },
+            &format!("[constructor]{name}"),
+            &constructor.params,
+            &kinds,
+            Some((&built, &kind)),
+            &context,
+            &boundary,
+        );
+        let method = format_ident!("new_{snake}", span = constructor.ident.span());
+        let doc = format!(" A new `{ident}`, from its constructor, as its handle.");
+        let params = constructor
+            .params
+            .iter()
+            .map(|(name, ty, _)| quote! { #name: #ty });
+        methods.push(quote! {
+            #[doc = #doc]
+            pub async fn #method(
+                &self,
+                #context: &::tembra::Context
+                #(, #params)*
+            ) -> ::tembra::Result<#returned> {
+                #body
+            }
+        });
+    }
+    for function in &resource.statics {
+        let owner = format!("{ident}::{}", function.ident);
+        let result = function.result.as_ref().map(|(ty, _)| ty);
+        let (kinds, result) =
+            signature(&owner, &function.params, result, resource.scope, analysis)?;
+        let (returned, body) = portable_call(
+            quote! { self.reference },
+            &format!("[static]{name}.{}", wit::kebab(&function.ident)),
+            &function.params,
+            &kinds,
+            result.as_ref().map(|(ty, kind)| (*ty, kind)),
+            &context,
+            &boundary,
+        );
+        let method = format_ident!("{snake}_{}", function.ident, span = function.ident.span());
+        let docs = &function.docs;
+        let params = function
+            .params
+            .iter()
+            .map(|(name, ty, _)| quote! { #name: #ty });
+        methods.push(quote! {
+            #(#[doc = #docs])*
+            pub async fn #method(
+                &self,
+                #context: &::tembra::Context
+                #(, #params)*
+            ) -> ::tembra::Result<#returned> {
+                #body
+            }
+        });
+    }
+    Ok(quote! {
+        impl #client {
+            #(#methods)*
         }
     })
 }
@@ -1651,64 +1856,137 @@ fn method(
     }
 }
 
+/// The typed client of a service, `MathClient` for `Math`.
+fn client_ident(service: &Service) -> Ident {
+    format_ident!("{}Client", service.ident)
+}
+
+/// The names the client of a service gives its methods: each function of the interface and each
+/// `#[local]` method its own, `new_` for `new`, and for each resource of the interface,
+/// `new_<resource>` its constructor and `<resource>_<function>` each static function. Two of one
+/// name, which the compiler would refuse as one method defined twice, are refused at the later
+/// one, naming both.
+fn client_names(service: &Service, analysis: &Analysis) -> Result<(), Refused> {
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    let mut claim = |name: String, what: String, span: Span| {
+        if let Some(previous) = names.get(&name) {
+            return Err(refused(
+                span,
+                &format!(
+                    "the client of `{}` would name both {previous} and {what} `{name}`; rename one of them",
+                    service.ident
+                ),
+            ));
+        }
+        names.insert(name, what);
+        Ok(())
+    };
+    for function in service.functions.iter().chain(&service.locals) {
+        let name = if function.ident == "new" {
+            "new_".to_owned()
+        } else {
+            function.ident.to_string()
+        };
+        let what = format!("the function `{}::{}`", service.ident, function.ident);
+        claim(name, what, function.ident.span())?;
+    }
+    for resource in owned_resources(service, analysis) {
+        let ident = &resource.ident;
+        let snake = ident.to_string().to_snake_case();
+        if let Some(constructor) = &resource.constructor {
+            let what = format!("the constructor of `{ident}`");
+            claim(format!("new_{snake}"), what, constructor.ident.span())?;
+        }
+        for function in &resource.statics {
+            let what = format!("the static function `{ident}::{}`", function.ident);
+            let name = format!("{snake}_{}", function.ident);
+            claim(name, what, function.ident.span())?;
+        }
+    }
+    Ok(())
+}
+
 /// The typed client of a service, `MathClient` for `Math`, in the service's module and as visible
 /// as its struct: `new` wraps a reference to one of its objects, and each function of the
 /// interface, and each `#[local]` method, is an async method that takes the call's `&Context` first
-/// and then the function's parameters, and calls the method's local entrypoint with them as a tuple
-/// in WIT order, `()` without parameters, so the compiler checks the types `Reference::call` checks
-/// at run time. A function named `new` is `new_` on the client, since `new` builds the client; its
-/// WIT name stays `new`. A function whose result holds a resource has no local entrypoint, and no
-/// method here: a native caller calls it with `call_portable`. The context's name is hygienic: a
-/// parameter of the same name stays the author's.
-fn client(service: &Service, analysis: &Analysis) -> TokenStream {
+/// and then the function's parameters, which the compiler checks. A function with a local
+/// entrypoint is called there with them as a tuple in WIT order, `()` without parameters, so the
+/// types `Reference::call` checks at run time are the function's; one whose result holds a
+/// resource, which has only its portable entrypoint, is called portably, and answers each resource
+/// as its handle type. A function named `new` is `new_` on the client, since `new` builds the
+/// client; its WIT name stays `new`. The constructors and static functions of the service's
+/// resources are the client's too, in their resources' modules. The reference is visible to the
+/// crate for them. Two of these methods of one name are refused, naming both. The context's name is
+/// hygienic: a parameter of the same name stays the author's.
+fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
+    client_names(service, analysis)?;
     let vis = &service.vis;
-    let ident = format_ident!("{}Client", service.ident);
+    let ident = client_ident(service);
     let context = Ident::new("context", Span::mixed_site());
-    let issuing = |function: &&Function| issues(function, service.scope, analysis);
-    let handing_out = service.functions.iter().any(|function| issuing(&function));
-    let methods = service
-        .functions
-        .iter()
-        .filter(|function| !issuing(function))
-        .chain(&service.locals)
-        .map(|function| {
-            let name = wit::kebab(&function.ident);
-            let method = if function.ident == "new" {
-                format_ident!("new_", span = function.ident.span())
-            } else {
-                function.ident.clone()
-            };
-            let docs = &function.docs;
+    let boundary = boundary(service.scope, analysis);
+    let mut methods = Vec::new();
+    // A `#[local]` method has only its local entrypoint, whatever it returns.
+    let functions = service.functions.iter().map(|function| (function, false));
+    let locals = service.locals.iter().map(|function| (function, true));
+    for (function, local) in functions.chain(locals) {
+        let name = wit::kebab(&function.ident);
+        let method = if function.ident == "new" {
+            format_ident!("new_", span = function.ident.span())
+        } else {
+            function.ident.clone()
+        };
+        let (returned, body) = if !local && issues(function, service.scope, analysis) {
+            let owner = format!("{}::{}", service.ident, function.ident);
+            let result = function.result.as_ref().map(|(ty, _)| ty);
+            let (kinds, result) =
+                signature(&owner, &function.params, result, service.scope, analysis)?;
+            portable_call(
+                quote! { self.reference },
+                &name,
+                &function.params,
+                &kinds,
+                result.as_ref().map(|(ty, kind)| (*ty, kind)),
+                &context,
+                &boundary,
+            )
+        } else {
             let params: Vec<&Ident> = function.params.iter().map(|(name, _, _)| name).collect();
             let types: Vec<&Type> = function.params.iter().map(|(_, ty, _)| ty).collect();
             let result = match &function.result {
                 Some((ty, _)) => quote! { #ty },
                 None => quote! { () },
             };
-            quote! {
-                #(#[doc = #docs])*
-                pub async fn #method(
-                    &self,
-                    #context: &::tembra::Context
-                    #(, #params: #types)*
-                ) -> ::tembra::Result<#result> {
-                    self.reference
-                        .call::<(#(#types,)*), #result>(#context, #name, (#(#params,)*))
-                        .await
-                }
+            let body = quote! {
+                self.reference
+                    .call::<(#(#types,)*), #result>(#context, #name, (#(#params,)*))
+                    .await
+            };
+            (result, body)
+        };
+        let docs = &function.docs;
+        let params = function
+            .params
+            .iter()
+            .map(|(name, ty, _)| quote! { #name: #ty });
+        methods.push(quote! {
+            #(#[doc = #docs])*
+            pub async fn #method(
+                &self,
+                #context: &::tembra::Context
+                #(, #params)*
+            ) -> ::tembra::Result<#returned> {
+                #body
             }
         });
-    let mut doc = format!(
-        " A typed client of the service `{}`: one async method per function of its interface and per `#[local]` method, which takes the call's context first and then the function's parameters.",
+    }
+    let doc = format!(
+        " A typed client of the service `{}`: one async method per function of its interface and per `#[local]` method, and per constructor and static function of its resources, which takes the call's context first and then the function's parameters. A resource the function answers is its handle type, whose methods are the resource's.",
         service.ident
     );
-    if handing_out {
-        doc.push_str(" A function handing out a resource has none: a native caller calls it with `Reference::call_portable` and holds the resource as an `Owned` handle.");
-    }
-    quote! {
+    Ok(quote! {
         #[doc = #doc]
         #vis struct #ident {
-            reference: ::std::rc::Rc<::tembra::Reference>,
+            pub(crate) reference: ::std::rc::Rc<::tembra::Reference>,
         }
 
         impl #ident {
@@ -1719,6 +1997,155 @@ fn client(service: &Service, analysis: &Analysis) -> TokenStream {
 
             #(#methods)*
         }
+    })
+}
+
+/// A native caller's portable call of a function, under its WIT name, `name`, through `callee`, a
+/// `Reference` or an `Owned` handle, under `context`: the type the call answers, and the body of
+/// the caller's async method. The parameters cross as the boundary's JSON array, which the codec
+/// writes, and the result comes back as the author's type, but for each resource it holds, which is
+/// its handle type: a bare one from the `Owned` handle the call delivers, nested ones from the
+/// `Delivered` result, each the handle at the index the value names. An argument the codec cannot
+/// write fails the call as its arguments, before it is issued, and a result it cannot read fails it
+/// as its result, which closes every handle the result held.
+fn portable_call(
+    callee: TokenStream,
+    name: &str,
+    params: &[(Ident, Type, String)],
+    kinds: &[Kind<'_>],
+    result: Option<(&Type, &Kind<'_>)>,
+    context: &Ident,
+    boundary: &TokenStream,
+) -> (TokenStream, TokenStream) {
+    let encoded = kinds
+        .iter()
+        .zip(params)
+        .map(|(kind, (name, _, _))| encode(kind, quote! { #name }, boundary));
+    let arguments = quote! {
+        let __tembra_encode = || -> ::core::result::Result<
+            ::tembra::serde_json::Value,
+            ::std::string::String,
+        > {
+            ::core::result::Result::Ok(::tembra::serde_json::Value::Array(
+                ::std::vec![#(#encoded?),*],
+            ))
+        };
+        let __tembra_arguments = __tembra_encode().map_err(|message| {
+            ::tembra::Error::invalid(::tembra::core::Reason::Arguments, message)
+        })?;
+    };
+    let call = |answer: TokenStream| {
+        quote! {
+            #callee
+                .call_portable::<_, #answer>(#context, #name, __tembra_arguments)
+                .await?
+        }
+    };
+    let failed = quote! {
+        |message| ::tembra::Error::invalid(::tembra::core::Reason::Result, message)
+    };
+    let (returned, read) = match result {
+        None => {
+            let called = call(quote! { ::tembra::serde_json::Value });
+            (
+                quote! { () },
+                quote! {
+                    #called;
+                    ::core::result::Result::Ok(())
+                },
+            )
+        }
+        Some((_, Kind::Resource { handle, .. })) => {
+            let called = call(quote! { ::tembra::portable::Owned });
+            (
+                quote! { #handle },
+                quote! {
+                    <#handle as ::core::convert::TryFrom<::tembra::portable::Owned>>::try_from(#called)
+                        .map_err(|_| ::tembra::Error::invalid(
+                            ::tembra::core::Reason::Result,
+                            "the result holds a resource of another type",
+                        ))
+                },
+            )
+        }
+        Some((ty, kind)) if kind.resource().is_none() => {
+            let called = call(quote! { ::tembra::serde_json::Value });
+            let decode = decode(kind, quote! { __tembra_value }, boundary);
+            (
+                quote! { #ty },
+                quote! {
+                    let __tembra_value = #called;
+                    let __tembra_decode = |__tembra_value: ::tembra::serde_json::Value|
+                        -> ::core::result::Result<#ty, ::std::string::String> { #decode };
+                    __tembra_decode(__tembra_value).map_err(#failed)
+                },
+            )
+        }
+        Some((_, kind)) => {
+            let called = call(quote! { ::tembra::portable::Delivered });
+            let delivered = delivered_type(kind);
+            let decode = decode(kind, quote! { __tembra_value }, boundary);
+            let owned = quote! {
+                ::std::vec::Vec<::core::option::Option<::tembra::portable::Owned>>
+            };
+            (
+                delivered.clone(),
+                quote! {
+                    let __tembra_delivered = #called;
+                    let mut __tembra_owned: #owned = __tembra_delivered
+                        .owned
+                        .into_iter()
+                        .map(::core::option::Option::Some)
+                        .collect();
+                    let __tembra_decode = |__tembra_value: ::tembra::serde_json::Value,
+                                           __tembra_owned: &mut #owned|
+                        -> ::core::result::Result<#delivered, ::std::string::String> { #decode };
+                    let __tembra_read = __tembra_decode(__tembra_delivered.value, &mut __tembra_owned)
+                        .map_err(#failed)?;
+                    if __tembra_owned.iter().any(::core::option::Option::is_some) {
+                        return ::core::result::Result::Err(::tembra::Error::invalid(
+                            ::tembra::core::Reason::Result,
+                            "the result holds a resource its value does not name",
+                        ));
+                    }
+                    ::core::result::Result::Ok(__tembra_read)
+                },
+            )
+        }
+    };
+    (returned, quote! { #arguments #read })
+}
+
+/// The type a native caller receives for a result of this kind: the Rust type, with each resource
+/// it holds replaced by its handle type.
+fn delivered_type(kind: &Kind<'_>) -> TokenStream {
+    match kind {
+        Kind::Resource { handle, .. } => quote! { #handle },
+        Kind::List(_, element) => {
+            let element = delivered_type(element);
+            quote! { ::std::vec::Vec<#element> }
+        }
+        Kind::Option(inner) => {
+            let inner = delivered_type(inner);
+            quote! { ::core::option::Option<#inner> }
+        }
+        Kind::Tuple(kinds) => {
+            let kinds = kinds.iter().map(delivered_type);
+            quote! { (#(#kinds,)*) }
+        }
+        Kind::Result(ok, err) => {
+            let side = |side: &Option<Box<Kind<'_>>>| {
+                side.as_deref()
+                    .map_or_else(|| quote! { () }, delivered_type)
+            };
+            let (ok, err) = (side(ok), side(err));
+            quote! { ::core::result::Result<#ok, #err> }
+        }
+        Kind::Plain(ty)
+        | Kind::Signed(ty)
+        | Kind::Float { ty, .. }
+        | Kind::Named(ty)
+        | Kind::Json(ty) => quote! { #ty },
     }
 }
 
@@ -1807,15 +2234,16 @@ enum Kind<'a> {
     /// Free JSON, `serde_json::Value`: a WIT `string` that holds its JSON text.
     Json(Cow<'a, Type>),
     /// A `#[wit_resource]` struct of the module, only returned: the value is issued into the
-    /// call's result, whose data names it by its index there.
-    Resource(&'a Type),
+    /// call's result, whose data names it by its index there. A native caller holds it as its
+    /// handle type, `handle`, the path the module that writes `ty` names it by.
+    Resource { ty: &'a Type, handle: TokenStream },
 }
 
 impl<'a> Kind<'a> {
     /// The first resource the kind holds, itself or in a container, if any.
     fn resource(&self) -> Option<&'a Type> {
         match self {
-            Kind::Resource(ty) => Some(ty),
+            Kind::Resource { ty, .. } => Some(ty),
             Kind::List(_, inner) | Kind::Option(inner) => inner.resource(),
             Kind::Tuple(kinds) => kinds.iter().find_map(Kind::resource),
             Kind::Result(ok, err) => ok.iter().chain(err).find_map(|side| side.resource()),
@@ -1984,12 +2412,15 @@ fn named<'a>(
         || analysis.consumed_modules.newtype(ty, scope).is_some()
     {
         return Ok(Kind::Named(Cow::Borrowed(ty)));
-    } else if analysis
+    } else if let Some(resource) = analysis
         .wit_resources
         .iter()
-        .any(|resource| resource.ident == *ident)
+        .find(|resource| resource.ident == *ident)
     {
-        return Ok(Kind::Resource(ty));
+        return Ok(Kind::Resource {
+            ty,
+            handle: handle_path(resource, scope, analysis),
+        });
     } else {
         "a type without a native codec; such types are not supported natively yet".to_owned()
     };
@@ -2041,7 +2472,8 @@ fn carried(number: TokenStream) -> TokenStream {
 
 /// Read a value of a kind from `value`, a JSON value: an expression of `Result<T, String>` over
 /// the author's type `T`, which the boundary trait, as `boundary` names it there, reads for a type
-/// of the module.
+/// of the module. A resource, which only a native caller reads, is its handle type in `T`, taken
+/// from the owned handles of the result, `__tembra_owned`, which must then be in scope.
 fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenStream {
     match kind {
         Kind::Plain(ty) => quote! {
@@ -2092,13 +2524,18 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
             }
         }
         Kind::List(ty, element) => {
+            // A list of resources is read into a list of their handles, which its elements name.
+            let list = match element.resource() {
+                Some(_) => quote! { ::std::vec::Vec<_> },
+                None => quote! { #ty },
+            };
             let element = decode(element, quote! { item }, boundary);
             quote! {
                 match #value {
                     ::tembra::serde_json::Value::Array(items) => items
                         .into_iter()
                         .map(|item| #element)
-                        .collect::<::core::result::Result<#ty, ::std::string::String>>(),
+                        .collect::<::core::result::Result<#list, ::std::string::String>>(),
                     _ => ::core::result::Result::Err(::std::string::String::from("expected a list")),
                 }
             }
@@ -2175,7 +2612,27 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
                 )),
             }
         },
-        Kind::Resource(_) => unreachable!("a resource is refused where it would be read"),
+        // Only a native caller reads a resource, from the result it received: the value is the
+        // index of one of the result's owned handles, `__tembra_owned`, each taken once, which
+        // it holds as the resource's handle type.
+        Kind::Resource { handle, .. } => quote! {
+            match #value
+                .as_u64()
+                .and_then(|index| ::core::convert::TryFrom::try_from(index).ok())
+                .and_then(|index: usize| __tembra_owned.get_mut(index))
+                .and_then(::core::option::Option::take)
+            {
+                ::core::option::Option::Some(owned) => {
+                    <#handle as ::core::convert::TryFrom<::tembra::portable::Owned>>::try_from(owned)
+                        .map_err(|_| ::std::string::String::from(
+                            "the result holds a resource of another type",
+                        ))
+                }
+                ::core::option::Option::None => ::core::result::Result::Err(::std::string::String::from(
+                    "expected the index of a resource the result holds, once",
+                )),
+            }
+        },
     }
 }
 
@@ -2264,7 +2721,7 @@ fn encode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
                 .map(::tembra::serde_json::Value::String)
                 .map_err(|error| error.to_string())
         },
-        Kind::Resource(_) => {
+        Kind::Resource { .. } => {
             let issued = issued(value);
             let written = written();
             quote! { #written(#issued) }

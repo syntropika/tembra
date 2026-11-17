@@ -2,18 +2,19 @@
 //! constructs one, opens others from the service and from a static function, alone and nested in
 //! a list, a tuple and a result, calls their methods through its `Owned` handles, an async one
 //! too, which keeps its `self` across its await and a reload, and drops them, each value closing
-//! once. A compiled caller does the same in `crates/executor-wasm/tests/orb_macro_native.rs`.
+//! once; and does it all again through the service's typed client and the accumulator's handle
+//! type. A compiled caller does the same in `crates/executor-wasm/tests/orb_macro_native.rs`.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 use tembra::{
-    Host, Reference,
+    Host, Orb, Reference, Service,
     core::Code,
-    portable::{Delivered, Owned},
+    portable::{Delivered, Issuable, Nominal, Owned, Payload},
 };
 use tembra_orb_native_fixture::calculator::{
     self,
-    accumulators::{Accumulators, AccumulatorsClient},
+    accumulators::{AccumulatorHandle, Accumulators, AccumulatorsClient},
 };
 
 const ACCUMULATORS: &str = "calculator::example:calculator/accumulators@1.0.0";
@@ -166,6 +167,116 @@ fn a_method_of_the_resource_reaches_its_objects_state_and_the_roots_resources() 
         assert_eq!(*reference.state::<Value>()?.value()?, json!({ "count": 2 }));
         Ok(())
     });
+}
+
+/// The service's client covers its resource: it constructs an accumulator and calls the resource's
+/// static function, each answering an `AccumulatorHandle`, whose methods, the async one too, take
+/// and return the Rust values the compiler checks; and the service's functions that hand
+/// accumulators out nested, in a list in a tuple and in a result, answer handles in their place,
+/// each naming its own value. Each value closes with its handle.
+#[test]
+fn the_client_constructs_calls_and_receives_accumulators_as_typed_handles() {
+    with_accumulators(async |reference, context| {
+        let client = AccumulatorsClient::new(reference);
+        let dropped = client.dropped(&context).await?;
+        let accumulator: AccumulatorHandle = client.new_accumulator(&context, 5).await?;
+        assert_eq!(accumulator.add(&context, 2).await?, 7);
+        assert_eq!(accumulator.add_later(&context, 3).await?, (7, 10));
+        assert_eq!(accumulator.total(&context).await?, 10);
+        assert_eq!(accumulator.reader(&context).await?, "host");
+        let zero: AccumulatorHandle = client.accumulator_zero(&context).await?;
+        assert_eq!(zero.total(&context).await?, 0);
+        let (opened, count): (Vec<AccumulatorHandle>, u32) =
+            client.open(&context, vec![10, 20]).await?;
+        assert_eq!(count, 2);
+        assert_eq!(opened[1].add(&context, 2).await?, 22);
+        assert_eq!(opened[0].total(&context).await?, 10);
+        let checked: Result<AccumulatorHandle, String> = client.checked(&context, 3).await?;
+        let checked = checked.expect("3 is not negative");
+        assert_eq!(checked.total(&context).await?, 3);
+        assert_eq!(
+            client.checked(&context, -1).await?.err().as_deref(),
+            Some("-1 is negative")
+        );
+        assert_eq!(client.dropped(&context).await?, dropped);
+        drop((accumulator, zero, opened, checked));
+        assert_eq!(client.dropped(&context).await?, dropped + 5);
+        Ok(())
+    });
+}
+
+/// A ticket: a resource of another interface, which a native Orb written by hand issues. Its drop
+/// counts the tickets closed.
+struct Ticket(Rc<Cell<u32>>);
+
+impl Issuable for Ticket {
+    fn nominal() -> Nominal {
+        Nominal {
+            interface: "example:tickets/tickets@1.0.0".into(),
+            name: "ticket".into(),
+        }
+    }
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+/// `AccumulatorHandle::try_from` wraps an owned accumulator, and gives an owned handle of another
+/// resource type back as its error, still open, so its caller can try another handle type; and
+/// `Owned::from` gives the owned handle of an accumulator back.
+#[test]
+fn a_handle_gives_back_an_owned_handle_of_another_resource_type() {
+    let closed = Rc::new(Cell::new(0));
+    let issued = closed.clone();
+    let tickets =
+        Orb::new("tickets", 1).service(Service::new("tickets", |_| Ok(())).payload_method(
+            "issue",
+            move |_, _, payload: Payload| {
+                let ticket = Ticket(issued.clone());
+                async move {
+                    payload.into_data()?;
+                    let mut result = Payload::data(Value::Null);
+                    let ticket = result.issue(ticket);
+                    result.encode(ticket)
+                }
+            },
+        ));
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![calculator::orb().unwrap(), tickets])
+        .unwrap();
+    let accumulators = Rc::new(host.get(ACCUMULATORS, vec!["main".into()], "host").unwrap());
+    let tickets = Rc::new(host.get("tickets", vec!["main".into()], "host").unwrap());
+    let (called, issuer, watched) = (accumulators.clone(), tickets.clone(), closed.clone());
+    pool.run_until(host.root("host", move |context| {
+        async move {
+            let ticket: Owned = issuer.call_portable(&context, "issue", ()).await?;
+            let Err(ticket) = AccumulatorHandle::try_from(ticket) else {
+                panic!("a ticket is no accumulator");
+            };
+            assert_eq!(ticket.nominal().name, "ticket");
+            assert_eq!(watched.get(), 0, "given back open");
+            drop(ticket);
+            assert_eq!(watched.get(), 1, "closed by its owner");
+            let accumulator: Owned = called
+                .call_portable(&context, "[constructor]accumulator", (5_i64,))
+                .await?;
+            let Ok(accumulator) = AccumulatorHandle::try_from(accumulator) else {
+                panic!("an accumulator");
+            };
+            assert_eq!(accumulator.total(&context).await?, 5);
+            assert_eq!(Owned::from(accumulator).nominal().name, "accumulator");
+            Ok(())
+        }
+        .boxed_local()
+    }))
+    .unwrap();
+    accumulators.release().unwrap();
+    tickets.release().unwrap();
+    pool.run_until(host.close()).unwrap();
 }
 
 /// An async method of the resource reads its `self` before and after its await: held there, the
