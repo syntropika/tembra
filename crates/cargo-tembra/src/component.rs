@@ -448,11 +448,12 @@ fn classify_import(id: &str, handler_only: bool) -> Import {
 /// handler, hooks declared and contributed to, kernel-managed state and resources, and imports
 /// with the grant they will need at installation; an import by key with the interface whose
 /// objects it reaches, and not the interface itself when the world imports it only for the types
-/// the view `use`s. An import of an interface the world exports that the contract's `model`
-/// pairs with no export (`Model::pairs`) is one elaboration added for the types another import
-/// `use`s: installation binds it like any other import when it holds a resource, and so the
-/// summary lists it, and to nothing otherwise. Without the contract, such an import is left out.
-/// Written to `out`.
+/// the view `use`s. The imports listed are those installation binds to a provider or a grant, by
+/// the rule of the contract's `model`, whether the world exports their interface or not: one with
+/// a function or a resource that the world imports itself, or one elaboration added for the types
+/// another import `use`s that holds a resource (`Interface::callable`), unless the contract pairs
+/// it with an export as a hook (`Model::pairs`). Without the contract, an import with functions
+/// is listed unless the world exports its interface besides. Written to `out`.
 pub fn summary(
     out: &mut impl Write,
     resolve: &Resolve,
@@ -568,20 +569,27 @@ pub fn summary(
             continue;
         };
         let id = world_key(resolve, key, None);
-        // An import of an interface the world exports besides, which the contract pairs with no
-        // export, holding a resource: installation binds it to the provider the installer names,
-        // the one serving the import that `use`s the resource, whether the component calls any
-        // of its functions or not.
-        let exported = world.exports.contains_key(key);
-        let bound = exported
-            && model.is_some_and(|model| {
-                model.imports.iter().any(|entry| {
-                    entry.key == id
-                        && matches!(&entry.item, Item::Interface(import)
-                            if !model.pairs(import) && import.callable())
-                })
-            });
-        if resolve.interfaces[*interface].functions.is_empty() && !bound {
+        // Installation binds the import by the contract's rule, whether the component calls any
+        // of its functions or not: to nothing when it is not callable, with neither a function
+        // nor a resource, or held only for the types another import `use`s and holding no
+        // resource; to the hook it declares or contributes to when the contract pairs it with an
+        // export; and otherwise to the provider the installer names or to a grant. Without the
+        // contract, an import with functions is callable, and paired when the world exports its
+        // interface besides.
+        let imported = model.and_then(|model| {
+            model.imports.iter().find_map(|entry| match &entry.item {
+                Item::Interface(import) if entry.key == id => Some((model, import)),
+                _ => None,
+            })
+        });
+        let (callable, paired) = match imported {
+            Some((model, import)) => (import.callable(), model.pairs(import)),
+            None => (
+                !resolve.interfaces[*interface].functions.is_empty(),
+                world.exports.contains_key(key),
+            ),
+        };
+        if !callable {
             continue; // types only: nothing to bind
         }
         if contributions.contains_key(&id) || hooks.contains_key(&id) || guest::reserved(&id) {
@@ -590,10 +598,10 @@ pub fn summary(
             context |= id == guest::CONTEXT;
             continue;
         }
-        if exported && !bound {
-            // The roles name every hook, so an import of an interface the world exports besides
-            // is one elaboration added for the types a view `use`s, the view of the interface the
-            // Orb implements: the kernel binds the view alone.
+        if paired {
+            // With the contract, the roles name every import it pairs, a hook. Without it, an
+            // import of an interface the world exports besides may be a hook or one elaboration
+            // added for the types a view `use`s, which the summary cannot tell apart: left out.
             continue;
         }
         match classify_import(&id, handler_only) {

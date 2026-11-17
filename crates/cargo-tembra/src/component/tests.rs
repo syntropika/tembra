@@ -2,6 +2,7 @@
 //! the component's imports and exports.
 use super::{Import, classify_import, consumed_packages, inspect, is_ingress, world_key};
 use crate::scratch;
+use std::collections::BTreeMap;
 use wit_parser::Resolve;
 
 /// The smallest component: the header alone, importing and exporting nothing.
@@ -277,6 +278,62 @@ fn the_summary_lists_an_import_of_an_implemented_interface_that_holds_a_resource
         view.ends_with(&format!("{requires}  example:router/counter-ref@1.0.0\n")),
         "{view}"
     );
+}
+
+/// A world importing an interface that `use`s a bare resource of one interface and a record of
+/// another, with a function, neither of which the world imports itself or exports: elaboration
+/// imports both for their types.
+const DOCS_SEARCH: &str = "package example:docs@1.0.0;
+interface store {
+  resource doc;
+}
+interface clock {
+  record instant { seconds: u64 }
+  now: func() -> instant;
+}
+interface index {
+  use store.{doc};
+  use clock.{instant};
+  search: func(q: string) -> list<doc>;
+  stamp: func() -> instant;
+}
+interface report {
+  count: func() -> u32;
+}
+world proxy { import index; export report; }
+";
+
+/// Installation binds every import by one rule, whether the world exports its interface or not:
+/// an import that holds a resource is bound to the provider the installer names, even when the
+/// world imports it only because another import `use`s the resource and it has no functions, and
+/// an import the world holds only for the types another uses, without a resource, is bound to
+/// nothing, functions or not. The summary lists the imports installation binds, `store` and
+/// `index` here and not `clock`, so an installation requiring a provider for each of them, and for
+/// no other import, succeeds.
+#[test]
+fn the_summary_lists_the_imports_installation_binds() {
+    let docs = summary_of(DOCS_SEARCH, "proxy");
+    let listed = ["example:docs/store@1.0.0", "example:docs/index@1.0.0"];
+    assert!(
+        docs.ends_with(&format!(
+            "imports of other Orbs, bound with Install::requires:\n  {}\n",
+            listed.join("\n  ")
+        )),
+        "{docs}"
+    );
+    let contract =
+        tembra_contracts::Contract::from_source("summary.wit", DOCS_SEARCH, Some("proxy")).unwrap();
+    let provider = tembra_contracts::OrbProvider {
+        orb: "docs".into(),
+        api_version: 1,
+    };
+    let requires: BTreeMap<String, tembra_contracts::OrbProvider> = listed
+        .iter()
+        .map(|id| ((*id).to_owned(), provider.clone()))
+        .collect();
+    contract
+        .providers(&requires, &tembra_contracts::Grants::default())
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[test]
