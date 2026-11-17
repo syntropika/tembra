@@ -198,6 +198,11 @@ install-tools:
 install-ts: install
 check-all: check
 
+# Run every part of the verification in order; CI runs each part in a job of its own.
+ci: check \
+    test-orb-examples \
+    test-orb-macro
+
 # Generate matching Swift and Kotlin bindings from the shared engine.
 build-mobile-bindings:
     bun packages/swift/build.ts bindings

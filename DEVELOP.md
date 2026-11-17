@@ -220,8 +220,20 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
 
 ## Checks
 
+`just ci` runs the full verification. It runs these parts in order:
+
+- `just check`, described below;
+- `just test-orb-examples`, which builds and runs every `#[orb]` example. The contracts and
+  lockfiles beside the examples must not change;
+- `just test-orb-macro`, which runs the macro's guests as components in the executor.
+
+CI runs each part in a job of its own, side by side, so that each job fits its timeout.
+The `acceptance` job runs beside them; see [Isolated orbs](#isolated-orbs).
+A new part is a recipe in `ci` and a line in the job matrix of the
+[quality workflow](.github/workflows/quality.yml).
+
 ```sh
-just check
+just ci
 bun run test:browser
 ```
 
