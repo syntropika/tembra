@@ -21,7 +21,7 @@ fn guest(no_std: bool) -> syn::ItemMod {
                     }
                 }
             },
-            Metadata::named("runtime"),
+            Ok(Metadata::named("runtime")),
             None,
         )
         .expect("a valid guest"),

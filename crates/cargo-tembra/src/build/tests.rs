@@ -1,9 +1,10 @@
 //! The build's reading of its inputs and writing of its outputs, checked without compiling an Orb.
-use super::{build, built_component, merged_checksums};
+use super::{build, built_component, contract_files, merged_checksums, removed};
 use crate::scratch;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use tembra_contracts::ModuleContract;
 
 /// A `compiler-artifact` message as cargo writes it, for a target of the given kinds.
 fn artifact(manifest: &Path, kinds: &[&str], filenames: &[&str]) -> String {
@@ -122,6 +123,57 @@ wit-bindgen = {{ version = "=0.63.0", default-features = false, features = ["mac
     build(Some(dir.join("Cargo.toml")), false, None).unwrap();
     let component = std::fs::read(dir.join("artifacts").join("calculator.wasm")).unwrap();
     assert!(wasmparser::Parser::is_component(&component));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A contract of the package `example:counter@1.0.0` whose world is `world`.
+fn counter(world: &str) -> String {
+    format!(
+        "package example:counter@1.0.0;\n\ninterface counter {{\n  add: func(by: s64) -> s64;\n}}\n\n\
+         world {world} {{\n  export counter;\n}}\n"
+    )
+}
+
+/// The macro writes the contract while cargo compiles the crate, so it removes the contract of the
+/// world's former name, and a standard package no world depends on any more, before the build's
+/// own write, which finds nothing left to remove: the build names them from the files `contract/`
+/// held before the compilation, and leaves the others alone.
+#[test]
+fn the_build_names_the_files_of_the_contract_the_compilation_removed() {
+    let dir = scratch("removed");
+    let contract = dir.join("contract");
+    let deps = contract.join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    std::fs::write(contract.join("tally.wit"), counter("tally")).unwrap();
+    std::fs::write(
+        deps.join("wasi-clocks.wit"),
+        "package wasi:clocks@0.3.0;\n\ninterface clock {}\n",
+    )
+    .unwrap();
+    std::fs::write(contract.join("notes.txt"), "kept").unwrap();
+    let before = contract_files(&contract).unwrap();
+    let ledger = ModuleContract::new(&counter("ledger"), None).unwrap();
+    // The macro's write, during the compilation, then the build's.
+    ledger.write(&dir).unwrap();
+    let written = ledger.write(&dir).unwrap();
+    assert!(written.former_contracts.is_empty() && written.former_dependencies.is_empty());
+    assert_eq!(
+        removed(&contract, &before).unwrap(),
+        [
+            format!(
+                "removed {}, the contract of the world's former name",
+                contract.join("tally.wit").display()
+            ),
+            format!(
+                "removed {}, a standard package the contract no longer depends on",
+                deps.join("wasi-clocks.wit").display()
+            ),
+        ]
+    );
+    // A build that removes nothing says nothing.
+    let before = contract_files(&contract).unwrap();
+    ledger.write(&dir).unwrap();
+    assert!(removed(&contract, &before).unwrap().is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
 

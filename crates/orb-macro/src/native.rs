@@ -56,14 +56,20 @@ pub(crate) struct Native {
 
 /// Write the native side of the module: `orb()` with the registration of every service, the
 /// client of each and the JSON of every type that enters the WIT, or the compile error for what
-/// the native side does not cover yet; with the `context` option, the native `context` too, which
-/// the author's code calls either way.
-pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
+/// the native side does not cover yet, or for a manifest whose `metadata` could not be read; with
+/// the `context` option, the native `context` too, which the author's code calls either way.
+pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>) -> Native {
     let context = analysis.options.context.then(context_module);
     let refusal = |Refused(error)| Native {
         root: wrapped(quote! { #error #context }),
         nested: Vec::new(),
         served: BTreeSet::new(),
+    };
+    // Only `orb()` needs the Orb's name and API version, so a manifest the macro cannot read fails
+    // a native build alone.
+    let metadata = match metadata {
+        Ok(metadata) => metadata,
+        Err(error) => return refusal(Refused(error.to_compile_error())),
     };
     // The interfaces the module imports from other Orbs and the hooks it contributes to, which
     // `orb(..)` takes the providers of.

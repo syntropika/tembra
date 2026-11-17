@@ -52,7 +52,7 @@ fn expanded(source: &str) -> syn::Result<String> {
     expand(
         options,
         syn::parse_str(source).unwrap(),
-        Metadata::named("events"),
+        Ok(Metadata::named("events")),
         None,
     )
     .map(|tokens| tokens.to_string())

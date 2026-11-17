@@ -527,6 +527,28 @@ fn the_worlds_of_one_crate_keep_the_standard_packages_each_depends_on() {
     }
 }
 
+/// A world named like a keyword of WIT, a module `list`, is named as WIT writes it, with the `%`
+/// escape: its contract is `contract/%list.wit`, as `cargo tembra build` named it before the macro
+/// wrote it, and reads back as the contract of `%list`. Another world of the crate reads it so
+/// too, and keeps the standard package it depends on.
+#[test]
+fn a_world_named_like_a_wit_keyword_is_written_with_its_escape() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("contract");
+    let list = ModuleContract::new(&TALLY.replace("world first", "world %list"), None).unwrap();
+    assert_eq!(list.world(), "%list");
+    let written = list.write(root.path()).unwrap();
+    assert_eq!(written.contract, dir.join("%list.wit"));
+    let read = Contract::from_dir(&dir, Some("%list")).unwrap();
+    assert_eq!(read.prepared(), list.contract().prepared());
+    ModuleContract::new(&contract("example:counter@1.0.0", "ledger"), None)
+        .unwrap()
+        .write(root.path())
+        .unwrap();
+    assert_eq!(names(&dir), ["%list.wit", "deps", "ledger.wit"]);
+    assert_eq!(names(&dir.join("deps")), ["tembra-guest.wit"]);
+}
+
 /// Builds of one crate may write its `contract/` at once and remove the same file: the one that
 /// finds it gone has nothing left to do. Here concurrent writes of the crate's contract each find
 /// a standard package no world depends on, which only one of them removes.

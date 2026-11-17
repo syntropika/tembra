@@ -76,6 +76,9 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .unwrap_or_else(|| orb_name.to_kebab_case());
     let target_dir = manifest_dir.join("target");
     let profile = if release { "release" } else { "debug" };
+    // What contract/ holds before the compilation, in which the macro writes it too.
+    let contract_dir = manifest_dir.join("contract");
+    let before = contract_files(&contract_dir)?;
 
     // 1. Compile the component on stable: a core module linked by the component linker. The
     //    library is compiled as a cdylib whatever crate type the manifest names, so that an Orb
@@ -129,7 +132,8 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     //    packages it depends on in contract/deps/. The macro writes the same files when the crate
     //    is compiled for itself; `ModuleContract` is the one writer of both. The world takes the
     //    module's name, so renaming the module leaves the former contract behind, a file of the
-    //    same package, which the write removes.
+    //    same package, which the write removes. The macro's write, during the compilation, removes
+    //    it first, so the build names what went from the files contract/ held before.
     let consumed = EmbeddedManifest::read(&component)
         .map_err(|error| anyhow::anyhow!("{error}"))?
         .wit
@@ -146,20 +150,11 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     let written = module
         .write(&manifest_dir)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    for former in &written.former_contracts {
-        eprintln!(
-            "removed {}, the contract of the world's former name",
-            former.display()
-        );
+    for notice in removed(&contract_dir, &before)? {
+        eprintln!("{notice}");
     }
     let wit_file = written.contract;
     println!("contract -> {}", wit_file.display());
-    for former in &written.former_dependencies {
-        eprintln!(
-            "removed {}, a standard package the contract no longer depends on",
-            former.display()
-        );
-    }
     for file in &written.dependencies {
         println!("contract -> {}", file.display());
     }
@@ -254,6 +249,59 @@ fn built_component(messages: impl BufRead, package: &Path) -> Result<Option<Path
         }
     }
     Ok(component)
+}
+
+/// The `.wit` files of the contract directory `dir`, then those of its `deps/`, each sorted: the
+/// files a write of the contract removes, the contract of a world's former name and the standard
+/// packages no world depends on any more. Empty when the directory does not exist yet.
+fn contract_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for dir in [dir.to_path_buf(), dir.join("deps")] {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", dir.display()));
+            }
+        };
+        let mut found = Vec::new();
+        for entry in entries {
+            let path = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
+            if path.extension().is_some_and(|extension| extension == "wit") && path.is_file() {
+                found.push(path);
+            }
+        }
+        found.sort();
+        files.extend(found);
+    }
+    Ok(files)
+}
+
+/// What the build says on stderr of each file of the contract directory `dir` removed since it
+/// held the files `before`, in their order: the macro writes the contract while cargo compiles
+/// the crate, so the build's own write finds removed already what the compilation removed.
+fn removed(dir: &Path, before: &[PathBuf]) -> Result<Vec<String>> {
+    let after = contract_files(dir)?;
+    let deps = dir.join("deps");
+    Ok(before
+        .iter()
+        .filter(|file| !after.contains(file))
+        .map(|file| {
+            if file.parent() == Some(deps.as_path()) {
+                format!(
+                    "removed {}, a standard package the contract no longer depends on",
+                    file.display()
+                )
+            } else {
+                format!(
+                    "removed {}, the contract of the world's former name",
+                    file.display()
+                )
+            }
+        })
+        .collect())
 }
 
 /// The checksums of a directory after a build, `previous` being the file's former content: one

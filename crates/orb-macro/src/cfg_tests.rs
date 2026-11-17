@@ -61,8 +61,13 @@ fn expanded(copy: &ItemMod) -> ItemMod {
 /// The module the macro writes for a copy under `attribute`.
 fn expanded_with(attribute: TokenStream, copy: &ItemMod) -> ItemMod {
     let options = options(attribute).unwrap();
-    let tokens = expand(options, copy.clone(), Metadata::named("calculator"), None)
-        .unwrap_or_else(|error| panic!("{error}"));
+    let tokens = expand(
+        options,
+        copy.clone(),
+        Ok(Metadata::named("calculator")),
+        None,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     syn::parse2(tokens).unwrap()
 }
 
@@ -709,11 +714,11 @@ fn nothing_to_export_names_the_configuration() {
             unreachable!("one predicate, two copies");
         };
         let options = || options(attribute()).unwrap();
-        let error = expand(options(), without, Metadata::named("calculator"), None)
+        let error = expand(options(), without, Ok(Metadata::named("calculator")), None)
             .unwrap_err()
             .to_string();
         assert_eq!(error, message);
-        expand(options(), with, Metadata::named("calculator"), None)
+        expand(options(), with, Ok(Metadata::named("calculator")), None)
             .unwrap_or_else(|error| panic!("{error}"));
     }
 }

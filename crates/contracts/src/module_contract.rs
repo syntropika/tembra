@@ -81,7 +81,7 @@ impl ModuleContract {
         let group = parse_source("contract.wit", wit)?;
         let package = group.main.name.clone();
         let world = match group.main.worlds.iter().collect::<Vec<_>>()[..] {
-            [(_, world)] => world.name.clone(),
+            [(_, world)] => escaped(&world.name),
             [] => return Err(Error("the module's WIT declares no world".into())),
             _ => {
                 return Err(Error(
@@ -129,7 +129,8 @@ impl ModuleContract {
         &self.text
     }
 
-    /// The name of the module's world, which names the contract's file.
+    /// The name of the module's world as WIT writes it, which names the contract's file: with the
+    /// `%` escape for a keyword of WIT, `contract/%list.wit` for a world `list`.
     pub fn world(&self) -> &str {
         &self.world
     }
@@ -180,6 +181,15 @@ fn parser(error: impl std::fmt::Display) -> Error {
 /// An I/O failure on a file of the contract directory.
 fn io(action: &str, path: &Path, error: std::io::Error) -> Error {
     Error(format!("{action} {}: {error}", path.display()))
+}
+
+/// A world's name as WIT writes it, and as a world specifier must name it: with WIT's `%` escape
+/// when the bare name does not read as a name, a keyword of WIT such as `list`.
+fn escaped(name: &str) -> String {
+    match wit_parser::parse_use_path(name) {
+        Ok(_) => name.to_owned(),
+        Err(_) => format!("%{name}"),
+    }
 }
 
 /// Whether a package is in a namespace of the standard packages that ship with tembra-contracts,
@@ -396,8 +406,8 @@ fn write_dependencies(
 
 /// The standard packages the other contracts of `dir` depend on, by their file names in `deps/`:
 /// those of every `<world>.wit` but `current` that reads as the contract of its world, as
-/// another Orb module of the crate writes it. A file that does not is not this writer's, and
-/// keeps nothing.
+/// another Orb module of the crate writes it: the file's stem names the world as WIT writes it,
+/// `%list` for a keyword of WIT. A file that does not is not this writer's, and keeps nothing.
 fn others_dependencies(dir: &Path, current: &Path) -> Result<Vec<&'static str>, Error> {
     let mut names = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|error| io("reading", dir, error))? {

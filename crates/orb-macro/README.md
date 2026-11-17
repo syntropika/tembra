@@ -1098,11 +1098,12 @@ a host to use it, or re-export the client where the runtime is linked, since a c
 none. A portable caller's JSON array of arguments goes through a codec the macro writes from the
 WIT, so the author's types need no serde. The Orb's name and API version
 come from `[package.metadata.tembra]` of the crate manifest, with the defaults of
-`cargo tembra build`: the crate name and 1. `orb_named(name, api_version, ..)` builds the same Orb
-under a name and API version the host chooses at run time, so that a host can also install the
-crate twice; `orb(..)` only calls it with the manifest's, passing its own arguments on. Both return
-the runtime's `Orb`, an ordinary builder: before installing it, a host may append services written
-by hand and the requirements they need.
+`cargo tembra build`: the crate name and 1. Only the native side reads the manifest: one the macro
+cannot read fails a native build with an error naming it, and a component build does without it.
+`orb_named(name, api_version, ..)` builds the same Orb under a name and API version the host
+chooses at run time, so that a host can also install the crate twice; `orb(..)` only calls it with
+the manifest's, passing its own arguments on. Both return the runtime's `Orb`, an ordinary builder:
+before installing it, a host may append services written by hand and the requirements they need.
 
 ```rust,ignore
 #[tembra::orb(package = "example:calculator@1.0.0")]
@@ -1604,15 +1605,17 @@ a crate used only natively, the one a build with the default features writes.
 The macro rewrites the module, or each copy of it under `#[cfg]`, see
 [items under `#[cfg]`](#items-under-cfg), with:
 
-1. `pub const WIT: &str`, the derived WIT text. When Cargo compiles the crate for itself, as the
-   primary package, the macro also writes it to the crate's `contract/<world>.wit`, the consumed
-   packages nested whole after it and the standard packages it depends on in `contract/deps/`:
-   the files `cargo tembra build` writes, rewritten only when their content changes, so a crate
-   used natively has the contract a compiled consumer reads, and a dependency's is never written.
-   Writing it, the macro removes any other `.wit` of `contract/` whose package, name and version,
-   is the module's, as the contract of a former name of its world, so each Orb module of a crate
-   needs a package of its own: two modules of one package remove each other's contract, silently,
-   and `contract/` keeps the one expanded last;
+1. `pub const WIT: &str`, the derived WIT text. When Cargo compiles the crate's library for
+   itself, as the primary package, the macro also writes it to the crate's `contract/<world>.wit`,
+   the consumed packages nested whole after it and the standard packages it depends on in
+   `contract/deps/`: the files `cargo tembra build` writes, rewritten only when their content
+   changes, so a crate used natively has the contract a compiled consumer reads, and a
+   dependency's is never written. The Orb modules of an integration test, a bench, a binary or an
+   example built as one are not the library's and write nothing. Writing it, the macro removes
+   any other `.wit` of `contract/` whose package, name and version, is the module's, as the
+   contract of a former name of its world, so each Orb module of a crate needs a package of its
+   own: two modules of one package remove each other's contract, silently, and `contract/` keeps
+   the one expanded last;
 2. the same text as a `tembra:wit` custom section of the Wasm module, and the manifest, the
    declared hooks with their composition, the contributions with their priorities, the
    services that chose a lifetime or a linger, the views of the interfaces imported by key with

@@ -68,9 +68,10 @@ The contract goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` direct
 crate on its own, even with an inline WIT, and finding the package twice it panics with
 "attempting to re-add package".
 
-The macro writes the same files when Cargo compiles the Orb crate for itself, as the primary
-package, on any target: a crate used natively, which `build` never compiles, has its contract too,
-and a dependency's is never written into. Both writers are `ModuleContract` of `tembra-contracts`,
+The macro writes the same files when Cargo compiles the Orb crate's library for itself, as the
+primary package, on any target: a crate used natively, which `build` never compiles, has its
+contract too, a dependency's is never written into, and the Orb modules of the crate's integration
+tests, benches and binaries write nothing. Both writers are `ModuleContract` of `tembra-contracts`,
 so `build` finds the contract current after the compilation it runs, and a file is rewritten only
 when its content changes, through a temporary file renamed into place. The consumed packages are
 nested in the order the module's WIT names them, the one text both writers share, so a

@@ -2,6 +2,8 @@
 //! embeds and the errors it reports. The generated bindings themselves compile in the examples.
 //! The helpers that expand a module and read its output serve the other test modules too.
 use super::{Options, expand, expansion, metadata::Metadata, primary_crate_dir};
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use syn::{Expr, Item, ItemMod, Lit, UnOp};
 
 /// Expand a module under `#[orb(package = ...)]` and parse the generated module back.
@@ -48,7 +50,7 @@ fn orb_with(options: Options, module: &str) -> syn::Result<ItemMod> {
 /// Expand a module with the given options and manifest table, and parse the generated module back.
 fn orb_as(options: Options, metadata: Metadata, module: &str) -> syn::Result<ItemMod> {
     let module: ItemMod = syn::parse_str(module).expect("a module");
-    syn::parse2(expand(options, module, metadata, None)?)
+    syn::parse2(expand(options, module, Ok(metadata), None)?)
 }
 
 fn expanded(package: &str, module: &str) -> ItemMod {
@@ -10549,26 +10551,29 @@ fn the_contract_is_written_into_the_crate_compiled_for_itself_alone() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let module = || syn::parse_str::<ItemMod>(COUNTER).unwrap();
-    let manifest_dir = || Some(dir.clone().into_os_string());
+    let manifest_dir = ("CARGO_MANIFEST_DIR", dir.as_os_str());
     // A dependency: Cargo sets no CARGO_PRIMARY_PACKAGE, and nothing is written.
-    let dependency = primary_crate_dir(None, manifest_dir());
+    let dependency = primary_crate_dir(variables(&[manifest_dir]));
     assert_eq!(dependency, None);
     expand(
         options("example:counter@1.0.0", None),
         module(),
-        Metadata::named("counter"),
+        Ok(Metadata::named("counter")),
         dependency.as_deref(),
     )
     .unwrap();
     assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
     // The crate compiled for itself: Cargo sets CARGO_PRIMARY_PACKAGE to 1.
-    let primary = primary_crate_dir(Some("1".into()), manifest_dir());
+    let primary = primary_crate_dir(variables(&[
+        ("CARGO_PRIMARY_PACKAGE", OsStr::new("1")),
+        manifest_dir,
+    ]));
     assert_eq!(primary.as_deref(), Some(dir.as_path()));
     let expanded: ItemMod = syn::parse2(
         expand(
             options("example:counter@1.0.0", None),
             module(),
-            Metadata::named("counter"),
+            Ok(Metadata::named("counter")),
             primary.as_deref(),
         )
         .unwrap(),
@@ -10588,6 +10593,63 @@ fn the_contract_is_written_into_the_crate_compiled_for_itself_alone() {
     assert_eq!(deps, ["tembra-guest.wit"]);
     tembra_contracts::Contract::from_dir(&contract, Some("tally")).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Cargo's variables, as `expansion` reads them, from the ones set.
+fn variables<'a>(set: &'a [(&str, &OsStr)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+    move |name| {
+        set.iter()
+            .find(|(variable, _)| *variable == name)
+            .map(|(_, value)| value.to_os_string())
+    }
+}
+
+/// Cargo compiles every target of the crate for itself, but only the library's Orb modules are
+/// the crate's: those of an integration test or a bench, for which Cargo also sets
+/// `CARGO_TARGET_TMPDIR`, and of a binary or an example built as one, for which it sets
+/// `CARGO_BIN_NAME`, write nothing into its `contract/`, where they would add their worlds and
+/// remove the library's contract of a package they reuse. The variables are those Cargo sets.
+#[test]
+fn only_the_library_target_writes_the_contract() {
+    let dir = Path::new("/ledger");
+    let primary = [
+        ("CARGO_PRIMARY_PACKAGE", OsStr::new("1")),
+        ("CARGO_MANIFEST_DIR", dir.as_os_str()),
+    ];
+    let library = [
+        primary.as_slice(),
+        &[("CARGO_CRATE_NAME", OsStr::new("ledger"))],
+    ]
+    .concat();
+    assert_eq!(primary_crate_dir(variables(&library)).as_deref(), Some(dir));
+    let tmpdir = ("CARGO_TARGET_TMPDIR", OsStr::new("/ledger/target/tmp"));
+    for (target, set) in [
+        (
+            "an integration test",
+            vec![("CARGO_CRATE_NAME", OsStr::new("t")), tmpdir],
+        ),
+        (
+            "a bench",
+            vec![("CARGO_CRATE_NAME", OsStr::new("speed")), tmpdir],
+        ),
+        (
+            "a binary",
+            vec![
+                ("CARGO_CRATE_NAME", OsStr::new("ledger")),
+                ("CARGO_BIN_NAME", OsStr::new("ledger")),
+            ],
+        ),
+        (
+            "an example built as a binary",
+            vec![
+                ("CARGO_CRATE_NAME", OsStr::new("host")),
+                ("CARGO_BIN_NAME", OsStr::new("host")),
+            ],
+        ),
+    ] {
+        let set = [primary.as_slice(), &set].concat();
+        assert_eq!(primary_crate_dir(variables(&set)), None, "{target}");
+    }
 }
 
 /// A module that reads its consumed directory from every place the expansion reads it: an

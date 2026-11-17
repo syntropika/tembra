@@ -1,7 +1,9 @@
 //! `[package.metadata.tembra]`, read from the manifest of the crate the macro expands in as
 //! `cargo tembra build` reads it: the Orb name and its API version, which the WIT does not carry.
 //! The table's `world` is not read: it names the contract of a component without an embedded one,
-//! and the macro names its world after the module.
+//! and the macro names its world after the module. Only the native side, `orb()`, needs the table,
+//! so a manifest the macro cannot read is the native side's compile error, and a component build,
+//! which drops that side, does without the manifest.
 use proc_macro2::Span;
 use std::path::{Path, PathBuf};
 

@@ -81,10 +81,7 @@ fn expansion(
         .clone()
         .into_iter()
         .any(|token| matches!(&token, proc_macro2::TokenTree::Ident(ident) if ident == "no_std"));
-    let crate_dir = primary_crate_dir(
-        std::env::var_os("CARGO_PRIMARY_PACKAGE"),
-        std::env::var_os("CARGO_MANIFEST_DIR"),
-    );
+    let crate_dir = primary_crate_dir(|name| std::env::var_os(name));
     let expanded = match cfg::combinations(&attribute, &item) {
         Ok(Some(copies)) => Ok(copies),
         Ok(None) => options(attribute)
@@ -93,7 +90,7 @@ fn expansion(
                 expand(
                     options,
                     module,
-                    metadata::Metadata::read()?,
+                    metadata::Metadata::read(),
                     crate_dir.as_deref(),
                 )
             }),
@@ -109,14 +106,20 @@ fn expansion(
     }
 }
 
-/// The directory the contract is written into, from the values of `CARGO_PRIMARY_PACKAGE` and
-/// `CARGO_MANIFEST_DIR`: the crate's own when Cargo compiles the crate for itself, which sets the
-/// first; none for a dependency, whose contract is never written into.
-fn primary_crate_dir(
-    primary_package: Option<OsString>,
-    manifest_dir: Option<OsString>,
-) -> Option<PathBuf> {
-    primary_package.and(manifest_dir).map(PathBuf::from)
+/// The directory the contract is written into, from Cargo's variables as `variable` reads them:
+/// the crate's own, `CARGO_MANIFEST_DIR`, when Cargo compiles the crate's library for itself,
+/// which sets `CARGO_PRIMARY_PACKAGE`; none for a dependency, whose contract is never written
+/// into. Cargo compiles the crate's other targets for itself too, whose Orb modules are not the
+/// library's and write nothing: it also sets `CARGO_TARGET_TMPDIR` for an integration test or a
+/// bench, and `CARGO_BIN_NAME` for a binary or an example built as one. It sets neither for an
+/// example built as a library, which this does not tell from the library.
+fn primary_crate_dir(variable: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    if variable("CARGO_TARGET_TMPDIR").is_some() || variable("CARGO_BIN_NAME").is_some() {
+        return None;
+    }
+    variable("CARGO_PRIMARY_PACKAGE")
+        .and(variable("CARGO_MANIFEST_DIR"))
+        .map(PathBuf::from)
 }
 
 /// Read the attribute's options.
@@ -1763,17 +1766,18 @@ impl Analysis {
 
 /// The module's expansion: one analysis of the module, then each side of the output written from
 /// it into the author's module, after the WIT both sides share. The native side names the Orb
-/// after the crate manifest's `[package.metadata.tembra]`, read by the caller. With `crate_dir`,
-/// the directory of the crate being compiled for itself, its `contract/` is written too, as
-/// `cargo tembra build` writes it; the token tests pass none.
+/// after the crate manifest's `[package.metadata.tembra]`, read by the caller, and alone reports
+/// a manifest the caller could not read: a component build never needs it. With `crate_dir`,
+/// the directory of the crate whose library is compiled for itself, its `contract/` is written
+/// too, as `cargo tembra build` writes it; the token tests pass none.
 fn expand(
     options: Options,
     module: ItemMod,
-    metadata: metadata::Metadata,
+    metadata: syn::Result<metadata::Metadata>,
     crate_dir: Option<&Path>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let analysis = analyze(options, module)?;
-    let native = native::emit(&analysis, &metadata);
+    let native = native::emit(&analysis, metadata.as_ref());
     let component = component(&analysis, &native.nested, &native.served)?;
     let native = native.root;
     // Last, once both sides accepted the module: the signature of each service, from the WIT.
