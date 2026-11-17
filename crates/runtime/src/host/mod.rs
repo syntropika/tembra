@@ -332,6 +332,7 @@ impl Host {
         self.0.scope_activations.borrow_mut().clear();
         self.0.host_resources.borrow_mut().clear();
         self.0.foreign_notifier.borrow_mut().take();
+        self.0.log_observer.borrow_mut().take();
         #[cfg(feature = "hooks")]
         self.clear_hooks();
         self.0.scope_objects.borrow_mut().clear();

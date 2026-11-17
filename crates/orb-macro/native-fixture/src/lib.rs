@@ -7,8 +7,9 @@
 //! `notebook` takes host values, which only a native host can lend, `library` shares its root's
 //! value among its objects, and `worker` only runs its root and a resource of it. The module
 //! `metering` imports the meter interface of the package in `wit/deps/`, which `meters`
-//! implements, and its `orb(..)` takes the provider of each import; `filter` contributes to the
-//! hook of a gate there, and its `orb(..)` takes the gate. The module `counters` rewrites with the
+//! implements, and its `orb(..)` takes the provider of each import; `exchange` imports an
+//! interface of types only, which needs none; `filter` contributes to the hook of a gate in
+//! `wit/deps/`, and its `orb(..)` takes the gate. The module `counters` rewrites with the
 //! macro a native Orb its test also writes by hand against the runtime's API. `abacus` and
 //! `restrung` are one Orb before and after a reload that gives its root's resource a new version,
 //! and `reframed` that Orb after a reload that gives only its package a new version.
@@ -1268,6 +1269,43 @@ pub mod metering {
             let total = meter.total().await;
             assert_eq!(added, total, "one call at a time feeds a meter");
             Ok(total)
+        }
+
+        /// The total of the provider's `main` meter if it answers at once, and 0 otherwise: the
+        /// call the method stops awaiting is cancelled.
+        pub async fn glance() -> u64 {
+            let mut total = std::pin::pin!(gauge::total());
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(match std::future::Future::poll(total.as_mut(), cx) {
+                    std::task::Poll::Ready(total) => total,
+                    std::task::Poll::Pending => 0,
+                })
+            })
+            .await
+        }
+    }
+}
+
+/// Swaps the currencies of the ledger's `money`, an interface of the package in `wit/` that holds
+/// types only: the attribute imports it for them, and as `cargo tembra build` binds such an import
+/// to nothing, `exchange::orb()` takes no provider for it.
+#[tembra::orb(
+    package = "example:exchange@1.0.0",
+    wit = "wit",
+    import = "example:ledger/money@1.0.0"
+)]
+pub mod exchange {
+    /// Swaps currencies.
+    #[service]
+    pub struct Desk;
+
+    impl Desk {
+        /// The other currency of the two.
+        pub fn swap(currency: money::Currency) -> money::Currency {
+            match currency {
+                money::Currency::Eur => money::Currency::Usd,
+                money::Currency::Usd => money::Currency::Eur,
+            }
         }
     }
 }

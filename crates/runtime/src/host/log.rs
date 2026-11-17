@@ -13,7 +13,8 @@ pub struct LogRecord {
 
 impl Host {
     /// Observe the records native Orbs write with [`Context::log`]; a later observer replaces this
-    /// one. Without an observer, records are dropped.
+    /// one. Without an observer, records are dropped. The host releases its observer when it
+    /// closes.
     pub fn on_log(&self, observer: impl Fn(&LogRecord) + 'static) {
         *self.0.log_observer.borrow_mut() = Some(Rc::new(observer));
     }

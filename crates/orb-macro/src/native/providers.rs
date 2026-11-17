@@ -1,14 +1,19 @@
 //! What a native Orb consumes from other Orbs. `orb(..)` takes `Providers`, one
 //! `tembra::Provider` per interface the module imports, so a host that leaves one out does not
 //! compile, and the Orb requires each provider, with the signature of the interface it imports,
-//! as the plan of a compiled Orb requires the provider an installation selects. A function of an
-//! imported interface calls the provider through the kernel, as a component's import does: the
-//! Orb module names the interface's module, `gauge`, in place of the bindings' import module, and
-//! each function writes its arguments as the boundary's JSON, calls the provider with
-//! `call_portable` under the context of the method running, and reads the result back. A plain
-//! import reaches the provider's `main` object, through the reference the Orb's create declares,
-//! as a component's root does; an import by key has its view's module, whose `get` acquires the
-//! object of a key under the principal of the call, as a value whose methods call that object.
+//! as the plan of a compiled Orb requires the provider an installation selects. An interface of
+//! types only needs no provider, as `cargo tembra build` binds a component's import of one to
+//! nothing: the bindings' module serves its types. A function of an imported interface calls the
+//! provider through the kernel, as a component's import does: the Orb module names the
+//! interface's module, `gauge`, in place of the bindings' import module, and each function writes
+//! its arguments as the boundary's JSON, issues the call with `issue_portable` under the context of
+//! the method running, and reads the result back. A call the method stops awaiting is cancelled,
+//! and the method ends once it has, as a component's executor cancels and joins an import its
+//! callback abandons. A plain import reaches the provider's `main` object, through the reference
+//! the Orb's create declares, as a component's root does; an import by key has its view's module,
+//! whose `get` acquires the object of a key under the principal of the call, as a value whose
+//! methods call that object, and whose claim the call that drops it releases as it settles, as a
+//! component's view's is.
 //!
 //! A native method has no fiber of its own, which a component's call suspends while the kernel
 //! completes an import: the functions of an imported interface are `async` natively, so an
@@ -58,9 +63,10 @@ impl Import<'_> {
 }
 
 /// The interfaces the module imports from other Orbs, which the native side serves, each with what
-/// its provider must offer; or the refusal of the first import it does not cover: a WASI import, an
-/// interface with a synchronous function, which works in a component build only, or with a
-/// resource, or a function taking or returning what the codec does not cover.
+/// its provider must offer, leaving out an interface of types only, which needs none; or the
+/// refusal of the first import it does not cover: a WASI import, an interface with a synchronous
+/// function, which works in a component build only, or with a resource, or a function taking or
+/// returning what the codec does not cover.
 pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
     let mut imports = Vec::new();
     for (literal, identity) in analysis.options.imports.iter().zip(&analysis.imports) {
@@ -71,6 +77,13 @@ pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
             ));
         }
         served(analysis, literal, identity, false)?;
+        let interface = analysis
+            .consumed_types
+            .interface(identity)
+            .expect("an imported interface is read");
+        if interface.functions.is_empty() {
+            continue;
+        }
         let [_, _, field] = hook_path(identity);
         imports.push((field, identity.as_str(), None));
     }
@@ -502,7 +515,10 @@ pub(super) fn requirements(
 /// from its `Providers` and whose plain imports the Orb's create declares, as a component's root
 /// declares its references, and the call each method's future runs for, which the functions of
 /// the import modules call with. A call that fails, or whose arguments or result the codec
-/// refuses, ends the method that made it with the failure, as a trap ends a component's call.
+/// refuses, ends the method that made it with the failure, as a trap ends a component's call. A
+/// call the method stops awaiting is cancelled, and the method ends once it has ended, unless its
+/// own call is cancelled, as a component's executor joins an import its callback abandons; then it
+/// releases the claims of the views dropped in it.
 pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
     let (plain, keyed): (Vec<&Import<'_>>, Vec<&Import<'_>>) =
         imports.iter().partition(|import| import.view.is_none());
@@ -588,19 +604,23 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                 }
 
                 /// Acquire the object of `key` for the call of `context`, under its principal, once
-                /// the object is ready, as a component's view acquires it: the call's root owns the
-                /// claim. Cancelling the call ends the wait.
+                /// the object is ready, as a component's view acquires it: the call's root files
+                /// the claim, and a wait that fails, is cancelled or is dropped releases it at
+                /// once. Cancelling the call ends the wait.
                 pub(crate) async fn get(
                     &self,
                     context: &::tembra::Context,
                     key: ::std::vec::Vec<::std::string::String>,
-                ) -> ::tembra::Result<::std::rc::Rc<::tembra::Reference>> {
-                    let reference = context
-                        .get_wait(&self.service, key, ::core::clone::Clone::clone(&self.options))
-                        .await?;
+                ) -> ::tembra::Result<Claim> {
+                    let mut claim = Claim {
+                        reference: context
+                            .get_wait(&self.service, key, ::core::clone::Clone::clone(&self.options))
+                            .await?,
+                        held: false,
+                    };
                     {
                         let signal = context.signal();
-                        let mut ready = ::std::boxed::Box::pin(reference.ready());
+                        let mut ready = ::std::boxed::Box::pin(claim.reference.ready());
                         let mut cancelled = ::std::boxed::Box::pin(signal.cancelled());
                         ::core::future::poll_fn(|cx| {
                             if let ::core::task::Poll::Ready(ready) =
@@ -614,7 +634,41 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                         .await?;
                     }
                     context.check()?;
-                    ::core::result::Result::Ok(reference)
+                    claim.held = true;
+                    ::core::result::Result::Ok(claim)
+                }
+            }
+
+            /// The claim of an object an import by key acquired, which the call's root files.
+            /// Dropped while `get` waits, it is released at once; held by a view, it is released
+            /// when the call that drops the view settles, as a component releases its view's claim
+            /// once the guest dropped the view, so the root keeps none after it.
+            pub(crate) struct Claim {
+                reference: ::std::rc::Rc<::tembra::Reference>,
+                held: bool,
+            }
+
+            impl Claim {
+                /// The reference of the claim, which calls the object.
+                pub(crate) fn reference(&self) -> &::tembra::Reference {
+                    &self.reference
+                }
+            }
+
+            impl ::core::ops::Drop for Claim {
+                fn drop(&mut self) {
+                    if self.held {
+                        let call = CALL.with(|current| current.borrow().clone());
+                        if let ::core::option::Option::Some(call) = call {
+                            call.dropped
+                                .borrow_mut()
+                                .push(::std::rc::Rc::clone(&self.reference));
+                            return;
+                        }
+                    }
+                    // A drop has no caller to answer: a release that fails goes unreported, as a
+                    // component's does.
+                    let _ = self.reference.release();
                 }
             }
         }
@@ -656,17 +710,23 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                     const { ::core::cell::RefCell::new(::core::option::Option::None) };
             }
 
-            /// The call of a method being polled: its context, the imports of its Orb, and the
-            /// failure of an import it made, which ends it.
+            /// The call of a method being polled: its context, the imports of its Orb, the
+            /// failure of an import it made, which ends it, the calls of the imports it stopped
+            /// awaiting, which it joins before it ends, and the claims of the views dropped in it,
+            /// which it releases as it ends.
             pub(crate) struct Call {
                 pub(crate) context: ::tembra::Context,
                 pub(crate) imports: ::std::rc::Rc<Imports>,
                 failed: ::core::cell::RefCell<::core::option::Option<::tembra::Error>>,
+                abandoned: ::core::cell::RefCell<::std::vec::Vec<::tembra::IssuedCall>>,
+                dropped: ::core::cell::RefCell<::std::vec::Vec<::std::rc::Rc<::tembra::Reference>>>,
             }
 
             /// Run a method's future for its call: while it is polled, the import modules call
             /// with that call, and an outer poll's call comes back after. A failed import ends
-            /// the method with its failure.
+            /// the method with its failure. As a component's callback, the method ends once the
+            /// calls of the imports it stopped awaiting have ended, and releases the claims of the
+            /// views dropped in it.
             pub(crate) fn scoped<T, F>(
                 context: ::tembra::Context,
                 imports: ::std::rc::Rc<Imports>,
@@ -679,20 +739,37 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                     context,
                     imports,
                     failed: ::core::cell::RefCell::new(::core::option::Option::None),
+                    abandoned: ::core::cell::RefCell::new(::std::vec::Vec::new()),
+                    dropped: ::core::cell::RefCell::new(::std::vec::Vec::new()),
                 });
-                let mut future = ::std::boxed::Box::pin(future);
-                ::core::future::poll_fn(move |cx| {
-                    let polled = {
-                        let _entered = Entered::enter(::std::rc::Rc::clone(&call));
-                        ::core::future::Future::poll(future.as_mut(), cx)
-                    };
-                    match call.failed.borrow_mut().take() {
-                        ::core::option::Option::Some(error) => {
-                            ::core::task::Poll::Ready(::core::result::Result::Err(error))
+                async move {
+                    let mut future = ::std::boxed::Box::pin(future);
+                    let result = ::core::future::poll_fn(|cx| {
+                        let polled = {
+                            let _entered = Entered::enter(::std::rc::Rc::clone(&call));
+                            ::core::future::Future::poll(future.as_mut(), cx)
+                        };
+                        match call.failed.borrow_mut().take() {
+                            ::core::option::Option::Some(error) => {
+                                ::core::task::Poll::Ready(::core::result::Result::Err(error))
+                            }
+                            ::core::option::Option::None => polled,
                         }
-                        ::core::option::Option::None => polled,
+                    })
+                    .await;
+                    // The method's future goes first, in its call, and the imports it still
+                    // awaits and the views it still holds with it.
+                    {
+                        let _entered = Entered::enter(::std::rc::Rc::clone(&call));
+                        ::core::mem::drop(future);
                     }
-                })
+                    call.join().await;
+                    for reference in call.dropped.take() {
+                        // As for a component's view, a release that fails goes unreported.
+                        let _ = reference.release();
+                    }
+                    result
+                }
             }
 
             /// The call set for one poll, which puts the previous one back when dropped, also
@@ -735,21 +812,21 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                     ) -> ::core::result::Result<R, ::std::string::String>,
                 ) -> R {
                     let answered = match arguments {
-                        ::core::result::Result::Ok(arguments) => match reference
-                            .call_portable::<::tembra::serde_json::Value, ::tembra::serde_json::Value>(
-                                &self.context,
-                                method,
-                                arguments,
-                            )
-                            .await
-                        {
-                            ::core::result::Result::Ok(value) => read(value).map_err(|message| {
-                                ::tembra::Error::invalid(::tembra::core::Reason::Result, message)
-                            }),
-                            ::core::result::Result::Err(error) => {
-                                ::core::result::Result::Err(error)
+                        ::core::result::Result::Ok(arguments) => {
+                            match self.issue(reference, method, arguments).await {
+                                ::core::result::Result::Ok(value) => {
+                                    read(value).map_err(|message| {
+                                        ::tembra::Error::invalid(
+                                            ::tembra::core::Reason::Result,
+                                            message,
+                                        )
+                                    })
+                                }
+                                ::core::result::Result::Err(error) => {
+                                    ::core::result::Result::Err(error)
+                                }
                             }
-                        },
+                        }
                         ::core::result::Result::Err(message) => ::core::result::Result::Err(
                             ::tembra::Error::invalid(::tembra::core::Reason::Arguments, message),
                         ),
@@ -760,6 +837,75 @@ pub(super) fn table(imports: &[Import<'_>]) -> TokenStream {
                             self.failed.borrow_mut().get_or_insert(error);
                             ::core::future::pending().await
                         }
+                    }
+                }
+
+                /// Issue the call of `method` with `arguments` to the object `reference` holds,
+                /// and wait for its result. Dropped first, it cancels the call, as a component's
+                /// executor cancels an import its callback abandons, and leaves it for the method
+                /// to join.
+                async fn issue(
+                    &self,
+                    reference: &::tembra::Reference,
+                    method: &str,
+                    arguments: ::tembra::serde_json::Value,
+                ) -> ::tembra::Result<::tembra::serde_json::Value> {
+                    let (issued, result) = reference
+                        .issue_portable::<::tembra::serde_json::Value, ::tembra::serde_json::Value>(
+                            &self.context,
+                            method,
+                            arguments,
+                        )
+                        .await?;
+                    let mut awaited = Awaited {
+                        call: self,
+                        issued: ::core::option::Option::Some(issued),
+                    };
+                    let answered = result.await;
+                    // Answered: nothing is left to cancel.
+                    awaited.issued = ::core::option::Option::None;
+                    answered
+                }
+
+                /// Wait until the calls of the imports the method stopped awaiting have ended, as
+                /// a component's callback joins them before it settles. Once the method's own call
+                /// is cancelled, it stops waiting: they stay cancelled, and counted until they end.
+                async fn join(&self) {
+                    let abandoned = self.abandoned.take();
+                    // Only a method that abandoned a call observes its own signal.
+                    if abandoned.is_empty() {
+                        return;
+                    }
+                    let signal = self.context.signal();
+                    for issued in abandoned {
+                        let mut settled = ::std::boxed::Box::pin(issued.settled());
+                        let mut cancelled = ::std::boxed::Box::pin(signal.cancelled());
+                        let stopped = ::core::future::poll_fn(|cx| {
+                            if ::core::future::Future::poll(settled.as_mut(), cx).is_ready() {
+                                return ::core::task::Poll::Ready(false);
+                            }
+                            ::core::future::Future::poll(cancelled.as_mut(), cx).map(|()| true)
+                        })
+                        .await;
+                        if stopped {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            /// The call of an import whose result the method awaits: dropped before it, it
+            /// cancels the call and leaves it to the method's call, which joins it.
+            struct Awaited<'a> {
+                call: &'a Call,
+                issued: ::core::option::Option<::tembra::IssuedCall>,
+            }
+
+            impl ::core::ops::Drop for Awaited<'_> {
+                fn drop(&mut self) {
+                    if let ::core::option::Option::Some(issued) = self.issued.take() {
+                        issued.cancel();
+                        self.call.abandoned.borrow_mut().push(issued);
                     }
                 }
             }
@@ -804,7 +950,7 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
                 None => (quote! { () }, quote! { ::core::result::Result::Ok(()) }),
             };
             let (receiver, reference) = match import.view {
-                Some(_) => (quote! { &self, }, quote! { &self.reference }),
+                Some(_) => (quote! { &self, }, quote! { self.claim.reference() }),
                 None => (
                     quote! {},
                     quote! { &__tembra_call.imports.#field.reference() },
@@ -843,11 +989,11 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
             Some(_) => {
                 let resource = type_ident(&interface.name.clone().unwrap_or_default());
                 let target = import.interface;
-                let doc = format!(" An object of `{target}`: its methods are the interface's functions.");
+                let doc = format!(" An object of `{target}`: its methods are the interface's functions. Dropping it releases its claim of the object when the call settles, as a component's view does.");
                 quote! {
                     #[doc = #doc]
                     pub struct #resource {
-                        reference: ::std::rc::Rc<::tembra::Reference>,
+                        claim: super::__tembra_import::Claim,
                     }
 
                     impl #resource {
@@ -865,8 +1011,8 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
                             .get(&__tembra_call.context, key)
                             .await
                         {
-                            ::core::result::Result::Ok(reference) => {
-                                ::core::result::Result::Ok(#resource { reference })
+                            ::core::result::Result::Ok(claim) => {
+                                ::core::result::Result::Ok(#resource { claim })
                             }
                             ::core::result::Result::Err(error) => {
                                 ::core::result::Result::Err(::std::string::ToString::to_string(&error))

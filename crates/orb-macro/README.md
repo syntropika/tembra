@@ -1397,20 +1397,25 @@ let orb = metering::orb(metering::Providers {
 ```
 
 The Orb requires each provider, with the signature of the interface, as the plan of a compiled Orb
-requires the provider an installation selects, so the host refuses the Orb without it. In place of
-the bindings' import module, the Orb module names a module of the same name, with the interface's
-types and functions, `async` as in a component and taking their parameters owned: each writes its
-arguments as the boundary's JSON, calls the provider through the kernel with `call_portable`, under
-the context of the method running, and reads the result back. A plain import reaches the provider's
-`main` object, of the principal `host`, through a reference the Orb's create declares, as a
-component's root does; the view of an import by key acquires the object of a key under the
-principal of the call, whose root holds it. A call that fails, or whose arguments or result the
-codec refuses, ends the method that made it with that error, where it traps a component. As the
-`context` functions, the imported functions serve the methods and the contributions of the Orb and
-the futures they await, and panic elsewhere. A native method has no fiber of its own to suspend
-while the kernel completes a call, as a component's call has, so a synchronous imported function
-cannot wait for its answer: an import of an interface with a synchronous function, plain or by key,
-is a compile error where the runtime is linked, and works in a component build of the same module.
+requires the provider an installation selects, so the host refuses the Orb without it. An import of
+an interface of types only needs no provider, as `cargo tembra build` binds a component's to
+nothing: `Providers` leaves it out. In place of the bindings' import module, the Orb module names a
+module of the same name, with the interface's types and functions, `async` as in a component and
+taking their parameters owned: each writes its arguments as the boundary's JSON, calls the provider
+through the kernel, under the context of the method running, and reads the result back. A call the
+method stops awaiting, a future it drops before the answer, is cancelled, and the method ends once
+that call has ended, unless its own call is cancelled, as a component's executor cancels and joins
+an import its callback abandons. A plain import reaches the provider's `main` object, of the
+principal `host`, through a reference the Orb's create declares, as a component's root does; the
+view of an import by key acquires the object of a key under the principal of the call, whose root
+holds the claim: a view dropped releases it when the call settles, and a `get` that fails releases
+it at once, as in a component. A call that fails, or whose arguments or result the codec refuses,
+ends the method that made it with that error, where it traps a component. As the `context`
+functions, the imported functions serve the methods and the contributions of the Orb and the
+futures they await, and panic elsewhere. A native method has no fiber of its own to suspend while
+the kernel completes a call, as a component's call has, so a synchronous imported function cannot
+wait for its answer: an import of an interface with a synchronous function, plain or by key, is a
+compile error where the runtime is linked, and works in a component build of the same module.
 
 A [contribution to a hook](#contributing-to-a-hook) serves a native host too. `Providers` names the
 Orb that declares each hook the module contributes to, under the name of the hook's module,

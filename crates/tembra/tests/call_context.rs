@@ -1,6 +1,7 @@
 //! A native method reads the address of the object running its call, and writes a record for the
 //! host's log observer, attributed to its Orb by the host. Without an observer the record is
 //! dropped, a later observer replaces an earlier one, and a root, which runs no call, has neither.
+//! The host releases its observer when it closes.
 use futures::{FutureExt, executor::LocalPool};
 use std::{cell::RefCell, rc::Rc};
 use tembra::{Host, LogRecord, Orb, Service};
@@ -104,5 +105,23 @@ fn a_later_observer_replaces_the_earlier_one() {
     assert_eq!(
         logged(&later),
         [("notes".to_owned(), "info".to_owned(), "once".to_owned())]
+    );
+}
+
+/// The host releases its observer when it closes, as it releases its other callbacks, so an
+/// observer that holds the host does not keep it alive.
+#[test]
+fn closing_the_host_releases_its_observer() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let holder = Rc::new(host.clone());
+    let held = Rc::downgrade(&holder);
+    host.on_log(move |_| {
+        let _host: &Host = &holder;
+    });
+    pool.run_until(host.close()).unwrap();
+    assert!(
+        held.upgrade().is_none(),
+        "the host kept its observer after it closed"
     );
 }
