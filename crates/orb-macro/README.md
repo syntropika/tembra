@@ -393,7 +393,9 @@ the running revision keeps serving, as the [state example](../../examples/rust-o
 shows for an update. A function named `validate` without the marker is ordinary Rust. Every state
 answers a reload, with a rule or without: the new instance first reads the value it inherits as its
 own state type, so a value of another shape, a field added or renamed under the same `version`,
-fails the reload instead of the first `read`.
+fails the reload instead of the first `read`. Another `version` fails the reload as well while an
+object holds the state, since the macro declares no migration of the value: the running revision
+keeps serving the object, and the objects created after a reload start at the new version.
 
 The kernel keeps the state as JSON, which has no room for a NaN or an infinite float: `serde_json`
 writes one as `null`, which reads back as no float, so a stored value holding one would fail every

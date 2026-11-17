@@ -1990,3 +1990,526 @@ fn a_renamed_facade_serves_the_copies_both_ways() {
     module_natively("renamed");
     module_natively("renamed,archive");
 }
+
+/// The hooks the gatehouse declares, its desk, and the Orb it is installed as.
+const VISITS: &str = "example:gatehouse/visits@1.0.0";
+const ROOMS: &str = "example:gatehouse/rooms@1.0.0";
+const GUARD: &str = "example:admission/guard@1.0.0";
+const DESK: &str = "gatehouse::example:gatehouse/desk@1.0.0";
+
+/// A native Orb contributing twice to each hook of the gatehouse, at the priorities -1 and 1:
+/// both see each visit, which they note in `seen`; the first answers a room above the ground floor
+/// only and the second any floor; the first adds one to an admission and the second blocks one
+/// above ten.
+fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> Orb {
+    let signature = |hook: &str| contract.function_signature(hook, "apply", true).unwrap();
+    let visits = tembra::Hook::<Value, ()>::series(VISITS).signature(signature(VISITS));
+    let rooms = tembra::Hook::<u32, Option<u32>>::bail(ROOMS).signature(signature(ROOMS));
+    let guard = tembra::Hook::<Value, Value>::waterfall(GUARD).signature(signature(GUARD));
+    let mut watch = Orb::new("watch", 1).requires(tembra::core::Requirement {
+        orb: "gatehouse".into(),
+        api_version: 1,
+        methods: Default::default(),
+        hooks: [VISITS.into(), ROOMS.into(), GUARD.into()].into(),
+        signatures: Default::default(),
+        hook_signatures: Default::default(),
+    });
+    for priority in [-1, 1] {
+        let seen = seen.clone();
+        watch = watch.contribute("gatehouse", &visits, priority, move |_, visit: Value| {
+            seen.borrow_mut().push((priority, visit));
+            async { Ok(()) }
+        });
+    }
+    watch
+        .contribute("gatehouse", &rooms, -1, |_, floor: u32| async move {
+            Ok((floor > 0).then_some(floor * 100))
+        })
+        .contribute("gatehouse", &rooms, 1, |_, floor: u32| async move {
+            Ok(Some(floor))
+        })
+        .contribute("gatehouse", &guard, -1, |_, admission: Value| async move {
+            let value = admission["value"].as_i64().unwrap() + 1;
+            Ok(json!({"value": value, "blocked": admission["blocked"]}))
+        })
+        .contribute("gatehouse", &guard, 1, |_, admission: Value| async move {
+            let value = admission["value"].as_i64().unwrap();
+            Ok(json!({"value": value, "blocked": value > 10}))
+        })
+}
+
+/// Hook declarations of each composition, in a component build, std and freestanding: the module
+/// `gatehouse` of the `hooks` feature declares a series and a bail from their input, and the
+/// waterfall of a consumed package by its identity, which the component's roles name with their
+/// compositions. Native contributions answer them in plan order: every contribution to the series
+/// sees each visit, the first answer of the bail gives the room, and each contribution to the
+/// waterfall changes the admission in turn. Without contributions, the series ends, the bail
+/// answers nothing and the waterfall hands its input back. Natively, the module compiles, and its
+/// `orb()` refuses the declarations, which only a component serves.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn hooks_a_component_declares_compose_their_contributions() {
+    let engine = Engine::new(Limits::default()).unwrap();
+    for features in ["hooks", "hooks,no-std"] {
+        let component = module_component(features);
+        let (module, artifact) = module_artifact(&component, "gatehouse");
+        let roles = module.contract().embedded_roles(&component).unwrap();
+        assert_eq!(
+            roles.hooks,
+            BTreeMap::from([
+                (
+                    GUARD.to_owned(),
+                    tembra_contracts::HookComposition::Waterfall
+                ),
+                (ROOMS.to_owned(), tembra_contracts::HookComposition::Bail),
+                (VISITS.to_owned(), tembra_contracts::HookComposition::Series),
+            ]),
+            "{features}"
+        );
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        for contributed in [false, true] {
+            let mut orbs = vec![engine.load(&artifact, Install::default()).unwrap()];
+            if contributed {
+                orbs.push(contributions(module.contract(), seen.clone()));
+            }
+            let mut pool = LocalPool::new();
+            let host = Host::new(pool.spawner());
+            host.install(orbs).unwrap();
+            let desk = ready(&mut pool, &host, DESK);
+            let mut call = |method: &'static str, arguments: Value| {
+                counting_call(&mut pool, &host, &desk, "alice", method, arguments)
+            };
+            assert_eq!(call("visit", json!(["ada", 9])), Value::Null, "{features}");
+            let rooms = [0, 3].map(|floor| call("room", json!([floor])));
+            let admitted = [5, 10].map(|value| call("admit", json!([value])));
+            let visit = json!({"who": "ada", "hour": 9});
+            if contributed {
+                assert_eq!(
+                    *seen.borrow(),
+                    [(-1, visit.clone()), (1, visit)],
+                    "{features}"
+                );
+                assert_eq!(rooms, [json!(0), json!(300)], "{features}");
+                assert_eq!(
+                    admitted,
+                    [json!([6, false]), json!([11, true])],
+                    "{features}"
+                );
+            } else {
+                assert!(seen.borrow().is_empty(), "{features}");
+                assert_eq!(rooms, [Value::Null, Value::Null], "{features}");
+                assert_eq!(
+                    admitted,
+                    [json!([5, false]), json!([10, false])],
+                    "{features}"
+                );
+            }
+            desk.release().unwrap();
+            pool.run_until(host.close()).unwrap();
+            assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+        }
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("hooks");
+}
+
+/// A state's version across a reload, in a component build, std and freestanding: the counter of
+/// the `versioned` feature keeps its state at version 1, and its next revision, built with
+/// `revised`, at version 2. The versions are compared on reload. Changing the version of a living
+/// object's state needs a migration of its value, which the macro does not declare: the reload is
+/// refused, naming the state's version, and the running revision keeps serving the object. Once
+/// the object is released the reload goes through, and a new object starts from the next
+/// revision's state at its version; going back to version 1 is then refused the same way.
+/// Natively, each revision keeps its state at its version, across a reload of its own code: one
+/// build of the crate holds one revision, so a native host cannot reload one into the other.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_state_version_is_compared_across_a_reload() {
+    const COUNTER: &str = "tallies::example:versioned/counter@1.0.0";
+    let engine = Engine::new(Limits::default()).unwrap();
+    for runtime in ["", ",no-std"] {
+        let [first, next] = ["versioned", "versioned,revised"].map(|features| {
+            module_artifact(
+                &module_component(&format!("{features}{runtime}")),
+                "tallies",
+            )
+            .1
+        });
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![engine.load(&first, Install::default()).unwrap()])
+            .unwrap();
+        let reload = |pool: &mut LocalPool, artifact: &[u8]| {
+            let orb = engine.load(artifact, Install::default()).unwrap();
+            pool.run_until(host.reload(vec![orb], 5_000))
+                .map(|_| ())
+                .map_err(|error| error.message)
+        };
+        let counter = ready(&mut pool, &host, COUNTER);
+        let add = |pool: &mut LocalPool, counter: &Rc<Reference>, by: u32| {
+            counting_call(pool, &host, counter, "alice", "add", json!([by]))
+        };
+        assert_eq!(add(&mut pool, &counter, 3), json!(3), "{runtime}");
+        let refused = reload(&mut pool, &next).expect_err("a raised version needs a migration");
+        assert!(refused.contains("state_version"), "{runtime}: {refused}");
+        assert_eq!(add(&mut pool, &counter, 1), json!(4), "{runtime}");
+        assert_eq!(counter.state_snapshot().unwrap().0.version, 1, "{runtime}");
+        counter.release().unwrap();
+        pool.run_until(host.settled());
+        assert_eq!(reload(&mut pool, &next), Ok(()), "{runtime}");
+        let counter = ready(&mut pool, &host, COUNTER);
+        let state = counter.state::<Value>().unwrap();
+        assert_eq!(
+            *state.value().unwrap(),
+            json!({"total": 0, "additions": 0}),
+            "{runtime}"
+        );
+        assert_eq!(add(&mut pool, &counter, 2), json!(2), "{runtime}");
+        assert_eq!(
+            *state.value().unwrap(),
+            json!({"total": 2, "additions": 1}),
+            "{runtime}"
+        );
+        assert_eq!(counter.state_snapshot().unwrap().0.version, 2, "{runtime}");
+        let refused = reload(&mut pool, &first).expect_err("a lowered version needs a migration");
+        assert!(refused.contains("state_version"), "{runtime}: {refused}");
+        assert_eq!(add(&mut pool, &counter, 1), json!(3), "{runtime}");
+        counter.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{runtime}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("versioned");
+    module_natively("versioned,revised");
+}
+
+/// A resource of the Orb's root, in a component build, std and freestanding, and natively: the
+/// lamp of the `lamps` feature, at version 1, opens in the component when the Orb's root is
+/// created and its `#[close]` function runs at teardown, each writing to the host's log. A reload
+/// to the next revision, whose lamp is at version 2, opens that lamp in the new instance and
+/// closes the first one, lit as it was; closing the host closes the second. Natively, the host
+/// opens each revision's lamp at its version, keeps it across a reload of the same code, and
+/// closes it through its `#[close]` function when it closes.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_root_resource_opens_and_closes_both_ways() {
+    const SWITCH: &str = "lamps::example:lamps/switch@1.0.0";
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for runtime in ["", ",no-std"] {
+        let [first, next] = ["lamps", "lamps,revised"].map(|features| {
+            module_artifact(&module_component(&format!("{features}{runtime}")), "lamps").1
+        });
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![engine.load(&first, Install::default()).unwrap()])
+            .unwrap();
+        let switch = ready(&mut pool, &host, SWITCH);
+        let light = |pool: &mut LocalPool, switch: &Rc<Reference>| {
+            counting_call(pool, &host, switch, "alice", "light", json!([]))
+        };
+        assert_eq!(light(&mut pool, &switch), json!(1), "{runtime}");
+        assert_eq!(light(&mut pool, &switch), json!(2), "{runtime}");
+        assert_eq!(logged(), ["open 1"], "{runtime}");
+        switch.release().unwrap();
+        let orb = engine.load(&next, Install::default()).unwrap();
+        pool.run_until(host.reload(vec![orb], 5_000)).unwrap();
+        pool.run_until(host.settled());
+        let switch = ready(&mut pool, &host, SWITCH);
+        assert_eq!(light(&mut pool, &switch), json!(1), "{runtime}");
+        assert_eq!(logged(), ["open 2", "close 1, lit 2"], "{runtime}");
+        switch.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(logged(), ["close 2, lit 1"], "{runtime}");
+        assert!(host.errors().is_empty(), "{runtime}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("lamps");
+    module_natively("lamps,revised");
+}
+
+/// An interface with `flags` consumed by a guest that depends on the facade alone, in a component
+/// build, std and freestanding: the module `holder` of the `flagged` feature implements
+/// `example:rights/rights@1.0.0`, whose `access` the bindings generate without `wit-bindgen`'s
+/// `bitflags` feature, and a derived service takes and returns the same type. A value crosses as
+/// an object of its set flags. The module's native build fails today, so its native test runs
+/// from the native fixture's `tests/flags.rs`, ignored until then.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_consumed_flags_crosses_a_component_with_the_facade_alone() {
+    const RIGHTS: &str = "holder::example:rights/rights@1.0.0";
+    const CHECKS: &str = "holder::example:holder/checks@1.0.0";
+    let engine = Engine::new(Limits::default()).unwrap();
+    for features in ["flagged", "flagged,no-std"] {
+        let (module, orb) = module_orb(&engine, &module_component(features), "holder");
+        let (words, text) = (words(&module), module.text());
+        assert!(
+            words.contains("missing:func(access:access,wanted:access)->access;"),
+            "{features}\n{text}"
+        );
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let (rights, checks) = (
+            ready(&mut pool, &host, RIGHTS),
+            ready(&mut pool, &host, CHECKS),
+        );
+        let mut call = |reference: &Rc<Reference>, method: &'static str, arguments: Value| {
+            counting_call(&mut pool, &host, reference, "alice", method, arguments)
+        };
+        assert_eq!(
+            call(&rights, "invert", json!([{"read": true}])),
+            json!({"write": true, "share": true}),
+            "{features}"
+        );
+        let grants = json!([
+            {"who": "ada", "access": {"read": true}},
+            {"who": "bob", "access": {"share": true}},
+        ]);
+        assert_eq!(
+            call(&rights, "merged", json!([grants])),
+            json!({"read": true, "share": true}),
+            "{features}"
+        );
+        assert_eq!(
+            call(
+                &checks,
+                "missing",
+                json!([{"read": true}, {"read": true, "write": true}])
+            ),
+            json!({"write": true}),
+            "{features}"
+        );
+        rights.release().unwrap();
+        checks.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+}
+
+/// The installation of a WASI module, with the grants `system` gives it, refused: the kernel
+/// answers `forbidden/orb_grant`, naming the interface the grants leave out, `missing`.
+fn refused_without(engine: &Engine, artifact: &[u8], install: Install, missing: &str) {
+    let Err(error) = engine.load(artifact, install) else {
+        panic!("installed without the grant of {missing}");
+    };
+    assert_eq!(
+        (error.code, error.reason.as_str()),
+        (Code::Forbidden, "orb_grant"),
+        "{error}"
+    );
+    assert!(error.message.contains(missing), "{missing}: {error}");
+}
+
+/// WASI imports of the host's system capabilities besides the random source and the monotonic
+/// clock, in a component build, std and freestanding: the module `system` of the `system` feature
+/// reads the system clock, a duration of the clocks' types, the CLI's arguments and environment
+/// and the insecure random source, under an installation that grants `clocks`, `cli` and
+/// `random`. The kernel refuses one that grants no `cli`, naming the CLI's interface. Natively,
+/// the module compiles, and its `orb()` refuses the imports, which only a component serves.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn wasi_imports_answer_in_a_component_under_their_grants() {
+    const PROBE: &str = "system::example:system/probe@1.0.0";
+    let engine = Engine::new(Limits::default()).unwrap();
+    let granted = |system: &[SystemCapability]| {
+        let mut install = Install::default();
+        install.grants.system = system.iter().copied().collect();
+        install.cli.arguments = vec!["probe".into()];
+        install.cli.environment = vec![("MODE".into(), "test".into())];
+        install
+    };
+    for features in ["system", "system,no-std"] {
+        let (_, artifact) = module_artifact(&module_component(features), "system");
+        let partly = granted(&[SystemCapability::Clocks, SystemCapability::Random]);
+        refused_without(&engine, &artifact, partly, "wasi:cli/");
+        let all = [
+            SystemCapability::Clocks,
+            SystemCapability::Cli,
+            SystemCapability::Random,
+        ];
+        let orb = engine.load(&artifact, granted(&all)).unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let probe = ready(&mut pool, &host, PROBE);
+        let mut call = |method: &'static str, arguments: Value| {
+            counting_call(&mut pool, &host, &probe, "alice", method, arguments)
+        };
+        let seconds = call("seconds", json!([])).as_i64().unwrap();
+        assert!(seconds > 1_700_000_000, "{features}: {seconds}");
+        assert_eq!(
+            call("nanoseconds", json!([2])),
+            json!(2_000_000_000_u64),
+            "{features}"
+        );
+        assert_eq!(
+            call("environment", json!([])),
+            json!(["probe", "MODE=test"]),
+            "{features}"
+        );
+        assert_eq!(call("insecure", json!([8])), json!(8), "{features}");
+        probe.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("system");
+}
+
+/// Accept one connection on the loopback address and answer `response` once its request head has
+/// arrived, on a thread of its own; return the port.
+fn peer(response: &'static str) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0];
+        while !response.is_empty() && !head.ends_with(b"\r\n\r\n") {
+            if socket.read(&mut byte).unwrap() == 0 {
+                break;
+            }
+            head.push(byte[0]);
+        }
+        socket.write_all(response.as_bytes()).unwrap();
+    });
+    port
+}
+
+/// WASI imports of the providers a host configures, in a component build, std and freestanding:
+/// the module `io` of the `io` feature lists the preopened directories, a type of the filesystem's
+/// types, which it reaches by the bindings' path since it imports the sockets' `types`, connects
+/// over TCP through a socket of those types, and sends an HTTP request through the client. Each
+/// needs the grant of a configured provider: a filesystem, a network destination and an HTTP
+/// origin; the kernel refuses an installation that grants no network, naming the sockets'
+/// interface. Natively, the module compiles, and its `orb()` refuses the imports.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn wasi_provider_imports_answer_in_a_component_under_their_grants() {
+    const OUTSIDE: &str = "io::example:io/outside@1.0.0";
+    let directory = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .filesystem("data", directory.path())
+        .unwrap()
+        .network("net")
+        .unwrap();
+    for features in ["io", "io,no-std"] {
+        let (_, artifact) = module_artifact(&module_component(features), "io");
+        let (listening, serving) = (
+            peer(""),
+            peer("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello"),
+        );
+        let granted = |network: bool| {
+            let mut install = Install::default();
+            install.grants.filesystem = vec![tembra_executor_wasm::FilesystemGrant {
+                provider: "data".into(),
+                mount: "/data".into(),
+                writable: false,
+            }];
+            install.grants.http = vec![tembra_contracts::HttpGrant {
+                provider: "net".into(),
+                origins: vec![format!("http://127.0.0.1:{serving}")],
+            }];
+            if network {
+                install.grants.network = vec![tembra_contracts::NetworkGrant {
+                    provider: "net".into(),
+                    connect: vec![([127, 0, 0, 1], listening).into()],
+                    ..Default::default()
+                }];
+            }
+            install
+        };
+        refused_without(&engine, &artifact, granted(false), "wasi:sockets/");
+        let orb = engine.load(&artifact, granted(true)).unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let outside = ready(&mut pool, &host, OUTSIDE);
+        let mut call = |method: &'static str, arguments: Value| {
+            counting_call(&mut pool, &host, &outside, "alice", method, arguments)
+        };
+        assert_eq!(
+            call("directories", json!([])),
+            json!(["/data: directory"]),
+            "{features}"
+        );
+        assert_eq!(
+            call("connect", json!([listening])),
+            json!({"tag": "ok"}),
+            "{features}"
+        );
+        let authority = format!("127.0.0.1:{serving}");
+        assert_eq!(
+            call("fetch", json!([authority, "/"])),
+            json!({"tag": "ok", "val": "200 hello"}),
+            "{features}"
+        );
+        outside.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("io");
+}
+
+/// A module with a state, a root resource and the `context` that implements an interface of a
+/// contract whose `deps/` holds the kernel's package, `tembra-guest.wit`, as `cargo tembra build`
+/// writes it, in a component build, std and freestanding, and natively: the module `steady` of the
+/// `steady` feature consumes the state example's contract. The macro reads the kernel's package
+/// once, from that directory, and the component answers: each object counts in its state, through
+/// the root's resource, and the `context` names the call's principal, which the counter refuses
+/// for `mallory`; so does the module's `orb()` in the fixture's native test.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_contract_holding_the_kernel_package_is_consumed_both_ways() {
+    const COUNTER: &str = "steady::example:counter/counter@1.0.0";
+    let engine = Engine::new(Limits::default()).unwrap();
+    for features in ["steady", "steady,no-std"] {
+        let (_, orb) = module_orb(&engine, &module_component(features), "steady");
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let counter = ready(&mut pool, &host, COUNTER);
+        let mut call = |principal: &str, method: &'static str, arguments: Value| {
+            counting_call(&mut pool, &host, &counter, principal, method, arguments)
+        };
+        assert_eq!(
+            call("alice", "add", json!([2])),
+            json!({"tag": "ok", "val": {"total": 2, "steps": 1}}),
+            "{features}"
+        );
+        assert_eq!(
+            call("alice", "add", json!([3])),
+            json!({"tag": "ok", "val": {"total": 5, "steps": 2}}),
+            "{features}"
+        );
+        assert_eq!(
+            call("mallory", "add", json!([1])),
+            json!({"tag": "err", "val": "mallory may not count"}),
+            "{features}"
+        );
+        assert_eq!(
+            call("alice", "read", json!([])),
+            json!({"total": 5, "steps": 2}),
+            "{features}"
+        );
+        assert_eq!(
+            *counter.state::<Value>().unwrap().value().unwrap(),
+            json!({"count": {"total": 5, "steps": 2}}),
+            "{features}"
+        );
+        counter.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("steady");
+}

@@ -1,0 +1,12 @@
+package example:admission@1.0.0;
+
+/// Each contributor may change the admission or block it, in plan order.
+interface guard {
+  /// One admission.
+  record admission {
+    value: s32,
+    blocked: bool,
+  }
+
+  apply: func(input: admission) -> admission;
+}

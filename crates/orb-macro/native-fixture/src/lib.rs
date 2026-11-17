@@ -18,6 +18,8 @@
 //! here all the same, and their `orb()` answers an error naming it. `trail` holds a service and its
 //! root two private modules down, and a service whose method is named `clone`, as a method of `Rc`.
 //! `list` is named like a keyword of WIT, as are its method `record` and its flag `r#type`.
+//! `steady` has a state, a root resource and the `context`, and implements an interface of the
+//! state example's contract, whose `deps/` holds the kernel's package.
 //! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
@@ -1900,6 +1902,69 @@ pub mod list {
                 bold: marks.bold,
                 r#type: marks.r#type || word.starts_with(char::is_uppercase),
             }
+        }
+    }
+}
+
+/// Implements `example:counter/counter@1.0.0` from the contract the state example's build wrote,
+/// whose `deps/` holds the kernel's package, `tembra-guest.wit`: with a state, a resource of the
+/// root and the `context`, the module needs that package too, which the macro adds to its bindings
+/// only when the consumed directory does not hold it already. The runtime fixture builds the same
+/// module into a component.
+#[tembra::orb(
+    package = "example:steady@1.0.0",
+    wit = "../../../examples/rust-orb-state/counter/contract",
+    context
+)]
+pub mod steady {
+    use std::cell::Cell;
+
+    /// The count of one counter object, kept by the kernel: the consumed record.
+    #[state]
+    pub struct Kept {
+        pub count: counter::Count,
+    }
+
+    impl Default for Kept {
+        fn default() -> Self {
+            Kept {
+                count: counter::Count { total: 0, steps: 0 },
+            }
+        }
+    }
+
+    /// How many additions the Orb's counters made, a resource of the root.
+    #[resource]
+    pub struct Additions {
+        pub made: Cell<u32>,
+    }
+
+    impl Additions {
+        #[open]
+        pub fn open() -> Additions {
+            Additions { made: Cell::new(0) }
+        }
+    }
+
+    /// The counter of the consumed contract.
+    #[service("example:counter/counter@1.0.0")]
+    pub struct Counter;
+
+    impl Counter {
+        pub fn add(by: i64) -> Result<counter::Count, String> {
+            if context::principal() == "mallory" {
+                return Err(format!("{} may not count", context::principal()));
+            }
+            Additions::with(|additions| additions.made.set(additions.made.get() + 1));
+            let kept = Kept::update(|kept| {
+                kept.count.total += by;
+                kept.count.steps += 1;
+            });
+            Ok(kept.count)
+        }
+
+        pub fn read() -> counter::Count {
+            Kept::read().count
         }
     }
 }

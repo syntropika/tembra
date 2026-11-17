@@ -7,12 +7,26 @@ extern crate alloc;
 
 #[cfg(feature = "configured")]
 mod configured;
+#[cfg(feature = "flagged")]
+mod flagged;
+#[cfg(feature = "hooks")]
+mod hooks;
+#[cfg(feature = "io")]
+mod io;
 #[cfg(feature = "keywords")]
 mod keywords;
+#[cfg(feature = "lamps")]
+mod lamps;
 #[cfg(all(test, any(feature = "native", feature = "native-sdk")))]
 mod native;
 #[cfg(feature = "renamed")]
 mod renamed;
+#[cfg(feature = "steady")]
+mod steady;
+#[cfg(feature = "system")]
+mod system;
+#[cfg(feature = "versioned")]
+mod versioned;
 
 #[cfg(feature = "guest")]
 #[cfg_attr(

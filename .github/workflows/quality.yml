@@ -27,9 +27,11 @@ jobs:
           # Measured after `check`: 10 minutes. Estimated alone, where it also builds what `check`
           # built: 14 minutes, 20 with the setup and the cache save.
           - { recipe: test-orb-examples, timeout: 35 }
-          # Measured after `check` and the examples: 2.5 minutes. Estimated alone: 6.5 minutes,
-          # 12 with the setup and the cache save.
-          - { recipe: test-orb-macro, timeout: 25 }
+          # The macro's fixtures, each module built as a component, std and freestanding, and
+          # natively. A cold run took 3.6 minutes with 6 jobs on 32 cores, 16 minutes of CPU; the
+          # estimate allows for 4 vCPUs and for downloading the crates: 8.5 minutes, 14 with the
+          # setup and the cache save.
+          - { recipe: test-orb-macro, timeout: 21 }
           # The `cargo tembra` commands on crates it scaffolds. Estimated on a cold cache: 4 minutes,
           # 9.5 with the setup and the cache save. A cold run took 1.7 minutes with 6 jobs on 32
           # cores; the estimate allows for 4 vCPUs and for downloading the crates.
