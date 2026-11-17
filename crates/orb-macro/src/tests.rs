@@ -4677,6 +4677,305 @@ fn a_standard_derive_is_decided_from_the_fields() {
     );
 }
 
+/// The bindings implement `Debug` for every type they generate, `Clone` and `Copy` as far as its
+/// contents allow, the comparisons for an enum, and `Display` and `Error` for the error of a
+/// function's result, and they derive `serde`'s traits on it in an Orb with a state; the macro
+/// implements `BitOr` for a flags struct. An impl of one of those traits that the Orb's modules
+/// write for such a type, under `#[cfg(..)]` too, or a derive implementing `BitOr` on a flags
+/// struct, would implement it twice, so it is refused, saying what implements it already. The same
+/// module without it expands, and so do an impl of a trait the bindings do not implement for that
+/// type and an impl whose trait the macro cannot follow to a crate.
+#[test]
+fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
+    let module = |items: &str| {
+        format!(
+            "mod walk {{
+                use std::fmt;
+                #[wit_resource]
+                pub struct Pen {{ pub ink: u32 }}
+                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                pub struct Point {{ pub x: i32 }}
+                pub struct Lease {{ pub pen: Pen }}
+                pub enum Fault {{ Lost, Stuck }}
+                pub enum Heading {{ North, East }}
+                #[flags]
+                pub struct Access {{ pub read: bool }}
+                {items}
+                #[service]
+                pub struct Walker;
+                impl Walker {{
+                    pub fn walk(access: Access, heading: Heading) -> Result<Point, Fault> {{ todo!() }}
+                    pub fn lend() -> Lease {{ todo!() }}
+                }}
+            }}"
+        )
+    };
+    let fmt = "fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { todo!() }";
+    let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
+    let state = "#[state] pub struct Count { pub steps: u32 }";
+    for (source, message) in [
+        (
+            module(&format!("impl fmt::Display for Fault {{ {fmt} }}")),
+            "`impl fmt::Display for Fault`: `Fault` enters the WIT and the generated type replacing it implements `Display` already, as the bindings implement it for the error of a function's result; remove the impl, or keep `Fault` out of the WIT",
+        ),
+        (
+            module("impl std::error::Error for Fault {}"),
+            "`impl std::error::Error for Fault`: `Fault` enters the WIT and the generated type replacing it implements `Error` already, as the bindings implement it for the error of a function's result",
+        ),
+        (
+            module(&format!(
+                "use core::fmt::Debug; impl Debug for Point {{ {fmt} }}"
+            )),
+            "`impl Debug for Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
+        ),
+        (
+            module("impl Clone for Point { fn clone(&self) -> Self { todo!() } }"),
+            "`impl Clone for Point`: `Point` enters the WIT and the generated type replacing it implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
+        ),
+        (
+            module(
+                "#[cfg(test)]
+                mod tests {
+                    use super::*;
+                    impl PartialEq for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }
+                }",
+            ),
+            "`impl PartialEq for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
+        ),
+        (
+            module(&format!(
+                "{state} impl serde::Serialize for Point {{ {serialize} }}"
+            )),
+            "`impl serde::Serialize for Point`: `Point` enters the WIT and the generated type replacing it implements `Serialize` already, as the bindings derive it for a type that enters the WIT of an Orb with a state; remove the impl, or keep `Point` out of the WIT",
+        ),
+        (
+            module("").replace("#[flags]", "#[flags] #[derive(derive_more::BitOr)]"),
+            "`derive_more::BitOr` on `Access`: `Access` is a #[flags] struct, for which the macro implements `BitOr`, as its bindings combine flags with `|`; remove the derive",
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &source);
+        assert!(error.contains(message), "{source}: {error}");
+    }
+    for items in [
+        String::new(),
+        format!("impl fmt::Display for Point {{ {fmt} }}"),
+        "impl PartialEq for Point { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
+        "impl Clone for Lease { fn clone(&self) -> Self { todo!() } }".to_owned(),
+        format!("impl serde::Serialize for Point {{ {serialize} }}"),
+        "impl crate::walk::Display for Fault {} pub trait Display {}".to_owned(),
+        format!("use pretty::*; impl Display for Fault {{ {fmt} }}"),
+        format!("{state} impl rkyv::Serialize<u32> for Point {{}}"),
+    ] {
+        expanded("example:walk@1.0.0", &module(&items));
+    }
+}
+
+/// The macro reads the trait impls of the Orb's modules before the compiler evaluates
+/// `#[cfg(..)]`, and leaves to them what the code it writes needs: the `Clone` of a flags struct,
+/// which its `Copy` needs, and what the bindings of a record holding the struct need of it, the
+/// `Default` of a state, a `serde` trait of a state kept out of the WIT, and a trait a type's derive
+/// needs of a type it holds. An impl under `#[cfg(..)]`, written plainly or under
+/// `#[cfg_attr(..)]`, or in a module under one, such as `#[cfg(test)] mod tests`, gives the trait in
+/// some configurations only, so it is refused, unless other impls, or a derive under
+/// `#[cfg_attr(..)]`, cover the others, as a `#[cfg(not(..))]` impl beside a `#[cfg(..)]` one does.
+/// The same impls without the attribute expand, and so does an impl under `#[cfg(..)]` of a trait
+/// the generated code does not need: the `Debug` or the `Copy` of a flags struct no record holds,
+/// or a `serde` trait of a type a state reaches, which the `#[serde(..)]` of its fields decide.
+#[test]
+fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                #[flags]
+                pub struct Access {{ pub read: bool, pub write: bool }}
+                pub struct Grant {{ pub access: Access, pub level: u32 }}
+                pub struct Note {{ pub text: String }}
+                {items}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn invert(grant: Grant, note: Note) -> Access {{ todo!() }} }}
+            }}"
+        )
+    };
+    let walk = |items: &str| {
+        format!(
+            "mod walk {{
+                #[wit_resource]
+                pub struct Pen {{ pub ink: u32 }}
+                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                pub struct Slot {{ pub pen: Pen }}
+                #[derive(PartialEq)]
+                pub struct Page {{ pub slot: Slot }}
+                {items}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn turn() -> Page {{ todo!() }} }}
+            }}"
+        )
+    };
+    let ledger = |items: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                {items}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let compared = |items: &str| {
+        office(items).replace("pub struct Grant", "#[derive(PartialEq)] pub struct Grant")
+    };
+    let clone = "impl Clone for Access { fn clone(&self) -> Self { *self } }";
+    let debug = "impl core::fmt::Debug for Access { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } }";
+    let equal = "impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
+    let compare = "impl PartialEq for Slot { fn eq(&self, other: &Self) -> bool { todo!() } }";
+    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
+    let serialize = "impl serde::Serialize for Balance { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }";
+    for (build, hand, place, owner, name) in [
+        (
+            &office as &dyn Fn(&str) -> String,
+            clone,
+            "`impl Clone for Access`",
+            "Access",
+            "Clone",
+        ),
+        (
+            &office,
+            debug,
+            "`impl core::fmt::Debug for Access`",
+            "Access",
+            "Debug",
+        ),
+        (
+            &compared,
+            equal,
+            "`impl PartialEq for Access`",
+            "Access",
+            "PartialEq",
+        ),
+        (
+            &walk,
+            compare,
+            "`impl PartialEq for Slot`",
+            "Slot",
+            "PartialEq",
+        ),
+        (
+            &ledger,
+            default,
+            "`impl Default for Balance`",
+            "Balance",
+            "Default",
+        ),
+        (
+            &ledger,
+            serialize,
+            "`impl serde::Serialize for Balance`",
+            "Balance",
+            "Serialize",
+        ),
+    ] {
+        for (condition, written) in CONDITIONS {
+            let error = refused(
+                "example:office@1.0.0",
+                &build(&format!("{condition} {hand}")),
+            );
+            let message = format!(
+                "{written} on {place}: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `{owner}` to implement `{name}` in every configuration; remove the attribute, or implement `{name}` for the configurations it turns off too, under `#[cfg(not(..))]`"
+            );
+            assert!(error.contains(&message), "{condition} {hand}: {error}");
+        }
+        expanded("example:office@1.0.0", &build(hand));
+        for (condition, opposite) in [
+            (
+                "#[cfg(feature = \"audit\")]",
+                "#[cfg(not(feature = \"audit\"))]",
+            ),
+            (
+                "#[cfg_attr(test, cfg(feature = \"audit\"))]",
+                "#[cfg_attr(test, cfg(not(feature = \"audit\")))]",
+            ),
+            (
+                "#[cfg(all(unix, feature = \"audit\"))]",
+                "#[cfg(any(not(unix), not(feature = \"audit\")))]",
+            ),
+        ] {
+            expanded(
+                "example:office@1.0.0",
+                &build(&format!("{condition} {hand} {opposite} {hand}")),
+            );
+        }
+    }
+    let error = refused(
+        "example:office@1.0.0",
+        &office(&format!(
+            "#[cfg(test)] mod tests {{ use super::Access; {clone} }}"
+        )),
+    );
+    assert!(
+        error.contains("`#[cfg(..)]` on the module `tests` holding `impl Clone for Access`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Access` to implement `Clone` in every configuration"),
+        "{error}"
+    );
+    let error = refused(
+        "example:office@1.0.0",
+        &ledger(&format!(
+            "#[cfg(feature = \"seeded\")] {default} #[cfg(test)] {default}"
+        )),
+    );
+    assert!(
+        error.contains("`#[cfg(..)]` on `impl Default for Balance`"),
+        "{error}"
+    );
+    // A derive under `#[cfg_attr(..)]` covers the configurations an impl leaves out.
+    let paired = tokens(&expanded(
+        "example:office@1.0.0",
+        &ledger(&format!("#[cfg(feature = \"compact\")] {serialize}")).replace(
+            "pub struct Balance",
+            "#[cfg_attr(not(feature = \"compact\"), derive(serde::Serialize))] pub struct Balance",
+        ),
+    ));
+    assert!(
+        paired.contains("# [derive (:: serde :: Deserialize)] pub struct Balance"),
+        "{paired}"
+    );
+    let not_cloned = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(&format!("#[cfg(test)] {clone} #[cfg(not(test))] {clone}")),
+    ));
+    assert!(
+        not_cloned.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)]"),
+        "{not_cloned}"
+    );
+    // What the generated code does not need stays the author's, under `#[cfg(..)]`.
+    expanded(
+        "example:office@1.0.0",
+        &office(
+            "#[cfg(test)]
+            mod tests {
+                use super::*;
+                impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }
+                impl PartialEq for Note { fn eq(&self, other: &Self) -> bool { todo!() } }
+                impl Default for Note { fn default() -> Self { todo!() } }
+            }",
+        ),
+    );
+    let unheld = office(&format!(
+        "#[cfg(feature = \"audit\")] {debug} #[cfg(feature = \"audit\")] impl Copy for Access {{}}"
+    ))
+    .replace("grant: Grant", "access: Access");
+    expanded("example:office@1.0.0", &unheld);
+    let reached = ledger(
+        "pub struct Note { pub text: String }
+        #[cfg(feature = \"compact\")]
+        impl serde::Serialize for Note { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }",
+    )
+    .replace("pub total: i64", "pub total: i64, pub notes: Vec<Note>");
+    expanded("example:office@1.0.0", &reached);
+}
+
 /// The bindings' module reads the helper attributes the generated type takes, so one it would not
 /// know there is refused on the author's type: one whose arguments name what the type's module
 /// declares or imports, which a path from `crate::` names from anywhere; an attribute macro the

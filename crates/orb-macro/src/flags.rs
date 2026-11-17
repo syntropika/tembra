@@ -15,12 +15,12 @@
 //! named from its import module too, one module higher, which one path cannot serve: a hook's input
 //! holds no flags.
 use crate::{
-    Candidate, Declared, Module, Shape, ShapeKind, Uses, identity, reaches_root, reaching,
-    relative, wit,
+    Candidate, Declared, Elsewhere, Module, Shape, ShapeKind, Uses, identity, reaches_root,
+    reaching, relative, wit,
 };
 use proc_macro2::Span;
 use quote::quote;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use syn::{Attribute, Fields, Ident, Item, LitInt, LitStr, Type, spanned::Spanned};
 
 /// The inherent functions the macro gives a flags struct, which the bindings call by these names.
@@ -207,6 +207,57 @@ pub(crate) fn check_modules(
     Ok(())
 }
 
+/// Refuse an impl under `#[cfg(..)]` that the macro left one of a flags struct's derives to
+/// (`emit`), `Clone`, `Copy`, `Debug` or `serde`'s, where a record or a variant that enters the
+/// WIT holds the struct, as the bindings make of them (`bindings`, by `crate::selector`): the
+/// bindings need the trait of the struct in every configuration, as they implement `Debug` for
+/// such a type and derive `Clone`, `Copy` and serde's traits on it as far as its contents allow
+/// (`implemented`, `Generated::serialized`). A struct no such type holds needs none of them.
+pub(crate) fn check_held(
+    shapes: &[Shape],
+    bindings: &wit::Bindings,
+    placement: &BTreeMap<String, Ident>,
+    package: &str,
+    elsewhere: &BTreeMap<String, Elsewhere>,
+) -> syn::Result<()> {
+    for flags in shapes
+        .iter()
+        .filter(|shape| matches!(shape.kind, ShapeKind::Flags(_)))
+    {
+        let Some(besides) = elsewhere.get(&flags.ident.to_string()) else {
+            continue;
+        };
+        let name = wit::kebab(&flags.ident);
+        for holder in shapes {
+            let selector = crate::selector(holder, placement, package);
+            let Some(generated) = bindings.types.get(&selector) else {
+                continue;
+            };
+            let holds = generated
+                .parts
+                .iter()
+                .any(|part| matches!(&part.held, wit::Held::Own(held) if *held == name));
+            if !holds {
+                continue;
+            }
+            let own = crate::implemented(&holder.kind, generated);
+            let needed = |trait_name: &str| match trait_name {
+                "Clone" | "Copy" | "Debug" => own.iter().any(|(known, _)| *known == trait_name),
+                "Serialize" | "Deserialize" => generated.serialized,
+                _ => false,
+            };
+            if let Some((_, refusal)) = besides
+                .conditional
+                .iter()
+                .find(|(trait_name, _)| needed(trait_name))
+            {
+                return Err(refusal.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The entries of `wit-bindgen`'s `with` option mapping each flags type onto the author's struct:
 /// the type's full WIT name, `ns:name/interface@version/type`, and the struct's path from the
 /// export modules, four modules below the Orb module.
@@ -236,11 +287,16 @@ pub(crate) fn remapped(
 /// Put each flags struct that enters the WIT back in its module, with the derives it lacks and
 /// the functions the bindings call on it. A function of a reserved name in an impl block of the
 /// struct, or a `BitOr` of the struct with itself or with a type parameter, written in any module
-/// of the Orb, is refused: the macro's would clash with it. `uses` are the modules' imports,
+/// of the Orb, is refused: the macro's would clash with it, and so would a derive of the struct
+/// implementing `BitOr`. The macro leaves one of its derives to the author's impls, which it reads
+/// before the compiler evaluates `#[cfg(..)]`: those under it that leave a configuration without
+/// `Clone` the struct's `Copy` needs are refused (`uncovered`). `uses` are the modules' imports,
 /// through which the type of an impl is followed, and `declared` the types of the Orb's modules,
-/// by scope, which tell a name a glob import brings in apart. Returns the traits each struct has,
-/// by its name: the macro's derives, the author's, and those the Orb's modules implement for it
-/// by hand, which decide the derives of the generated types holding the struct.
+/// by scope, which tell a name a glob import brings in apart. Returns what each struct implements,
+/// by its name: the macro's derives, the author's, and the traits the Orb's modules implement for
+/// it by hand, which decide the derives of the generated types holding the struct, with the
+/// refusal of the impls that give a trait in some configurations only, those the macro leaves its
+/// derive to included.
 pub(crate) fn emit(
     shapes: &[Shape],
     tree: &mut Module,
@@ -249,7 +305,7 @@ pub(crate) fn emit(
     uses: &[Uses],
     declared: &[(usize, Ident)],
     serde: bool,
-) -> syn::Result<BTreeMap<String, BTreeSet<String>>> {
+) -> syn::Result<BTreeMap<String, Elsewhere>> {
     let mut traits = BTreeMap::new();
     for shape in shapes {
         let ShapeKind::Flags(item) = &shape.kind else {
@@ -281,11 +337,39 @@ pub(crate) fn emit(
             }
         }
         let implemented = traits_implemented(tree, modules, names_struct);
-        if let Some(span) = implemented.get("BitOr") {
+        if let Some((_, block)) = implemented.get("BitOr").and_then(|hands| hands.last()) {
             return Err(syn::Error::new(
-                *span,
+                block.span(),
                 format!(
                     "`{ident}` is a #[flags] struct, for which the macro implements `BitOr`, as its bindings combine flags with `|`; remove this impl"
+                ),
+            ));
+        }
+        let bit_or = item
+            .attrs
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("derive"))
+            .filter_map(|derive| {
+                derive
+                    .parse_args_with(
+                        syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                    )
+                    .ok()
+            })
+            .flatten()
+            .find(|path| {
+                path.segments.last().is_some_and(|last| {
+                    crate::implemented_by(&last.ident, &item.attrs)
+                        .iter()
+                        .any(|name| name == "BitOr")
+                })
+            });
+        if let Some(path) = bit_or {
+            return Err(syn::Error::new(
+                path.span(),
+                format!(
+                    "`{}` on `{ident}`: `{ident}` is a #[flags] struct, for which the macro implements `BitOr`, as its bindings combine flags with `|`; remove the derive",
+                    crate::written(&path)
                 ),
             ));
         }
@@ -298,20 +382,30 @@ pub(crate) fn emit(
             wanted.push(("Serialize", quote! { ::serde::Serialize }));
             wanted.push(("Deserialize", quote! { ::serde::Deserialize }));
         }
-        let has: BTreeSet<String> = wanted
-            .iter()
-            .map(|(name, _)| (*name).to_owned())
-            .chain(crate::derived(&item.attrs))
-            .chain(implemented.keys().cloned())
-            .collect();
+        let mut has = Elsewhere::by_hand(&implemented, &ident, tree, modules);
+        let mut missing = Vec::new();
+        for (name, path) in &wanted {
+            if crate::derives(&item.attrs, name) {
+                // The derive gives the trait in every configuration.
+                has.conditional.remove(*name);
+            } else if !implemented.contains_key(*name) {
+                missing.push(path.clone());
+            }
+        }
+        // `Copy` needs `Clone`, and the struct has `Copy` in every configuration unless the macro
+        // leaves it to impls that give it in some only; a record holding the struct needs what
+        // the bindings derive on it (`check_held`).
+        let copy = !has.conditional.contains_key("Copy");
+        if copy && let Some(refusal) = has.conditional.remove("Clone") {
+            return Err(refusal);
+        }
+        has.traits.extend(
+            wanted
+                .iter()
+                .map(|(name, _)| (*name).to_owned())
+                .chain(crate::derived(&item.attrs)),
+        );
         traits.insert(ident.to_string(), has);
-        let missing: Vec<proc_macro2::TokenStream> = wanted
-            .into_iter()
-            .filter(|(name, _)| {
-                !crate::derives(&item.attrs, name) && !implemented.contains_key(*name)
-            })
-            .map(|(_, path)| path)
-            .collect();
         if !missing.is_empty() {
             item.attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
         }
@@ -324,9 +418,10 @@ pub(crate) fn emit(
 }
 
 /// The traits the Orb's modules implement by hand for the type `ident` of the module `home`, a
-/// flags struct or not, by the last name of each trait's path, as `emit` reads them for a flags
-/// struct (`traits_implemented`): once the generated type replaces a record, a variant or an enum,
-/// the author's impls apply to it, so the types holding it may derive what they implement.
+/// flags struct or not, by the last name of each trait's path, with the impls, as `emit` reads
+/// them for a flags struct (`traits_implemented`): once the generated type replaces a record, a
+/// variant or an enum, the author's impls apply to it, so the types holding it may derive what
+/// they implement.
 pub(crate) fn implemented_by_hand(
     tree: &mut Module,
     modules: &[Vec<Ident>],
@@ -334,12 +429,10 @@ pub(crate) fn implemented_by_hand(
     declared: &[(usize, Ident)],
     ident: &Ident,
     home: usize,
-) -> BTreeSet<String> {
+) -> BTreeMap<String, Vec<(usize, syn::ItemImpl)>> {
     let names_type =
         |ty: &Type, scope: usize| names(ty, scope, ident, home, modules, uses, declared);
     traits_implemented(tree, modules, names_type)
-        .into_keys()
-        .collect()
 }
 
 /// The trait impls the Orb's modules write by hand for the type `ident` of the module `home`, a
@@ -417,16 +510,16 @@ fn names(
 }
 
 /// The traits the Orb's modules implement by hand for a flags struct, by the last name of each
-/// trait's path, with where each impl is written; `names` tells whether a type written in a module
-/// is the struct. `BitOr` counts where it overlaps the macro's own, `BitOr<Self>`: written with
-/// no argument, with `Self`, with the struct, or with a type parameter of the impl, which takes
-/// the struct too; one with another right-hand type does not.
+/// trait's path, with the impls, each with the module it is written in; `names` tells whether a
+/// type written in a module is the struct. `BitOr` counts where it overlaps the macro's own,
+/// `BitOr<Self>`: written with no argument, with `Self`, with the struct, or with a type parameter
+/// of the impl, which takes the struct too; one with another right-hand type does not.
 fn traits_implemented(
     tree: &mut Module,
     modules: &[Vec<Ident>],
     names: impl Fn(&Type, usize) -> bool,
-) -> BTreeMap<String, Span> {
-    let mut implemented = BTreeMap::new();
+) -> BTreeMap<String, Vec<(usize, syn::ItemImpl)>> {
+    let mut implemented: BTreeMap<String, Vec<(usize, syn::ItemImpl)>> = BTreeMap::new();
     for (scope, block) in trait_impls(tree, modules, &names) {
         let Some((_, path, _)) = &block.trait_ else {
             continue;
@@ -434,6 +527,7 @@ fn traits_implemented(
         let Some(last) = path.segments.last() else {
             continue;
         };
+        let name = last.ident.to_string();
         if last.ident == "BitOr" {
             let parameter = |rhs: &Type| {
                 block.generics.type_params().any(|param| {
@@ -461,7 +555,7 @@ fn traits_implemented(
                 continue;
             }
         }
-        implemented.insert(last.ident.to_string(), block.span());
+        implemented.entry(name).or_default().push((scope, block));
     }
     implemented
 }
