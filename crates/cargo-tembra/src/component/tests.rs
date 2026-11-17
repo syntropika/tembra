@@ -2,6 +2,7 @@
 //! the component's imports and exports.
 use super::{Import, classify_import, consumed_packages, inspect, is_ingress, world_key};
 use crate::scratch;
+use std::collections::BTreeMap;
 use wit_parser::Resolve;
 
 /// The smallest component: the header alone, importing and exporting nothing.
@@ -175,6 +176,164 @@ fn a_consumed_package_brings_the_packages_it_builds_on() {
             .collect::<Vec<_>>(),
         ["relay"]
     );
+}
+
+/// A proxy importing by key the interface it implements: the view `use`s the implemented
+/// interface's record, so elaboration imports that interface for its types.
+const ROUTER_PROXY: &str = "package example:router@1.0.0;
+interface counter-ref {
+  use example:counters/counter@1.0.0.{tally};
+  resource counter { add: func(amount: u32) -> u32; read: async func() -> tally; }
+  get: async func(key: list<string>) -> result<counter, string>;
+}
+world proxy { import counter-ref; export example:counters/counter@1.0.0; }
+package example:counters@1.0.0 {
+  interface counter { record tally { key: list<string>, count: u32 } add: func(amount: u32) -> u32; read: async func() -> tally; }
+}
+";
+
+/// The roles of a component without a manifest pair an import with an export, as a contribution at
+/// priority 0, only when the world imports the interface itself: an interface the world imports
+/// because a view `use`s its types, while exporting it, as a proxy importing by key the interface
+/// it implements does, stays a service.
+#[test]
+fn an_interface_imported_only_for_its_types_is_no_contribution() {
+    let roles = |source: &str, world: &str| {
+        let contract =
+            tembra_contracts::Contract::from_source("roles.wit", source, Some(world)).unwrap();
+        super::roles(&contract, EMPTY_COMPONENT).unwrap()
+    };
+    let hook = roles(
+        "package example:hooks@1.0.0; interface guard { apply: func(value: u32) -> u32; } world extension { import guard; export guard; }",
+        "extension",
+    );
+    assert_eq!(
+        hook.contributions,
+        [("example:hooks/guard@1.0.0".to_owned(), 0)].into()
+    );
+    let proxy = roles(ROUTER_PROXY, "proxy");
+    assert_eq!(proxy, tembra_contracts::ComponentRoles::default());
+}
+
+/// A world importing an interface that `use`s a resource of the interface it implements, as
+/// `#[orb]` derives one for `import = "example:docs/index@1.0.0"` beside
+/// `#[service("example:docs/store@1.0.0")]`: elaboration imports the implemented interface for
+/// the resource's type.
+const DOCS_PROXY: &str = "package example:docs@1.0.0;
+interface store {
+  resource doc { constructor(title: string); title: func() -> string; }
+}
+interface index {
+  use store.{doc};
+  search: func(q: string) -> list<doc>;
+}
+world proxy { import index; export store; }
+";
+
+/// The summary of a component of the world `world` of `source`, as `cargo tembra build` prints it
+/// with the roles and the contract the build reads.
+fn summary_of(source: &str, world: &str) -> String {
+    let contract =
+        tembra_contracts::Contract::from_source("summary.wit", source, Some(world)).unwrap();
+    let roles = super::roles(&contract, EMPTY_COMPONENT).unwrap();
+    let mut resolve = Resolve::default();
+    let package = resolve.push_str("summary.wit", source).unwrap();
+    let world = resolve.select_world(&[package], Some(world)).unwrap();
+    let mut out = Vec::new();
+    let model = Some(contract.prepared().model());
+    super::summary(&mut out, &resolve, world, "proxy", &roles, model).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+/// An interface the world exports and imports only because another import `use`s its resource is
+/// no hook: installation binds its import like any other import holding a resource, to the
+/// provider the installer names, so the summary lists it with the imports of other Orbs, whether
+/// the component calls its functions or not. The import a view's types bring holds no resource,
+/// and installation binds it to nothing: it stays out.
+#[test]
+fn the_summary_lists_an_import_of_an_implemented_interface_that_holds_a_resource() {
+    let requires = "imports of other Orbs, bound with Install::requires:\n";
+    // In the world's order: elaboration imports `store` before the import that `use`s it.
+    let docs = summary_of(DOCS_PROXY, "proxy");
+    assert!(
+        docs.ends_with(&format!(
+            "{requires}  example:docs/store@1.0.0\n  example:docs/index@1.0.0\n"
+        )),
+        "{docs}"
+    );
+    // A resource without functions: the component calls none of the interface's functions.
+    let bare = DOCS_PROXY.replace(
+        "resource doc { constructor(title: string); title: func() -> string; }",
+        "resource doc;",
+    );
+    let bare = summary_of(&bare, "proxy");
+    assert!(
+        bare.ends_with(&format!(
+            "{requires}  example:docs/store@1.0.0\n  example:docs/index@1.0.0\n"
+        )),
+        "{bare}"
+    );
+    let view = summary_of(ROUTER_PROXY, "proxy");
+    assert!(
+        view.ends_with(&format!("{requires}  example:router/counter-ref@1.0.0\n")),
+        "{view}"
+    );
+}
+
+/// A world importing an interface that `use`s a bare resource of one interface and a record of
+/// another, with a function, neither of which the world imports itself or exports: elaboration
+/// imports both for their types.
+const DOCS_SEARCH: &str = "package example:docs@1.0.0;
+interface store {
+  resource doc;
+}
+interface clock {
+  record instant { seconds: u64 }
+  now: func() -> instant;
+}
+interface index {
+  use store.{doc};
+  use clock.{instant};
+  search: func(q: string) -> list<doc>;
+  stamp: func() -> instant;
+}
+interface report {
+  count: func() -> u32;
+}
+world proxy { import index; export report; }
+";
+
+/// Installation binds every import by one rule, whether the world exports its interface or not:
+/// an import that holds a resource is bound to the provider the installer names, even when the
+/// world imports it only because another import `use`s the resource and it has no functions, and
+/// an import the world holds only for the types another uses, without a resource, is bound to
+/// nothing, functions or not. The summary lists the imports installation binds, `store` and
+/// `index` here and not `clock`, so an installation requiring a provider for each of them, and for
+/// no other import, succeeds.
+#[test]
+fn the_summary_lists_the_imports_installation_binds() {
+    let docs = summary_of(DOCS_SEARCH, "proxy");
+    let listed = ["example:docs/store@1.0.0", "example:docs/index@1.0.0"];
+    assert!(
+        docs.ends_with(&format!(
+            "imports of other Orbs, bound with Install::requires:\n  {}\n",
+            listed.join("\n  ")
+        )),
+        "{docs}"
+    );
+    let contract =
+        tembra_contracts::Contract::from_source("summary.wit", DOCS_SEARCH, Some("proxy")).unwrap();
+    let provider = tembra_contracts::OrbProvider {
+        orb: "docs".into(),
+        api_version: 1,
+    };
+    let requires: BTreeMap<String, tembra_contracts::OrbProvider> = listed
+        .iter()
+        .map(|id| ((*id).to_owned(), provider.clone()))
+        .collect();
+    contract
+        .providers(&requires, &tembra_contracts::Grants::default())
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[test]

@@ -1,0 +1,13 @@
+package example:texts@1.0.0;
+
+/// Texts under construction, the contract shared by whoever builds one.
+interface texts {
+  /// A text that grows as words are appended to it.
+  resource builder {
+    /// Start a builder holding `text`.
+    constructor(text: string);
+
+    /// Append `word` and return the length of the text.
+    append: func(word: string) -> u32;
+  }
+}

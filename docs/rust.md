@@ -22,7 +22,6 @@ Guest crates use the same facade with host execution disabled:
 ```toml
 [dependencies]
 tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
-wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc", "async"] }
 ```
 
 ```rust,ignore
@@ -40,10 +39,10 @@ mod greeting {
 ```
 
 The macro uses `std` by default. A freestanding guest uses `#![no_std]`, the `no_std` macro
-option and `dlmalloc`; see the [macro guide](../crates/orb-macro/README.md). `wit-bindgen`
-remains the explicit dependency used by the generated bindings. The `macros` feature builds
-the procedural macro for the compiler; it adds no host runtime, Wasmtime or WIT parser to the
-guest binary.
+option and `dlmalloc`; see the [macro guide](../crates/orb-macro/README.md). The `macros`
+feature brings the `wit-bindgen` the generated bindings use, at the version whose rules the
+macro follows, so a guest does not name it; it builds the procedural macro for the compiler and
+adds no host runtime, Wasmtime or WIT parser to the guest binary.
 
 ## Declare an orb
 

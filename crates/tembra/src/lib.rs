@@ -4,7 +4,8 @@
 //! `wasm::Engine`, which loads isolated Orbs as the same `Orb` type.
 //! Enable `contracts` for prepared WIT contracts or `authoring` for WIT parsing and packaging.
 //! Guests use `default-features = false` with `macros` to declare components using `orb`
-//! without linking the host runtime.
+//! without linking the host runtime; the feature brings the `wit-bindgen` the generated
+//! bindings use, so a guest never names it.
 //! Browser applications use the TypeScript SDK and its WebAssembly host adapter.
 #![cfg_attr(not(feature = "host"), no_std)]
 
@@ -18,6 +19,12 @@ pub use tembra_contracts as contracts;
 /// Declare a compiled Orb and its WIT bindings from a Rust module.
 #[cfg(feature = "macros")]
 pub use tembra_orb_macro::orb;
+
+// The bindings generator the macro's expansion calls, and the runtime of the bindings it writes:
+// the generated code follows the rules of this version, so the facade picks it, not the guest.
+#[cfg(feature = "macros")]
+#[doc(hidden)]
+pub use wit_bindgen as __wit_bindgen;
 
 /// Isolated WebAssembly execution, providers and prepared WIT contracts.
 #[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
