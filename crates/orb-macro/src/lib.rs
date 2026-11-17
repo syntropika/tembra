@@ -1707,6 +1707,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .collect::<syn::Result<Vec<String>>>()?;
     let consumed_modules = foreign::Modules::new(
         options.context,
+        !states.is_empty() || !resources.is_empty(),
+        &package,
         &options.imports,
         &keyed_imports,
         &services,

@@ -132,18 +132,21 @@ enum Reached<'m, 't> {
 impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
     /// interface imported by key under its view's, and with `context`, the attribute's option, the
-    /// kernel's context interface under `context`. `imports` are the attribute's literals, read as
-    /// identities already; `paths` are the Orb's own modules and `uses` what each imports, by
-    /// scope; `own` are the names the Orb module's items take where a module takes its name
-    /// (`own_names`). Another interface
-    /// under a name already taken is an error on it, naming both, and so is a second role of an
-    /// interface, or one role twice, which the world cannot hold, an import of the kernel's context
-    /// interface beside the option, and a plain import of an interface the module implements, which
-    /// would make the world a hook's. An item of the Orb module under the name of a re-exported
-    /// module is an error on the item, naming both.
+    /// kernel's context interface under `context`. `kernel` says whether a state or a resource
+    /// makes the world import the kernel's interfaces, `package` is the Orb's package, `imports`
+    /// are the attribute's literals, read as identities already; `paths` are the Orb's own modules
+    /// and `uses` what each imports, by scope; `own` are the names the Orb module's items take
+    /// where a module takes its name (`own_names`). Another interface under a name already taken is
+    /// an error on it, naming both, and so is a second role of an interface, or one role twice,
+    /// which the world cannot hold, an import of the kernel's context interface beside the option,
+    /// and a plain import of an interface the module implements, which would make the world a
+    /// hook's. An item of the Orb module under the name of a re-exported module, or of a module the
+    /// bindings declare there, is an error on the item, naming both.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         context: bool,
+        kernel: bool,
+        package: &str,
         imports: &[LitStr],
         keyed: &[String],
         services: &[Service],
@@ -282,6 +285,61 @@ impl Modules {
                     ),
                 ));
             }
+        }
+        // The bindings declare in the Orb module `exports`, the module of the interfaces the world
+        // exports, and the module of each namespace of the interfaces it imports itself: those the
+        // attribute imports, the consumed hooks, the views and the derived hooks, interfaces of the
+        // Orb's package, and the kernel's for the `context` option, a state or a resource. An
+        // interface the world imports because one of those `use`s it, which the macro does not
+        // read here, may bring another namespace, which the compiler judges.
+        let namespace = |identity: &str| {
+            crate::rust_ident(crate::Identity::of(identity).namespace)
+                .unraw()
+                .to_string()
+        };
+        let mut namespaces: BTreeSet<String> = imports
+            .iter()
+            .map(|literal| namespace(&literal.value()))
+            .chain(
+                contributions
+                    .iter()
+                    .map(|contribution| namespace(&contribution.hook)),
+            )
+            .chain(
+                declared
+                    .iter()
+                    .filter(|declaration| declaration.input.is_none())
+                    .map(|declaration| namespace(&declaration.hook)),
+            )
+            .collect();
+        if !keyed.is_empty()
+            || declared
+                .iter()
+                .any(|declaration| declaration.input.is_some())
+        {
+            namespaces.insert(namespace(package));
+        }
+        if context || kernel {
+            namespaces.insert(namespace(wit::GUEST_CONTEXT));
+        }
+        let exporting = !services.is_empty() || !contributions.is_empty() || !declared.is_empty();
+        for (ident, kind) in own {
+            let name = ident.unraw().to_string();
+            let holding = if name == "exports" && exporting {
+                "the interfaces the world exports".to_owned()
+            } else if namespaces.contains(&name) {
+                format!(
+                    "the namespace `{name}`, which holds the interfaces the world imports from it"
+                )
+            } else {
+                continue;
+            };
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` is the name of the Orb module's own {kind} and of the bindings' module of {holding}; rename its own {kind}"
+                ),
+            ));
         }
         Ok(Self {
             reexported: modules,

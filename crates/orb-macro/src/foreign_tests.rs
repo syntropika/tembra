@@ -1139,6 +1139,165 @@ fn an_item_named_like_a_reexported_module_is_refused() {
     }
 }
 
+/// The bindings declare in the Orb module `exports`, the module of the interfaces the world
+/// exports, and a module for each namespace of the interfaces it imports: `example` for an
+/// imported example:ledger/book@1.0.0 or a hook of that package, the Orb's own for a view or a
+/// hook it derives, `wasi` for a WASI interface, and `tembra` for the kernel's, which a state or the
+/// `context` option imports. An item of the Orb module under one of those names would be defined
+/// twice, and is an error on it naming both. A namespace the world imports nothing from has no
+/// module, that of an interface the module implements, which the world exports only, or of the
+/// Orb's own package without a view or a derived hook, so an item of its name expands, as does each
+/// module without the item.
+#[test]
+fn an_item_named_like_a_bindings_module_is_refused() {
+    let dir = consumed("bindings-names", LEDGER);
+    let orb = |context: bool, imports: &[&str], keyed: &[&str], items: &str| {
+        let module = format!(
+            "mod keeping {{
+                #[service]
+                pub struct Report;
+                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
+                {items}
+            }}"
+        );
+        let options = Options {
+            context,
+            keyed: keyed.iter().map(|identity| literal(identity)).collect(),
+            ..options("other:keeping@1.0.0", Some(&dir), imports)
+        };
+        (options, module)
+    };
+    let namespace = |name: &str, kind: &str| {
+        format!(
+            "`{name}` is the name of the Orb module's own {kind} and of the bindings' module of the namespace `{}`, which holds the interfaces the world imports from it; rename its own {kind}",
+            name.trim_start_matches("r#")
+        )
+    };
+    let book = ["example:ledger/book@1.0.0"];
+    let contribution = "#[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
+        pub fn admit(input: guard::Admission) -> guard::Admission { input }";
+    let declaration = "#[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
+        pub struct Gate;";
+    let derived = "#[hook(composition = waterfall, input = Admission)]
+        pub struct Gate;
+        pub struct Admission { pub value: i32 }";
+    let state = "#[state] pub struct Balance { pub total: i64 }";
+    // The option, the imports, the keyed imports, the items besides the one named like a module of
+    // the bindings, that one, and the error on it.
+    for (context, imports, keyed, items, item, message) in [
+        (
+            false,
+            &[][..],
+            &[][..],
+            "",
+            "pub mod exports { pub fn csv() -> u32 { 0 } }",
+            "`exports` is the name of the Orb module's own module and of the bindings' module of the interfaces the world exports; rename its own module".to_owned(),
+        ),
+        (
+            false,
+            &book[..],
+            &[][..],
+            "",
+            "pub mod example {}",
+            namespace("example", "module"),
+        ),
+        (
+            false,
+            &[][..],
+            &[][..],
+            contribution,
+            "pub struct example;",
+            namespace("example", "struct"),
+        ),
+        (
+            false,
+            &[][..],
+            &[][..],
+            declaration,
+            "extern crate example;",
+            namespace("example", "`extern crate`"),
+        ),
+        (
+            false,
+            &["wasi:random/random@0.3.0"][..],
+            &[][..],
+            "",
+            "mod r#wasi {}",
+            namespace("r#wasi", "module"),
+        ),
+        (
+            false,
+            &[][..],
+            &["example:ledger/guard@1.0.0"][..],
+            "",
+            "pub enum other {}",
+            namespace("other", "enum"),
+        ),
+        (
+            false,
+            &[][..],
+            &[][..],
+            derived,
+            "pub trait other {}",
+            namespace("other", "trait"),
+        ),
+        (
+            true,
+            &[][..],
+            &[][..],
+            "",
+            "pub type tembra = u32;",
+            namespace("tembra", "type alias"),
+        ),
+        (
+            false,
+            &[][..],
+            &[][..],
+            state,
+            "use crate::util::tembra::{self};",
+            namespace("tembra", "import"),
+        ),
+    ] {
+        let (options, module) = orb(context, imports, keyed, &format!("{items}\n{item}"));
+        let error = refused(options, &module);
+        assert!(error.contains(&message), "{item}\n{error}");
+        let (options, module) = orb(context, imports, keyed, items);
+        expanded(options, &module);
+    }
+    let implemented = "#[service(\"example:ledger/book@1.0.0\")]
+        pub struct Keeper;
+        impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
+        #[wit_resource(service = Keeper)]
+        pub struct Cursor;
+        impl Cursor {
+            #[constructor]
+            pub fn new() -> Self { Cursor }
+        }
+        pub mod example {}";
+    for (imports, items) in [
+        (
+            &[][..],
+            "pub mod example {} pub mod other {} pub mod wasi {} pub mod tembra {}",
+        ),
+        (&[][..], implemented),
+        (
+            &book[..],
+            "use crate::util::exports; use crate::util::example;",
+        ),
+        (
+            &book[..],
+            "pub fn exports() -> u32 { 0 } pub fn example() -> u32 { 0 }",
+        ),
+        (
+            &book[..],
+            "#[cfg(test)] mod exports {} #[cfg(test)] mod example {}",
+        ),
+    ] {
+        let (options, module) = orb(false, imports, &[], items);
+        expanded(options, &module);
+    }
+}
+
 /// The `context` option imports the kernel's interface tembra:guest/context, which the Orb module
 /// re-exports as `context`: a service implementing that interface, a hook contributing to it and a
 /// hook declaring it would each re-export a second module under that name, and each is refused at
