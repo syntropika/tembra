@@ -4865,10 +4865,11 @@ fn a_standard_derive_is_decided_from_the_fields() {
 /// implements `BitOr` for a flags struct. An impl of one of those traits that the Orb's modules
 /// write for such a type, under `#[cfg(..)]` too, or a derive implementing `BitOr` on a flags
 /// struct, would implement it twice, so it is refused, saying what implements it already; so is an
-/// impl of the trait with `Self`, the type or a type parameter as its type argument,
-/// `PartialEq<Self>`, which the derived `PartialEq` is. The same module without it expands, and so
-/// do an impl of a trait the bindings do not implement for that type, one of the trait with another
-/// right-hand type, `PartialEq<u8>`, which coexists with the derived one, an impl whose trait the
+/// impl of the trait with `Self`, the type itself, placed from the impl's module, or a type
+/// parameter as its type argument, `PartialEq<Self>`, which the derived `PartialEq` is. The same
+/// module without it expands, and so do an impl of a trait the bindings do not implement for that
+/// type, one of the trait with another right-hand type, `PartialEq<u8>` or another module's
+/// namesake, which coexists with the derived one, an impl whose trait the
 /// macro cannot follow to a crate, one of a trait of the Orb's own that takes a prelude's or
 /// `serde`'s name, `pub trait Clone`, declared in the module or brought in by a glob import from
 /// another module of the Orb, and one for a type the macro places only by its name, one a glob
@@ -4919,6 +4920,12 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
         (
             module("impl Clone for Point { fn clone(&self) -> Self { todo!() } }"),
             "`impl Clone for Point`: `Point` enters the WIT and the generated type replacing it implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
+        ),
+        (
+            module(
+                "impl PartialEq<Heading> for Heading { fn eq(&self, other: &Heading) -> bool { todo!() } }",
+            ),
+            "`impl PartialEq<Heading> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
         ),
         (
             module(
@@ -4981,6 +4988,8 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
         impl PartialEq for Heading { fn same(&self) -> bool { true } }".to_owned(),
         format!("{state} pub trait Serialize {{ fn bytes(&self) -> u32; }} impl Serialize for Point {{ fn bytes(&self) -> u32 {{ 0 }} }}"),
         "pub mod ops { use crate::geometry::*; impl core::fmt::Debug for Point { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } } }".to_owned(),
+        "pub mod legacy { pub struct Heading(pub u8); }
+        impl PartialEq<legacy::Heading> for Heading { fn eq(&self, other: &legacy::Heading) -> bool { todo!() } }".to_owned(),
     ] {
         expanded("example:walk@1.0.0", &module(&items));
     }

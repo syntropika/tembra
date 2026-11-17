@@ -4481,10 +4481,17 @@ fn clashing(
         let Some(name) = known_trait(path, *scope, uses, modules, owner) else {
             continue;
         };
+        // The type itself as a type argument, `PartialEq<Heading>`, as `type_module` places it
+        // from the impl's module; another module's namesake is another type.
+        let is_owner = |rhs: &Type| {
+            matches!(rhs, Type::Path(rhs) if rhs.qself.is_none()
+                && type_module(&rhs.path, *scope, uses, modules)
+                    .is_some_and(|(module, name)| module == shape.scope && name == *owner))
+        };
         if !path
             .segments
             .last()
-            .is_some_and(|last| overlaps(last, block, owner))
+            .is_some_and(|last| overlaps(last, block, is_owner))
         {
             continue;
         }
@@ -4509,30 +4516,32 @@ fn clashing(
 }
 
 /// Whether a trait impl's trait, by the last segment of its path with the segment's arguments, is
-/// the one the bindings implement under that name for `owner`: with no type argument, or with
-/// `Self`, the type itself or a type parameter of the impl as each type argument, as
-/// `PartialEq<Self>` is the derived `PartialEq`, which `flags::traits_implemented` reads of `BitOr`
-/// too. `PartialEq<u8>` is another impl of the trait, which coexists with the derived one; a
-/// lifetime argument, `Deserialize<'de>`, changes nothing.
-fn overlaps(last: &syn::PathSegment, block: &syn::ItemImpl, owner: &Ident) -> bool {
+/// the one the bindings implement under that name for the type `is_owner` tells: with no type
+/// argument, or with `Self`, the type itself or a type parameter of the impl as each type argument,
+/// as `PartialEq<Self>` is the derived `PartialEq`, which `flags::traits_implemented` reads of
+/// `BitOr` too. `PartialEq<u8>`, or the trait with another module's namesake of the type, is
+/// another impl of the trait, which coexists with the derived one; a lifetime argument,
+/// `Deserialize<'de>`, changes nothing.
+fn overlaps(
+    last: &syn::PathSegment,
+    block: &syn::ItemImpl,
+    is_owner: impl Fn(&Type) -> bool,
+) -> bool {
     let arguments = match &last.arguments {
         syn::PathArguments::None => return true,
         syn::PathArguments::AngleBracketed(arguments) => &arguments.args,
         syn::PathArguments::Parenthesized(_) => return false,
     };
+    let parameter = |rhs: &Type| {
+        matches!(rhs, Type::Path(path) if path.qself.is_none()
+            && block.generics.type_params().any(|param| path.path.is_ident(&param.ident)))
+    };
     arguments.iter().all(|argument| match argument {
         syn::GenericArgument::Lifetime(_) => true,
-        syn::GenericArgument::Type(Type::Path(path)) if path.qself.is_none() => {
-            path.path.is_ident("Self")
-                || path
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == *owner && segment.arguments.is_none())
-                || block
-                    .generics
-                    .type_params()
-                    .any(|param| path.path.is_ident(&param.ident))
+        syn::GenericArgument::Type(rhs) => {
+            matches!(rhs, Type::Path(path) if path.qself.is_none() && path.path.is_ident("Self"))
+                || parameter(rhs)
+                || is_owner(rhs)
         }
         _ => false,
     })
