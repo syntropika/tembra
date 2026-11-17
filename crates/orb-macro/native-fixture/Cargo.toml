@@ -36,11 +36,7 @@ serde.workspace = true
 # The module `notebook` takes host values, so it is compiled only natively, and names the runtime:
 # there the crate links it itself, with `hooks`, which the native contribution of `filter` needs.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tembra = { path = "../../tembra", default-features = false, features = [
-  "macros",
-  "host",
-  "hooks",
-] }
+tembra = { path = "../../tembra", default-features = false, features = ["macros", "host", "hooks"] }
 
 [dev-dependencies]
 # The tests are a native host: Cargo unifies the features, so the crate's `tembra` links the
