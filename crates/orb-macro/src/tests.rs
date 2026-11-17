@@ -5074,6 +5074,60 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
     );
 }
 
+/// The values written for a configuration name that takes one at a time, `target_endian =
+/// "little"` and `target_endian = "big"`, may be all it takes, so the macro cannot be sure a
+/// configuration sets none of them: impls split across them give the trait, as a `#[cfg(x)]` one
+/// beside a `#[cfg(not(x))]` one does. One value alone leaves the others out, the features and the
+/// target features a configuration sets are any of them, together or none, and an impl that needs
+/// another option too leaves out the configurations without it, so those are refused.
+#[test]
+fn impls_split_across_the_values_of_one_name_give_the_trait() {
+    let ledger = |items: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                {items}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
+    for split in [
+        "#[cfg(target_endian = \"little\")] {default} #[cfg(target_endian = \"big\")] {default}",
+        "#[cfg(target_pointer_width = \"32\")] {default} #[cfg(target_pointer_width = \"64\")] {default}",
+        "#[cfg(any(target_endian = \"little\", feature = \"audit\"))] {default}
+         #[cfg(all(target_endian = \"big\", not(feature = \"audit\")))] {default}",
+    ] {
+        let expanded = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &ledger(&split.replace("{default}", default)),
+        ));
+        assert!(
+            !expanded.contains("impl :: core :: default :: Default for Balance"),
+            "{split}: {expanded}"
+        );
+    }
+    for split in [
+        "#[cfg(target_endian = \"little\")] {default}",
+        "#[cfg(all(target_pointer_width = \"32\", feature = \"audit\"))] {default}
+         #[cfg(target_pointer_width = \"64\")] {default}",
+        "#[cfg(feature = \"audit\")] {default} #[cfg(feature = \"seeded\")] {default}",
+        "#[cfg(target_feature = \"simd128\")] {default} #[cfg(target_feature = \"atomics\")] {default}",
+    ] {
+        let error = refused(
+            "example:ledger@1.0.0",
+            &ledger(&split.replace("{default}", default)),
+        );
+        assert!(
+            error.contains("`#[cfg(..)]` on `impl Default for Balance`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Balance` to implement `Default` in every configuration"),
+            "{split}: {error}"
+        );
+    }
+}
+
 /// The bindings' module reads the helper attributes the generated type takes, so one it would not
 /// know there is refused on the author's type: one whose arguments name what the type's module
 /// declares or imports, which a path from `crate::` names from anywhere; an attribute macro the

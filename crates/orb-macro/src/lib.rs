@@ -4083,8 +4083,9 @@ fn written_condition(attribute: &Attribute) -> &'static str {
 
 /// A configuration predicate, as `#[cfg(..)]` and `#[cfg_attr(..)]` write it.
 enum Predicate {
-    /// A configuration option, set or not, by its tokens: `test`, `feature = "audit"`.
-    Config(String),
+    /// A configuration option, set or not, by its tokens, `test` or `feature = "audit"`, with the
+    /// name one such as `target_endian = "little"` gives a value to.
+    Config(String, Option<String>),
     /// `all(..)`: each holds, as an empty one does.
     All(Vec<Predicate>),
     /// `any(..)`: one holds.
@@ -4112,24 +4113,31 @@ impl Predicate {
                 return Predicate::Not(Box::new(parts.remove(0)));
             }
         }
-        Predicate::Config(quote!(#meta).to_string())
+        let name = match meta {
+            syn::Meta::NameValue(option) => {
+                let name = &option.path;
+                Some(quote!(#name).to_string())
+            }
+            _ => None,
+        };
+        Predicate::Config(quote!(#meta).to_string(), name)
     }
 
     /// Whether it holds in the configuration that sets the options `set` and no other.
     fn holds(&self, set: &BTreeSet<&str>) -> bool {
         match self {
-            Predicate::Config(option) => set.contains(option.as_str()),
+            Predicate::Config(option, _) => set.contains(option.as_str()),
             Predicate::All(parts) => parts.iter().all(|part| part.holds(set)),
             Predicate::Any(parts) => parts.iter().any(|part| part.holds(set)),
             Predicate::Not(part) => !part.holds(set),
         }
     }
 
-    /// Add the options it reads to `options`.
-    fn options<'a>(&'a self, options: &mut BTreeSet<&'a str>) {
+    /// Add the options it reads to `options`, each with the name it gives a value to, if any.
+    fn options<'a>(&'a self, options: &mut BTreeMap<&'a str, Option<&'a str>>) {
         match self {
-            Predicate::Config(option) => {
-                options.insert(option);
+            Predicate::Config(option, name) => {
+                options.insert(option, name.as_deref());
             }
             Predicate::All(parts) | Predicate::Any(parts) => {
                 for part in parts {
@@ -4194,24 +4202,55 @@ fn applying(meta: &syn::Meta) -> Option<Predicate> {
     Some(Predicate::of(wrapped.first()?))
 }
 
-/// Whether one of `predicates` holds in every configuration, for each value of the options they
-/// read. Past twelve options, which the macro does not try one by one, it takes them for holding.
+/// The configuration names a configuration may give several values at once, or none: the
+/// features, and the target's families, features and atomic widths. Each value written for one
+/// is an option of its own, set or not.
+const SEVERAL_VALUES: [&str; 4] = [
+    "feature",
+    "target_family",
+    "target_feature",
+    "target_has_atomic",
+];
+
+/// Whether one of `predicates` holds in every configuration the macro can be sure of: one that
+/// sets each option they read or not, but gives a name other than those of `SEVERAL_VALUES` one of
+/// the values they write for it, when they write two or more, which may be all it takes, as
+/// `target_endian = "little"` and `target_endian = "big"` are. Past 4096 configurations, twelve
+/// options set or not, which the macro does not try one by one, it takes them for holding.
 fn always(predicates: &[Predicate]) -> bool {
-    let mut options = BTreeSet::new();
+    let mut options = BTreeMap::new();
     for predicate in predicates {
         predicate.options(&mut options);
     }
-    let options: Vec<&str> = options.into_iter().collect();
-    if options.len() > 12 {
-        return true;
+    // What a configuration chooses, each choice among the options it may set, `None` setting
+    // none of them: an option alone is set or not, and so is a name's one value written.
+    let mut choices: Vec<Vec<Option<&str>>> = Vec::new();
+    let mut values: BTreeMap<&str, Vec<Option<&str>>> = BTreeMap::new();
+    for (option, name) in options {
+        match name.filter(|name| !SEVERAL_VALUES.contains(name)) {
+            Some(name) => values.entry(name).or_default().push(Some(option)),
+            None => choices.push(vec![Some(option), None]),
+        }
     }
-    (0..1u32 << options.len()).all(|bits| {
-        let set = options
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| bits & (1 << index) != 0)
-            .map(|(_, option)| *option)
-            .collect();
+    for mut values in values.into_values() {
+        if values.len() == 1 {
+            values.push(None);
+        }
+        choices.push(values);
+    }
+    let Some(count) = choices.iter().try_fold(1usize, |count, choice| {
+        count
+            .checked_mul(choice.len())
+            .filter(|count| *count <= 1 << 12)
+    }) else {
+        return true;
+    };
+    (0..count).all(|mut index| {
+        let mut set = BTreeSet::new();
+        for choice in &choices {
+            set.extend(choice[index % choice.len()]);
+            index /= choice.len();
+        }
         predicates.iter().any(|predicate| predicate.holds(&set))
     })
 }
