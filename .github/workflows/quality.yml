@@ -30,6 +30,10 @@ jobs:
           # Measured after `check` and the examples: 2.5 minutes. Estimated alone: 6.5 minutes,
           # 12 with the setup and the cache save.
           - { recipe: test-orb-macro, timeout: 25 }
+          # The `cargo tembra` commands on crates it scaffolds. Estimated on a cold cache: 4 minutes,
+          # 9.5 with the setup and the cache save. A cold run took 1.7 minutes with 6 jobs on 32
+          # cores; the estimate allows for 4 vCPUs and for downloading the crates.
+          - { recipe: test-cargo-tembra, timeout: 15 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

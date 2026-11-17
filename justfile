@@ -52,6 +52,10 @@ test-no-hooks:
 test-native-fixture:
     cargo test --locked -p tembra-orb-native-fixture
 
+# Run the `cargo tembra` commands end to end on scratch crates: `new`, `build --out`, `wit` and `inspect`. The crates build as components and natively.
+test-cargo-tembra:
+    cargo test --locked -p cargo-tembra --test commands -- --ignored
+
 # Execute documented Rust guarantees, including the optional native hooks facade.
 test-doc:
     cargo test --locked --workspace --all-features --doc
@@ -202,6 +206,7 @@ check-all: check
 ci: check \
     test-orb-examples \
     test-orb-macro \
+    test-cargo-tembra \
     check-clean-tree
 
 # Fail when the checks changed the tree: a modified or deleted file, or a new file that .gitignore does not list.

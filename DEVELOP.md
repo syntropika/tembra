@@ -225,7 +225,9 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
 - `just check`, described below;
 - `just test-orb-examples`, which builds and runs every `#[orb]` example. The contracts and
   lockfiles beside the examples must not change;
-- `just test-orb-macro`, which runs the macro's guests as components in the executor.
+- `just test-orb-macro`, which runs the macro's guests as components in the executor;
+- `just test-cargo-tembra`, which runs `cargo tembra new`, `build --out`, `wit` and `inspect` on
+  scratch crates that build as components and natively.
 
 Then it runs `just check-clean-tree`, which fails when the parts left a modified file or a new
 file that `.gitignore` does not list.
