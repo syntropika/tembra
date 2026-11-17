@@ -12,7 +12,6 @@ use tembra_orb_native_fixture::{
 };
 
 const WALKER: &str = "calculator::example:calculator/walker@1.0.0";
-const TALLY: &str = "calculator::example:calculator/tally@1.0.0";
 
 /// A host with the Orb installed, and a reference to the walker of `key`, ready, under the
 /// principal `host`.
@@ -219,11 +218,6 @@ fn a_reload_keeps_the_state() {
         moves: 2,
     };
     assert_eq!(walk(&mut pool, &host, &main, "walk", path), Ok(stood));
-    // A reload waits for every object of the Orb to be active, the `tally` the installation
-    // created too, which nothing has waited for yet.
-    let tally = Rc::new(host.get(TALLY, vec!["main".into()], "host").unwrap());
-    pool.run_until(tally.ready()).unwrap();
-    tally.release().unwrap();
     pool.run_until(host.reload(vec![calculator::orb().unwrap()], 5_000))
         .unwrap();
     pool.run_until(host.settled());
@@ -260,11 +254,6 @@ fn a_reload_refuses_a_state_the_rule_of_the_new_code_refuses() {
         walk(&mut pool, &host, &main, "walk", vec![Move::Step(5)]),
         Ok(stood)
     );
-    // A reload waits for every object of the Orb to be active, the `tally` the installation
-    // created too, which nothing has waited for yet.
-    let tally = Rc::new(host.get(TALLY, vec!["main".into()], "host").unwrap());
-    pool.run_until(tally.ready()).unwrap();
-    tally.release().unwrap();
     set_grid(3);
     let error = pool
         .run_until(host.reload(vec![calculator::orb().unwrap()], 5_000))
