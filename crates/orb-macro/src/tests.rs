@@ -5105,6 +5105,152 @@ fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
     }
 }
 
+/// A known derive reads some of its helper attributes as code, in the bindings' module: a string
+/// it parses as code, derivative's `value`, or the names thiserror's string captures, `{PAGE}`,
+/// and, under a glob import the macro cannot follow, `use super::*;` in the Orb module, the tokens
+/// of smart_default's `#[default(..)]` and the format arguments of thiserror's `#[error(..)]` and
+/// derive_more's `#[display(..)]`, which the glob may bring a name to. A name there that the
+/// bindings' module does not reach is refused, with the `crate::` advice; the `crate::` form
+/// expands, and so do a field of the type, a name of the prelude, a primitive type and a lowercase
+/// name before `::`, which may be a crate's. Elsewhere a word may be the derive's own syntax, as
+/// `ignore` in `#[from(ignore)]`, which stays as written.
+#[test]
+fn a_helper_attribute_naming_what_a_glob_or_a_string_brings_is_refused() {
+    let module = |items: &str, returned: &str| {
+        format!(
+            "mod walk {{
+                use super::*;
+                {items}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let limit = |attribute: &str| {
+        format!("#[derive(thiserror::Error)] {attribute} pub struct Limit {{ pub limit: u32 }}")
+    };
+    let display = |attribute: &str| {
+        format!("#[derive(derive_more::Display)] {attribute} pub struct Limit {{ pub limit: u32 }}")
+    };
+    let page = |attribute: &str| {
+        format!(
+            "#[derive(smart_default::SmartDefault)] pub struct Page {{ {attribute} pub size: u32 }}"
+        )
+    };
+    let derivative = |value: &str| {
+        format!(
+            "#[derive(derivative::Derivative)]
+            #[derivative(Default)]
+            pub struct Page {{ #[derivative(Default(value = \"{value}\"))] pub size: u32 }}"
+        )
+    };
+    let advice = "enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach";
+    for (refused_items, returned, shown, name, expanding) in [
+        (
+            limit("#[error(\"limit {} of {}\", limit, PAGE)]"),
+            "Limit",
+            "#[error(..)]",
+            "PAGE",
+            vec![
+                limit("#[error(\"limit {} of {}\", limit, crate::PAGE)]"),
+                limit("#[error(\"limit {} of {:?}\", limit, None::<u32>)]"),
+            ],
+        ),
+        (
+            limit("#[error(\"limit {limit} of {PAGE}\")]"),
+            "Limit",
+            "#[error(..)]",
+            "PAGE",
+            vec![
+                limit("#[error(\"limit {limit} of {}\", crate::PAGE)]"),
+                limit("#[error(\"limit {limit:?} of {{PAGE}}\")]"),
+            ],
+        ),
+        (
+            format!(
+                "const PAGE: u32 = 20; {}",
+                limit("#[error(\"limit {limit} of {PAGE}\")]")
+            ),
+            "Limit",
+            "#[error(..)]",
+            "PAGE",
+            vec![format!(
+                "const PAGE: u32 = 20; {}",
+                limit("#[error(\"limit {limit} of {}\", crate::walk::PAGE)]")
+            )],
+        ),
+        (
+            display("#[display(\"{} of {}\", limit, PAGE)]"),
+            "Limit",
+            "#[display(..)]",
+            "PAGE",
+            vec![
+                display("#[display(\"{} of {}\", limit, crate::PAGE)]"),
+                display("#[display(\"{} of {}\", limit, u32::MAX)]"),
+            ],
+        ),
+        (
+            page("#[default(PAGE)]"),
+            "Page",
+            "#[default(..)]",
+            "PAGE",
+            vec![
+                page("#[default(crate::PAGE)]"),
+                page("#[default(Some(20).unwrap_or_default())]"),
+                page("#[default(limits::PAGE)]"),
+            ],
+        ),
+        (
+            page("#[default(Limits::PAGE)]"),
+            "Page",
+            "#[default(..)]",
+            "Limits::PAGE",
+            vec![page("#[default(crate::Limits::PAGE)]")],
+        ),
+        (
+            derivative("PAGE"),
+            "Page",
+            "#[derivative(..)]",
+            "PAGE",
+            vec![
+                derivative("crate::PAGE"),
+                derivative("u32::MAX"),
+                derivative("Default::default()"),
+            ],
+        ),
+        (
+            format!("const PAGE: u32 = 20; {}", derivative("PAGE")),
+            "Page",
+            "#[derivative(..)]",
+            "PAGE",
+            vec![format!(
+                "const PAGE: u32 = 20; {}",
+                derivative("crate::walk::PAGE")
+            )],
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(&refused_items, returned));
+        let owner = returned;
+        let message = format!(
+            "`{shown}` on `{owner}` names `{name}` from this module: `{owner}` {advice} `{name}`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
+        );
+        assert!(error.contains(&message), "{refused_items}: {error}");
+        for items in expanding {
+            expanded("example:walk@1.0.0", &module(&items, returned));
+        }
+    }
+    // A word of the derive's own syntax names nothing, under the same glob.
+    expanded(
+        "example:walk@1.0.0",
+        &module(
+            "#[derive(derive_more::From)]
+            pub enum Value { Int(i32), #[from(ignore)] Other(i32) }",
+            "Value",
+        ),
+    );
+}
+
 /// A state starts from its `Default`: the macro implements it field by field unless the author
 /// gives it, by an `impl Default` anywhere in the Orb module or by a derive, which stays on a
 /// state out of the WIT and goes to the generated type replacing a state that enters it; the serde

@@ -5189,13 +5189,20 @@ fn bound(name: &Ident, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> O
 /// continues a path, reads a field or is a lifetime, a name before `=` is a key, the name of a
 /// derive of the standard library, which the arguments give as a keyword or as a derive, reaches
 /// the prelude's from every module, and one of `defined`, a type of the module that the bindings'
-/// module declares under the same name, reaches that declaration.
+/// module declares under the same name, reaches that declaration. With `code`, the fields of the
+/// type, the arguments are what a known derive reads as code (`read_as_code`): a field, which the
+/// derive binds, names that field, and a name nothing in the module binds is one a glob import the
+/// macro cannot follow may bring (`through_globs`), but for a keyword, a macro's name, derive_more's
+/// `_0` for an unnamed field, a name of the standard prelude or a primitive type, which every
+/// module reaches, and a lowercase name before `::`, which may be a crate's. A type that enters the
+/// WIT has no generic parameter to name.
 fn from_module(
     arguments: proc_macro2::TokenStream,
     scope: usize,
     uses: &[Uses],
     modules: &[Vec<Ident>],
     defined: &BTreeSet<String>,
+    code: Option<&BTreeSet<String>>,
 ) -> Option<String> {
     use proc_macro2::{Spacing, TokenTree};
     let trees: Vec<TokenTree> = arguments.into_iter().collect();
@@ -5207,7 +5214,7 @@ fn from_module(
     for (index, tree) in trees.iter().enumerate() {
         let ident = match tree {
             TokenTree::Group(group) => {
-                match from_module(group.stream(), scope, uses, modules, defined) {
+                match from_module(group.stream(), scope, uses, modules, defined, code) {
                     Some(path) => return Some(path),
                     None => continue,
                 }
@@ -5225,15 +5232,28 @@ fn from_module(
             }
             _ => false,
         };
+        let name = ident.to_string();
         if continued
             || key
-            || STANDARD_DERIVES.iter().any(|(name, _)| ident == name)
-            || defined.contains(&ident.to_string())
+            || STANDARD_DERIVES.iter().any(|(derive, _)| *derive == name)
+            || defined.contains(&name)
+            || code.is_some_and(|fields| fields.contains(&name))
         {
             continue;
         }
         let relative = ident == "super" || (ident == "self" && colons(index + 1));
-        if relative || bound(ident, scope, uses, modules).is_some() {
+        let reached = name == "Self"
+            || RUST_KEYWORDS.contains(&name.as_str())
+            || STANDARD_NAMES.contains(&name.as_str())
+            || (punct(index + 1, '!') && matches!(trees.get(index + 2), Some(TokenTree::Group(_))))
+            || name
+                .strip_prefix('_')
+                .is_some_and(|digits| digits.chars().all(|digit| digit.is_ascii_digit()))
+            || (colons(index + 1) && name.starts_with(|first: char| first.is_ascii_lowercase()));
+        let globbed = code.is_some()
+            && !reached
+            && matches!(through_globs(ident, scope, uses, modules), Globbed::Outside);
+        if relative || bound(ident, scope, uses, modules).is_some() || globbed {
             let mut path = ident.to_string();
             let mut next = index + 1;
             while colons(next)
@@ -5246,6 +5266,174 @@ fn from_module(
         }
     }
     None
+}
+
+/// The names the standard prelude brings into every module, the bindings' module among them, with
+/// the primitive types.
+const STANDARD_NAMES: &[&str] = &[
+    "AsMut",
+    "AsRef",
+    "Box",
+    "Clone",
+    "Copy",
+    "Default",
+    "DoubleEndedIterator",
+    "Drop",
+    "Eq",
+    "Err",
+    "ExactSizeIterator",
+    "Extend",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "From",
+    "FromIterator",
+    "Future",
+    "Into",
+    "IntoFuture",
+    "IntoIterator",
+    "Iterator",
+    "None",
+    "Ok",
+    "Option",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+    "Result",
+    "Send",
+    "Sized",
+    "Some",
+    "String",
+    "Sync",
+    "ToOwned",
+    "ToString",
+    "TryFrom",
+    "TryInto",
+    "Unpin",
+    "Vec",
+    "align_of",
+    "align_of_val",
+    "drop",
+    "size_of",
+    "size_of_val",
+    "bool",
+    "char",
+    "f32",
+    "f64",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "str",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+];
+
+/// What a known derive reads as code in the arguments of the helper attribute `name`, which then
+/// names from the bindings' module: the tokens of smart_default's `#[default(..)]` or
+/// `#[default = ..]`, the format arguments after the string of thiserror's `#[error(..)]` and of
+/// derive_more's `#[display(..)]` and `#[debug(..)]`, and, written in strings, the names the string
+/// of thiserror's `#[error(..)]` captures, `{PAGE}`, derivative's `value = ".."`, and serde's
+/// `default`, `with`, `serialize_with`, `deserialize_with` and `skip_serializing_if`. Elsewhere a
+/// word may be the derive's own syntax, as `ignore` in `#[from(ignore)]`.
+fn read_as_code(
+    name: &Ident,
+    arguments: proc_macro2::TokenStream,
+) -> Vec<proc_macro2::TokenStream> {
+    use proc_macro2::TokenTree;
+    if name == "default" {
+        return vec![arguments];
+    }
+    if name == "derivative" {
+        return strings(arguments, &["value"]);
+    }
+    if name == "serde" {
+        return strings(
+            arguments,
+            &[
+                "default",
+                "with",
+                "serialize_with",
+                "deserialize_with",
+                "skip_serializing_if",
+            ],
+        );
+    }
+    if name != "error" && name != "display" && name != "debug" {
+        return Vec::new();
+    }
+    let trees: Vec<TokenTree> = arguments.into_iter().collect();
+    let format = trees
+        .iter()
+        .enumerate()
+        .find_map(|(index, tree)| match tree {
+            TokenTree::Literal(literal) => match syn::Lit::new(literal.clone()) {
+                syn::Lit::Str(format) => Some((index, format.value())),
+                _ => None,
+            },
+            _ => None,
+        });
+    let Some((position, format)) = format else {
+        return Vec::new();
+    };
+    let mut code = vec![trees[position + 1..].iter().cloned().collect()];
+    if name == "error" {
+        code.push(captures(&format));
+    }
+    code
+}
+
+/// The code in the strings of the arguments `key = ".."`, at any depth, for the keys `keys`.
+fn strings(arguments: proc_macro2::TokenStream, keys: &[&str]) -> Vec<proc_macro2::TokenStream> {
+    use proc_macro2::TokenTree;
+    let trees: Vec<TokenTree> = arguments.into_iter().collect();
+    let mut code = Vec::new();
+    for (index, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Group(group) => code.extend(strings(group.stream(), keys)),
+            TokenTree::Ident(key) if keys.iter().any(|known| key == known) => {
+                let (Some(TokenTree::Punct(equals)), Some(TokenTree::Literal(literal))) =
+                    (trees.get(index + 1), trees.get(index + 2))
+                else {
+                    continue;
+                };
+                if equals.as_char() == '='
+                    && let syn::Lit::Str(string) = syn::Lit::new(literal.clone())
+                    && let Ok(tokens) = string.parse::<proc_macro2::TokenStream>()
+                {
+                    code.push(tokens);
+                }
+            }
+            _ => {}
+        }
+    }
+    code
+}
+
+/// The names a format string captures from its scope, `{PAGE}` or `{PAGE:?}`, as tokens: what is
+/// neither a position, `{}` or `{0}`, nor a brace a doubled `{{` escapes.
+fn captures(format: &str) -> proc_macro2::TokenStream {
+    let mut names = proc_macro2::TokenStream::new();
+    let mut rest = format;
+    while let Some(open) = rest.find('{') {
+        rest = &rest[open + 1..];
+        if let Some(escaped) = rest.strip_prefix('{') {
+            rest = escaped;
+            continue;
+        }
+        let end = rest.find(['}', ':']).unwrap_or(rest.len());
+        if let Ok(name) = syn::parse_str::<Ident>(rest[..end].trim()) {
+            names.extend(quote! { #name , });
+        }
+        rest = &rest[end..];
+    }
+    names
 }
 
 /// A helper attribute as the errors show it: `#[strum(..)]`, `#[default = ..]` or `#[default]`.
@@ -5279,7 +5467,9 @@ fn unread(carried: &Carried, others: &[Reads]) -> String {
 /// that name, an attribute none of the derives the generated type takes reads, by what each of
 /// them reads, `readers`, and one whose arguments name what the type's module
 /// declares or imports, or start from that module, but for the types of the module the bindings'
-/// module declares beside the generated type under the same name, `defined`.
+/// module declares beside the generated type under the same name, `defined`: in the tokens, and
+/// in what a known derive reads as code, strings included, where a name a glob import the macro
+/// cannot follow may bring is refused too (`from_module`).
 fn readable(
     shape: &Shape,
     readers: &[Reads],
@@ -5289,6 +5479,10 @@ fn readable(
 ) -> syn::Result<()> {
     let owner = &shape.ident;
     let carried = &shape.carried;
+    let fields: BTreeSet<String> = match &shape.kind {
+        ShapeKind::Record(fields) => fields.iter().map(|(field, _)| field.to_string()).collect(),
+        _ => BTreeSet::new(),
+    };
     let members = carried.members.iter().flat_map(|(_, helpers)| helpers);
     for attribute in carried.helpers.iter().chain(members) {
         let shown = shown(attribute);
@@ -5322,7 +5516,13 @@ fn readable(
                 quote! { #value }
             }
         };
-        if let Some(path) = from_module(arguments, shape.scope, uses, modules, defined) {
+        let named = from_module(arguments.clone(), shape.scope, uses, modules, defined, None)
+            .or_else(|| {
+                read_as_code(name, arguments).into_iter().find_map(|code| {
+                    from_module(code, shape.scope, uses, modules, defined, Some(&fields))
+                })
+            });
+        if let Some(path) = named {
             return refuse(format!(
                 "`{shown}` on `{owner}` names `{path}` from this module: `{owner}` enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach `{path}`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
             ));
