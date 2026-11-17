@@ -284,7 +284,11 @@ Then run the recipe of the area. Each area below names its crates and its recipe
 
 `just ci` also fails when the parts change the tree: a modified or deleted file, or a new file
 that `.gitignore` does not list. It compares the tree after the parts with the tree before them,
-so the edits you made first do not count.
+so the edits you made first do not count. The examples are the exception.
+`just test-orb-examples` ends with `git diff --exit-code -- examples`, which compares `examples/`
+with the index. The contracts and lockfiles committed beside the examples must match what the
+builds write. Any other edit under `examples/` must be staged or committed. Commit an edit under
+`examples/`, with the contract and the lockfile it changes, before you run `just ci`.
 
 CI runs each part in a job of its own, side by side, so that each job fits its timeout.
 Each job starts from a clean checkout and ends with `just check-clean-tree`, which fails on any
