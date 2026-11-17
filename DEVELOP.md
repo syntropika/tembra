@@ -282,14 +282,17 @@ Then run the recipe of the area. Each area below names its crates and its recipe
   examples' Orb crates and the async and host feature fixtures natively, with the facade's `host`,
   and the native fixture for wasm32.
 
-Then it runs `just check-clean-tree`, which fails when the parts left a modified file or a new
-file that `.gitignore` does not list.
+`just ci` also fails when the parts change the tree: a modified or deleted file, or a new file
+that `.gitignore` does not list. It compares the tree after the parts with the tree before them,
+so the edits you made first do not count.
 
 CI runs each part in a job of its own, side by side, so that each job fits its timeout.
-Each job ends with `just check-clean-tree`, and so does the `acceptance` job that runs beside
-them; see [Isolated orbs](#isolated-orbs).
+Each job starts from a clean checkout and ends with `just check-clean-tree`, which fails on any
+such change. So does the `acceptance` job that runs beside them; see
+[Isolated orbs](#isolated-orbs).
 A new part is a recipe in `ci` and a line in the job matrix of the
-[quality workflow](.github/workflows/quality.yml).
+[quality workflow](.github/workflows/quality.yml). `just check` runs `just check-ci-parts`, which
+fails when the two differ.
 
 ```sh
 just ci
@@ -299,6 +302,7 @@ bun run test:browser
 ### Commands
 
 `just check` builds the engines and SDK. It checks formatting, TypeScript types and dependencies.
+It also checks that the parts of `just ci` are the jobs of the quality workflow.
 It runs Clippy, oxlint, Rust tests, SDK tests and React Native adapter tests.
 It also runs Node compatibility tests, the WASM target check and the Rust examples.
 It does not build the interpreter, so isolated orb tests skip. Browser and isolated orb acceptance
@@ -315,6 +319,8 @@ run separately; see [Isolated orbs](#isolated-orbs).
 | `just test-hook-lifecycle` | Build adapters and test the native hook lifecycle  |
 | `just test-no-hooks`       | Test the core and bridge without optional features |
 | `just check-wasm`          | Check the WASM target with all features            |
+| `just check-ci-parts`      | Check that the parts of `just ci` are CI jobs      |
+| `just check-clean-tree`    | Fail on a modified, deleted or untracked file      |
 | `bun run typecheck`        | Check TypeScript across the workspace              |
 | `bun run test:browser`     | Exercise Chrome and a module Worker                |
 

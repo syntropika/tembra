@@ -9,7 +9,9 @@ concurrency:
   cancel-in-progress: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  # One job per part of `just ci`, side by side. A new part is a recipe in `ci` and a line in this matrix.
+  # One job per part of `just ci`, side by side. A new part is a recipe in `ci` and one line in this
+  # matrix, `- { recipe: <name>, timeout: <minutes> }`. `just check-ci-parts`, which `just check` runs,
+  # fails when the two differ.
   # A cold run must take less than two thirds of its job's timeout. It takes 4 minutes of setup, the
   # recipe, and 1.5 minutes to save the cache.
   part:
@@ -71,7 +73,7 @@ jobs:
       - run: just install-tools
       - run: just install
       - run: just ${{ matrix.recipe }}
-      # A part leaves the tree as it found it: no modified file and no new file that Git does not ignore.
+      # The checkout was clean, so a change is the part's: a modified file or a new file that Git does not ignore.
       - run: just check-clean-tree
 
   # Build the pinned interpreter and compiled provider once, then run every isolated Orb suite.
@@ -166,7 +168,7 @@ jobs:
           2>&1 | tee "$RUNNER_TEMP/acceptance.log"
       - name: Test portable mobile execution and foreign continuation delivery
         run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_keyed_router.wasm"
-      # The suites leave the tree as they found it: no modified file and no new file that Git does not ignore.
+      # The checkout was clean, so a change is the suites': a modified file or a new file that Git does not ignore.
       - run: just check-clean-tree
       - name: Preserve acceptance timings and failures
         if: always()

@@ -56,7 +56,7 @@ A change keeps each invariant below. Each one names the tests that guard it, and
   - Each Orb crate of the examples and the fixtures, built the way the other recipes do not (`just test-orb-both-ways`).
   - The `cargo tembra` commands, run on the crates they write (`just test-cargo-tembra`).
 - The full verification leaves the tree as it found it: no modified file, and no new file that `.gitignore` does not list.
-  - `just check-clean-tree` ends each job of CI, and `just ci` runs the same check.
+  - `just check-clean-tree` ends each job of CI. `just ci` compares the tree after its parts with the tree before them.
 
 ## Verification
 

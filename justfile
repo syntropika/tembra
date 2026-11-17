@@ -247,7 +247,7 @@ test-orb-both-ways:
     echo "== crates/orb-macro/native-fixture for wasm32"
     cargo check --locked -p tembra-orb-native-fixture --target wasm32-unknown-unknown --target-dir "$target"
 
-check: fmt-check build-node build-wasm build-sdk
+check: fmt-check check-ci-parts build-node build-wasm build-sdk
     bun run typecheck
     just lint
     just deps
@@ -263,24 +263,75 @@ install-tools:
 install-ts: install
 check-all: check
 
-# Run every part of the verification in order, then check the tree; CI runs each part in a job of its own.
-ci: check \
+# Run every part of the verification in order, and fail when the parts change the tree; CI runs each part in a job of its own.
+ci: _record-tree \
+    check \
     test-orb-examples \
     test-orb-macro \
     test-cargo-tembra \
     test-orb-parity \
     test-configurations \
     test-orb-both-ways \
-    check-clean-tree
+    && _compare-tree
 
-# Fail when the checks changed the tree: a modified or deleted file, or a new file that .gitignore does not list.
+# Fail when the parts of `ci` and the recipes of the job matrix in the quality workflow differ.
+check-ci-parts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The parts are the recipes `ci` runs before its own steps, except the helpers whose names start
+    # with an underscore. The matrix lists each part as `- { recipe: <name>, timeout: <minutes> }`.
+    parts="$(just --show ci | sed -n 's/^ci: \(.*\) && .*/\1/p' | tr ' ' '\n' | grep -v '^_' | sort || true)"
+    jobs="$(sed -n 's/^ *- { recipe: \([a-z0-9-]*\),.*/\1/p' .github/workflows/quality.yml | sort)"
+    only_ci="$(comm -23 <(echo "$parts") <(echo "$jobs") | paste -sd ' ' -)"
+    only_jobs="$(comm -13 <(echo "$parts") <(echo "$jobs") | paste -sd ' ' -)"
+    if [ -z "$parts" ] || [ -z "$jobs" ] || [ -n "$only_ci$only_jobs" ]; then
+        echo "The parts of \`just ci\` and the job matrix of .github/workflows/quality.yml differ:" >&2
+        echo "  only in ci: ${only_ci:-none}" >&2
+        echo "  only in the matrix: ${only_jobs:-none}" >&2
+        exit 1
+    fi
+
+# Fail on any modified or deleted file, and on any new file that .gitignore does not list; CI runs it after each part, on a clean checkout.
 check-clean-tree:
     #!/usr/bin/env bash
     set -euo pipefail
-    changes="$(git status --porcelain)"
+    # Show new files whatever `status.showUntrackedFiles` says.
+    changes="$(git status --porcelain --untracked-files=normal)"
     if [ -n "$changes" ]; then
         echo "The checks changed the tree:" >&2
         echo "$changes" >&2
+        exit 1
+    fi
+
+# Print the id of a Git tree that holds the working tree as it is: the tracked files with their changes, and the new files that .gitignore does not list.
+_tree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # An index of its own keeps the real index as it is.
+    scratch="$(mktemp -d)"
+    trap 'rm -rf "$scratch"' EXIT
+    export GIT_INDEX_FILE="$scratch/index"
+    git read-tree HEAD
+    git add --all
+    git write-tree
+
+# Record the working tree before the parts of `ci` run.
+_record-tree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _tree > "$(git rev-parse --git-path tembra-ci-tree)"
+
+# Fail when the working tree is not the one that `_record-tree` recorded, and name the files that differ.
+_compare-tree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    record="$(git rev-parse --git-path tembra-ci-tree)"
+    before="$(cat "$record")"
+    rm -f "$record"
+    after="$(just _tree)"
+    if [ "$before" != "$after" ]; then
+        echo "The parts changed the tree (A added, M modified, D deleted):" >&2
+        git diff-tree -r --name-status "$before" "$after" >&2
         exit 1
     fi
 
