@@ -9,8 +9,9 @@
 //! `metering` imports the meter interface of the package in `wit/deps/`, which `meters`
 //! implements, and its `orb(..)` takes the provider of each import; `filter` contributes to the
 //! hook of a gate there, and its `orb(..)` takes the gate. The module `counters` rewrites with the
-//! macro a native Orb its test also writes by hand against the runtime's API. The manifest names
-//! every Orb of the crate `calculator` at API version 2, which `orb()` reports.
+//! macro a native Orb its test also writes by hand against the runtime's API. `abacus` and
+//! `restrung` are one Orb before and after a reload that gives its root's resource a new version.
+//! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
 //!
@@ -1509,6 +1510,89 @@ pub mod counters {
         /// What the tape holds: each count the counters reached, in order.
         pub fn tape(&self) -> tembra::Result<Vec<String>> {
             Ok(self.tally.tape.value()?.borrow().clone())
+        }
+    }
+}
+
+/// An abacus whose beads are a resource of the Orb's root, at version 1: a native host's reload
+/// keeps them, with what was slid on them, while their version stays the same. `restrung` is the
+/// same Orb a revision later, whose beads are at version 2.
+#[tembra::orb(package = "example:abacus@1.0.0")]
+pub mod abacus {
+    /// The beads, a resource of the Orb's root, at the default version, 1.
+    #[resource]
+    pub struct Beads {
+        slid: i64,
+    }
+
+    impl Beads {
+        /// Set the beads at zero, as the host opens them.
+        #[open]
+        fn open() -> Self {
+            super::note("beads 1 open".to_owned());
+            Beads { slid: 0 }
+        }
+
+        /// Note how far the beads were slid, as the host closes them.
+        #[close]
+        fn close(self) {
+            super::note(format!("beads 1 closed at {}", self.slid));
+        }
+    }
+
+    /// Slides the beads.
+    #[service]
+    pub struct Rod;
+
+    impl Rod {
+        /// Slide the beads by `by` and return how far they were slid in all.
+        pub fn slide(by: i64) -> i64 {
+            Beads::with(|beads| {
+                beads.slid += by;
+                beads.slid
+            })
+        }
+    }
+}
+
+/// The abacus a revision later, restrung: its beads, a resource of the Orb's root, are at version
+/// 2, so a native host's reload from `abacus` closes the beads slid there and opens these. Its
+/// package is at 2.0.0, as two modules of one package in a crate would each remove the other's
+/// contract.
+#[tembra::orb(package = "example:abacus@2.0.0")]
+pub mod restrung {
+    /// The beads, a resource of the Orb's root, at version 2.
+    #[resource(version = 2)]
+    pub struct Beads {
+        slid: i64,
+    }
+
+    impl Beads {
+        /// Set the beads at zero, as the host opens them.
+        #[open]
+        fn open() -> Self {
+            super::note("beads 2 open".to_owned());
+            Beads { slid: 0 }
+        }
+
+        /// Note how far the beads were slid, as the host closes them.
+        #[close]
+        fn close(self) {
+            super::note(format!("beads 2 closed at {}", self.slid));
+        }
+    }
+
+    /// Slides the beads.
+    #[service]
+    pub struct Rod;
+
+    impl Rod {
+        /// Slide the beads by `by` and return how far they were slid in all.
+        pub fn slide(by: i64) -> i64 {
+            Beads::with(|beads| {
+                beads.slid += by;
+                beads.slid
+            })
         }
     }
 }

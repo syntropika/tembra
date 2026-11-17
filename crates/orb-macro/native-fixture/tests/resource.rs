@@ -1,12 +1,17 @@
 //! The memory of `calculator::orb()` in a native host: a `#[resource]` of the Orb's root, which the
 //! host opens once, when it installs the Orb, which the methods of every object of the Orb use
 //! through `with`, natively as in a component, and which the host closes, through its `#[close]`
-//! function, when it removes the Orb.
+//! function, when it removes the Orb. The beads of `abacus::orb()`, a resource of its root too,
+//! across a reload: the host keeps them while their version stays the same, and closes and opens
+//! them again for the beads of `restrung`, at a new version.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::{Host, Reference};
-use tembra_orb_native_fixture::{calculator, journal};
+use tembra_orb_native_fixture::{abacus, calculator, journal, restrung};
+
+const ROD: &str = "calculator::example:abacus/rod@1.0.0";
+const RESTRUNG_ROD: &str = "calculator::example:abacus/rod@2.0.0";
 
 /// The register of the Orb named `orb`.
 fn register(orb: &str) -> String {
@@ -115,4 +120,66 @@ fn each_orb_has_its_own_memory() {
     let mut closed = journal();
     closed.sort();
     assert_eq!(closed, ["memory closed at 10", "memory closed at 5"]);
+}
+
+/// Slide the beads by `by` through the rod, under a root of `host`: how far they were slid in all.
+fn slide(pool: &mut LocalPool, host: &Host, rod: &Rc<Reference>, by: i64) -> i64 {
+    let rod = rod.clone();
+    pool.run_until(host.root("host", move |context| {
+        async move { rod.call::<_, i64>(&context, "slide", (by,)).await }.boxed_local()
+    }))
+    .unwrap()
+}
+
+/// A reload keeps the beads, a resource of the Orb's root, while their name and version stay the
+/// same, as the host keeps the resources of any native Orb: nothing closes or opens, and the new
+/// code's method, through the same reference, slides the value the old code slid. The host closes
+/// that value once, when it closes. A component would open its beads again, in a fresh instance.
+#[test]
+fn a_reload_keeps_a_root_resource_whose_version_stays() {
+    journal();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![abacus::orb().unwrap()]).unwrap();
+    pool.run_until_stalled();
+    assert_eq!(journal(), ["beads 1 open"]);
+    let rod = Rc::new(host.get(ROD, vec!["main".into()], "host").unwrap());
+    assert_eq!(slide(&mut pool, &host, &rod, 5), 5);
+    pool.run_until(host.reload(vec![abacus::orb().unwrap()], 5_000))
+        .unwrap();
+    pool.run_until(host.settled());
+    assert!(journal().is_empty());
+    assert_eq!(slide(&mut pool, &host, &rod, 1), 6);
+    rod.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(journal(), ["beads 1 closed at 6"]);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// A reload to code whose beads are at a new version, `#[resource(version = 2)]`, opens the new
+/// code's beads with their `#[open]` function, then closes the beads the old code slid, once,
+/// through theirs. The new code's rod, of its interface at 2.0.0, which the host acquires once it
+/// has released the old one, slides the new beads from zero. The host closes the new beads when it
+/// closes, and never the old ones again.
+#[test]
+fn a_reload_reopens_a_root_resource_at_a_new_version() {
+    journal();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![abacus::orb().unwrap()]).unwrap();
+    let rod = Rc::new(host.get(ROD, vec!["main".into()], "host").unwrap());
+    assert_eq!(slide(&mut pool, &host, &rod, 5), 5);
+    rod.release().unwrap();
+    pool.run_until_stalled();
+    assert_eq!(journal(), ["beads 1 open"]);
+    pool.run_until(host.reload(vec![restrung::orb().unwrap()], 5_000))
+        .unwrap();
+    pool.run_until(host.settled());
+    assert_eq!(journal(), ["beads 2 open", "beads 1 closed at 5"]);
+    let rod = Rc::new(host.get(RESTRUNG_ROD, vec!["main".into()], "host").unwrap());
+    assert_eq!(slide(&mut pool, &host, &rod, 1), 1);
+    rod.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(journal(), ["beads 2 closed at 1"]);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
 }

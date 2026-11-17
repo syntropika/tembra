@@ -442,9 +442,15 @@ root it asks the component for its resource declarations (name and version), run
 function during activation and the `#[close]` one at teardown; `with` asks the kernel for the handle of the open resource
 first. The value lives in the component, one per instance, as the TypeScript guest's root
 resources do: a reload gives the Orb a fresh instance whose resources the kernel opens again. A
-resource struct enters the WIT only when a service method uses it; a resource may hold types the
-WIT has no spelling for, such as a client of some granted I/O. A native host opens the same
-resources, see [using the Orb natively](#using-the-orb-natively).
+native host keeps the value across a reload instead, while the resource's name and version stay
+the same, as it keeps the resources of every native Orb: nothing closes or opens, and the new
+code's `with` gives the value the old code opened. A reload to another module whose resource of
+that name has another type therefore needs a new version, or the new `with` panics. At a new
+version, `#[resource(version = 2)]`, the host opens the new code's resource with its `#[open]`
+function, then closes the old value, once, through the old code's `#[close]` function. A resource
+struct enters the WIT only when a service method uses it; a resource may hold types the WIT has no
+spelling for, such as a client of some granted I/O. A native host opens the same resources, see
+[using the Orb natively](#using-the-orb-natively).
 
 ## The call's context
 
@@ -1361,8 +1367,10 @@ A [`#[resource]`](#resources-of-the-orbs-root) of the Orb's root serves a native
 a component. `orb(..)` gives each Orb it builds a table of its resources, which the Orb's create
 fills, declaring each with `Declaration::resource` before the `#[root]`, if any, runs: the host
 opens each with its `#[open]` function once the create returns, once for the Orb and before any
-object of it is built, and closes it, through its `#[close]` function, when it removes the Orb. The
-value lives in the host, one per Orb, so a crate installed twice under two names has two of each.
+object of it is built, and closes it, through its `#[close]` function, when it removes the Orb. A
+reload keeps it while its version stays the same, and replaces it at a new version, as
+[above](#resources-of-the-orbs-root). The value lives in the host, one per Orb, so a crate
+installed twice under two names has two of each.
 `with` gives the open value to the methods of every service of the Orb and the functions of their
 WIT resources, which the native side runs with their Orb's table around each poll of their future,
 as for the `context` functions.
