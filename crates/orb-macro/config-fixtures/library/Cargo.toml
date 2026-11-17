@@ -1,0 +1,12 @@
+[package]
+name = "tembra-config-library"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# What a guest depends on: the facade's authoring entry point, without the host runtime. The
+# crate's tests, bench, binary and example declare their Orb modules through it too.
+tembra = { path = "../../../tembra", default-features = false, features = ["macros"] }

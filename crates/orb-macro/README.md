@@ -1633,7 +1633,9 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    `contract/deps/`: the files `cargo tembra build` writes, rewritten only when their content
    changes, so a crate used natively has the contract a compiled consumer reads, and a
    dependency's is never written. The Orb modules of an integration test, a bench, a binary or an
-   example built as one are not the library's and write nothing. Writing it, the macro removes
+   example built as one are not the library's and write nothing. An example built as a library,
+   with `crate-type = ["lib"]`, still writes into the crate's `contract/`: the macro does not tell
+   it from the library today. Writing the contract, the macro removes
    any other `.wit` of `contract/` whose package, name and version, is the module's, as the
    contract of a former name of its world, so each Orb module of a crate needs a package of its
    own: two modules of one package remove each other's contract, silently, and `contract/` keeps

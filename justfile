@@ -202,6 +202,10 @@ test-orb-parity:
     TEMBRA_WASM_ORB_PARITY="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_parity_fixture.wasm" \
         cargo test --locked -p tembra-executor-wasm --test orb_macro_parity -- --ignored
 
+# Build with Cargo the fixtures of crates/orb-macro/config-fixtures and the facade's features; a failing test names its configuration.
+test-configurations:
+    cargo test --locked -p tembra-orb-macro --test configurations -- --ignored
+
 check: fmt-check build-node build-wasm build-sdk
     bun run typecheck
     just lint
@@ -224,6 +228,7 @@ ci: check \
     test-orb-macro \
     test-cargo-tembra \
     test-orb-parity \
+    test-configurations \
     check-clean-tree
 
 # Fail when the checks changed the tree: a modified or deleted file, or a new file that .gitignore does not list.

@@ -229,7 +229,10 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
 - `just test-cargo-tembra`, which runs `cargo tembra new`, `build --out`, `wit` and `inspect` on
   scratch crates that build as components and natively;
 - `just test-orb-parity`, which builds the parity fixture's Orb natively and as a component and
-  requires the same answers from both.
+  requires the same answers from both;
+- `just test-configurations`, which builds the configurations that only Cargo sets up: a
+  workspace whose application enables `host` beside a guest, a library whose other targets hold
+  Orb modules, and the facade with each feature alone.
 
 Then it runs `just check-clean-tree`, which fails when the parts left a modified file or a new
 file that `.gitignore` does not list.
