@@ -240,8 +240,10 @@ hook's types then belong to the consumed package, re-exported under the interfac
 fits the composition. Those are the types of the hook's import, which `run` calls; the world exports
 the hook too, as the portable hook contract requires, and a derived interface takes the copy of the
 types the export holds, another Rust type, so a service's function does not name
-`guard::Admission`: it reports the hook's value in a type of the module, converted from it. A state
-holds the import's types as they are. Which role an interface plays travels in the
+`guard::Admission`: it reports the hook's value in a type of the module, converted from it. A type
+the hook `use`s from an interface the world only imports has no copy of its own: the import and the
+export both name that interface's type, which a service's function names as the hook's module
+does. A state holds the import's types as they are. Which role an interface plays travels in the
 `tembra:manifest` section next to the contribution priorities, and `cargo tembra build` packages
 it; an Orb declares a hook or contributes to it, never both. The world holds an interface in one
 role: the macro refuses a hook's interface the module also implements or imports plainly, and an
@@ -616,7 +618,8 @@ a view of a hook the module contributes to or declares beside the keyed import, 
 world exports too: a derived signature names a contributed hook's types through the hook's module,
 `guard::Admission`, and none of a declared hook's. A type such an interface `use`s from an
 interface the world only imports has no copy of its own: the import, the export and the view all
-name that interface's type, so a derived signature names it through the view as well. The
+name that interface's type, so a derived signature names it through the view and through the
+interface's module alike, a declared hook's included. The
 `counting` and `lending` services of the [runtime fixture](runtime-fixture/src/lib.rs) import by
 key, `lending` the interface the fixture implements.
 
@@ -787,7 +790,8 @@ the type that names it:
   an option, a result, a list or a tuple ([taking a resource](#taking-a-resource)), and an object
   of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
 - a type of a hook the module declares from a consumed package, whose `run` speaks the import's
-  types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook));
+  types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook)), but
+  one the hook `use`s from an interface the world only imports, which both name;
 - a type of an implemented interface or of a hook the module contributes to named through the
   bindings' module of its import, `self::example::counters::counter::Tally`, or through a name a
   `use` binds to it, `counter::Tally` after `use super::example::counters::counter;`, the import's

@@ -880,6 +880,7 @@ interface guard {
 
 interface gate {
   use types.{ticket};
+  record stamp { value: s32 }
   apply: func(input: ticket) -> ticket;
 }
 ";
@@ -951,6 +952,50 @@ fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
             .contains("interface admissions {\n  use example:ledger/gate@1.0.0.{ticket};\n"),
         "{}",
         wit(&module)
+    );
+}
+
+/// The Orb module re-exports the import of a hook it declares, whose types `run` takes and
+/// returns, while a derived interface takes the hook's export: a type the hook `use`s from an
+/// interface the world only imports is one type under both, which a derived signature names
+/// through the hook's module, and a type the hook defines itself has two copies, the module's
+/// the import's, which is refused.
+#[test]
+fn a_type_a_declared_hook_uses_from_an_import_has_one_copy() {
+    let dir = consumed("declared-shared", SHARED);
+    let gatekeeper = |admit: &str| {
+        format!(
+            "mod gatekeeper {{
+                #[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
+                pub struct Gate;
+                #[service]
+                pub struct Admissions;
+                impl Admissions {{ {admit} }}
+            }}"
+        )
+    };
+    let module = expanded(
+        options("example:gatekeeper@1.0.0", Some(&dir), &[]),
+        &gatekeeper(
+            "pub fn admit(ticket: gate::Ticket) -> i32 { ticket.value }
+            pub fn ran(value: i32) -> gate::Ticket { Gate::run(gate::Ticket { value }) }",
+        ),
+    );
+    let text = resolved(&module, &dir);
+    for expected in [
+        "interface admissions {\n  use example:ledger/gate@1.0.0.{ticket};\n",
+        "  admit: func(ticket: ticket) -> s32;\n",
+        "  ran: func(value: s32) -> ticket;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let error = refused(
+        options("example:gatekeeper@1.0.0", Some(&dir), &[]),
+        &gatekeeper("pub fn stamped(stamp: gate::Stamp) -> i32 { stamp.value }"),
+    );
+    assert!(
+        error.contains("`Admissions::stamped` takes `Stamp`, a record of the hook example:ledger/gate@1.0.0, which this module declares: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `gate::Stamp` and `Gate::run` are the import's; use a type of the module"),
+        "{error}"
     );
 }
 

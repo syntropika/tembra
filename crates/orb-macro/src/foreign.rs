@@ -17,9 +17,9 @@
 //! but of those it `use`s from an interface the world only imports, which its import and its
 //! export alias alike, and a derived interface, exported too, uses that copy: the Orb module
 //! re-exports the export module of an implemented interface and of a contributed hook, but the
-//! import module of a hook it declares, which `run` calls, so a derived interface names none of a
-//! declared hook's types, and none of an exported interface's, an implemented one's or a hook's,
-//! through the view of its keyed import, the import's copy, where the two copies differ. A
+//! import module of a hook it declares, which `run` calls, so where the two copies differ a
+//! derived interface names none of a declared hook's types, and none of an exported interface's,
+//! an implemented one's or a hook's, through the view of its keyed import, the import's copy. A
 //! WASI interface's names stay out of a derived interface, named through the WASI interface's
 //! module or through a consumed interface that `use`s them, and a consumed type crosses one when it
 //! carries data only. A state may hold a consumed type that `serde` can write, which the bindings
@@ -1198,7 +1198,10 @@ fn checked<'a>(
     match (interface.role, &definition.kind) {
         (Role::Wasi, _) => unreachable!("checked above"),
         (Role::Context, _) => unreachable!("`Modules::named` reaches no name of the context"),
-        (Role::Declared, _) => {
+        // The Orb module re-exports the import of a hook it declares, a copy of the hook's types
+        // other than the export's, but for a type the hook `use`s from an interface the world only
+        // imports, which both alias; a resource stays the hook's, as a contributed hook's does.
+        (Role::Declared, _) if definition.copied => {
             let module = named.module;
             refuse(format!(
                 "{what} of {of}: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{module}::{ident}` and {} are the import's; use a type of the module",
@@ -1231,14 +1234,18 @@ fn checked<'a>(
             }
             Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
         },
-        (Role::Implemented | Role::Contributed, wit::Kind::Resource) if returned => {
+        (Role::Implemented | Role::Contributed | Role::Declared, wit::Kind::Resource)
+            if returned =>
+        {
             refuse(format!(
                 "{what} of {of}: the runtime returns a resource only from the interface that defines it"
             ))
         }
-        (Role::Implemented | Role::Contributed, wit::Kind::Resource) => refuse(format!(
-            "{what} of {of}: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"
-        )),
+        (Role::Implemented | Role::Contributed | Role::Declared, wit::Kind::Resource) => {
+            refuse(format!(
+                "{what} of {of}: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"
+            ))
+        }
         (Role::Keyed, wit::Kind::Resource) => refuse(format!(
             "{what} of {of}: the objects of a view carry data, so an interface with a resource is not imported by key"
         )),
