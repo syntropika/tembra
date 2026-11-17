@@ -5,8 +5,21 @@
 //! object's state and the resources of the Orb's root, as a component's do. The module `keeper`
 //! implements an interface of the package in `wit/`, whose types are the bindings'. The module
 //! `notebook` takes host values, which only a native host can lend, `library` shares its root's
-//! value among its objects, and `worker` only runs its root and a resource of it. The manifest names
-//! every Orb of the crate `calculator` at API version 2, which `orb()` reports.
+//! value among its objects, and `worker` only runs its root and a resource of it. The module
+//! `metering` imports the meter interface of the package in `wit/deps/`, which `meters`
+//! implements, and its `orb(..)` takes the provider of each import. The manifest names every Orb
+//! of the crate `calculator` at API version 2, which `orb()` reports.
+//!
+//! A host that leaves a provider out of `metering::Providers` does not compile:
+//!
+//! ```compile_fail,E0063
+//! use tembra::Provider;
+//! use tembra_orb_native_fixture::metering;
+//!
+//! let orb = metering::orb(metering::Providers {
+//!     gauge: Provider::new("meters", 1),
+//! });
+//! ```
 
 use std::cell::{Cell, RefCell};
 
@@ -1135,5 +1148,68 @@ pub mod worker {
                 Ok(())
             })
         })
+    }
+}
+
+/// A meter another Orb consumes: an implementation of `example:meter/gauge@1.0.0`, whose functions
+/// are all asynchronous, from the package in `wit/deps/`. Each object keeps its own total.
+#[tembra::orb(package = "example:meters@1.0.0", wit = "wit")]
+pub mod meters {
+    /// The total of one meter, which the kernel keeps for each object.
+    #[state(service = Gauge)]
+    pub struct Total {
+        pub total: u64,
+    }
+
+    #[service("example:meter/gauge@1.0.0")]
+    pub struct Gauge;
+
+    impl Gauge {
+        /// Add the reading to this meter's total and return the total after it.
+        pub async fn add(reading: gauge::Reading) -> u64 {
+            let added = u64::from(reading.amount) * u64::from(reading.times);
+            Total::update(|total| total.total += added).total
+        }
+
+        /// This meter's total.
+        pub async fn total() -> u64 {
+            Total::read().total
+        }
+    }
+}
+
+/// Feeds the meter of another Orb, which the host names: the attribute imports its interface, for
+/// the `main` object of the provider, and imports it by key, for the object of a key the call
+/// chooses. Natively, `metering::orb(..)` takes the provider of each, in `metering::Providers`.
+#[tembra::orb(
+    package = "example:metering@1.0.0",
+    wit = "wit",
+    import = "example:meter/gauge@1.0.0",
+    import("example:meter/gauge@1.0.0", keyed)
+)]
+pub mod metering {
+    /// Feeds meters.
+    #[service]
+    pub struct Readings;
+
+    impl Readings {
+        /// Add each amount, counted once, to the provider's `main` meter, and return the total it
+        /// reports after them.
+        pub async fn feed(amounts: Vec<u32>) -> u64 {
+            for amount in amounts {
+                gauge::add(gauge::Reading { amount, times: 1 }).await;
+            }
+            gauge::total().await
+        }
+
+        /// Add the reading to the meter of `key`, and return the total it reports then, or why the
+        /// provider refused the key.
+        pub async fn feed_at(key: String, reading: gauge::Reading) -> Result<u64, String> {
+            let meter = gauge_ref::get(vec![key]).await?;
+            let added = meter.add(reading).await;
+            let total = meter.total().await;
+            assert_eq!(added, total, "one call at a time feeds a meter");
+            Ok(total)
+        }
     }
 }

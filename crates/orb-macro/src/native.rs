@@ -19,9 +19,11 @@
 //! for. A service whose objects own a `#[state]` declares it in its factory, and its methods run in
 //! the scope of their object, whose state the state's `read` and `update` reach natively. The Orb's
 //! create declares each `#[resource]` of its root, into a table `orb()` builds for the Orb, and
-//! every method runs in the scope of its Orb, whose resources their `with` reaches natively. What
-//! the native side does not cover yet is a compile error inside the same wrapper, naming the item;
-//! a component build of the module is unaffected.
+//! every method runs in the scope of its Orb, whose resources their `with` reaches natively. An
+//! import of another Orb's interface whose functions are all `async func` calls the provider the
+//! host names through the kernel, see `providers`. What the native side does not cover yet is a
+//! compile error inside the same wrapper, naming the item; a component build of the module is
+//! unaffected.
 use crate::{
     Analysis, Function, Newtype, Payload, Resource, Service, Shape, ShapeKind, WitResource,
     camel_ident, foreign::Role, metadata::Metadata, rust_ident, wit,
@@ -29,17 +31,25 @@ use crate::{
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
-use std::{borrow::Cow, collections::BTreeMap};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 use syn::{Ident, LitStr, Type, spanned::Spanned};
 use tembra_contracts::javascript_name;
 use wit_parser::{TypeDefKind, TypeId};
 
+mod providers;
+
 /// The native output, by the module each part goes in: the Orb module's items, and the items of
 /// each sub-module declaring a service or a type that enters the WIT, by scope, which the
-/// component's tree renders in place.
+/// component's tree renders in place. `served` names the modules of the imports it writes in the
+/// Orb module, in place of the bindings' import modules, which the component's re-exports leave to
+/// a component build.
 pub(crate) struct Native {
     pub root: TokenStream,
     pub nested: Vec<(usize, TokenStream)>,
+    pub served: BTreeSet<String>,
 }
 
 /// Write the native side of the module: `orb()` with the registration of every service, the
@@ -48,26 +58,33 @@ pub(crate) struct Native {
 /// the author's code calls either way.
 pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
     let context = analysis.options.context.then(context_module);
-    let registrations = covered(analysis).and_then(|()| {
-        analysis
-            .services
-            .iter()
-            .map(|service| registration(service, analysis))
-            .collect::<Result<Vec<_>, _>>()
-    });
+    let refusal = |Refused(error)| Native {
+        root: wrapped(quote! { #error #context }),
+        nested: Vec::new(),
+        served: BTreeSet::new(),
+    };
+    // The interfaces the module imports from other Orbs, which `orb(..)` takes the providers of.
+    let imports = match providers::imports(analysis).and_then(|imports| {
+        covered(analysis)?;
+        Ok(imports)
+    }) {
+        Ok(imports) => imports,
+        Err(refused) => return refusal(refused),
+    };
+    let imported = !imports.is_empty();
+    let registrations = analysis
+        .services
+        .iter()
+        .map(|service| registration(service, analysis, imported))
+        .collect::<Result<Vec<_>, _>>();
     let registrations = match registrations {
         Ok(registrations) => registrations,
-        Err(Refused(error)) => {
-            return Native {
-                root: wrapped(quote! { #error #context }),
-                nested: Vec::new(),
-            };
-        }
+        Err(refused) => return refusal(refused),
     };
     let mut by_scope: BTreeMap<usize, Vec<TokenStream>> = BTreeMap::new();
     let mut calls = Vec::new();
     // The resources of the Orb's root, which `orb(..)` keeps for the Orb, for the methods of every
-    // service.
+    // service, and so are its imports.
     let resources = !analysis.resources.is_empty();
     for (service, items) in analysis.services.iter().zip(registrations) {
         let path = &analysis.modules[service.scope];
@@ -75,7 +92,8 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         // A service its create builds takes the inputs `orb(..)` shares.
         let inputs = service.create.is_some().then(|| quote! { , &inputs });
         let table = resources.then(|| quote! { , &resources });
-        calls.push(quote! { self::#(#path::)* #function(name #inputs #table) });
+        let imports = imported.then(|| quote! { , &imports });
+        calls.push(quote! { self::#(#path::)* #function(name #inputs #table #imports) });
         by_scope
             .entry(service.scope)
             .or_default()
@@ -98,7 +116,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
             analysis
                 .wit_resources
                 .iter()
-                .map(|resource| Ok((resource.scope, resource_glue(resource, analysis)?))),
+                .map(|resource| Ok((resource.scope, resource_glue(resource, analysis, imported)?))),
         )
         .collect::<Result<Vec<_>, Refused>>();
     match codecs {
@@ -107,12 +125,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
                 by_scope.entry(scope).or_default().push(items);
             }
         }
-        Err(Refused(error)) => {
-            return Native {
-                root: wrapped(quote! { #error #context }),
-                nested: Vec::new(),
-            };
-        }
+        Err(refused) => return refusal(refused),
     }
     let root = by_scope.remove(&0).unwrap_or_default();
     // The JSON of each data type of an implemented interface, in the Orb module, from its WIT.
@@ -142,16 +155,30 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         shared,
         create.as_ref(),
         resources,
+        &imports,
         &calls,
     );
     let boundary =
         (!analysis.shapes.is_empty() || !analysis.newtypes.is_empty() || !consumed.is_empty())
             .then(boundary_trait);
+    // The providers `orb(..)` takes, the table of the imports and the module of each, in place of
+    // the bindings'.
+    let imported = imported.then(|| {
+        let providers = providers::providers(&imports);
+        let requirements = providers::requirements(&imports);
+        let table = providers::table(&imports);
+        let modules = providers::modules(&imports, analysis);
+        quote! { #providers #requirements #table #modules }
+    });
     Native {
-        root: wrapped(quote! { #orb #boundary #(#root)* #(#consumed)* #context }),
+        root: wrapped(quote! { #orb #imported #boundary #(#root)* #(#consumed)* #context }),
         nested: by_scope
             .into_iter()
             .map(|(scope, items)| (scope, wrapped(quote! { #(#items)* })))
+            .collect(),
+        served: imports
+            .iter()
+            .map(|import| import.field.to_string())
             .collect(),
     }
 }
@@ -170,17 +197,21 @@ fn wrapped(items: TokenStream) -> TokenStream {
 /// the Orb module names it by, is the Orb's create: `Orb::create` runs it with the inputs and the
 /// Orb's declaration. With root `resources`, `orb_named` builds the table of the Orb's resources,
 /// which the Orb's create fills, declaring each before the root runs, and which every service
-/// takes, as one `Rc`.
+/// takes, as one `Rc`. With `imports`, they take `providers` last, the Orb requires each provider,
+/// and `orb_named` builds the table of the Orb's imports, which every service takes too, as one
+/// `Rc`, and whose plain imports the Orb's create declares first.
 ///
 /// Cargo does not rebuild a crate when only `[package.metadata.tembra]` changes, so the generated
 /// code includes the manifest, which makes the compiler track the file: the next build then reads
 /// the table again.
+#[allow(clippy::too_many_arguments)]
 fn orb(
     metadata: &Metadata,
     inputs: Option<&TokenStream>,
     shared: bool,
     create: Option<&TokenStream>,
     resources: bool,
+    imports: &[providers::Import<'_>],
     calls: &[TokenStream],
 ) -> TokenStream {
     let name = &metadata.name;
@@ -196,9 +227,21 @@ fn orb(
         doc.push_str(lent);
         named.push_str(lent);
     }
-    let parameter = inputs.map(|path| quote! { inputs: #path });
+    let imported = !imports.is_empty();
+    if imported {
+        let provided = " `providers` name the Orb that answers each interface it imports.";
+        doc.push_str(provided);
+        named.push_str(provided);
+    }
+    let parameters = inputs
+        .map(|path| quote! { inputs: #path })
+        .into_iter()
+        .chain(imported.then(|| quote! { providers: Providers }));
+    let parameter = quote! { #(#parameters),* };
     let named_parameter = inputs.map(|path| quote! { , inputs: #path });
+    let named_providers = imported.then(|| quote! { , providers: Providers });
     let argument = inputs.map(|_| quote! { , inputs });
+    let provided = imported.then(|| quote! { , providers });
     let shared = shared.then(|| quote! { let inputs = ::std::rc::Rc::new(inputs); });
     let table = resources.then(|| {
         quote! {
@@ -207,30 +250,73 @@ fn orb(
             );
         }
     });
-    let create = match (create, resources) {
-        (Some(create), false) => Some(quote! {
+    // The Orb requires each provider, and its services and its create share the table of its
+    // imports, whose plain ones the create declares before anything else.
+    let (imports_table, built) = if imported {
+        (
+            Some(quote! {
+                let imports = ::std::rc::Rc::new(self::__tembra_import::Imports::new(&providers));
+            }),
+            quote! {
+                {
+                    let mut orb = ::tembra::Orb::new(name, api_version);
+                    for requirement in self::__tembra_providers::requirements(&providers)? {
+                        orb = orb.requires(requirement);
+                    }
+                    orb
+                }
+            },
+        )
+    } else {
+        (None, quote! { ::tembra::Orb::new(name, api_version) })
+    };
+    let declared = imports.iter().any(|import| import.view.is_none());
+    let create = if declared {
+        let shares = create.map(|_| quote! { let inputs = ::std::rc::Rc::clone(&inputs); });
+        let holds = resources.then(|| quote! { let resources = ::std::rc::Rc::clone(&resources); });
+        let opens = resources.then(|| quote! { resources.declare(&declaration)?; });
+        let root = match create {
+            Some(create) => quote! { self::#create(&inputs, &declaration) },
+            None => quote! { ::core::result::Result::Ok(()) },
+        };
+        Some(quote! {
             .create({
-                let inputs = ::std::rc::Rc::clone(&inputs);
-                move |declaration| self::#create(&inputs, &declaration)
-            })
-        }),
-        (Some(create), true) => Some(quote! {
-            .create({
-                let inputs = ::std::rc::Rc::clone(&inputs);
-                let resources = ::std::rc::Rc::clone(&resources);
+                let imports = ::std::rc::Rc::clone(&imports);
+                #shares
+                #holds
                 move |declaration| {
-                    resources.declare(&declaration)?;
-                    self::#create(&inputs, &declaration)
+                    imports.declare(&declaration)?;
+                    #opens
+                    #root
                 }
             })
-        }),
-        (None, true) => Some(quote! {
-            .create({
-                let resources = ::std::rc::Rc::clone(&resources);
-                move |declaration| resources.declare(&declaration)
-            })
-        }),
-        (None, false) => None,
+        })
+    } else {
+        match (create, resources) {
+            (Some(create), false) => Some(quote! {
+                .create({
+                    let inputs = ::std::rc::Rc::clone(&inputs);
+                    move |declaration| self::#create(&inputs, &declaration)
+                })
+            }),
+            (Some(create), true) => Some(quote! {
+                .create({
+                    let inputs = ::std::rc::Rc::clone(&inputs);
+                    let resources = ::std::rc::Rc::clone(&resources);
+                    move |declaration| {
+                        resources.declare(&declaration)?;
+                        self::#create(&inputs, &declaration)
+                    }
+                })
+            }),
+            (None, true) => Some(quote! {
+                .create({
+                    let resources = ::std::rc::Rc::clone(&resources);
+                    move |declaration| resources.declare(&declaration)
+                })
+            }),
+            (None, false) => None,
+        }
     };
     quote! {
         const _: &[u8] = ::core::include_bytes!(::core::concat!(
@@ -240,7 +326,7 @@ fn orb(
 
         #[doc = #doc]
         pub fn orb(#parameter) -> ::tembra::Result<::tembra::Orb> {
-            orb_named(#name, #version #argument)
+            orb_named(#name, #version #argument #provided)
         }
 
         #[doc = #named]
@@ -248,11 +334,13 @@ fn orb(
             name: &str,
             api_version: u32
             #named_parameter
+            #named_providers
         ) -> ::tembra::Result<::tembra::Orb> {
             #shared
             #table
+            #imports_table
             ::core::result::Result::Ok(
-                ::tembra::Orb::new(name, api_version) #create #(.service(#calls))*
+                #built #create #(.service(#calls))*
             )
         }
     }
@@ -720,7 +808,12 @@ pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) ->
 
 /// The trait of `boundary_trait`, as the module `scope` names it.
 fn boundary(scope: usize, analysis: &Analysis) -> TokenStream {
-    let root = crate::supers(analysis.modules[scope].len());
+    boundary_at(analysis.modules[scope].len())
+}
+
+/// The trait of `boundary_trait`, as a module `depth` levels below the Orb module names it.
+fn boundary_at(depth: usize) -> TokenStream {
+    let root = crate::supers(depth);
     let boundary = format_ident!("{BOUNDARY}");
     quote! { #root #boundary }
 }
@@ -734,30 +827,10 @@ fn refused(span: Span, message: &str) -> Refused {
     Refused(quote_spanned! { span => ::core::compile_error!(#message); })
 }
 
-/// Whether the native side covers the module's features; the first it does not is refused. Each
-/// has its item of the plan, which lifts the refusal.
+/// Whether the native side covers the module's hooks; the first it does not is refused. Each has
+/// its item of the plan, which lifts the refusal. `providers::imports` refuses the imports it does
+/// not cover first.
 fn covered(analysis: &Analysis) -> Result<(), Refused> {
-    if let Some((import, identity)) = analysis
-        .options
-        .imports
-        .iter()
-        .zip(&analysis.imports)
-        .next()
-    {
-        return Err(refused(
-            import.span(),
-            &format!("the import of {identity} is not supported natively yet"),
-        ));
-    }
-    if let Some(import) = analysis.options.keyed.first() {
-        return Err(refused(
-            import.span(),
-            &format!(
-                "the import of {} by key is not supported natively yet",
-                import.value()
-            ),
-        ));
-    }
     if let Some(contribution) = analysis.contributions.first() {
         return Err(refused(
             contribution.ident.span(),
@@ -808,8 +881,13 @@ fn codec_ident(function: &Function) -> Ident {
 /// whose objects own a `#[state]` declares it next, before its create runs, and keeps it beside the
 /// environment, for the scope each method's future runs in, where the state's `read` and `update`
 /// reach it. With root resources, the service takes the table of its Orb's too, which each
-/// method's future runs with, where their `with` reaches them.
-fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
+/// method's future runs with, where their `with` reaches them, and so with the Orb's imports,
+/// `imported`, whose functions call with the call of the method.
+fn registration(
+    service: &Service,
+    analysis: &Analysis,
+    imported: bool,
+) -> Result<TokenStream, Refused> {
     let depth = analysis.modules[service.scope].len();
     let root = crate::supers(depth);
     let signature = crate::signature_ident(service);
@@ -907,11 +985,15 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
         }),
         resources: (!analysis.resources.is_empty())
             .then(|| quote! { self::#root __tembra_resource::scoped }),
+        imports: imported.then(|| quote! { self::#root __tembra_import::scoped }),
     };
     // With root resources, the service takes the table of its Orb's, which each method's scope
-    // sets.
+    // sets, and so with imports.
     let table = scopes.resources.is_some().then(|| {
         quote! { , resources: &::std::rc::Rc<self::#root __tembra_resource::Resources> }
+    });
+    let imports = imported.then(|| {
+        quote! { , imports: &::std::rc::Rc<self::#root __tembra_import::Imports> }
     });
     let mut codecs = Vec::new();
     let mut methods = Vec::new();
@@ -942,17 +1024,20 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
     // Orb's resources through its table.
     let state_of = state.map(|_| quote! { , |object: &#environment| object.1.clone() });
     let resources = scopes.resources.is_some().then(|| quote! { , resources });
+    let imported = imported.then(|| quote! { , imports });
     let built = owned_resources(service, analysis).fold(built, |built, resource| {
         let glue = crate::relative(
             depth,
             &analysis.modules[resource.scope],
             &glue_ident(resource),
         );
-        quote! { #glue(#built #state_of #resources) }
+        quote! { #glue(#built #state_of #resources #imported) }
     });
     Ok(quote! {
         #[doc = #doc]
-        pub(crate) fn #function(orb: &str #parameter #table) -> ::tembra::Service<#environment> {
+        pub(crate) fn #function(
+            orb: &str #parameter #table #imports
+        ) -> ::tembra::Service<#environment> {
             #(#codecs)*
 
             #shared
@@ -1183,8 +1268,12 @@ fn glue_ident(resource: &WitResource) -> Ident {
 /// service, in the scopes its methods run in: that of its call, with the `context` option, that of
 /// its object, when the service's objects own a state, which the function adding them is given the
 /// way to reach, as the object's environment is the service's, and that of its Orb, with root
-/// resources, whose table that function is given too.
-fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStream, Refused> {
+/// resources, whose table that function is given too, as it is the table of the Orb's imports.
+fn resource_glue(
+    resource: &WitResource,
+    analysis: &Analysis,
+    imported: bool,
+) -> Result<TokenStream, Refused> {
     let ident = &resource.ident;
     let name = wit::kebab(ident);
     let service = analysis
@@ -1211,6 +1300,7 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
         }),
         resources: (!analysis.resources.is_empty())
             .then(|| quote! { self::#root __tembra_resource::scoped }),
+        imports: imported.then(|| quote! { self::#root __tembra_import::scoped }),
     };
     let (environment, _) = scopes.environment(&service.ident, false);
     let mut functions = Vec::new();
@@ -1296,6 +1386,9 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
     let resources = scopes.resources.is_some().then(|| {
         quote! { , resources: &::std::rc::Rc<self::#root __tembra_resource::Resources> }
     });
+    let imports = scopes.imports.is_some().then(|| {
+        quote! { , imports: &::std::rc::Rc<self::#root __tembra_import::Imports> }
+    });
     Ok(quote! {
         impl ::tembra::portable::Issuable for #ident {
             fn nominal() -> ::tembra::portable::Nominal {
@@ -1311,6 +1404,7 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
             service: ::tembra::Service<E>
             #state_of
             #resources
+            #imports
         ) -> ::tembra::Service<E> {
             service #(#functions)*
         }
@@ -1365,6 +1459,10 @@ struct Scopes {
     /// `__tembra_resource::scoped`, which takes the table of the Orb's resources, `resources`, which
     /// the function registering the handle takes.
     resources: Option<TokenStream>,
+    /// The call's, which the functions of the import modules call with, for an Orb that imports:
+    /// the path of `__tembra_import::scoped`, which takes the call's context and the table of the
+    /// Orb's imports, `imports`, which the function registering the handle takes.
+    imports: Option<TokenStream>,
 }
 
 /// How a handle reaches the state of its object: the path of `__tembra_state::scoped`, the type of
@@ -1400,9 +1498,19 @@ impl Scopes {
         }
     }
 
-    /// `future`, a handle's future over its `__tembra_context`, `__tembra_object` and
-    /// `__tembra_resources`, run in each scope.
+    /// `future`, a handle's future over its `__tembra_context`, `__tembra_object`,
+    /// `__tembra_resources` and `__tembra_imports`, run in each scope.
     fn around(&self, future: TokenStream) -> TokenStream {
+        let future = match &self.imports {
+            Some(scoped) => quote! {
+                #scoped(
+                    __tembra_context.clone(),
+                    ::std::rc::Rc::clone(&__tembra_imports),
+                    #future,
+                )
+            },
+            None => future,
+        };
         let future = match &self.state {
             Some(ObjectState { scoped, state, .. }) => {
                 quote! { #scoped(__tembra_context.clone(), #state, #future) }
@@ -1420,18 +1528,29 @@ impl Scopes {
     }
 
     /// `handle`, a closure, as one that owns what its scopes read: a handle that reaches its
-    /// object's state moves what it reads it with, and one that reaches the Orb's resources keeps
-    /// the table of them.
+    /// object's state moves what it reads it with, and one that reaches the Orb's resources or its
+    /// imports keeps the table of them.
     fn handle(&self, handle: TokenStream) -> TokenStream {
-        match (&self.resources, &self.state) {
-            (Some(_), _) => quote! {
+        let imports = self
+            .imports
+            .is_some()
+            .then(|| quote! { let __tembra_imports = ::std::rc::Rc::clone(imports); });
+        match (&self.resources, &self.state, imports) {
+            (Some(_), _, imports) => quote! {
                 {
                     let __tembra_resources = ::std::rc::Rc::clone(resources);
+                    #imports
                     move #handle
                 }
             },
-            (None, Some(_)) => quote! { move #handle },
-            (None, None) => handle,
+            (None, _, Some(imports)) => quote! {
+                {
+                    #imports
+                    move #handle
+                }
+            },
+            (None, Some(_), None) => quote! { move #handle },
+            (None, None, None) => handle,
         }
     }
 }
@@ -1795,18 +1914,26 @@ fn named<'a>(
 ) -> Result<Kind<'a>, Uncovered<'a>> {
     let reason = if let Some(named) = analysis.consumed_modules.named(ty, scope) {
         let identity = &named.interface.identity;
-        // A type of an interface the module implements is the bindings' type, which the codec
-        // reads from the interface's WIT.
-        let defined = (named.interface.role == Role::Implemented)
-            .then(|| analysis.consumed_types.named(identity, named.ident))
-            .flatten();
+        // A type of an interface the module implements or imports, by name or by key, is the
+        // bindings' type, which the codec reads from the interface's WIT.
+        let defined = matches!(
+            named.interface.role,
+            Role::Implemented | Role::Imported | Role::Keyed
+        )
+        .then(|| analysis.consumed_types.named(identity, named.ident))
+        .flatten();
         match defined {
             Some(defined) => {
                 let depth = analysis.modules[scope].len();
+                let role = if named.interface.role == Role::Implemented {
+                    "implemented"
+                } else {
+                    "imported"
+                };
                 match wit_kind(defined, &analysis.consumed_types, depth) {
                     Ok(kind) => return Ok(kind),
                     Err(what) => format!(
-                        "a type of the implemented interface {identity} that is or holds {what}, which the native side does not cover yet"
+                        "a type of the {role} interface {identity} that is or holds {what}, which the native side does not cover yet"
                     ),
                 }
             }

@@ -1244,6 +1244,37 @@ Elsewhere, in the root, a `#[create]` or a task, and before the host opens the r
 it closes it, `with` panics, as it traps a component. A root that fails fails the create, and no
 resource opens.
 
+An import of another Orb's interface, [plain](#importing-another-orbs-interface) or
+[by key](#importing-another-orbs-interface-by-key), serves a native host when every function of the
+interface is an `async func`. The struct `Providers`, generated beside `orb(..)`, names the Orb that
+answers each import, a `tembra::Provider` of its name and API version, under the name of the
+import's module, `gauge` or `gauge_ref`. `orb(..)` takes it last, `orb(providers)` or
+`orb(inputs, providers)`, and so does `orb_named(..)`, so a host that leaves an import without a
+provider does not compile:
+
+```rust,ignore
+let orb = metering::orb(metering::Providers {
+    gauge: tembra::Provider::new("meters", 1),
+    gauge_ref: tembra::Provider::new("meters", 1),
+})?;
+```
+
+The Orb requires each provider, with the signature of the interface, as the plan of a compiled Orb
+requires the provider an installation selects, so the host refuses the Orb without it. In place of
+the bindings' import module, the Orb module names a module of the same name, with the interface's
+types and functions, `async` as in a component and taking their parameters owned: each writes its
+arguments as the boundary's JSON, calls the provider through the kernel with `call_portable`, under
+the context of the method running, and reads the result back. A plain import reaches the provider's
+`main` object, of the principal `host`, through a reference the Orb's create declares, as a
+component's root does; the view of an import by key acquires the object of a key under the
+principal of the call, whose root holds it. A call that fails, or whose arguments or result the
+codec refuses, ends the method that made it with that error, where it traps a component. As the
+`context` functions, the imported functions serve the methods of the Orb and the futures they
+await, and panic elsewhere. A native method has no fiber of its own to suspend while the kernel
+completes a call, as a component's call has, so a synchronous imported function cannot wait for its
+answer: an import of an interface with a synchronous function, plain or by key, is a compile error
+where the runtime is linked, and works in a component build of the same module.
+
 The bindings of the kernel's `tembra:guest` package, which a module with a state, a root resource
 or the `context` option imports, are a module named `tembra` inside the Orb module, which hides the
 facade there: such a module names the facade `::tembra`, as in `::tembra::Result<Self>` and
@@ -1251,11 +1282,12 @@ facade there: such a module names the facade `::tembra`, as in `::tembra::Result
 
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, newtypes, `Result`s, and `Vec`, `Option` and
-tuples of them, the types of an implemented interface among them, WIT resources as above, states
-and the resources of the Orb's root. A type of an implemented interface that holds a resource, a
-type of an imported interface, an import and a hook are compile errors where the runtime is linked,
-naming the item, until the native side covers them, and so is an `Option` of an `Option`, which the
-boundary's JSON cannot tell from `None`; a component build of the same module is unaffected.
+tuples of them, the types of an implemented or imported interface among them, WIT resources as
+above, states, the resources of the Orb's root and the imports of interfaces of `async func`s. A
+type of a consumed interface that holds a resource, an import of an interface with a resource, a
+WASI import and a hook are compile errors where the runtime is linked, naming the item, until the
+native side covers them, and so is an `Option` of an `Option`, which the boundary's JSON cannot
+tell from `None`; a component build of the same module is unaffected.
 
 ## Items under `#[cfg]`
 

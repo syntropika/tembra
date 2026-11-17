@@ -23,7 +23,7 @@ pub use host::{
     AcquisitionOptions, Cancellation, Context, Declaration, ForeignNotification, Host, IssuedCall,
     LogRecord, Reference, Resource, ResourceKey, ResourceSignal, TaskScope,
 };
-pub use orb::{Codec, Orb, Service};
+pub use orb::{Codec, Orb, Provider, Service};
 /// The JSON crate the codecs `#[tembra::orb]` generates read and write portable values with: an
 /// Orb crate names it through the facade, with no dependency of its own.
 #[doc(hidden)]

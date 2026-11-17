@@ -1446,7 +1446,7 @@ fn expand(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let analysis = analyze(options, module)?;
     let native = native::emit(&analysis, &metadata);
-    let component = component(&analysis, &native.nested)?;
+    let component = component(&analysis, &native.nested, &native.served)?;
     let native = native.root;
     // Last, once both sides accepted the module: the signature of each service, from the WIT.
     let signatures = signatures(&analysis)?;
@@ -2087,22 +2087,15 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         .collect();
     let consumed = match (&wit_dir, implemented.is_empty() && imported.is_empty()) {
         (_, true) => BTreeMap::new(),
-        (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(imported))?,
+        (Some(dir), false) => {
+            wit::consumed(dir, implemented.iter().chain(imported.iter().copied()))?
+        }
         (None, false) => {
             return Err(syn::Error::new(
                 Span::call_site(),
                 "implementing or importing an interface needs wit = \"<dir>\", the directory with its WIT package",
             ));
         }
-    };
-    // The data types of the implemented interfaces, for the native codecs: the world exports
-    // those interfaces, so the bindings generate their types under `exports`.
-    let consumed_types = match &wit_dir {
-        Some(dir) if !implemented.is_empty() => wit::ConsumedTypes::read(
-            dir,
-            implemented.iter().map(|identity| (identity.as_str(), true)),
-        )?,
-        _ => wit::ConsumedTypes::default(),
     };
     // The callback of a contributed hook, or of a declared one named from a consumed package, is
     // read from that package; a hook derived from `input = Type` needs no directory.
@@ -2339,6 +2332,23 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &interface_names,
         &implemented,
     )?;
+    // The data types of the implemented interfaces and of the imported ones, for the native
+    // codecs: the world exports an implemented interface, so the bindings generate its types under
+    // `exports`, and imports the others, whose types they generate at the root, an interface
+    // imported by key too, whose view `use`s them.
+    let consumed_types = match &wit_dir {
+        Some(dir) if !implemented.is_empty() || !imported.is_empty() || !views.is_empty() => {
+            wit::ConsumedTypes::read(
+                dir,
+                implemented
+                    .iter()
+                    .map(|identity| (identity.as_str(), true))
+                    .chain(imported.iter().map(|identity| (identity.as_str(), false)))
+                    .chain(views.iter().map(|view| (view.target.as_str(), false))),
+            )?
+        }
+        _ => wit::ConsumedTypes::default(),
+    };
     // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
     // of its resources is a #[wit_resource] struct of the same name with the resource's functions.
     for service in services
@@ -2557,10 +2567,12 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
 /// replaced by the generated ones, the bridges to the author's functions, each in the module of
 /// the item it serves, the sections `cargo tembra build` reads and the optional freestanding
 /// runtime prelude. The sub-modules are rendered here, so the native side's items that go in one,
-/// `nested` by scope, are placed in it on the way.
+/// `nested` by scope, are placed in it on the way. The re-export of an import module the native
+/// side writes in its place, one `served` names, is a component build's alone.
 fn component(
     analysis: &Analysis,
     nested: &[(usize, proc_macro2::TokenStream)],
+    served: &BTreeSet<String>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let Analysis {
         options,
@@ -2773,7 +2785,15 @@ fn component(
         }
     }
     // Implemented and imported interfaces are re-exported under their own names, like hooks, in
-    // the Orb module; a sub-module reaches them through `super::`.
+    // the Orb module; a sub-module reaches them through `super::`. A native host gets the module
+    // the native side writes in place of an import module it serves.
+    let guest_only = |module: &Ident, reexport: proc_macro2::TokenStream| {
+        if served.contains(&module.to_string()) {
+            quote! { ::tembra::__guest! { #reexport } }
+        } else {
+            reexport
+        }
+    };
     let consumed_modules = services
         .iter()
         .filter_map(|service| service.implements.as_deref())
@@ -2783,9 +2803,17 @@ fn component(
         })
         .chain(imports.iter().map(|identity| {
             let [ns, package, interface] = hook_path(identity);
-            quote! { pub use self::#ns::#package::#interface; }
+            guest_only(
+                &interface,
+                quote! { pub use self::#ns::#package::#interface; },
+            )
         }))
-        .chain(keyed::reexports(package, views));
+        .chain(
+            views
+                .iter()
+                .zip(keyed::reexports(package, views))
+                .map(|(view, reexport)| guest_only(&rust_ident(&view.name), reexport)),
+        );
     // The kernel's context interface is re-exported as `context`, so the author writes
     // `context::principal()`; only in a component build, as a native host gets the native side's
     // `context` instead.

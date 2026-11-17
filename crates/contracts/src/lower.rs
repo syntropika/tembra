@@ -253,6 +253,45 @@ impl PreparedContract {
             .collect()
     }
 
+    /// What an Orb provider of the import `binding` offers, as [`Self::plan`] requires it of the
+    /// provider an installation selects: the identity of the interface the provider exports, the
+    /// signature of that interface and the names of its functions. A reference view, which
+    /// `reference` maps to the provider interface it addresses, requires that interface, with the
+    /// signature and the methods derived from the view's resource. A native consumer of the import
+    /// requires the same of its provider, so the kernel admits both against one contract.
+    pub fn import_requirement(
+        &self,
+        binding: &str,
+        reference: Option<&str>,
+    ) -> Result<(String, String, std::collections::BTreeSet<String>), Error> {
+        if let Some(target) = reference {
+            let view = self.reference_binding(binding, target)?;
+            return Ok((
+                view.interface,
+                view.signature,
+                view.methods.into_values().collect(),
+            ));
+        }
+        let (_, interface) = self
+            .provided_imports()?
+            .into_iter()
+            .find(|(key, _)| *key == binding)
+            .ok_or_else(|| Error(format!("{binding} is no import of the world")))?;
+        let contract = interface
+            .contract
+            .clone()
+            .ok_or_else(|| Error("anonymous import needs an explicit provider mapping".into()))?;
+        Ok((
+            contract,
+            self.digest(interface)?,
+            interface
+                .functions
+                .iter()
+                .map(|function| function.name.clone())
+                .collect(),
+        ))
+    }
+
     /// Derive kernel metadata after selecting installed Orb and host providers explicitly.
     pub fn plan(
         &self,

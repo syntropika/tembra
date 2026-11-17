@@ -9,9 +9,12 @@
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
-use tembra::Host;
+use tembra::{Host, Provider};
 use tembra_executor_wasm::{Engine, Install, Limits};
-use tembra_orb_native_fixture::calculator::{self, accumulators::Accumulators};
+use tembra_orb_native_fixture::{
+    calculator::{self, accumulators::Accumulators},
+    metering,
+};
 
 #[path = "support/components.rs"]
 mod components;
@@ -20,6 +23,7 @@ const PLOTTER: &str = "example:calculator/plotter@1.0.0";
 const RELAY: &str = "relay::example:calculator/relay@1.0.0";
 const ACCUMULATORS: &str = "example:calculator/accumulators@1.0.0";
 const HOLDER: &str = "holder::example:calculator/holder@1.0.0";
+const READINGS: &str = "metering::example:metering/readings@1.0.0";
 
 /// The consumer's WIT: the provider's package, as the module derives it, with an interface that
 /// relays the plotter's functions and a world that imports the plotter and exports the relay.
@@ -266,6 +270,100 @@ fn a_compiled_consumer_constructs_calls_and_drops_a_native_resource() {
     holder.release().unwrap();
     pool.run_until(host.close()).unwrap();
     assert_eq!(Accumulators::dropped(), dropped + 1);
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// The meter's WIT, the package the native fixture's `metering` imports, with a world exporting
+/// its gauge.
+fn meter_wit() -> String {
+    format!(
+        "{}
+world meter {{
+  export gauge;
+}}
+",
+        include_str!("../../orb-macro/native-fixture/wit/deps/meter/meter.wit")
+    )
+}
+
+/// A compiled meter: each async-lifted function returns at once, with `task.return`, the total of
+/// the readings `add` was given, kept in a global.
+const METER_MODULE: &str = r#"(module
+  (import "[export]example:meter/gauge@1.0.0" "[task-return]add" (func $added (param i64)))
+  (import "[export]example:meter/gauge@1.0.0" "[task-return]total" (func $totalled (param i64)))
+  (memory (export "memory") 1)
+  (global $total (mut i64) (i64.const 0))
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 1024)
+  (func (export "[async-lift]example:meter/gauge@1.0.0#add")
+    (param $amount i32) (param $times i32) (result i32)
+    global.get $total
+    local.get $amount
+    i64.extend_i32_u
+    local.get $times
+    i64.extend_i32_u
+    i64.mul
+    i64.add
+    global.set $total
+    global.get $total
+    call $added
+    i32.const 0)
+  (func (export "[callback][async-lift]example:meter/gauge@1.0.0#add")
+    (param i32 i32 i32) (result i32)
+    i32.const 0)
+  (func (export "[async-lift]example:meter/gauge@1.0.0#total") (result i32)
+    global.get $total
+    call $totalled
+    i32.const 0)
+  (func (export "[callback][async-lift]example:meter/gauge@1.0.0#total")
+    (param i32 i32 i32) (result i32)
+    i32.const 0))"#;
+
+/// A native consumer that `#[tembra::orb]` generates calls a compiled provider through its import
+/// of an interface of `async func`s: the kernel admits the consumer's requirement against the
+/// signature it computes for the component's contract, and each call's arguments and result cross
+/// the consumer's codec and the component's canonical ABI, a record of the interface included.
+#[test]
+fn a_native_consumer_calls_a_compiled_provider_through_its_import() {
+    let engine = Engine::new(Limits::default()).unwrap();
+    let artifact = components::encode(
+        &meter_wit(),
+        "meter",
+        METER_MODULE,
+        "meters",
+        &Default::default(),
+    );
+    let provider = engine.load(&artifact, Install::default()).unwrap();
+    let consumer = metering::orb_named(
+        "metering",
+        1,
+        metering::Providers {
+            gauge: Provider::new("meters", 1),
+            gauge_ref: Provider::new("meters", 1),
+        },
+    )
+    .unwrap();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![provider, consumer]).unwrap();
+    let readings = Rc::new(host.get(READINGS, vec!["main".into()], "alice").unwrap());
+    pool.run_until(readings.ready()).unwrap();
+    for (amounts, total) in [(json!([2, 3]), 5), (json!([4]), 9)] {
+        let called = readings.clone();
+        let fed = pool
+            .run_until(host.root("alice", move |context| {
+                async move {
+                    called
+                        .call_portable::<_, Value>(&context, "feed", json!([amounts]))
+                        .await
+                }
+                .boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(fed, json!(total));
+    }
+    readings.release().unwrap();
+    pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
     assert!(host.errors().is_empty(), "{:?}", host.errors());
 }

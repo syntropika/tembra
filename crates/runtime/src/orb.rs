@@ -283,6 +283,27 @@ pub(crate) fn type_error() -> Error {
     )
 }
 
+/// The Orb that answers what a native Orb consumes from another: the name and API version it is
+/// installed under. An Orb that `#[tembra::orb]` generates takes one per imported interface and
+/// per hook it contributes to, as the fields of its `Providers`, which `orb(..)` requires.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Provider {
+    /// The provider's Orb name.
+    pub name: String,
+    /// The API version the provider is installed at.
+    pub api_version: u32,
+}
+
+impl Provider {
+    /// The Orb `name` at `api_version`.
+    pub fn new(name: impl Into<String>, api_version: u32) -> Self {
+        Self {
+            name: name.into(),
+            api_version,
+        }
+    }
+}
+
 /// Native Orb declarations compile with the application and dispatch typed Rust callbacks.
 pub struct Orb {
     pub(crate) metadata: core::Orb,

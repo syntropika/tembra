@@ -5303,12 +5303,15 @@ fn the_orbs_create_declares_its_root_resources_natively() {
 }
 
 /// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
-/// component build of the module is unaffected: an import, and a hook contributed to or declared,
-/// each named.
+/// component build of the module is unaffected: a WASI import, an import, plain or by key, of an
+/// interface with a synchronous function, which works in a component build only, and a hook
+/// contributed to or declared, each named.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
     let dir = consumed("native-hook", ADMISSION_WIT);
+    let pace = consumed("native-pace", PACE_WIT);
+    let synchronous = "works in a component build only: its function `now` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`";
     for (options, module, message) in [
         (
             Options {
@@ -5316,21 +5319,37 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
                 ..options(PACKAGE, None)
             },
             ledger("#[service]"),
-            "the import of wasi:random/random@0.3.0 is not supported natively yet",
+            "the import of wasi:random/random@0.3.0 is not supported natively yet".to_owned(),
+        ),
+        (
+            Options {
+                imports: vec![literal("example:pace/beat@1.0.0")],
+                ..options(PACKAGE, Some(&pace))
+            },
+            ledger("#[service]"),
+            format!("the import of example:pace/beat@1.0.0 {synchronous}"),
+        ),
+        (
+            Options {
+                keyed: vec![literal("example:pace/beat@1.0.0")],
+                ..options(PACKAGE, Some(&pace))
+            },
+            ledger("#[service]"),
+            format!("the import of example:pace/beat@1.0.0 by key {synchronous}"),
         ),
         (
             options(PACKAGE, Some(&dir)),
             format!(
                 "mod book {{ #[hook(\"example:admission/guard@1.0.0\", priority = 1)] pub fn admit(input: guard::Admission) -> guard::Admission {{ input }} {service} }}"
             ),
-            "the contribution to the hook example:admission/guard@1.0.0 is not supported natively yet",
+            "the contribution to the hook example:admission/guard@1.0.0 is not supported natively yet".to_owned(),
         ),
         (
             options(PACKAGE, None),
             format!(
                 "mod book {{ #[hook(composition = series, input = Admission)] pub struct Guard; pub struct Admission {{ pub value: i32 }} {service} }}"
             ),
-            "the declaration of the hook example:book/guard@1.0.0 is not supported natively yet",
+            "the declaration of the hook example:book/guard@1.0.0 is not supported natively yet".to_owned(),
         ),
     ] {
         let module =
@@ -5342,6 +5361,76 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
         );
         assert!(wit(&module).starts_with("package "), "{message}");
     }
+}
+
+/// A package with an interface whose functions are all `async func`, and one with a synchronous
+/// function.
+const PACE_WIT: &str = "package example:pace@1.0.0;
+interface clock {
+  record tick { at: u64, label: string }
+  /// Wait until `value` and return it.
+  wait: async func(value: u64) -> u64;
+  last: async func(labels: list<string>) -> option<tick>;
+}
+interface beat {
+  now: func() -> u64;
+  later: async func() -> u64;
+}
+";
+
+/// An import of an interface whose functions are all `async func` is served natively: `orb(..)`
+/// takes `Providers`, one `tembra::Provider` per import, from which `orb_named` builds the Orb's
+/// requirements and the table of its imports, whose reference to the provider's `main` object the
+/// Orb's create declares, and which each service takes. The Orb module names, in place of the
+/// bindings' import module, a module of the same name, which re-exports its types and whose
+/// `async` functions take their parameters owned and call the provider; a component build alone
+/// re-exports the bindings' module. A type of the interface reads and writes its JSON as a type
+/// of an implemented one does.
+#[test]
+fn an_import_of_async_functions_is_served_natively() {
+    let dir = consumed("native-import", PACE_WIT);
+    let module = orb_with(
+        Options {
+            imports: vec![literal("example:pace/clock@1.0.0")],
+            ..options(PACKAGE, Some(&dir))
+        },
+        "mod book {
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub async fn count() -> u64 { clock::wait(1).await }
+                pub fn latest(tick: clock::Tick) -> clock::Tick { tick }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let root = native(&module, &[]);
+    for expected in [
+        "pub fn orb (providers : Providers) -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"book\" , 1u32 , providers) }",
+        "pub fn orb_named (name : & str , api_version : u32 , providers : Providers) -> :: tembra :: Result < :: tembra :: Orb >",
+        "let imports = :: std :: rc :: Rc :: new (self :: __tembra_import :: Imports :: new (& providers)) ;",
+        "for requirement in self :: __tembra_providers :: requirements (& providers) ? { orb = orb . requires (requirement) ; }",
+        "move | declaration | { imports . declare (& declaration) ? ; :: core :: result :: Result :: Ok (()) }",
+        ". service (self :: __tembra_service_ledger (name , & imports))",
+        "pub (crate) fn __tembra_service_ledger (orb : & str , imports : & :: std :: rc :: Rc < self :: __tembra_import :: Imports >) -> :: tembra :: Service < () >",
+        "self :: __tembra_import :: scoped (__tembra_context . clone () , :: std :: rc :: Rc :: clone (& __tembra_imports) , async move {",
+        "pub struct Providers { # [doc = \" The Orb answering the import of `example:pace/clock@1.0.0`, at its `main` object.\"] pub clock : :: tembra :: Provider , }",
+        "let requirement = entry (& mut requirements , & providers . clock) ? ; let service = :: std :: format ! (\"{}::{}\" , providers . clock . name , \"example:pace/clock@1.0.0\") ;",
+        "pub mod clock { # [allow (unused_imports)] pub use super :: example :: pace :: clock :: * ;",
+        "# [doc = \" Wait until `value` and return it.\"] pub async fn wait (value : u64) -> u64 { let __tembra_call = super :: __tembra_import :: current () ;",
+        "pub async fn last (labels : :: std :: vec :: Vec < :: std :: string :: String >) -> :: core :: option :: Option < super :: example :: pace :: clock :: Tick > {",
+        ". call (& __tembra_call . imports . clock . reference () , \"last\" , __tembra_arguments , | value |",
+        "impl __TembraBoundary for self :: example :: pace :: clock :: Tick {",
+        ". method_with (\"latest\" ,",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    assert!(
+        tokens(&module)
+            .contains(":: tembra :: __guest ! { pub use self :: example :: pace :: clock ; }"),
+        "{}",
+        tokens(&module)
+    );
 }
 
 /// A method returning `tembra::Result<T>`, its error channel, has `T` as its WIT result, nothing

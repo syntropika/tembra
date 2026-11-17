@@ -61,7 +61,11 @@ impl PreparedContract {
             .collect()
     }
 
-    fn reference_binding(&self, binding: &str, target: &str) -> Result<ReferenceBinding, Error> {
+    pub(crate) fn reference_binding(
+        &self,
+        binding: &str,
+        target: &str,
+    ) -> Result<ReferenceBinding, Error> {
         crate::model::identity(target)?;
         let interface = self
             .model()

@@ -1020,6 +1020,63 @@ impl ConsumedTypes {
         })
     }
 
+    /// The interface `identity`, when it was read.
+    pub(crate) fn interface(&self, identity: &str) -> Option<&wit_parser::Interface> {
+        Some(&self.resolve.interfaces[*self.interfaces.get(identity)?])
+    }
+
+    /// A type as the bindings spell it where they take it owned, in the parameters of an async
+    /// import and in every result, as a module `depth` levels below the Orb module names it: a
+    /// named type by its path, a string, a list, an option, a result or a tuple by its structure.
+    /// Only for a type `native::wit_kind` accepted, which holds no resource, stream or future.
+    pub(crate) fn owned(&self, ty: wit_parser::Type, depth: usize) -> proc_macro2::TokenStream {
+        use wit_parser::Type as Wit;
+        let spelled = |ty: Wit| self.owned(ty, depth);
+        match ty {
+            Wit::Bool => quote::quote! { bool },
+            Wit::U8 => quote::quote! { u8 },
+            Wit::U16 => quote::quote! { u16 },
+            Wit::U32 => quote::quote! { u32 },
+            Wit::U64 => quote::quote! { u64 },
+            Wit::S8 => quote::quote! { i8 },
+            Wit::S16 => quote::quote! { i16 },
+            Wit::S32 => quote::quote! { i32 },
+            Wit::S64 => quote::quote! { i64 },
+            Wit::F32 => quote::quote! { f32 },
+            Wit::F64 => quote::quote! { f64 },
+            Wit::Char => quote::quote! { char },
+            Wit::String => quote::quote! { ::std::string::String },
+            Wit::ErrorContext => unreachable!("an error context has no native codec"),
+            Wit::Id(id) => {
+                let definition = &self.resolve.types[id];
+                if definition.name.is_some() {
+                    return self.path(id, depth);
+                }
+                match &definition.kind {
+                    TypeDefKind::List(inner) => {
+                        let inner = spelled(*inner);
+                        quote::quote! { ::std::vec::Vec<#inner> }
+                    }
+                    TypeDefKind::Option(inner) => {
+                        let inner = spelled(*inner);
+                        quote::quote! { ::core::option::Option<#inner> }
+                    }
+                    TypeDefKind::Result(result) => {
+                        let side = |ty: Option<Wit>| ty.map_or(quote::quote! { () }, spelled);
+                        let (ok, err) = (side(result.ok), side(result.err));
+                        quote::quote! { ::core::result::Result<#ok, #err> }
+                    }
+                    TypeDefKind::Tuple(tuple) => {
+                        let types = tuple.types.iter().map(|ty| spelled(*ty));
+                        quote::quote! { (#(#types,)*) }
+                    }
+                    TypeDefKind::Type(inner) => spelled(*inner),
+                    _ => unreachable!("only a type with a native codec is spelled"),
+                }
+            }
+        }
+    }
+
     /// The type of the interface `identity` the bindings name `ident`, `Entry` in the author's
     /// `book::Entry`: one the interface defines or `use`s.
     pub(crate) fn named(&self, identity: &str, ident: &Ident) -> Option<wit_parser::Type> {
