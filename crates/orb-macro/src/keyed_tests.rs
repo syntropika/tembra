@@ -524,6 +524,54 @@ fn a_path_into_the_bindings_import_of_an_implemented_interface_is_refused() {
     }
 }
 
+/// An implemented interface may `use` its types from an interface the world only imports: the
+/// bindings alias the implemented interface's import and export, and the view of its keyed
+/// import, to the type of that import, so the view and the bindings' module of the import name
+/// the very type a derived interface takes.
+#[test]
+fn a_type_an_implemented_interface_uses_from_an_import_has_one_copy() {
+    let dir = consumed(
+        "used-tally",
+        "package example:counters@1.0.0;
+
+interface types {
+  record tally { key: list<string>, count: u32 }
+}
+
+interface counter {
+  use types.{tally};
+  add: func(amount: u32) -> u32;
+  read: async func() -> tally;
+}
+",
+    );
+    let module = expanded(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        "mod proxy {
+            #[service(\"example:counters/counter@1.0.0\")]
+            pub struct Counter;
+            impl Counter {
+                pub fn add(amount: u32) -> u32 { amount }
+                pub async fn read() -> counter::Tally { counter::Tally { key: vec![], count: 0 } }
+            }
+            #[service]
+            pub struct Relay;
+            impl Relay {
+                pub async fn relayed(key: String) -> Result<counter_ref::Tally, String> {
+                    Ok(counter_ref::get(vec![key]).await?.read().await)
+                }
+                pub fn counted(last: self::example::counters::counter::Tally) -> u32 { last.count }
+            }
+        }",
+    );
+    let text = wit(&module);
+    assert!(
+        text.contains("interface relay {\n  use example:counters/counter@1.0.0.{tally};\n"),
+        "{text}"
+    );
+    resolved(&dir, &text);
+}
+
 /// A view is an interface of the Orb's package named after the provider interface: an interface
 /// imported by key twice, two interfaces of one name, a view named like the world or a service's
 /// interface, and a provider type named like the view's resource or `get`, are errors.

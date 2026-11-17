@@ -14,11 +14,12 @@
 //! The bindings put the types of an interface the world only imports in its import module, which
 //! the Orb module re-exports, or which a keyed import's view re-exports them from. An interface
 //! the world exports, an implemented one or a hook, gets a copy of its types in its export module,
-//! and a derived interface, exported too, uses that copy: the Orb module re-exports the export
-//! module of an implemented interface and of a contributed hook, but the import module of a hook it
-//! declares, which `run` calls, so a derived interface names none of a declared hook's types, and
-//! none of an exported interface's, an implemented one's or a hook's, through the view of its
-//! keyed import, the import's copy. A
+//! but of those it `use`s from an interface the world only imports, which its import and its
+//! export alias alike, and a derived interface, exported too, uses that copy: the Orb module
+//! re-exports the export module of an implemented interface and of a contributed hook, but the
+//! import module of a hook it declares, which `run` calls, so a derived interface names none of a
+//! declared hook's types, and none of an exported interface's, an implemented one's or a hook's,
+//! through the view of its keyed import, the import's copy, where the two copies differ. A
 //! WASI interface's names stay out of a derived interface, named through the WASI interface's
 //! module or through a consumed interface that `use`s them, and a consumed type crosses one when it
 //! carries data only. A state may hold a consumed type that `serde` can write, which the bindings
@@ -694,12 +695,6 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
     if found.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let defined = wit::defined(
-        parsed,
-        found
-            .iter()
-            .map(|(named, _)| named.interface.identity.as_str()),
-    )?;
     // The consumed interfaces the world exports: the implemented ones, the hooks the module
     // contributes to and those it declares from a consumed package.
     let exported: Vec<Reexported> = services
@@ -719,6 +714,16 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         )
         .map(|(identity, role)| Reexported { identity, role })
         .collect();
+    let defined = wit::defined(
+        parsed,
+        found
+            .iter()
+            .map(|(named, _)| named.interface.identity.as_str()),
+        &exported
+            .iter()
+            .map(|interface| interface.identity.as_str())
+            .collect(),
+    )?;
     let mut foreign: BTreeMap<String, Vec<Foreign>> = BTreeMap::new();
     for (named, place) in &found {
         let items = &defined[&named.interface.identity];
@@ -947,8 +952,10 @@ fn checked<'a>(
     // import's copy of its types, as the view of its keyed import does, while a derived interface,
     // exported, takes the copy of the export, which the module the Orb module re-exports for an
     // implemented interface and a contributed hook names; a declared hook's module is the import's
-    // too, which its rule refuses below.
+    // too, which its rule refuses below. The two copies are one type where the export holds none
+    // of its own, for a type the interface `use`s from an interface the world only imports.
     if named.through_import
+        && definition.copied
         && let Some(takes) = match interface.role {
             Role::Implemented => Some("an implemented interface"),
             Role::Contributed => Some("a hook"),
@@ -972,8 +979,10 @@ fn checked<'a>(
     // The view of an interface the world exports, one the module implements or a hook it
     // contributes to or declares, names the import's copy of the interface's types, while a
     // derived interface, exported, takes the copy of its export, which the implemented interface's
-    // or the contributed hook's module names; a declared hook's module names the import's too.
+    // or the contributed hook's module names; a declared hook's module names the import's too. The
+    // two copies are one type where the export holds none of its own.
     if interface.role == Role::Keyed
+        && definition.copied
         && let Some((module, role)) = modules.exporting(&interface.identity)
     {
         let view = named.module;

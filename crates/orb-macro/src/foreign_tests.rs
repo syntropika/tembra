@@ -863,6 +863,97 @@ fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
     );
 }
 
+/// Hooks whose types are `use`d from an interface the world only imports, beside one the hook
+/// defines itself.
+const SHARED: &str = "package example:ledger@1.0.0;
+
+interface types {
+  record admission { value: s32, blocked: bool }
+  record ticket { value: s32 }
+}
+
+interface guard {
+  use types.{admission};
+  record verdict { blocked: bool }
+  apply: func(input: admission) -> admission;
+}
+
+interface gate {
+  use types.{ticket};
+  apply: func(input: ticket) -> ticket;
+}
+";
+
+/// A type an exported hook `use`s from an interface the world only imports has no copy of its own
+/// in the hook's export: the bindings alias the hook's import and export, and the view of its
+/// keyed import, to the type of that import, so the bindings' module of the hook's import and the
+/// view name the very type a derived interface takes, and a derived signature names it through
+/// either. A type the hook defines itself has two copies, and the import's is refused.
+#[test]
+fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
+    let dir = consumed("shared-types", SHARED);
+    let keyed = |hook: &str| Options {
+        keyed: vec![literal(hook)],
+        ..options("example:keeper@1.0.0", Some(&dir), &[])
+    };
+    let keeper = |report: &str| {
+        format!(
+            "mod keeper {{
+                #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
+                pub fn admit(input: guard::Admission) -> guard::Admission {{ input }}
+                #[service]
+                pub struct Report;
+                impl Report {{ {report} }}
+            }}"
+        )
+    };
+    let module = expanded(
+        keyed("example:ledger/guard@1.0.0"),
+        &keeper(
+            "pub fn judged(admission: self::example::ledger::guard::Admission) -> bool { admission.blocked }
+            pub fn viewed(admission: guard_ref::Admission) -> bool { admission.blocked }",
+        ),
+    );
+    let text = resolved(&module, &dir);
+    for expected in [
+        "interface report {\n  use example:ledger/guard@1.0.0.{admission};\n",
+        "  judged: func(admission: admission) -> bool;\n",
+        "  viewed: func(admission: admission) -> bool;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let error = refused(
+        keyed("example:ledger/guard@1.0.0"),
+        &keeper(
+            "pub fn judged(verdict: self::example::ledger::guard::Verdict) -> bool { verdict.blocked }",
+        ),
+    );
+    assert!(
+        error.contains("`Report::judged` takes `Verdict`, a record of the hook example:ledger/guard@1.0.0, which this module contributes to, through the bindings' module of its import: a derived interface takes the types of a hook from its export, as `guard::Verdict` names them; `self::example::ledger::guard::Verdict` is the import's"),
+        "{error}"
+    );
+    // The view of a hook the module declares names the type the hook's import and export alias.
+    let module = expanded(
+        keyed("example:ledger/gate@1.0.0"),
+        "mod gatekeeper {
+            #[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
+            pub struct Gate;
+            #[service]
+            pub struct Admissions;
+            impl Admissions {
+                pub fn admit(ticket: gate_ref::Ticket) -> i32 { ticket.value }
+                pub fn ran(value: i32) -> gate_ref::Ticket { Gate::run(gate::Ticket { value }) }
+            }
+        }",
+    );
+    assert!(
+        resolved(&module, &dir)
+            .contains("interface admissions {\n  use example:ledger/gate@1.0.0.{ticket};\n"),
+        "{}",
+        wit(&module)
+    );
+}
+
 /// The world holds a consumed interface in one role, and the Orb module re-exports one module for
 /// it: an interface imported plainly beside a hook the module contributes to or declares,
 /// implemented beside such a hook, or imported or implemented twice is an error on the second

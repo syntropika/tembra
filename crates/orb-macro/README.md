@@ -614,7 +614,9 @@ copy of the export the derived interface takes; the view's `counter_ref::Tally` 
 which the view's methods take and return, and the macro refuses it in a derived signature. So does
 a view of a hook the module contributes to or declares beside the keyed import, an interface the
 world exports too: a derived signature names a contributed hook's types through the hook's module,
-`guard::Admission`, and none of a declared hook's. The
+`guard::Admission`, and none of a declared hook's. A type such an interface `use`s from an
+interface the world only imports has no copy of its own: the import, the export and the view all
+name that interface's type, so a derived signature names it through the view as well. The
 `counting` and `lending` services of the [runtime fixture](runtime-fixture/src/lib.rs) import by
 key, `lending` the interface the fixture implements.
 
@@ -789,7 +791,8 @@ the type that names it:
 - a type of an implemented interface or of a hook the module contributes to named through the
   bindings' module of its import, `self::example::counters::counter::Tally`, the import's copy,
   where a derived interface takes the export's, which the interface's own module names,
-  `counter::Tally`;
+  `counter::Tally`; a type the interface `use`s from an interface the world only imports has one
+  copy, that interface's, which every module names;
 - a type or a handle of a WASI interface, named through that interface's module or through a
   consumed interface that `use`s it from WASI, `files::Descriptor` for a
   `use wasi:filesystem/types@0.3.0.{descriptor};` in `files`;

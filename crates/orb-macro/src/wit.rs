@@ -1108,8 +1108,8 @@ pub(crate) struct Defined {
     pub depends: BTreeSet<String>,
 }
 
-/// A type or a resource of a consumed interface: its WIT name, what it is, and the WASI interface
-/// defining it, if one does.
+/// A type or a resource of a consumed interface: its WIT name, what it is, the WASI interface
+/// defining it, if one does, and whether the world's export of the interface holds a copy of it.
 pub(crate) struct Definition {
     pub name: String,
     pub kind: Kind,
@@ -1117,6 +1117,10 @@ pub(crate) struct Definition {
     /// of WASI, or the one its alias chain leads into, `wasi:filesystem/types@0.3.0` for the
     /// `descriptor` another Orb's interface `use`s from there.
     pub wasi: Option<String>,
+    /// Whether the bindings of the world's export of the interface give the definition a Rust type
+    /// of its own, another than its import's (`copied`): false for one the interface `use`s from an
+    /// interface the world only imports, which the import and the export alias alike.
+    pub copied: bool,
 }
 
 /// What an item of a consumed interface is, for the places that name it.
@@ -1174,10 +1178,12 @@ impl Defined {
 }
 
 /// What each consumed interface of `identities` defines, read from the packages of the consumed
-/// directory, or from the bundled WASI packages for a WASI interface.
+/// directory, or from the bundled WASI packages for a WASI interface. `exported` are the consumed
+/// interfaces the world exports.
 pub(crate) fn defined<'a>(
     parsed: &Parsed,
     identities: impl Iterator<Item = &'a str>,
+    exported: &BTreeSet<&str>,
 ) -> syn::Result<BTreeMap<String, Defined>> {
     use crate::wasi::is_wasi;
     let identities: BTreeSet<&str> = identities.collect();
@@ -1245,6 +1251,7 @@ pub(crate) fn defined<'a>(
                     name: name.clone(),
                     kind,
                     wasi: wasi_origin(resolve, ty),
+                    copied: copied(resolve, ty, exported),
                 };
                 (crate::type_ident(name), definition)
             })
@@ -1264,6 +1271,48 @@ pub(crate) fn defined<'a>(
         defined.insert(identity.to_owned(), Defined { items, depends });
     }
     Ok(defined)
+}
+
+/// Whether the bindings give a WIT type of an interface the world exports a Rust type of its own in
+/// the export, another than the import's: whether the type is, or holds, a record, a variant, an
+/// enum, a flags or a resource of one of the consumed interfaces the world exports, `exported`,
+/// reached through aliases and the types of such interfaces. `wit-bindgen` copies the types of an
+/// interface the world imports and exports into the export, and those of the exported interfaces
+/// it `use`s, but aliases a type it `use`s from an interface the world only imports to that
+/// import's, as the import does: `use types.{admission};` in a hook makes the hook's import, its
+/// export and the view of its keyed import all name the one `admission` of `types`.
+fn copied(resolve: &Resolve, ty: wit_parser::Type, exported: &BTreeSet<&str>) -> bool {
+    let wit_parser::Type::Id(id) = ty else {
+        return false;
+    };
+    let definition = &resolve.types[id];
+    if let wit_parser::TypeOwner::Interface(owner) = definition.owner
+        && !resolve
+            .id_of(owner)
+            .is_some_and(|identity| exported.contains(identity.as_str()))
+    {
+        return false;
+    }
+    let copied = |ty: wit_parser::Type| copied(resolve, ty, exported);
+    match &definition.kind {
+        TypeDefKind::Record(_)
+        | TypeDefKind::Variant(_)
+        | TypeDefKind::Enum(_)
+        | TypeDefKind::Flags(_)
+        | TypeDefKind::Resource => true,
+        TypeDefKind::Type(inner)
+        | TypeDefKind::Option(inner)
+        | TypeDefKind::List(inner)
+        | TypeDefKind::FixedLengthList(inner, _) => copied(*inner),
+        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().any(copied),
+        TypeDefKind::Map(key, value) => copied(*key) || copied(*value),
+        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).any(copied),
+        TypeDefKind::Handle(
+            wit_parser::Handle::Own(resource) | wit_parser::Handle::Borrow(resource),
+        ) => copied(wit_parser::Type::Id(*resource)),
+        TypeDefKind::Future(inner) | TypeDefKind::Stream(inner) => inner.is_some_and(copied),
+        TypeDefKind::Unknown => false,
+    }
 }
 
 /// The WASI interface a WIT type belongs to, if one does: the interface defining it, or the one
