@@ -156,7 +156,7 @@ pub(crate) fn hook_shapes(
         if let Some(shape) = by_name.get(&name)
             && reached.insert(name)
         {
-            pending.extend(shape.references.iter().cloned());
+            pending.extend(shape.references.iter().map(|(ident, _)| ident.clone()));
         }
     }
     reached
@@ -224,7 +224,7 @@ pub(crate) fn placement(
             };
             if seen.insert(name.clone()) {
                 placed.entry(name).or_insert_with(|| service.ident.clone());
-                pending.extend(shape.references.iter().cloned());
+                pending.extend(shape.references.iter().map(|(ident, _)| ident.clone()));
             }
         }
     }
@@ -316,7 +316,7 @@ pub(crate) fn render<'a>(
             None => service_mentions(ident, &functions, modules),
         };
         for shape in &defined {
-            mentioned.extend(shape.references.iter().cloned());
+            mentioned.extend(shape.references.iter().map(|(ident, _)| ident.clone()));
         }
         // Each type another interface defines is borrowed from it with `use`, one line per
         // interface in package order. A resource is mentioned only in the interface that owns it,

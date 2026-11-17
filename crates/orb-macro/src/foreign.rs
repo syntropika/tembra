@@ -115,11 +115,13 @@ pub(crate) struct Named<'m, 't> {
 }
 
 /// Where a type path leads, read as far as `Modules::leads` follows it: what is left of the path,
-/// and whether a `use` declaration led it there and the walk stopped in the Orb module.
+/// whether a `use` declaration led it there and the walk stopped in the Orb module, and the module
+/// of the Orb it stopped in, by scope, none once it left the Orb module.
 struct Leads {
     segments: Vec<Ident>,
     used: bool,
     rooted: bool,
+    scope: Option<usize>,
 }
 
 /// What a walk through a type reaches: a name through a consumed interface's module, or the last
@@ -427,6 +429,7 @@ impl Modules {
                 .collect(),
             used: false,
             rooted: false,
+            scope: None,
         };
         if path.leading_colon.is_some() {
             return leads;
@@ -483,6 +486,7 @@ impl Modules {
             }
         }
         leads.rooted = scope == Some(0);
+        leads.scope = scope;
         leads
     }
 
@@ -490,8 +494,9 @@ impl Modules {
     /// the elements of a tuple. Each name a consumed interface's module reaches is reported, with
     /// whether it is the value of an `Option`, which `in_option` says of the type itself, and not
     /// looked into; so is the last name of every other path, before its type parameters, with the
-    /// module of the Orb the path leads into (`module_of`), or the writing module for a bare name
-    /// or a path the macro cannot follow.
+    /// module of the Orb the path leads into down to the name (`leads`), through `self::`,
+    /// `super::`, the sub-modules and the modules the `use` declarations bind, or the writing
+    /// module for a bare name or a path the macro cannot follow so.
     fn walk<'m, 't>(
         &'m self,
         ty: &'t Type,
@@ -508,9 +513,11 @@ impl Modules {
                 let Some(segment) = path.path.segments.last() else {
                     return;
                 };
-                let module = crate::module_of(&path.path, &self.paths[scope])
-                    .and_then(|own| self.paths.iter().position(|path| *path == own))
-                    .unwrap_or(scope);
+                let leads = self.leads(&path.path, scope);
+                let module = match (leads.scope, leads.segments.as_slice()) {
+                    (Some(module), [_]) => module,
+                    _ => scope,
+                };
                 visit(Reached::Module(&segment.ident, module));
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
@@ -585,11 +592,12 @@ impl Modules {
     }
 
     /// The module types the fields of a struct or the payloads of an enum's cases mention, the
-    /// item declared in the module `scope`.
-    pub(crate) fn item_references(&self, item: &Item, scope: usize) -> Vec<Ident> {
+    /// item declared in the module `scope`, each with the module of the Orb the field's path names
+    /// it in (`references_in`).
+    pub(crate) fn item_references(&self, item: &Item, scope: usize) -> Vec<(Ident, usize)> {
         let mut references = Vec::new();
         for ty in item_types(item) {
-            self.references(ty, scope, &mut references);
+            self.references_in(ty, scope, &mut references);
         }
         references
     }
@@ -1058,7 +1066,7 @@ fn returned<'f>(
                 shape
                     .references
                     .iter()
-                    .map(|reference| (reference.clone(), shape.scope, Some(via))),
+                    .map(|(reference, scope)| (reference.clone(), *scope, Some(via))),
             );
         }
     }

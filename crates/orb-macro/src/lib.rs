@@ -161,11 +161,12 @@ struct Options {
     keyed: Vec<LitStr>,
 }
 
-/// A type declared in the module, with its WIT definition and the module types it refers to.
+/// A type declared in the module, with its WIT definition and the module types it refers to, each
+/// with the module of the Orb the field's path names it in, by scope (`Candidate::references`).
 struct Shape {
     ident: Ident,
     wit: String,
-    references: Vec<Ident>,
+    references: Vec<(Ident, usize)>,
     /// How the type is built, for the conversions between the two sides of a derived hook.
     kind: ShapeKind,
     /// The module declaring the type, by scope; 0 is the Orb module.
@@ -200,8 +201,10 @@ struct Candidate {
     item: Item,
     ident: Ident,
     /// The module types the fields name, read once the scan knows the consumed interfaces, whose
-    /// modules name none.
-    references: Vec<Ident>,
+    /// modules name none, each with the module of the Orb the field's path names it in, by scope:
+    /// the one a path leads into, `super::model::Entry`, or this one for a bare name
+    /// (`foreign::Modules::item_references`).
+    references: Vec<(Ident, usize)>,
     /// The module declaring the type, by scope; 0 is the Orb module.
     scope: usize,
     /// A struct marked `#[flags]`, a `flags` once it enters the WIT, which stays the author's.
@@ -3715,7 +3718,8 @@ fn own_or_only<T>(named: impl IntoIterator<Item = (usize, T)>, scope: usize) -> 
 /// to their modules as ordinary Rust. The resources of an implemented interface reach nothing:
 /// their functions speak the consumed package's types, whatever the module's own are called. A
 /// name resolves by `own_or_only` in the module its path names it in, the one a path leads into,
-/// `super::sessions::Token`, or the one writing a bare name (`Modules::references_in`): to the type
+/// `super::sessions::Token`, or the one writing a bare name (`Modules::references_in`), in a
+/// signature as in a record's field (`Candidate::references`): to the type
 /// of that module, a resource included, else to the only resource of that name, else to the only
 /// type of that name in the Orb; two of other modules are ambiguous, a type the module does not
 /// declare is an error, and a resource is a type of its own. A type of any shape the module
@@ -3794,14 +3798,7 @@ fn reachable(
             }
         };
         if kept.insert(index) {
-            let candidate = &candidates[index];
-            pending.extend(
-                candidate
-                    .references
-                    .iter()
-                    .cloned()
-                    .map(|reference| (reference, candidate.scope)),
-            );
+            pending.extend(candidates[index].references.iter().cloned());
         }
     }
     // Only the kept candidates are translated: what they hold must have a WIT spelling.
@@ -6134,12 +6131,7 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
                 .iter()
                 .any(|state| state.ident == candidate.ident && state.scope == candidate.scope);
         if state && serialized.insert(index) {
-            pending.extend(
-                candidate
-                    .references
-                    .iter()
-                    .map(|name| (name.clone(), candidate.scope)),
-            );
+            pending.extend(candidate.references.iter().cloned());
         }
     }
     while let Some((name, scope)) = pending.pop() {
@@ -6158,13 +6150,7 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
         if let Some(Some(index)) = own_or_only(named, scope)
             && serialized.insert(index)
         {
-            let candidate = &unreached[index];
-            pending.extend(
-                candidate
-                    .references
-                    .iter()
-                    .map(|name| (name.clone(), candidate.scope)),
-            );
+            pending.extend(unreached[index].references.iter().cloned());
         }
     }
     serialized

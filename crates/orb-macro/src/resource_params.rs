@@ -262,7 +262,7 @@ fn held<'a>(
                 shape
                     .references
                     .iter()
-                    .map(|reference| (reference.clone(), shape.scope, via)),
+                    .map(|(reference, scope)| (reference.clone(), *scope, via)),
             );
         }
     }
