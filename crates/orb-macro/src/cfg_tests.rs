@@ -556,7 +556,9 @@ fn a_root_follows_its_cfg() {
         let module = expanded(copy);
         let module = quote!(#module).to_string();
         assert_eq!(
-            module.contains("move | declaration | self :: start (& inputs , & declaration)"),
+            module.contains(
+                "move | declaration | self :: __TembraRegistry :: < 0 > :: __tembra_root (& inputs , & declaration)"
+            ),
             worker,
             "{guard}\n{module}"
         );

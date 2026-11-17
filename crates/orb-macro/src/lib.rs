@@ -602,6 +602,10 @@ struct Root {
     ident: Ident,
     /// The module declaring the function, by scope; 0 is the Orb module.
     scope: usize,
+    /// The types of its parameters, the inputs' and the declaration's, and its result, as written,
+    /// which the function of its module that the native side calls it through repeats.
+    params: Vec<Type>,
+    output: ReturnType,
 }
 
 /// A marker that makes the module native only, where it is written: something only a native host
@@ -1528,6 +1532,15 @@ impl Scan {
         self.root = Some(Root {
             ident: ident.clone(),
             scope,
+            params: signature
+                .inputs
+                .iter()
+                .filter_map(|input| match input {
+                    FnArg::Typed(typed) => Some((*typed.ty).clone()),
+                    FnArg::Receiver(_) => None,
+                })
+                .collect(),
+            output: signature.output.clone(),
         });
         self.native_only.push(NativeOnly {
             name: "#[root]".to_owned(),

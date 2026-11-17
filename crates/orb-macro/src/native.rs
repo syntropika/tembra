@@ -30,7 +30,7 @@
 //! compiling, with an `orb()` that answers an error naming the item, so only a host that builds
 //! the Orb fails; a component build of the module is unaffected.
 use crate::{
-    Analysis, Function, Newtype, Payload, Resource, Service, Shape, ShapeKind, WitResource,
+    Analysis, Function, Newtype, Payload, Resource, Root, Service, Shape, ShapeKind, WitResource,
     camel_ident, foreign::Role, metadata::Metadata, rust_ident, wit,
 };
 use heck::{ToShoutySnakeCase, ToSnakeCase};
@@ -145,6 +145,16 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
             .or_default()
             .push(providers::contribution(hook, analysis, imported));
     }
+    // The Orb's `#[root]` is its create, which takes the inputs too, called by a function of the
+    // registry of its module.
+    let create = analysis.root.as_ref().map(|root| {
+        let registered = Literal::usize_unsuffixed(root.scope);
+        by_scope
+            .entry(root.scope)
+            .or_default()
+            .push(root_call(root, analysis));
+        quote! { #registry::<#registered>::__tembra_root }
+    });
     // The JSON of each type of the module that enters the WIT, and of each newtype the WIT spells
     // as its field, in the type's module, once the methods that take or return it are covered, and
     // the functions of each WIT resource, in the resource's module.
@@ -181,11 +191,6 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         .into_iter()
         .filter_map(|id| consumed_codec(id, &analysis.consumed_types, facade))
         .collect();
-    // The Orb's `#[root]` is its create, which takes the inputs too.
-    let create = analysis
-        .root
-        .as_ref()
-        .map(|root| crate::from_root(&analysis.modules[root.scope], &root.ident));
     let shared = create.is_some()
         || analysis
             .services
@@ -202,16 +207,17 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         &contributed,
         facade,
     );
-    // The registries, for an Orb that registers a service or adds a contribution.
-    let declared_registry = (!calls.is_empty() || !contributed.is_empty()).then(|| {
-        quote! {
-            /// The registry of each module of the Orb, by its scope: its functions register the
-            /// services of the module and add its contributions, written there, where the items
-            /// resolve as written, and `orb()` reaches them through it, whatever the visibility of
-            /// the module.
-            struct #registry<const SCOPE: usize>;
-        }
-    });
+    // The registries, for an Orb that registers a service, adds a contribution or has a root.
+    let declared_registry = (!calls.is_empty() || !contributed.is_empty() || create.is_some())
+        .then(|| {
+            quote! {
+                /// The registry of each module of the Orb, by its scope: its functions register the
+                /// services of the module, add its contributions and call the Orb's root, written
+                /// there, where the items resolve as written, and `orb()` reaches them through it,
+                /// whatever the visibility of the module.
+                struct #registry<const SCOPE: usize>;
+            }
+        });
     let boundary =
         (!analysis.shapes.is_empty() || !analysis.newtypes.is_empty() || !consumed.is_empty())
             .then(|| boundary_trait(facade));
@@ -254,8 +260,8 @@ fn wrapped(facade: &Ident, items: TokenStream) -> TokenStream {
 /// it. With an `#[inputs]` struct, `inputs` the path the Orb module names it by, they are
 /// `orb(inputs)` and `orb_named(name, api_version, inputs)`, and when a service has a create or
 /// the Orb a `#[root]`, `shared`, the inputs go to each as one `Rc`. The root, `create` the path
-/// the Orb module names it by, is the Orb's create: `Orb::create` runs it with the inputs and the
-/// Orb's declaration. With root `resources`, `orb_named` builds the table of the Orb's resources,
+/// of the function of its module's registry that calls it, is the Orb's create: `Orb::create` runs
+/// it with the inputs and the Orb's declaration. With root `resources`, `orb_named` builds the table of the Orb's resources,
 /// which the Orb's create fills, declaring each before the root runs, and which every service
 /// takes, as one `Rc`. With `imports`, they take `providers` last, the Orb requires each provider,
 /// and `orb_named` builds the table of the Orb's imports, which every service takes too, as one
@@ -423,10 +429,43 @@ fn orb(
 /// writes its JSON, declared in the Orb module.
 const BOUNDARY: &str = "__TembraBoundary";
 
-/// The name of the type of the Orb module whose functions register its services and add its
-/// contributions, one type per module, by its scope, so that each module keeps its own names: each
-/// function is written in its item's module, and `orb()` reaches it through the type.
+/// The name of the type of the Orb module whose functions register its services, add its
+/// contributions and call its root, one type per module, by its scope, so that each module keeps
+/// its own names: each function is written in its item's module, and `orb()` reaches it through
+/// the type.
 const REGISTRY: &str = "__TembraRegistry";
+
+/// The function of the registry of the root's module that calls the Orb's `#[root]`, as the author
+/// wrote it, with its parameters and its result: `orb_named` calls the root through it, whatever
+/// the visibility of the module.
+fn root_call(root: &Root, analysis: &Analysis) -> TokenStream {
+    let supers = crate::supers(analysis.modules[root.scope].len());
+    let registry = format_ident!("{REGISTRY}");
+    let registered = Literal::usize_unsuffixed(root.scope);
+    let Root {
+        ident,
+        params,
+        output,
+        ..
+    } = root;
+    let [inputs, declaration] = params.as_slice() else {
+        unreachable!("a root takes the inputs and the declaration");
+    };
+    let doc = format!(
+        " The Orb's root, `{ident}`, which `orb_named` calls through the registry of its module."
+    );
+    quote! {
+        impl #supers #registry<#registered> {
+            #[doc = #doc]
+            pub(crate) fn __tembra_root(
+                __tembra_inputs: #inputs,
+                __tembra_declaration: #declaration,
+            ) #output {
+                self::#ident(__tembra_inputs, __tembra_declaration)
+            }
+        }
+    }
+}
 
 /// The trait through which each type of the module that enters the WIT reads and writes its JSON:
 /// private to the Orb module, so its sub-modules implement it and every codec names it, and no

@@ -1,5 +1,6 @@
-//! `trail::orb(..)` in a native host: the Orb registers a service of a module the Orb module cannot
-//! name, and calls a service's method named as a method of `Rc` is, as the service's.
+//! `trail::orb(..)` in a native host: the Orb registers a service and runs a root of a module the
+//! Orb module cannot name, and calls a service's method named as a method of `Rc` is, as the
+//! service's.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
@@ -39,6 +40,25 @@ fn a_service_two_private_modules_down_installs() {
         }))
         .unwrap();
     assert_eq!(steps, 1);
+    walker.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// The Orb's root sits two private modules below the Orb module too: the Orb runs it as the host
+/// installs it, and a method of the walker reads its value, a leg per word of the trail's name.
+#[test]
+fn a_root_two_private_modules_down_installs() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![orb("the ridge")]).unwrap();
+    let walker = Rc::new(host.get(WALKER, vec!["main".into()], "alice").unwrap());
+    let called = walker.clone();
+    let legs = pool
+        .run_until(host.root("alice", move |context| {
+            async move { called.call::<_, u32>(&context, "legs", ()).await }.boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(legs, 2);
     walker.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }

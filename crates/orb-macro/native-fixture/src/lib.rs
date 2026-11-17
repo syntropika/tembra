@@ -15,8 +15,8 @@
 //! and `reframed` that Orb after a reload that gives only its package a new version. `dice`,
 //! `turnstile`, `checkpoint` and `desk` hold what the native side does not cover yet, a WASI
 //! import, a synchronous import, a hook declaration and a record holding a resource: they compile
-//! here all the same, and their `orb()` answers an error naming it. `trail` holds a service two
-//! private modules down, and one whose method is named `clone`, as a method of `Rc`.
+//! here all the same, and their `orb()` answers an error naming it. `trail` holds a service and its
+//! root two private modules down, and a service whose method is named `clone`, as a method of `Rc`.
 //! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
@@ -1796,10 +1796,10 @@ pub mod desk {
     }
 }
 
-/// A trail whose services `orb()` reaches wherever the module puts them: the walker two private
-/// modules below the Orb module, and the guide, whose method shares its name with a method of the
-/// `Rc` each guide object is kept in, which `orb()` calls as the guide's. Native only, as
-/// `notebook`: the guide's create takes inputs.
+/// A trail whose services and root `orb()` reaches wherever the module puts them: the walker and
+/// the Orb's root two private modules below the Orb module, and the guide, whose method shares its
+/// name with a method of the `Rc` each guide object is kept in, which `orb()` calls as the guide's.
+/// Native only, as `notebook`: the guide's create and the root take inputs.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:trail@1.0.0")]
 pub mod trail {
@@ -1814,6 +1814,25 @@ pub mod trail {
 
     pub mod a {
         mod b {
+            use tembra::{Context, Declaration};
+
+            /// The map of the trail, which every object of the Orb shares.
+            pub struct Map {
+                /// How many legs the trail has.
+                pub legs: u32,
+            }
+
+            /// Map the trail, a leg per word of its name: the Orb's root, which the Orb module
+            /// cannot name either.
+            #[root]
+            pub(crate) fn map(
+                inputs: &super::super::Inputs,
+                _declaration: &Declaration,
+            ) -> tembra::Result<Map> {
+                let legs = inputs.name.split_whitespace().count() as u32;
+                Ok(Map { legs })
+            }
+
             /// A walker, which the Orb module cannot name: the module `b` is private to `a`.
             #[service]
             pub struct Walker;
@@ -1822,6 +1841,11 @@ pub mod trail {
                 /// How many steps a walk takes.
                 pub fn steps() -> u32 {
                     1
+                }
+
+                /// How many legs the trail has, as the Orb's root mapped them.
+                pub fn legs(context: &Context) -> u32 {
+                    context.orb::<Map>().map_or(0, |map| map.legs)
                 }
             }
         }

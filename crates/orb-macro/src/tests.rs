@@ -9136,7 +9136,7 @@ fn the_orbs_create_declares_its_root_resources_natively() {
     let root = native(&module, &[]);
     for expected in [
         "let resources = :: std :: rc :: Rc :: new (< self :: __tembra_resource :: Resources as :: core :: default :: Default > :: default () ,) ;",
-        ". create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; let resources = :: std :: rc :: Rc :: clone (& resources) ; move | declaration | { resources . declare (& declaration) ? ; self :: shelves (& inputs , & declaration) } })",
+        ". create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; let resources = :: std :: rc :: Rc :: clone (& resources) ; move | declaration | { resources . declare (& declaration) ? ; self :: __TembraRegistry :: < 0 > :: __tembra_root (& inputs , & declaration) } })",
         ". service (self :: __TembraRegistry :: < 0 > :: __tembra_service_ledger (name , & resources)) . service (self :: __TembraRegistry :: < 1 > :: __tembra_service_shelf (name , & resources))",
         "pub (crate) fn __tembra_service_ledger (orb : & str , resources : & :: std :: rc :: Rc < self :: __tembra_resource :: Resources >) -> :: tembra :: Service < () >",
         ". method_with (\"count\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , () : () | self :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }) } , __TEMBRA_CODEC_COUNT ,)",
@@ -10341,8 +10341,10 @@ fn a_host_lifetime_guards_no_other_principal() {
 
 /// The function marked `#[root]` is the Orb's create: `orb(..)` shares the inputs as one `Rc` and
 /// hands `Orb::create` a closure calling the root with them and the Orb's `Declaration`. The root
-/// stays the author's function, as written but for the marker, and its value no type of the WIT. In
-/// a sub-module, the Orb module names it by its path.
+/// stays the author's function, as written but for the marker, and its value no type of the WIT.
+/// The Orb module calls it through a function of the registry of the root's module, written there,
+/// which repeats the root's parameters and result and calls it as written, so that a root in a
+/// sub-module the Orb module cannot see runs all the same.
 #[test]
 fn the_root_is_the_create_of_the_orb() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
@@ -10364,7 +10366,7 @@ fn the_root_is_the_create_of_the_orb() {
     let root = native(&module, &[]);
     assert!(
         root.contains(
-            "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: shared (& inputs , & declaration) }) . service (self :: __TembraRegistry :: < 0 > :: __tembra_service_ledger (name))) }"
+            "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: __TembraRegistry :: < 0 > :: __tembra_root (& inputs , & declaration) }) . service (self :: __TembraRegistry :: < 0 > :: __tembra_service_ledger (name))) }"
         ),
         "{root}"
     );
@@ -10399,9 +10401,16 @@ fn the_root_is_the_create_of_the_orb() {
     let root = native(&module, &[]);
     assert!(
         root.contains(
-            ". create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: shared :: open (& inputs , & declaration) })"
+            ". create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: __TembraRegistry :: < 1 > :: __tembra_root (& inputs , & declaration) })"
         ),
         "{root}"
+    );
+    let shared = native(&module, &["shared"]);
+    assert!(
+        shared.contains(
+            "impl super :: __TembraRegistry < 1 > { # [doc = \" The Orb's root, `open`, which `orb_named` calls through the registry of its module.\"] pub (crate) fn __tembra_root (__tembra_inputs : & super :: Inputs , __tembra_declaration : & Declaration ,) -> tembra :: Result < u32 > { self :: open (__tembra_inputs , __tembra_declaration) } }"
+        ),
+        "{shared}"
     );
 }
 
@@ -10637,7 +10646,7 @@ fn a_native_only_module_may_only_run_its_root() {
     let root = native(&module, &[]);
     assert!(
         root.contains(
-            ":: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: start (& inputs , & declaration) })) }"
+            ":: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: __TembraRegistry :: < 0 > :: __tembra_root (& inputs , & declaration) })) }"
         ),
         "{root}"
     );
