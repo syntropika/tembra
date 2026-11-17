@@ -130,7 +130,9 @@ test("a generated client types every WIT kind in the host's value form and check
     expect(generated).toContain(
       'kebabName(firstValue: number, delete_: boolean, context_: ({ tag: "none" } | { tag: "size"; val: number } | { tag: "named"; val: { name: string; count: number | null; bigNumber: bigint } })[], context?: Context): Promise<boolean>;',
     );
-    expect(generated).toContain('kebabName: (...args) => reference["kebab-name"](...args),');
+    expect(generated).toContain(
+      'kebabName: (...args) => reference["kebab-name"](...sent(args, 3)),',
+    );
     expect(generated).toContain(
       "check(public_: boolean, static_: number, let_: string, arguments_: number[], eval_: number, implements_: number, await_: boolean, context?: Context): Promise<boolean>;",
     );
@@ -177,6 +179,7 @@ test("a generated client acquires the kebab-case service and forwards each call 
     const reference = {
       "kebab-name": (...args: unknown[]) => Promise.resolve(args),
       numbers: (...args: unknown[]) => Promise.resolve(args.length),
+      nothing: (...args: unknown[]) => Promise.resolve(args.length),
       release: () => {},
     };
     const scope = {
@@ -198,6 +201,10 @@ test("a generated client acquires the kebab-case service and forwards each call 
     const context = { marker: "a trailing context travels with the arguments" };
     expect(await shapes.numbers(1, 2, 3, 4n, context)).toBe(5);
     expect(await shapes.numbers(1, 2, 3, 4n)).toBe(4);
+    // A caller that forwards an optional context passes `undefined`, which is not an argument.
+    const forward = (context?: unknown) => shapes.numbers(1, 2, 3, 4n, context);
+    expect(await forward()).toBe(4);
+    expect(await shapes.nothing(undefined)).toBe(0);
     expect(shapes["kebab-name"]).toBeUndefined();
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -254,6 +261,103 @@ test("client generation refuses functions a reference's own members would hide",
   }
 });
 
+/** WIT names TypeScript reads otherwise: `new`, `Object`'s members, the module's own types. */
+const NAMES = `package example:names@1.0.0;
+interface calls {
+  new: func(value: u32) -> u32;
+  %constructor: func() -> string;
+  to-string: func() -> string;
+  to-locale-string: func() -> string;
+  value-of: func() -> u32;
+  has-own-property: func(name: string) -> bool;
+  is-prototype-of: func() -> bool;
+  property-is-enumerable: func() -> bool;
+}
+interface context { add: func(value: u32) -> u32; }
+interface promise { add: func(value: u32) -> u32; }
+interface acquisition-options { add: func(value: u32) -> u32; }
+interface dynamic-reference { add: func(value: u32) -> u32; }
+interface reference-base { add: func(value: u32) -> u32; }
+world app {
+  export calls;
+  export context;
+  export promise;
+  export acquisition-options;
+  export dynamic-reference;
+  export reference-base;
+}
+`;
+
+/** A call site of those clients, next to the SDK's own `Context`. */
+const NAMES_SITE = `import type { Context } from "@syntropika/tembra-sdk";
+import { get, type Calls } from "./example-names-calls.ts";
+import * as acquisition from "./example-names-acquisition-options.ts";
+import * as context from "./example-names-context.ts";
+import * as dynamic from "./example-names-dynamic-reference.ts";
+import * as promise from "./example-names-promise.ts";
+import * as base from "./example-names-reference-base.ts";
+
+export async function check(scope: Parameters<typeof get>[0], ctx?: Context) {
+  const address = { orb: "names", key: "main" };
+  const calls: Calls = await get(scope, address);
+  const made: number = await calls.new(1, ctx);
+  const text: string = await calls.toString();
+  const owned: boolean = await calls.hasOwnProperty("name", ctx);
+  // @ts-expect-error \`new\` is a method that takes its WIT parameters.
+  calls.new("1");
+  // @ts-expect-error \`toString\` takes no WIT argument.
+  calls.toString(1);
+  const services: [
+    acquisition.AcquisitionOptions_,
+    context.Context_,
+    dynamic.DynamicReference_,
+    promise.Promise_,
+    base.ReferenceBase_,
+  ] = await Promise.all([
+    acquisition.get(scope, address),
+    context.get(scope, address),
+    dynamic.get(scope, address),
+    promise.get(scope, address),
+    base.get(scope, address),
+  ]);
+  const sum: number = await services[1].add(1, ctx);
+  return { made, text, owned, services, sum };
+}
+`;
+
+test("a generated client type-checks for WIT names TypeScript reads otherwise", async () => {
+  const root = await mkdtemp(
+    path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-client-"),
+  );
+  try {
+    await writeFile(path.join(root, "contract.wit"), NAMES);
+    const out = path.join(root, "clients");
+    const files = await client({ wit: path.join(root, "contract.wit"), world: "app", out });
+    // In an interface, `new(..)` would declare a construct signature; the quoted name is a method.
+    expect(await readFile(path.join(out, "example-names-calls.ts"), "utf8")).toContain(
+      '  "new"(value: number, context?: Context): Promise<number>;',
+    );
+    // An interface's type takes a `_` where the module already uses its name.
+    for (const [file, service] of [
+      ["acquisition-options", "AcquisitionOptions_"],
+      ["context", "Context_"],
+      ["dynamic-reference", "DynamicReference_"],
+      ["promise", "Promise_"],
+      ["reference-base", "ReferenceBase_"],
+    ]) {
+      const generated = await readFile(path.join(out, `example-names-${file}.ts`), "utf8");
+      expect(generated).toContain(`export interface ${service} {`);
+      expect(generated).toContain("  add(value: number, context?: Context): Promise<number>;");
+    }
+    const site = path.join(out, "site.ts");
+    await writeFile(site, NAMES_SITE);
+    const reported = diagnostics([...files, site]);
+    expect([...reported].filter(([, messages]) => messages.length)).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 const MAX = (1n << 64n) - 1n;
 const MIN = -(1n << 63n);
@@ -298,6 +402,8 @@ test.skipIf(!fixtures)(
           return inner.add(2n, 3n, context);
         });
         expect(scoped).toBe(5n);
+        // A context forwarded as `undefined` is left out, not sent as a third argument.
+        expect(await direct.add(2n, 3n, undefined)).toBe(5n);
       } finally {
         direct.reference.release();
       }
