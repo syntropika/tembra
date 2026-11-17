@@ -3754,7 +3754,9 @@ fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
 /// too, `Ser` after `use serde::{Serialize as Ser};`, or an impl of `serde`'s trait the Orb's
 /// modules write by hand, in the type's module or another, gives the type the trait, and the macro
 /// adds no second one. Another crate's trait of either name, `rkyv::Serialize`, derived or
-/// implemented, is no `serde` trait, so the macro still adds `serde`'s.
+/// implemented, is no `serde` trait, so the macro still adds `serde`'s, and neither is a trait of
+/// the Orb's own named so, `pub trait Serialize` declared in the module, implemented under
+/// `#[cfg(..)]` too.
 #[test]
 fn the_serde_derives_a_state_gets_follow_renames_and_hand_impls() {
     let module = |items: &str| {
@@ -3805,6 +3807,18 @@ fn the_serde_derives_a_state_gets_follow_renames_and_hand_impls() {
             ),
             [
                 "# [derive (:: serde :: Serialize)] pub struct Balance",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
+            ],
+        ),
+        (
+            "pub trait Serialize { fn bytes(&self) -> u32; }
+            impl Serialize for Balance { fn bytes(&self) -> u32 { 0 } }
+            #[cfg(test)]
+            impl Serialize for Note { fn bytes(&self) -> u32 { 0 } }"
+                .to_owned(),
+            [
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance",
                 "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
                 "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
             ],
@@ -4833,8 +4847,10 @@ fn a_standard_derive_is_decided_from_the_fields() {
 /// impl of the trait with `Self`, the type or a type parameter as its type argument,
 /// `PartialEq<Self>`, which the derived `PartialEq` is. The same module without it expands, and so
 /// do an impl of a trait the bindings do not implement for that type, one of the trait with another
-/// right-hand type, `PartialEq<u8>`, which coexists with the derived one, and an impl whose trait
-/// the macro cannot follow to a crate.
+/// right-hand type, `PartialEq<u8>`, which coexists with the derived one, an impl whose trait the
+/// macro cannot follow to a crate, and one of a trait of the Orb's own that takes a prelude's or
+/// `serde`'s name, `pub trait Clone`, declared in the module or brought in by a glob import from
+/// another module of the Orb.
 #[test]
 fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
     let module = |items: &str| {
@@ -4930,6 +4946,12 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
         "impl crate::walk::Display for Fault {} pub trait Display {}".to_owned(),
         format!("use pretty::*; impl Display for Fault {{ {fmt} }}"),
         format!("{state} impl rkyv::Serialize<u32> for Point {{}}"),
+        "pub trait Clone { fn dup(&self) -> u32; } impl Clone for Point { fn dup(&self) -> u32 { 0 } }".to_owned(),
+        "pub trait Ord { fn rank(&self) -> u32; } impl Ord for Heading { fn rank(&self) -> u32 { 0 } }".to_owned(),
+        "pub mod traits { pub trait PartialEq { fn same(&self) -> bool; } }
+        use traits::*;
+        impl PartialEq for Heading { fn same(&self) -> bool { true } }".to_owned(),
+        format!("{state} pub trait Serialize {{ fn bytes(&self) -> u32; }} impl Serialize for Point {{ fn bytes(&self) -> u32 {{ 0 }} }}"),
     ] {
         expanded("example:walk@1.0.0", &module(&items));
     }

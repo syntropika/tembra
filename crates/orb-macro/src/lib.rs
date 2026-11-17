@@ -4397,10 +4397,10 @@ fn uncovered(
 
 /// The trait a trait impl's path, written in the module `scope`, names for certain, by name, as
 /// the macro follows it (`followed`): one of the standard library's, through a path to `core`,
-/// `std` or `alloc` or a name of the prelude nothing in the module binds, or one of `serde`'s,
-/// through a path to `serde`. A path the macro cannot follow to a crate, which a glob import may
-/// bring from any crate, or a re-export through `crate::`, which may be the crate's own trait,
-/// names none of them as far as it tells.
+/// `std` or `alloc` or a name of the prelude nothing in the module binds or declares, or one of
+/// `serde`'s, through a path to `serde`. A path the macro cannot follow to a crate, which a glob
+/// import may bring from any crate, a re-export through `crate::`, which may be the crate's own
+/// trait, or a trait the module declares under such a name names none of them as far as it tells.
 fn known_trait(
     path: &syn::Path,
     scope: usize,
@@ -4419,6 +4419,7 @@ fn known_trait(
         Followed::Name {
             ident,
             globs: false,
+            declared: false,
         } if PRELUDE.contains(&ident.to_string().as_str()) => Some(ident.to_string()),
         _ => None,
     }
@@ -4550,7 +4551,8 @@ fn serde_derived(
 /// under any name, or by the name of a path it cannot follow to a crate, from a crate's glob
 /// import or from above the Orb module, which `carried_derive` takes for `serde`'s too, and, with
 /// `unbound`, from nothing the module binds, as a crate-root `#[macro_use]` brings it. Another
-/// crate's trait of either name, `rkyv::Serialize`, is another trait.
+/// crate's trait of either name, `rkyv::Serialize`, is another trait, and so is one the module
+/// declares itself, `pub trait Serialize`.
 fn serde_trait(
     path: &syn::Path,
     scope: usize,
@@ -4564,7 +4566,11 @@ fn serde_trait(
             Derive::Serde(named) => named.segments.last()?.to_string(),
             Derive::Standard(..) | Derive::Other(_) => return None,
         },
-        Followed::Name { ident, globs } if globs || unbound => ident.to_string(),
+        Followed::Name {
+            ident,
+            globs,
+            declared: false,
+        } if globs || unbound => ident.to_string(),
         Followed::Above(ident) => ident.to_string(),
         Followed::Name { .. } => return None,
     };
@@ -4709,9 +4715,16 @@ enum Followed {
     /// A path from the crates, `::strum::EnumIter`, or from this crate, `crate::derives::Thing`,
     /// which names the same item in every module of the crate.
     Path(Named),
-    /// A single name the module neither declares nor imports by name, `Hash`: one a prelude
-    /// brings, or, when `globs` is set, a glob import from a module the macro does not read.
-    Name { ident: Ident, globs: bool },
+    /// A single name the module does not import by name, `Hash`: one a prelude brings, or, when
+    /// `globs` is set, one a glob import from a module the macro does not read may bring; when
+    /// `declared` is set, the module declares an item of the name itself, `Serialize` beside
+    /// `pub trait Serialize`, which is the trait or the type the name means there, before what
+    /// the prelude or a glob import brings, while a derive is a macro, which no such item shadows.
+    Name {
+        ident: Ident,
+        globs: bool,
+        declared: bool,
+    },
     /// An item of a module above the Orb module, `super::Serialize` written in the Orb module, by
     /// its name: the macro does not read that module.
     Above(Ident),
@@ -4788,9 +4801,18 @@ fn followed(
                 continue;
             }
         }
-        // A name the module neither binds nor declares: a glob import may bring it from another
-        // module of the Orb, where it resolves next, or from a module the macro does not read.
-        let outside = match through_globs(&first, scope, uses, modules) {
+        // A name the module does not bind by `use`: one it declares itself, or one a glob import
+        // may bring from another module of the Orb, where it resolves next, or from a module the
+        // macro does not read.
+        let globbed = through_globs(&first, scope, uses, modules);
+        if rest.is_empty() && uses[scope].items.contains(&first.to_string()) {
+            return Ok(Followed::Name {
+                ident: first,
+                globs: matches!(globbed, Globbed::Outside),
+                declared: true,
+            });
+        }
+        let outside = match globbed {
             Globbed::In(module) => {
                 scope = module;
                 continue;
@@ -4802,6 +4824,7 @@ fn followed(
             return Ok(Followed::Name {
                 ident: first,
                 globs: outside,
+                declared: false,
             });
         }
         named.global = true;
@@ -5091,7 +5114,10 @@ fn carried_derive(
     // A `Serialize` or `Deserialize` the macro cannot follow to a crate, from a crate's glob or
     // from above the Orb module, is serde's where the bindings derive serde's traits, so what the
     // type holds is the reason to give first, before the path.
-    if let Followed::Name { ident, globs: true } | Followed::Above(ident) = &followed
+    if let Followed::Name {
+        ident, globs: true, ..
+    }
+    | Followed::Above(ident) = &followed
         && serde_name(&ident.to_string())
         && let Some(refused) = unwritable(&ident.to_string())
     {
@@ -5099,9 +5125,10 @@ fn carried_derive(
     }
     let derive = match followed {
         Followed::Path(named) => Derive::of(named),
-        // A single name no declaration of the module binds is a prelude's, which brings the
-        // derives of the standard library, or a glob import's, which the macro cannot read.
-        Followed::Name { ident, globs } => {
+        // A single name no `use` of the module binds is a prelude's, which brings the derives of
+        // the standard library, or a glob import's, which the macro cannot read; an item of the
+        // module under the name is no macro.
+        Followed::Name { ident, globs, .. } => {
             match STANDARD_DERIVES.iter().find(|(name, _)| ident == name) {
                 Some(&(name, module)) => Derive::Standard(name, module),
                 None if globs && covered(&ident) => return Ok(None),
