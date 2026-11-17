@@ -227,8 +227,12 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
   lockfiles beside the examples must not change;
 - `just test-orb-macro`, which runs the macro's guests as components in the executor.
 
+Then it runs `just check-clean-tree`, which fails when the parts left a modified file or a new
+file that `.gitignore` does not list.
+
 CI runs each part in a job of its own, side by side, so that each job fits its timeout.
-The `acceptance` job runs beside them; see [Isolated orbs](#isolated-orbs).
+Each job ends with `just check-clean-tree`, and so does the `acceptance` job that runs beside
+them; see [Isolated orbs](#isolated-orbs).
 A new part is a recipe in `ci` and a line in the job matrix of the
 [quality workflow](.github/workflows/quality.yml).
 

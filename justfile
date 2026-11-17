@@ -198,10 +198,22 @@ install-tools:
 install-ts: install
 check-all: check
 
-# Run every part of the verification in order; CI runs each part in a job of its own.
+# Run every part of the verification in order, then check the tree; CI runs each part in a job of its own.
 ci: check \
     test-orb-examples \
-    test-orb-macro
+    test-orb-macro \
+    check-clean-tree
+
+# Fail when the checks changed the tree: a modified or deleted file, or a new file that .gitignore does not list.
+check-clean-tree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changes="$(git status --porcelain)"
+    if [ -n "$changes" ]; then
+        echo "The checks changed the tree:" >&2
+        echo "$changes" >&2
+        exit 1
+    fi
 
 # Generate matching Swift and Kotlin bindings from the shared engine.
 build-mobile-bindings:

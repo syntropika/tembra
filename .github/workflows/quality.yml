@@ -51,6 +51,8 @@ jobs:
       - run: just install-tools
       - run: just install
       - run: just ${{ matrix.recipe }}
+      # A part leaves the tree as it found it: no modified file and no new file that Git does not ignore.
+      - run: just check-clean-tree
 
   # Build the pinned interpreter and compiled provider once, then run every isolated Orb suite.
   acceptance:
@@ -144,6 +146,8 @@ jobs:
           2>&1 | tee "$RUNNER_TEMP/acceptance.log"
       - name: Test portable mobile execution and foreign continuation delivery
         run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_keyed_router.wasm"
+      # The suites leave the tree as they found it: no modified file and no new file that Git does not ignore.
+      - run: just check-clean-tree
       - name: Preserve acceptance timings and failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
