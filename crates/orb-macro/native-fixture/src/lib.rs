@@ -17,6 +17,7 @@
 //! import, a synchronous import, a hook declaration and a record holding a resource: they compile
 //! here all the same, and their `orb()` answers an error naming it. `trail` holds a service and its
 //! root two private modules down, and a service whose method is named `clone`, as a method of `Rc`.
+//! `list` is named like a keyword of WIT, as are its method `record` and its flag `r#type`.
 //! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
@@ -1870,6 +1871,35 @@ pub mod trail {
         #[allow(clippy::should_implement_trait)]
         pub fn clone(&self) -> String {
             format!("a copy of {}", self.name)
+        }
+    }
+}
+
+/// Names that are keywords of WIT, which the WIT writes with its `%` escape: the module `list`,
+/// whose world is `%list` and whose contract is `contract/%list.wit`, the method `record`, and the
+/// flag `r#type`, which enters the WIT as `%type`. The runtime fixture builds the same names into a
+/// component.
+#[tembra::orb(package = "example:keywords@1.0.0")]
+pub mod list {
+    /// How a word is written: a flag per field.
+    #[flags]
+    pub struct Marks {
+        pub bold: bool,
+        pub r#type: bool,
+    }
+
+    /// Records words.
+    #[service]
+    pub struct Words;
+
+    impl Words {
+        /// The marks of `word`: those of `marks`, and `type` when the word starts with a capital
+        /// letter too.
+        pub fn record(word: String, marks: Marks) -> Marks {
+            Marks {
+                bold: marks.bold,
+                r#type: marks.r#type || word.starts_with(char::is_uppercase),
+            }
         }
     }
 }

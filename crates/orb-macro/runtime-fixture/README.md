@@ -70,6 +70,26 @@ which the macro keeps the author's. Each comes back through the newtype's `From`
 makes: a component build of the crate then fails, with an error that names the newtype, which the
 test checks.
 
+A component carries the WIT of one Orb module, so the crate's other Orb modules build components of
+their own: each feature below, without the default features, which add `guest`, selects one. The
+test builds each std and with `no-std`, into the fixtures' target directory, and calls it. It then
+runs the module's native tests, in the module's file: the crate built for the host with `native`,
+the facade's `host`, or `native-sdk` for `renamed`, whose tests install the module's `orb()` in a
+native host:
+
+- `keywords` selects the module `list`, whose names are keywords of WIT, which the WIT writes with
+  its `%` escape: the world `%list`, whose contract is `contract/%list.wit`, the method `%record`
+  and the flag `%type` of the field `r#type`;
+- `configured` selects the module `notebook`, whose items under `#[cfg(feature = "archive")]` the
+  macro expands once per value of the feature: without `archive`, `Notes` clears its notes; with
+  it, `Notes` archives them onto the shelf of `Shelf`, whose struct and block the feature adds,
+  and runs the hook that the sub-module `archiving` declares. The component, its WIT and its
+  contract are those of the build's features, and so is `orb()`, which refuses the hook natively;
+- `renamed` selects the module `tally`, whose crate names the facade `sdk`, with `crate = "sdk"`,
+  and has no `tembra`. Its method under `#[cfg(feature = "archive")]` makes the macro expand the
+  module once per value of the feature, each copy through `::sdk::orb`, and the component reaches
+  its state and the call's `context` through that name too, as `orb()` does natively.
+
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs`, one test on Cranelift and one on Pulley. Each test
 reads both contracts from the WIT the macro embedded in the components, as `cargo tembra build`

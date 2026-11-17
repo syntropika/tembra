@@ -1,7 +1,20 @@
-//! The same WIT implementation with std's runtime or the explicit freestanding runtime.
+//! The same WIT implementation with std's runtime or the explicit freestanding runtime. The module
+//! `guest` is the default component; a feature selects another module in its place, alone, since
+//! a component carries the WIT of one Orb module. With `native`, the selected module's tests
+//! install its `orb()` in a native host.
 #![cfg_attr(all(target_arch = "wasm32", feature = "no-std"), no_std)]
 extern crate alloc;
 
+#[cfg(feature = "configured")]
+mod configured;
+#[cfg(feature = "keywords")]
+mod keywords;
+#[cfg(all(test, any(feature = "native", feature = "native-sdk")))]
+mod native;
+#[cfg(feature = "renamed")]
+mod renamed;
+
+#[cfg(feature = "guest")]
 #[cfg_attr(
     feature = "no-std",
     tembra::orb(
