@@ -2600,15 +2600,16 @@ fn a_namesake_of_a_flags_struct_in_another_module_keeps_its_impls() {
     }
 }
 
-/// An impl names the type through a `use` the macro follows to a `crate::` path, through a module
-/// a glob import brings in, `pinned::Balance` after `use super::*;`, or through an alias of the
-/// type's own name, `pub type Access = super::rights::Access;`: the macro cannot place the
-/// `crate::` path such a `use` leads to, so the name counts by its uniqueness among the types of
-/// the Orb's modules, as a name a glob import the macro cannot follow brings does, and such an
-/// alias stands for the type it names, as a `use` does. A glob import from a module of the Orb is
-/// followed to the type that module declares, whatever namesake a third module declares. A
-/// `crate::` path written on the impl itself leaves the Orb module, as before: it may name a
-/// namesake outside the Orb, whose impl is not the type's.
+/// An impl names the type through a `use` the macro follows to a `crate::` path, binding the name
+/// or a module of its path, through a module a glob import brings in, `pinned::Balance` after
+/// `use super::*;`, or through an alias of the type's own name, `pub type Access =
+/// super::rights::Access;`: the macro cannot place the `crate::` path such a `use` leads to, so the
+/// name counts by its uniqueness among the types of the Orb's modules that may enter the WIT, as a
+/// name a glob import the macro cannot follow brings does, whatever type of another shape a module
+/// declares under the name, and such an alias stands for the type it names, as a `use` does. A
+/// glob import from a module of the Orb is followed to the type that module declares, whatever
+/// namesake a third module declares. A `crate::` path written on the impl itself leaves the Orb
+/// module, as before: it may name a namesake outside the Orb, whose impl is not the type's.
 #[test]
 fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
     let office = |ops: &str, legacy: &str| {
@@ -2647,6 +2648,15 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
             format!("use super::rights::*; {clone}"),
             "pub mod legacy { pub struct Access(pub u32); }",
         ),
+        (
+            "use crate::office::rights; impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"
+                .to_owned(),
+            "",
+        ),
+        (
+            format!("use crate::office::rights::*; {clone}"),
+            "pub mod legacy { pub struct Access(pub u32); }",
+        ),
     ] {
         let generated = tokens(&expanded("example:office@1.0.0", &office(&ops, legacy)));
         assert!(generated.contains(without_clone), "{ops}\n{generated}");
@@ -2675,6 +2685,13 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
         ),
         (
             format!("pub type Access = super::rights::Access; {bitor}"),
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            format!(
+                "use crate::office::rights; {}",
+                bitor.replace("for Access", "for rights::Access")
+            ),
             "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
         ),
     ] {
@@ -2708,23 +2725,27 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
         &ledger("impl Default for crate::elsewhere::Balance { fn default() -> Self { todo!() } }"),
     ));
     assert!(generated.contains(written), "{generated}");
-    let generated = tokens(&expanded(
-        "example:ledger@1.0.0",
-        "mod ledger {
-            pub mod pinned {
-                #[state]
-                pub struct Balance { pub total: i64 }
-                #[service]
-                pub struct Pinned;
-                impl Pinned { pub fn add(amount: i64) -> i64 { amount } }
-            }
-            pub mod defaults {
-                use super::*;
-                impl Default for pinned::Balance { fn default() -> Self { pinned::Balance { total: 7 } } }
-            }
-        }",
-    ));
-    assert!(!generated.contains(written), "{generated}");
+    for uses in ["use super::*;", "use crate::ledger::pinned;"] {
+        let generated = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &format!(
+                "mod ledger {{
+                    pub mod pinned {{
+                        #[state]
+                        pub struct Balance {{ pub total: i64 }}
+                        #[service]
+                        pub struct Pinned;
+                        impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+                    }}
+                    pub mod defaults {{
+                        {uses}
+                        impl Default for pinned::Balance {{ fn default() -> Self {{ pinned::Balance {{ total: 7 }} }} }}
+                    }}
+                }}"
+            ),
+        ));
+        assert!(!generated.contains(written), "{uses}\n{generated}");
+    }
     // A type holding a resource handle has the `Clone` a type holding it derives when the macro
     // sees it implemented, through such a `use` too.
     expanded(

@@ -15,8 +15,8 @@
 //! named from its import module too, one module higher, which one path cannot serve: a hook's input
 //! holds no flags.
 use crate::{
-    Candidate, Declared, Elsewhere, Module, Shape, ShapeKind, Uses, identity, reaches_root,
-    reaching, relative, wit,
+    Candidate, Declared, DeclaredTypes, Elsewhere, Module, Shape, ShapeKind, Uses, identity,
+    reaches_root, reaching, relative, wit,
 };
 use proc_macro2::Span;
 use quote::quote;
@@ -290,7 +290,7 @@ pub(crate) fn remapped(
 /// before the compiler evaluates `#[cfg(..)]`: those under it that leave a configuration without
 /// `Clone` the struct's `Copy` needs are refused (`uncovered`). `uses` are the modules' imports,
 /// through which the type of an impl is followed, and `declared` the types of the Orb's modules,
-/// by scope, which tell a name a glob import brings in apart. Returns what each struct implements,
+/// by scope, which place a name a glob import brings in. Returns what each struct implements,
 /// by its name: the macro's derives, the author's, and the traits the Orb's modules implement for
 /// it by hand, which decide the derives of the generated types holding the struct, with the
 /// refusal of the impls that give a trait in some configurations only, those the macro leaves its
@@ -301,7 +301,7 @@ pub(crate) fn emit(
     modules: &[Vec<Ident>],
     impls: &[(usize, syn::ItemImpl)],
     uses: &[Uses],
-    declared: &[(usize, Ident)],
+    declared: DeclaredTypes<'_>,
     serde: bool,
 ) -> syn::Result<BTreeMap<String, Elsewhere>> {
     let mut traits = BTreeMap::new();
@@ -424,7 +424,7 @@ pub(crate) fn implemented_by_hand(
     tree: &mut Module,
     modules: &[Vec<Ident>],
     uses: &[Uses],
-    declared: &[(usize, Ident)],
+    declared: DeclaredTypes<'_>,
     ident: &Ident,
     home: usize,
 ) -> BTreeMap<String, Vec<(usize, syn::ItemImpl)>> {
@@ -440,7 +440,7 @@ pub(crate) fn impls_of(
     tree: &mut Module,
     modules: &[Vec<Ident>],
     uses: &[Uses],
-    declared: &[(usize, Ident)],
+    declared: DeclaredTypes<'_>,
     ident: &Ident,
     home: usize,
 ) -> Vec<(usize, syn::ItemImpl)> {
@@ -475,10 +475,11 @@ fn trait_impls(
 /// sub-modules and the glob imports from the Orb's modules (`type_module`), as `Access` in its own
 /// module, `model::Access` from the Orb module and `Access` after `use super::model::Access;` or
 /// `use super::model::*;` in any module. A name the macro cannot place, one a glob import from a
-/// module it does not read brings into a module declaring no type of that name, or one reached
-/// through `crate::`, is the type when no other type of the Orb's modules has its name, as the
-/// state's `impl Default` is read; `declared` are those types, an alias of a namesake left out,
-/// which stands for the type it names as a `use` does. A path leaving the Orb module through a
+/// module it does not read brings into a module declaring no type of that name, or one a `use`
+/// leads to through `crate::`, is the type when no other type of the Orb's modules that may enter
+/// the WIT has its name, as the state's `impl Default` is read; `declared` are the types of the
+/// Orb's modules, an alias of a namesake left out, which stands for the type it names as a `use`
+/// does, with the candidates for the WIT among them. A path leaving the Orb module through a
 /// crate is not the type.
 fn names(
     ty: &Type,
@@ -487,7 +488,7 @@ fn names(
     home: usize,
     modules: &[Vec<Ident>],
     uses: &[Uses],
-    declared: &[(usize, Ident)],
+    declared: DeclaredTypes<'_>,
 ) -> bool {
     let Type::Path(path) = ty else {
         return false;
@@ -505,9 +506,16 @@ fn names(
         return true;
     }
     let elsewhere = declared
+        .all
         .iter()
         .any(|(scope, name)| *scope == module && *name == *ident);
-    !elsewhere && declared.iter().filter(|(_, name)| *name == *ident).count() == 1
+    !elsewhere
+        && declared
+            .candidates
+            .iter()
+            .filter(|(_, name)| *name == *ident)
+            .count()
+            == 1
 }
 
 /// The traits the Orb's modules implement by hand for a flags struct, by the last name of each
