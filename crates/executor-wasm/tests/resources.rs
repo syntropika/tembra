@@ -229,7 +229,7 @@ both_engines!(
     a_compiled_importer_opens_independent_keyed_sessions,
     one_revision_serves_its_sessions_one_call_at_a_time,
     a_compiled_importer_uses_a_native_exporter,
-    a_closed_resource_answers_alike_from_compiled_and_native_exporters,
+    a_closed_resource_of_a_compiled_exporter_answers_by_what_closed_it,
 );
 
 /// A real canonical move returns imported handles to their issuer or transfers the same
@@ -2739,29 +2739,39 @@ fn a_compiled_importer_uses_a_native_exporter(interpreted: bool) {
     assert!(host.errors().is_empty(), "{:?}", host.errors());
 }
 
-/// A handle outliving its value answers the same from a native exporter as from a compiled one:
+/// What a handle outliving its value answers, from a native exporter as from a compiled one:
 /// `Gone/resource` once the exporter is reloaded, `Gone/object` once the issuing object is
 /// released, and `Cancelled/root` from a root the host's close cancelled.
-fn a_closed_resource_answers_alike_from_compiled_and_native_exporters(interpreted: bool) {
+fn closed_answers() -> Vec<(tembra::Code, String)> {
+    vec![
+        (tembra::Code::Gone, "resource".to_owned()),
+        (tembra::Code::Gone, "object".to_owned()),
+        (tembra::Code::Cancelled, "root".to_owned()),
+    ]
+}
+
+/// A compiled exporter's handle outliving its value answers `closed_answers`.
+fn a_closed_resource_of_a_compiled_exporter_answers_by_what_closed_it(interpreted: bool) {
     let Some(bytes) = fixture("TEMBRA_WASM_RESOURCE_PROVIDER") else {
         return;
     };
     let engine = engine(interpreted);
-    let expected = [
-        (tembra::Code::Gone, "resource".to_owned()),
-        (tembra::Code::Gone, "object".to_owned()),
-        (tembra::Code::Cancelled, "root".to_owned()),
-    ];
     assert_eq!(
         stale_answers(|| provider(&engine, &bytes, "store")),
-        expected,
+        closed_answers(),
         "compiled"
     );
     assert_eq!(engine.instances(), 0);
+}
+
+/// A native exporter's handle outliving its value answers `closed_answers` too. The native
+/// exporter needs no compiled fixture, so this half runs everywhere.
+#[test]
+fn a_closed_resource_of_a_native_exporter_answers_as_a_compiled_one() {
     let closed = Rc::new(Cell::new(0));
     assert_eq!(
         stale_answers(|| native_store(closed.clone())),
-        expected,
+        closed_answers(),
         "native"
     );
     assert_eq!(closed.get(), 3, "each value closed once");

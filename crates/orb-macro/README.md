@@ -1205,15 +1205,28 @@ needs before handing it over.
 A `#[wit_resource]` struct is natively a value the Orb issues as a capability of its resource type,
 as `tembra::portable::Issuable` names it: the resource's constructor and static functions, and a
 function whose result holds the struct, alone or in an `Option`, a `Result`, a `Vec` or a tuple,
-issue what they return into the call's result, and each method reads its `self` from the call. The
-value belongs to the object that issued it, as a compiled exporter's belongs to its Store: it
+issue what they return into the call's result, and each method reads its `self` from the call. A
+record or a variant holding the struct is component-only: the bindings replace it with a type
+holding their handle, which only a component creates, so where the runtime is linked it is a
+compile error. A tuple carries the resource beside its data in both builds:
+
+```rust,ignore
+impl Texts {
+    /// A builder and the label it was started under: a tuple, where a record holding the builder
+    /// would be component-only.
+    pub fn labelled(label: String) -> (Builder, String) {
+        (Builder::new(), label)
+    }
+}
+```
+
+The value belongs to the object that issued it, as a compiled exporter's belongs to its Store: it
 closes, running its `Drop`, with its last owner, or when that object is reloaded or released or the
 host closes. Such a function has no local entrypoint, so a native caller calls it with
 `call_portable` and holds the resource as an `Owned` handle, and the service's client has no method
 for it; see [owned WIT resources](../../docs/rust.md#owned-wit-resources). Natively a resource is
-only returned, or borrowed as a method's `self`: a function taking one, a record or a variant
-holding one, which the bindings replace with a type holding their handle, which only a component
-creates, and an `async` method of a resource, are compile errors where the runtime is linked.
+only returned, or borrowed as a method's `self`: a function taking one, and an `async` method of a
+resource, are compile errors where the runtime is linked.
 
 A [`#[state]`](#kernel-managed-state) serves a native host as it serves a component. The factory of
 the service that owns it declares it with `Declaration::state`, from the state's `Default` at its

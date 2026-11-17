@@ -2435,8 +2435,9 @@ fn record_encode(bound: &[Ident], members: &[Member<'_>], boundary: &TokenStream
 
 /// The kind of a member of the type of the module `shape`, written in its module, or its refusal,
 /// after `place`, which names the member: "the field `count` of `Entry` is". A member holding a
-/// resource is refused: the bindings generate such a type, with their handle in the resource's
-/// place, which only a component can create.
+/// resource is refused, pointing to a tuple, which carries the resource natively too: a record or
+/// a variant holding one is component-only, since the bindings generate such a type, with their
+/// handle in the resource's place, which only a component can create.
 fn member<'a>(
     ty: &'a Type,
     place: &str,
@@ -2453,7 +2454,10 @@ fn member<'a>(
     match kind.resource() {
         Some(resource) => Err(refusal(Uncovered {
             ty: resource,
-            reason: "a resource; a record or a variant holding one is the bindings' type, whose handle only a component creates, so it is not supported natively".to_owned(),
+            reason: format!(
+                "a resource; a record or a variant holding a resource is component-only, since the bindings replace it with their type, whose handle only a component creates: to return the resource natively too, return it in a tuple beside the data, such as `-> ({}, String)`",
+                spelled(resource)
+            ),
         })),
         None => Ok(kind),
     }

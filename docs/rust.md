@@ -289,7 +289,9 @@ its destructor.
 A native Orb exports resources over the same transport, and its callers, native or compiled,
 hold them as they hold a compiled exporter's. A Rust type implementing `portable::Issuable`
 names the WIT resource type its values are issued as. The exporter serves each function of the
-interface with `Service::payload_method`, under its WIT name and with the interface's signature.
+interface under its WIT name and with the interface's signature: a function that issues a resource
+or reads its `self` with `Service::payload_method`, and a function taking and returning data only
+with `Service::method` or `Service::method_with`, as a compiled exporter serves its own.
 `Payload::issue` issues a value into the result and returns the `Slot` to place wherever the
 result's data names the resource: alone, or in a record, a list, a tuple, an option, a variant
 or a result. `Payload::receiver::<T>()` takes a method's implicit `self` as a `Receiver<T>`, whose
@@ -336,9 +338,12 @@ let service = Service::new(name, |_| Ok(()))
 ```
 
 A `self` of another resource type is refused as `Forbidden/resource`, one of another object or of
-a retired revision as `Gone/resource`, and a method called without one as `Invalid/resource`. The
-receiver reads the value across the call's awaits, since the call pins it, but cannot keep it
-alive beyond the call. The value belongs to the object version that issued it, as a guest
+a retired revision as `Gone/resource`, and a method called without one as `Invalid/resource`. A
+function without `self` refuses one lent to it as a compiled exporter's does: `Invalid/resource`
+when it issues a resource, as `Payload::into_data` refuses it, and `Invalid/local_value` when it
+takes and returns data only, as `method` and `method_with` refuse it. The receiver reads the
+value across the call's awaits, since the call pins it, but cannot keep it alive beyond the call.
+The value belongs to the object version that issued it, as a guest
 instance belongs to its Store: it closes, running its `Drop`, once with its last owner, or when
 that object is reloaded or released or the host closes, whatever handles remain. A later call
 through a remaining handle answers as for a compiled exporter: `Gone/resource` after a reload,

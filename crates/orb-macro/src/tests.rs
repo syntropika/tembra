@@ -5058,8 +5058,8 @@ fn a_service_with_only_a_resource_has_a_signature() {
 /// Natively a resource is only returned, or borrowed as a method's `self`: a function of a service
 /// or of a resource taking one, itself or inside a container, is refused, and so is a record or a
 /// variant holding one, which the bindings replace with a type holding their handle, which only a
-/// component creates, and an `async` method of a resource, whose future would hold its `self`
-/// beyond the borrow the call lends it.
+/// component creates, so it is component-only and the refusal points to a tuple, and an `async`
+/// method of a resource, whose future would hold its `self` beyond the borrow the call lends it.
 #[test]
 fn the_native_side_refuses_a_resource_it_cannot_carry() {
     let taken =
@@ -5095,7 +5095,7 @@ fn the_native_side_refuses_a_resource_it_cannot_carry() {
         }
         pub struct Lease { pub session: Session, pub count: u32 }
         impl Sessions {",
-            "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding one is the bindings' type, whose handle only a component creates, so it is not supported natively".to_owned(),
+            "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the bindings replace it with their type, whose handle only a component creates: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`".to_owned(),
         ),
         (
             "pub fn get(&self) -> u32 { self.n }",

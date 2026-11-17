@@ -7,8 +7,9 @@
 //! Each compiled Orb is a real component encoded from a small core module, so it runs without a
 //! guest toolchain: each function of the consumer's `relay` interface forwards its flat arguments
 //! to the same function of the provider's `plotter` and returns what that one returns, and its
-//! `holder` constructs, calls and drops one of the provider's accumulators; the meter answers its
-//! async functions at once, and the gate runs its hook over each value it admits.
+//! `holder` constructs, calls and drops one of the provider's accumulators, and two it receives
+//! nested in the result of the provider's `open`; the meter answers its async functions at once,
+//! and the gate runs its hook over each value it admits.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
@@ -193,6 +194,7 @@ fn holder_wit() -> String {
         "{}
 interface holder {{
   run: func(start: s64, value: s64) -> s64;
+  second: func(first: s64, second: s64, value: s64) -> s64;
 }}
 
 world holder-consumer {{
@@ -205,7 +207,11 @@ world holder-consumer {{
 }
 
 /// `run` constructs an accumulator at its start, adds its value through the handle, drops the
-/// handle and returns the total `add` answered.
+/// handle and returns the total `add` answered. `second` opens an accumulator at each of its two
+/// starts through the service's `open`, which hands them out nested, as a list in a tuple: the
+/// starts go at offset 64, and `open` writes the list of handles, which the host's one allocation
+/// puts at offset 1024, and the count from offset 16, trapping `second` unless both say 2. It adds
+/// its value through the second handle, drops both and returns the total `add` answered.
 const HOLDER_MODULE: &str = r#"(module
   (import "example:calculator/accumulators@1.0.0" "[constructor]accumulator"
     (func $new (param i64) (result i32)))
@@ -213,6 +219,8 @@ const HOLDER_MODULE: &str = r#"(module
     (func $add (param i32 i64) (result i64)))
   (import "example:calculator/accumulators@1.0.0" "[resource-drop]accumulator"
     (func $drop (param i32)))
+  (import "example:calculator/accumulators@1.0.0" "open"
+    (func $open (param i32 i32 i32)))
   (memory (export "memory") 1)
   (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 1024)
   (func (export "example:calculator/holder@1.0.0#run") (param $start i64) (param $value i64)
@@ -228,11 +236,51 @@ const HOLDER_MODULE: &str = r#"(module
     local.set $total
     local.get $accumulator
     call $drop
+    local.get $total)
+  (func (export "example:calculator/holder@1.0.0#second")
+    (param $first i64) (param $second i64) (param $value i64) (result i64)
+    (local $handles i32)
+    (local $total i64)
+    i32.const 64
+    local.get $first
+    i64.store
+    i32.const 72
+    local.get $second
+    i64.store
+    i32.const 64
+    i32.const 2
+    i32.const 16
+    call $open
+    i32.const 20
+    i32.load
+    i32.const 2
+    i32.ne
+    if unreachable end
+    i32.const 24
+    i32.load
+    i32.const 2
+    i32.ne
+    if unreachable end
+    i32.const 16
+    i32.load
+    local.set $handles
+    local.get $handles
+    i32.load offset=4
+    local.get $value
+    call $add
+    local.set $total
+    local.get $handles
+    i32.load
+    call $drop
+    local.get $handles
+    i32.load offset=4
+    call $drop
     local.get $total))"#;
 
 /// A compiled consumer constructs a WIT resource of the native Orb, calls its method through the
 /// handle and drops it: the method reads as its `self` the value the constructor issued, and the
-/// value closes once the consumer's call has settled.
+/// value closes once the consumer's call has settled. It also receives two of them nested in a
+/// service function's result, each handle naming its own value.
 #[test]
 fn a_compiled_consumer_constructs_calls_and_drops_a_native_resource() {
     let engine = Engine::new(Limits::default()).unwrap();
@@ -256,23 +304,29 @@ fn a_compiled_consumer_constructs_calls_and_drops_a_native_resource() {
     let holder = Rc::new(host.get(HOLDER, vec!["main".into()], "alice").unwrap());
     pool.run_until(holder.ready()).unwrap();
     let dropped = Accumulators::dropped();
-    let called = holder.clone();
-    let total = pool
-        .run_until(host.root("alice", move |context| {
-            async move {
-                called
-                    .call_portable::<_, i64>(&context, "run", (5_i64, 2_i64))
-                    .await
-            }
-            .boxed_local()
-        }))
-        .unwrap();
-    assert_eq!(total, 7);
-    pool.run_until(host.settled());
+    let mut call = |method: &'static str, arguments: Value| {
+        let called = holder.clone();
+        let total = pool
+            .run_until(host.root("alice", move |context| {
+                async move {
+                    called
+                        .call_portable::<_, i64>(&context, method, arguments)
+                        .await
+                }
+                .boxed_local()
+            }))
+            .unwrap_or_else(|error| panic!("{method}: {error}"));
+        pool.run_until(host.settled());
+        total
+    };
+    assert_eq!(call("run", json!([5, 2])), 7);
     assert_eq!(Accumulators::dropped(), dropped + 1, "dropped once");
+    // The second start is 7: a handle naming the first value would answer 7.
+    assert_eq!(call("second", json!([5, 7, 2])), 9);
+    assert_eq!(Accumulators::dropped(), dropped + 3, "each dropped once");
     holder.release().unwrap();
     pool.run_until(host.close()).unwrap();
-    assert_eq!(Accumulators::dropped(), dropped + 1);
+    assert_eq!(Accumulators::dropped(), dropped + 3);
     assert_eq!(engine.instances(), 0);
     assert!(host.errors().is_empty(), "{:?}", host.errors());
 }
