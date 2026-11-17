@@ -1615,7 +1615,11 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    any other `.wit` of `contract/` whose package, name and version, is the module's, as the
    contract of a former name of its world, so each Orb module of a crate needs a package of its
    own: two modules of one package remove each other's contract, silently, and `contract/` keeps
-   the one expanded last;
+   the one expanded last. A crate whose `contract/` other crates read holds one Orb module:
+   wit-parser reads a directory as one package, so a consumer's `wit = "../provider/contract"`
+   does not resolve a `contract/` that holds the worlds of several modules, and two modules of one
+   name under different parent modules write the same `<world>.wit`. The `contract/` of a crate
+   with several, such as the native fixture, is read by no one;
 2. the same text as a `tembra:wit` custom section of the Wasm module, and the manifest, the
    declared hooks with their composition, the contributions with their priorities, the
    services that chose a lifetime or a linger, the views of the interfaces imported by key with
