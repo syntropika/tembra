@@ -206,6 +206,47 @@ test-orb-parity:
 test-configurations:
     cargo test --locked -p tembra-orb-macro --test configurations -- --ignored
 
+# Build each Orb crate of the examples and of the macro's fixtures the way the other recipes do not: natively, or for wasm32.
+test-orb-both-ways:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="${CARGO_TARGET_DIR:-target}/orb-both-ways"
+    hosts=crates/orb-macro/config-fixtures/native-hosts
+    # Natively, the Orb crates of the examples, as the fixture's native hosts link them: with the
+    # facade's `host`, and `hooks` where a module contributes to a hook. Each host builds on its
+    # own, so that Cargo unifies the features of its Orb crates only, and names every crate that
+    # fails.
+    for host in tembra-config-native-host tembra-config-native-hooks-host; do
+        echo "== $host"
+        cargo build --locked --keep-going --manifest-path "$hosts/Cargo.toml" -p "$host" --target-dir "$target"
+    done
+    # A native host links each Orb crate of the examples but those native already: the hosts, the
+    # hook's provider written by hand, and the Orb crates the native example's host links.
+    for manifest in examples/rust-orb-*/*/Cargo.toml; do
+        crate="${manifest%/Cargo.toml}"
+        case "$crate" in
+            */host | examples/rust-orb-hook-contribution/gate | examples/rust-orb-native/*) ;;
+            *)
+                if ! grep -q "\"../../../../../$crate\"" "$hosts"/*/Cargo.toml; then
+                    echo "No native host of $hosts links $crate" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+    # Natively, the async and host feature fixtures, whose `host` feature puts the runtime in their
+    # lockfiles. Not the runtime fixture, whose modules `just test-orb-macro` builds and calls
+    # natively too, nor the parity fixture, which `just test-orb-parity` builds both ways.
+    for fixture in async-fixture host-feature-fixture; do
+        echo "== crates/orb-macro/$fixture natively"
+        cargo build --locked --manifest-path "crates/orb-macro/$fixture/Cargo.toml" --features host --target-dir "$target"
+    done
+    # For wasm32, the native fixture, which its tests build natively. Checked, not built: two Orbs
+    # of one crate export one interface of the kernel, whose symbols the crate would define twice;
+    # see #10's item 1.2.
+    echo "== crates/orb-macro/native-fixture for wasm32"
+    cargo check --locked -p tembra-orb-native-fixture --target wasm32-unknown-unknown --target-dir "$target"
+
 check: fmt-check build-node build-wasm build-sdk
     bun run typecheck
     just lint
@@ -229,6 +270,7 @@ ci: check \
     test-cargo-tembra \
     test-orb-parity \
     test-configurations \
+    test-orb-both-ways \
     check-clean-tree
 
 # Fail when the checks changed the tree: a modified or deleted file, or a new file that .gitignore does not list.

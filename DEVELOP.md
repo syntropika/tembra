@@ -232,7 +232,10 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
   requires the same answers from both;
 - `just test-configurations`, which builds the configurations that only Cargo sets up: a
   workspace whose application enables `host` beside a guest, a library whose other targets hold
-  Orb modules, and the facade with each feature alone.
+  Orb modules, and the facade with each feature alone;
+- `just test-orb-both-ways`, which builds each Orb crate the way the other parts do not: the
+  examples' Orb crates and the async and host feature fixtures natively, with the facade's `host`,
+  and the native fixture for wasm32.
 
 Then it runs `just check-clean-tree`, which fails when the parts left a modified file or a new
 file that `.gitignore` does not list.

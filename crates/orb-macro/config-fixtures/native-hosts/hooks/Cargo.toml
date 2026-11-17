@@ -1,0 +1,12 @@
+[package]
+name = "tembra-config-native-hooks-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The facade with `hooks`, which the native side of a contribution to a hook needs, and `host`.
+tembra = { path = "../../../../tembra", features = ["hooks"] }
+# The Orb crates of the examples whose modules contribute to a hook.
+tembra-example-filter = { path = "../../../../../examples/rust-orb-hook-contribution/filter" }
+tembra-example-blocker = { path = "../../../../../examples/rust-orb-hook-declaration/blocker" }
