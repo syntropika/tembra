@@ -5058,8 +5058,7 @@ fn a_service_with_only_a_resource_has_a_signature() {
 /// Natively a resource is only returned, or borrowed as a method's `self`: a function of a service
 /// or of a resource taking one, itself or inside a container, is refused, and so is a record or a
 /// variant holding one, which the bindings replace with a type holding their handle, which only a
-/// component creates, so it is component-only and the refusal points to a tuple, and an `async`
-/// method of a resource, whose future would hold its `self` beyond the borrow the call lends it.
+/// component creates, so it is component-only and the refusal points to a tuple.
 #[test]
 fn the_native_side_refuses_a_resource_it_cannot_carry() {
     let taken =
@@ -5097,11 +5096,6 @@ fn the_native_side_refuses_a_resource_it_cannot_carry() {
         impl Sessions {",
             "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the bindings replace it with their type, whose handle only a component creates: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`".to_owned(),
         ),
-        (
-            "pub fn get(&self) -> u32 { self.n }",
-            "pub async fn get(&self) -> u32 { self.n }",
-            "`Session::get` is an async method of a WIT resource; such methods are not supported natively yet".to_owned(),
-        ),
     ] {
         let module = orb_with(options("example:desk@1.0.0", None), &DESK.replace(from, to))
             .unwrap_or_else(|error| panic!("{message}: {error}"));
@@ -5111,6 +5105,35 @@ fn the_native_side_refuses_a_resource_it_cannot_carry() {
             "{message}"
         );
         assert!(wit(&module).starts_with("package "), "{message}");
+    }
+}
+
+/// An `async` method of a WIT resource borrows its `self` natively from the guard its call's
+/// receiver gives, held for the whole of the method's future, so the value stays the method's
+/// across its awaits; the WIT keeps the method `async`.
+#[test]
+fn an_async_method_of_a_wit_resource_holds_its_self_natively() {
+    let module = expanded(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn get(&self) -> u32 { self.n }",
+            "pub fn get(&self) -> u32 { self.n }
+            pub async fn later(&self, by: u32) -> u32 { self.n + by }",
+        ),
+    );
+    assert!(
+        wit(&module).contains("    later: async func(by: u32) -> u32;\n"),
+        "{}",
+        wit(&module)
+    );
+    let native = native(&module, &[]);
+    for expected in [
+        ". payload_method (\"[method]session.later\" , | _ , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | async move { __tembra_context . check () ? ; let __tembra_receiver = __tembra_payload . receiver :: < Session > () ? ;",
+        "let value = { let __tembra_self = __tembra_receiver . guard () ? ; Session :: later (& * __tembra_self , by) . await } ;",
+        // A synchronous method still reads its `self` only while it runs.
+        "let value = __tembra_receiver . with (| __tembra_value | Session :: get (__tembra_value ,)) ? ;",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
     }
 }
 

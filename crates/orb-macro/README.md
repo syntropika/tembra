@@ -1222,11 +1222,14 @@ impl Texts {
 
 The value belongs to the object that issued it, as a compiled exporter's belongs to its Store: it
 closes, running its `Drop`, with its last owner, or when that object is reloaded or released or the
-host closes. Such a function has no local entrypoint, so a native caller calls it with
-`call_portable` and holds the resource as an `Owned` handle, and the service's client has no method
-for it; see [owned WIT resources](../../docs/rust.md#owned-wit-resources). Natively a resource is
-only returned, or borrowed as a method's `self`: a function taking one, and an `async` method of a
-resource, are compile errors where the runtime is linked.
+host closes. A method may be `async`: its call holds the value until it ends, through the guard of
+`Receiver::guard`, so `&self` stays valid across its awaits, as in a component, also when the Orb is
+reloaded meanwhile, after which the value closes once the call has ended. These functions have no
+local entrypoint, so a native caller calls them with `call_portable` and holds the resource as an
+`Owned` handle, and the service's client has no method for them; see
+[owned WIT resources](../../docs/rust.md#owned-wit-resources). Natively a resource is only
+returned, or borrowed as a method's `self`: a function taking one is a compile error where the
+runtime is linked.
 
 A [`#[state]`](#kernel-managed-state) serves a native host as it serves a component. The factory of
 the service that owns it declares it with `Declaration::state`, from the state's `Default` at its

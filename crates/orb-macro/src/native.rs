@@ -1297,12 +1297,13 @@ fn glue_ident(resource: &WitResource) -> Ident {
 /// `payload_method` under its WIT name: the constructor, `[constructor]<resource>`, which issues
 /// the value it builds; each method, `[method]<resource>.<name>`, which reads its `self` from the
 /// call as the value issued, through the `Receiver` the call pins; and each static function,
-/// `[static]<resource>.<name>`. A method borrows the value only while it runs, so an `async` one,
-/// whose future would hold the borrow across its awaits, is refused. Each runs on an object of the
-/// service, in the scopes its methods run in: that of its call, with the `context` option, that of
-/// its object, when the service's objects own a state, which the function adding them is given the
-/// way to reach, as the object's environment is the service's, and that of its Orb, with root
-/// resources, whose table that function is given too, as it is the table of the Orb's imports.
+/// `[static]<resource>.<name>`. A synchronous method reads the value while it runs, and an `async`
+/// one borrows it from the receiver's guard, which its future holds across its awaits until the
+/// call ends. Each runs on an object of the service, in the scopes its methods run in: that of its
+/// call, with the `context` option, that of its object, when the service's objects own a state,
+/// which the function adding them is given the way to reach, as the object's environment is the
+/// service's, and that of its Orb, with root resources, whose table that function is given too, as
+/// it is the table of the Orb's imports.
 fn resource_glue(
     resource: &WitResource,
     analysis: &Analysis,
@@ -1358,18 +1359,24 @@ fn resource_glue(
     }
     for method in &resource.methods {
         let function = &method.ident;
-        if method.asynchronous {
-            return Err(refused(
-                function.span(),
-                &format!(
-                    "`{ident}::{function}` is an async method of a WIT resource; such methods are not supported natively yet"
-                ),
-            ));
-        }
         let owner = format!("{ident}::{function}");
         let result = method.result.as_ref().map(|(ty, _)| ty);
         let (kinds, result) = signature(&owner, &method.params, result, resource.scope, analysis)?;
         let params: Vec<&Ident> = method.params.iter().map(|(name, _, _)| name).collect();
+        // A synchronous method reads the value while it runs; an `async` one borrows it from the
+        // guard of its receiver, which its future holds across its awaits until the call ends.
+        let call = if method.asynchronous {
+            quote! {
+                {
+                    let __tembra_self = __tembra_receiver.guard()?;
+                    #ident::#function(&*__tembra_self, #(#params),*).await
+                }
+            }
+        } else {
+            quote! {
+                __tembra_receiver.with(|__tembra_value| #ident::#function(__tembra_value, #(#params),*))?
+            }
+        };
         functions.push(payload_method(
             &format!("[method]{name}.{}", wit::kebab(function)),
             environment.clone(),
@@ -1377,9 +1384,7 @@ fn resource_glue(
             &method.params,
             &kinds,
             result.as_ref().map(|(ty, kind)| (*ty, kind)),
-            quote! {
-                __tembra_receiver.with(|__tembra_value| #ident::#function(__tembra_value, #(#params),*))?
-            },
+            call,
             &boundary,
             &scopes,
         ));

@@ -25,6 +25,7 @@ use tembra::{
 const INTERFACE: &str = "test:media/codecs@1.0.0";
 const CONSTRUCTOR: &str = "[constructor]decoder";
 const FEED: &str = "[method]decoder.feed";
+const HOLD: &str = "[method]decoder.hold";
 const RETAIN: &str = "[method]decoder.retain";
 const OPEN_BUNDLE: &str = "open-bundle";
 const BUFFER: &str = "[constructor]buffer";
@@ -153,6 +154,23 @@ fn service(codecs: Rc<Codecs>) -> Service<Rc<Codecs>> {
                 // The value is still the method's after the await.
                 let id = decoder.with(|decoder| decoder.id)?;
                 Ok(Payload::data(json!(id * 1000 + n)))
+            }
+        })
+        // Like `feed`, but with its `self` held as a `&Decoder` across its await, as an async
+        // method borrows it: the id before the await, and the id and `n` after it.
+        .payload_method(HOLD, |codecs, _, mut payload: Payload| {
+            let gate = codecs.feed_gate.borrow_mut().take();
+            async move {
+                let receiver = payload.receiver::<Decoder>()?;
+                let (n,): (u32,) = arguments(payload)?;
+                let guard = receiver.guard()?;
+                let decoder: &Decoder = &guard;
+                let before = decoder.id;
+                codecs.feed_entered.set(true);
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                Ok(Payload::data(json!([before, decoder.id * 1000 + n])))
             }
         })
         .payload_method(RETAIN, |codecs, _, mut payload: Payload| async move {
@@ -566,6 +584,57 @@ fn a_retired_revision_serves_its_own_roots_until_they_end_and_refuses_newer_ones
     fixture.pool.run_until(fixture.host.settled());
     assert_eq!(fixture.closed(), 1, "drained with the retired revision");
     drop(stale);
+    assert_eq!(fixture.closed(), 1);
+    fixture.close();
+}
+
+/// A method that awaits holds its `self` with `Receiver::guard`, which reads as the value across its
+/// awaits. A reload during the call lets the call finish on the value; the retired revision closes
+/// the value once the call has ended, and a later call through the handle answers `Gone/resource`.
+#[test]
+fn a_guard_holds_a_methods_self_across_its_awaits_through_a_reload() {
+    let mut fixture = fixture();
+    let owned = fixture.construct(CONSTRUCTOR);
+    let (finish, gate) = oneshot::channel();
+    *fixture.codecs.feed_gate.borrow_mut() = Some(gate);
+    let held = fixture
+        .host
+        .spawn_root("host", move |context| {
+            async move {
+                let held = owned
+                    .call_portable::<_, (u32, u32)>(&context, HOLD, (5_u32,))
+                    .await;
+                Ok((held, owned))
+            }
+            .boxed_local()
+        })
+        .unwrap();
+    fixture.pool.run_until_stalled();
+    assert!(fixture.codecs.feed_entered.get());
+    let reloaded = media(fixture.codecs.clone(), 1);
+    fixture
+        .pool
+        .run_until(fixture.host.reload(vec![reloaded], 5000))
+        .unwrap();
+    fixture.pool.run_until_stalled();
+    assert_eq!(fixture.closed(), 0, "the call still holds its self");
+    finish.send(()).unwrap();
+    let (held, owned) = fixture.pool.run_until(held).unwrap().unwrap();
+    assert_eq!(held.unwrap(), (1, 1005));
+    fixture.pool.run_until(fixture.host.settled());
+    assert_eq!(fixture.closed(), 1, "closed with the retired revision");
+    let (refused, owned) = fixture
+        .root(async move |context| {
+            let refused = owned
+                .call_portable::<_, (u32, u32)>(&context, HOLD, (1_u32,))
+                .await
+                .unwrap_err();
+            Ok((refused, owned))
+        })
+        .unwrap();
+    assert_eq!(refused.code, core::Code::Gone, "{refused}");
+    assert_eq!(refused.reason, "resource");
+    drop(owned);
     assert_eq!(fixture.closed(), 1);
     fixture.close();
 }

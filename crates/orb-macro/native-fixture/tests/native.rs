@@ -137,6 +137,7 @@ fn the_declaration_is_the_plan_of_the_contract() {
         [
             "[constructor]accumulator",
             "[method]accumulator.add",
+            "[method]accumulator.add-later",
             "[method]accumulator.reader",
             "[method]accumulator.store",
             "[method]accumulator.total",

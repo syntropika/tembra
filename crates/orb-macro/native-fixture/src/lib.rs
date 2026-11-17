@@ -53,6 +53,49 @@ pub fn journal() -> Vec<String> {
     JOURNAL.with(RefCell::take)
 }
 
+std::thread_local! {
+    /// While a test holds them, the accumulators' `add_later` calls on this thread wait at their
+    /// await, with the wakers of those waiting there; `None` lets them pass.
+    static HELD: RefCell<Option<Vec<std::task::Waker>>> = const { RefCell::new(None) };
+}
+
+/// Hold each accumulator's `add_later` on this thread at its await, until `release_additions`.
+pub fn hold_additions() {
+    HELD.with(|held| {
+        held.borrow_mut().get_or_insert_with(Vec::new);
+    });
+}
+
+/// How many `add_later` calls wait at their await on this thread.
+pub fn held_additions() -> usize {
+    HELD.with(|held| held.borrow().as_ref().map_or(0, Vec::len))
+}
+
+/// Let the `add_later` calls waiting at their await on this thread go on, and the next ones pass.
+pub fn release_additions() {
+    let waiting = HELD.with(|held| held.borrow_mut().take());
+    waiting
+        .into_iter()
+        .flatten()
+        .for_each(std::task::Waker::wake);
+}
+
+/// Wait while `hold_additions` holds the calls on this thread.
+async fn additions_released() {
+    std::future::poll_fn(|context| {
+        HELD.with(|held| match &mut *held.borrow_mut() {
+            Some(waiting) => {
+                if !waiting.iter().any(|waker| waker.will_wake(context.waker())) {
+                    waiting.push(context.waker().clone());
+                }
+                std::task::Poll::Pending
+            }
+            None => std::task::Poll::Ready(()),
+        })
+    })
+    .await
+}
+
 #[tembra::orb(package = "example:calculator@1.0.0", context)]
 pub mod calculator {
     /// Arithmetic over plain values: numbers, strings, characters, lists, options and tuples.
@@ -542,6 +585,17 @@ pub mod calculator {
                 let total = self.total.get() + value;
                 self.total.set(total);
                 total
+            }
+
+            /// Add to the total once the call goes on, and return the total before the wait and
+            /// after the addition: an async method, which reads `self` on both sides of its
+            /// await, where a host may hold it with `hold_additions`.
+            pub async fn add_later(&self, value: i64) -> (i64, i64) {
+                let before = self.total.get();
+                crate::additions_released().await;
+                let total = self.total.get() + value;
+                self.total.set(total);
+                (before, total)
             }
 
             /// The total so far.

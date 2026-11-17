@@ -12,7 +12,10 @@
 //! and the gate runs its hook over each value it admits.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
-use std::rc::Rc;
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use tembra::{Host, Provider};
 use tembra_executor_wasm::{Engine, Install, Limits};
 use tembra_orb_native_fixture::{
@@ -195,6 +198,7 @@ fn holder_wit() -> String {
 interface holder {{
   run: func(start: s64, value: s64) -> s64;
   second: func(first: s64, second: s64, value: s64) -> s64;
+  later: async func(start: s64, value: s64) -> s64;
 }}
 
 world holder-consumer {{
@@ -211,12 +215,20 @@ world holder-consumer {{
 /// starts through the service's `open`, which hands them out nested, as a list in a tuple: the
 /// starts go at offset 64, and `open` writes the list of handles, which the host's one allocation
 /// puts at offset 1024, and the count from offset 16, trapping `second` unless both say 2. It adds
-/// its value through the second handle, drops both and returns the total `add` answered.
+/// its value through the second handle, drops both and returns the total `add` answered. `later`,
+/// an async export, which may block, constructs an accumulator at its start and adds its value
+/// through `add-later`, an async method it calls synchronously, waiting for it; the method writes
+/// the totals before and after from offset 16. `later` traps unless the total before is the start,
+/// drops the handle and returns the total after with `task.return`.
 const HOLDER_MODULE: &str = r#"(module
   (import "example:calculator/accumulators@1.0.0" "[constructor]accumulator"
     (func $new (param i64) (result i32)))
   (import "example:calculator/accumulators@1.0.0" "[method]accumulator.add"
     (func $add (param i32 i64) (result i64)))
+  (import "example:calculator/accumulators@1.0.0" "[method]accumulator.add-later"
+    (func $add_later (param i32 i64 i32)))
+  (import "[export]example:calculator/holder@1.0.0" "[task-return]later"
+    (func $return (param i64)))
   (import "example:calculator/accumulators@1.0.0" "[resource-drop]accumulator"
     (func $drop (param i32)))
   (import "example:calculator/accumulators@1.0.0" "open"
@@ -275,7 +287,32 @@ const HOLDER_MODULE: &str = r#"(module
     local.get $handles
     i32.load offset=4
     call $drop
-    local.get $total))"#;
+    local.get $total)
+  (func (export "[async-lift]example:calculator/holder@1.0.0#later")
+    (param $start i64) (param $value i64) (result i32)
+    (local $accumulator i32)
+    local.get $start
+    call $new
+    local.set $accumulator
+    local.get $accumulator
+    local.get $value
+    i32.const 16
+    call $add_later
+    i32.const 16
+    i64.load
+    local.get $start
+    i64.ne
+    if unreachable end
+    local.get $accumulator
+    call $drop
+    i32.const 24
+    i64.load
+    call $return
+    ;; EXIT: the task has returned.
+    i32.const 0)
+  (func (export "[callback][async-lift]example:calculator/holder@1.0.0#later")
+    (param i32 i32 i32) (result i32)
+    unreachable))"#;
 
 /// A compiled consumer constructs a WIT resource of the native Orb, calls its method through the
 /// handle and drops it: the method reads as its `self` the value the constructor issued, and the
@@ -284,22 +321,9 @@ const HOLDER_MODULE: &str = r#"(module
 #[test]
 fn a_compiled_consumer_constructs_calls_and_drops_a_native_resource() {
     let engine = Engine::new(Limits::default()).unwrap();
-    let artifact = components::encode(
-        &holder_wit(),
-        "holder-consumer",
-        HOLDER_MODULE,
-        "holder",
-        &Default::default(),
-    );
-    let consumer = engine
-        .load(
-            &artifact,
-            Install::default().requires(ACCUMULATORS, "calculator", 2),
-        )
-        .unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    host.install(vec![calculator::orb().unwrap(), consumer])
+    host.install(vec![calculator::orb().unwrap(), holder_consumer(&engine)])
         .unwrap();
     let holder = Rc::new(host.get(HOLDER, vec!["main".into()], "alice").unwrap());
     pool.run_until(holder.ready()).unwrap();
@@ -510,6 +534,65 @@ fn a_native_contribution_joins_the_hook_a_compiled_orb_declares() {
         ["5 for alice on []@host", "-3 for alice on []@host"]
     );
     admissions.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// The holder, a compiled consumer of the native Orb's accumulators.
+fn holder_consumer(engine: &Engine) -> tembra::Orb {
+    let artifact = components::encode(
+        &holder_wit(),
+        "holder-consumer",
+        HOLDER_MODULE,
+        "holder",
+        &Default::default(),
+    );
+    engine
+        .load(
+            &artifact,
+            Install::default().requires(ACCUMULATORS, "calculator", 2),
+        )
+        .unwrap()
+}
+
+/// A compiled consumer calls an async method of the native Orb's resource, synchronously: while
+/// the host holds the method at its await, the consumer's call waits, and once released the method
+/// adds to the total it read before its await.
+#[test]
+fn a_compiled_consumer_calls_an_async_method_of_a_native_resource() {
+    let engine = Engine::new(Limits::default()).unwrap();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![calculator::orb().unwrap(), holder_consumer(&engine)])
+        .unwrap();
+    let holder = Rc::new(host.get(HOLDER, vec!["main".into()], "alice").unwrap());
+    pool.run_until(holder.ready()).unwrap();
+    let dropped = Accumulators::dropped();
+    tembra_orb_native_fixture::hold_additions();
+    let called = holder.clone();
+    let total = host
+        .spawn_root("alice", move |context| {
+            async move {
+                called
+                    .call_portable::<_, i64>(&context, "later", json!([5, 2]))
+                    .await
+            }
+            .boxed_local()
+        })
+        .unwrap();
+    // The consumer runs on its Store's thread: poll the host until the method waits.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while tembra_orb_native_fixture::held_additions() == 0 {
+        assert!(Instant::now() < deadline, "the method never waited");
+        pool.run_until_stalled();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    tembra_orb_native_fixture::release_additions();
+    assert_eq!(pool.run_until(total).unwrap().unwrap(), 7);
+    pool.run_until(host.settled());
+    assert_eq!(Accumulators::dropped(), dropped + 1, "dropped once");
+    holder.release().unwrap();
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
     assert!(host.errors().is_empty(), "{:?}", host.errors());

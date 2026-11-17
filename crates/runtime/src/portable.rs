@@ -13,10 +13,11 @@
 //! A native exporter issues a plain Rust value as a capability of a WIT resource type: the type
 //! names its resource type ([`Issuable`]), [`Payload::issue`] issues the value and places its
 //! [`Slot`] wherever the result's data names it, and a method reads its implicit `self` back as
-//! the value through the [`Receiver`] of [`Payload::receiver`]. The value belongs to the object
-//! version that issued it, as a compiled exporter's instance belongs to its Store: it closes
-//! with its last owner, and with that version when the exporter is reloaded or released or the
-//! host closes, whatever handles remain. A method on such a handle then answers as it would for
+//! the value through the [`Receiver`] of [`Payload::receiver`], or holds it across its awaits with
+//! the receiver's [`Guard`]. The value belongs to the object version that issued it, as a compiled
+//! exporter's instance belongs to its Store: it closes with its last owner, and with that version
+//! when the exporter is reloaded or released or the host closes, whatever handles remain, once the
+//! calls holding it have ended. A method on such a handle then answers as it would for
 //! a compiled exporter: `Gone/resource` from the reloaded exporter, and the kernel's refusal of
 //! the call once the object is released or the host has closed.
 //!
@@ -168,6 +169,43 @@ impl<T: Issuable> Receiver<T> {
             .ok_or_else(resource_closed)?;
         let value = (*value).downcast_ref::<T>().ok_or_else(mistyped)?;
         Ok(read(value))
+    }
+
+    /// Hold the value for the rest of the call, for a method that awaits: the guard reads as the
+    /// value and keeps it alive while held, so a `&T` borrowed from it stays valid across the
+    /// method's awaits, as a component's `&self` does while its method is suspended. Held by the
+    /// method's future, it lasts until the call ends, also when the issuing object is reloaded or
+    /// released meanwhile. A value that has closed is refused as `Gone/resource`.
+    pub fn guard(&self) -> Result<Guard<'_, T>> {
+        let value = self
+            .issuer
+            .upgrade()
+            .and_then(|issuer| issuer.value(self.key))
+            .ok_or_else(resource_closed)?;
+        if !(*value).is::<T>() {
+            return Err(mistyped());
+        }
+        Ok(Guard {
+            value,
+            receiver: PhantomData,
+        })
+    }
+}
+
+/// A method's `self` held for the rest of its call, from [`Receiver::guard`]: it reads as the value,
+/// which it keeps alive while held. It borrows the receiver, which the call took from its payload.
+pub struct Guard<'a, T> {
+    value: Rc<dyn Any>,
+    receiver: PhantomData<&'a Receiver<T>>,
+}
+
+impl<T: Issuable> std::ops::Deref for Guard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        (*self.value)
+            .downcast_ref::<T>()
+            .expect("a guard holds a value of its receiver's type")
     }
 }
 

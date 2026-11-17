@@ -1,8 +1,8 @@
 //! The WIT resource `Accumulator` of `calculator::orb()` in a native host: a native caller
 //! constructs one, opens others from the service and from a static function, alone and nested in
-//! a list, a tuple and a result, calls their methods through its `Owned` handles, and drops them,
-//! each value closing once. A compiled caller does the same in
-//! `crates/executor-wasm/tests/orb_macro_native.rs`.
+//! a list, a tuple and a result, calls their methods through its `Owned` handles, an async one
+//! too, which keeps its `self` across its await and a reload, and drops them, each value closing
+//! once. A compiled caller does the same in `crates/executor-wasm/tests/orb_macro_native.rs`.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
@@ -11,10 +11,14 @@ use tembra::{
     core::Code,
     portable::{Delivered, Owned},
 };
-use tembra_orb_native_fixture::calculator::{self, accumulators::AccumulatorsClient};
+use tembra_orb_native_fixture::calculator::{
+    self,
+    accumulators::{Accumulators, AccumulatorsClient},
+};
 
 const ACCUMULATORS: &str = "calculator::example:calculator/accumulators@1.0.0";
 const INTERFACE: &str = "example:calculator/accumulators@1.0.0";
+const ADD_LATER: &str = "[method]accumulator.add-later";
 
 /// Install the Orb in a host and run `test` under a root of the principal `host`, with a
 /// reference to the `main` object of the accumulators' service.
@@ -162,4 +166,110 @@ fn a_method_of_the_resource_reaches_its_objects_state_and_the_roots_resources() 
         assert_eq!(*reference.state::<Value>()?.value()?, json!({ "count": 2 }));
         Ok(())
     });
+}
+
+/// An async method of the resource reads its `self` before and after its await: held there, the
+/// call waits, and once released it adds to the value it read before.
+#[test]
+fn an_async_method_reads_its_self_before_and_after_its_await() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![calculator::orb().unwrap()]).unwrap();
+    let reference = Rc::new(host.get(ACCUMULATORS, vec!["main".into()], "host").unwrap());
+    let called = reference.clone();
+    tembra_orb_native_fixture::hold_additions();
+    let added = host
+        .spawn_root("host", move |context| {
+            async move {
+                let accumulator: Owned = called
+                    .call_portable(&context, "[constructor]accumulator", (5_i64,))
+                    .await?;
+                let added: (i64, i64) = accumulator
+                    .call_portable(&context, ADD_LATER, (2_i64,))
+                    .await?;
+                let total: i64 = accumulator
+                    .call_portable(&context, "[method]accumulator.total", ())
+                    .await?;
+                Ok((added, total))
+            }
+            .boxed_local()
+        })
+        .unwrap();
+    pool.run_until_stalled();
+    assert_eq!(tembra_orb_native_fixture::held_additions(), 1, "held");
+    tembra_orb_native_fixture::release_additions();
+    assert_eq!(pool.run_until(added).unwrap().unwrap(), ((5, 7), 7));
+    reference.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// A reload during a call of an async method of the resource lets the call finish on the value it
+/// holds. The retired revision closes the value once the call has ended, and a later call through
+/// the handle answers `Gone/resource`, as for a compiled exporter.
+#[test]
+fn a_reload_during_an_async_method_lets_it_finish_and_retires_its_handle() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![calculator::orb().unwrap()]).unwrap();
+    let reference = Rc::new(host.get(ACCUMULATORS, vec!["main".into()], "host").unwrap());
+    let called = reference.clone();
+    let accumulator: Owned = pool
+        .run_until(host.root("host", move |context| {
+            async move {
+                called
+                    .call_portable(&context, "[constructor]accumulator", (5_i64,))
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    let dropped = Accumulators::dropped();
+    tembra_orb_native_fixture::hold_additions();
+    let added = host
+        .spawn_root("host", move |context| {
+            async move {
+                let added = accumulator
+                    .call_portable::<_, (i64, i64)>(&context, ADD_LATER, (2_i64,))
+                    .await;
+                Ok((added, accumulator))
+            }
+            .boxed_local()
+        })
+        .unwrap();
+    pool.run_until_stalled();
+    assert_eq!(tembra_orb_native_fixture::held_additions(), 1, "held");
+    pool.run_until(host.reload(vec![calculator::orb().unwrap()], 5_000))
+        .unwrap();
+    pool.run_until_stalled();
+    assert_eq!(Accumulators::dropped(), dropped, "the call holds its value");
+    tembra_orb_native_fixture::release_additions();
+    let (added, accumulator) = pool.run_until(added).unwrap().unwrap();
+    assert_eq!(added.unwrap(), (5, 7));
+    pool.run_until(host.settled());
+    assert_eq!(
+        Accumulators::dropped(),
+        dropped + 1,
+        "closed with the retired revision"
+    );
+    let (refused, accumulator) = pool
+        .run_until(host.root("host", move |context| {
+            async move {
+                let refused = accumulator
+                    .call_portable::<_, (i64, i64)>(&context, ADD_LATER, (1_i64,))
+                    .await
+                    .unwrap_err();
+                Ok((refused, accumulator))
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(
+        (refused.code, refused.reason.as_str()),
+        (Code::Gone, "resource"),
+        "{refused}"
+    );
+    drop(accumulator);
+    assert_eq!(Accumulators::dropped(), dropped + 1, "closed once");
+    reference.release().unwrap();
+    pool.run_until(host.close()).unwrap();
 }

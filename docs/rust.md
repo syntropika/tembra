@@ -343,11 +343,15 @@ function without `self` refuses one lent to it as a compiled exporter's does: `I
 when it issues a resource, as `Payload::into_data` refuses it, and `Invalid/local_value` when it
 takes and returns data only, as `method` and `method_with` refuse it. The receiver reads the
 value across the call's awaits, since the call pins it, but cannot keep it alive beyond the call.
-The value belongs to the object version that issued it, as a guest
-instance belongs to its Store: it closes, running its `Drop`, once with its last owner, or when
-that object is reloaded or released or the host closes, whatever handles remain. A later call
-through a remaining handle answers as for a compiled exporter: `Gone/resource` after a reload,
-`Gone/object` once the object is released, and `Cancelled/root` from a root the close cancelled.
+A method that borrows its `self` across its awaits, as an `async` method does, takes it with
+`Receiver::guard`: the guard reads as the value, a `&Session` here, and keeps it alive while the
+method holds it, until the call ends, also when the issuing object is reloaded meanwhile. The
+value belongs to the object version that issued it, as a guest instance belongs to its Store: it
+closes, running its `Drop`, once with its last owner, or when that object is reloaded or released
+or the host closes, whatever handles remain; held by a method, it closes once that call ends. A
+later call through a remaining handle answers as for a compiled exporter: `Gone/resource` after a
+reload, `Gone/object` once the object is released, and `Cancelled/root` from a root the close
+cancelled.
 
 This transport covers compiled and native exporters with native or compiled callers through
 the Rust facade. Source Orbs and the Node/mobile JSON ports refuse inter-Orb resource contracts until
