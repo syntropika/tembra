@@ -279,8 +279,8 @@ Then run the recipe of the area. Each area below names its crates and its recipe
   workspace whose application enables `host` beside a guest, a library whose other targets hold
   Orb modules, and the facade with each feature alone;
 - `just test-orb-both-ways`, which builds each Orb crate the way the other parts do not: the
-  examples' Orb crates and the async and host feature fixtures natively, with the facade's `host`,
-  and the native fixture for wasm32.
+  examples' Orb crates, the async and host feature fixtures and the runtime fixture's default
+  module natively, with the facade's `host`, and the native fixture for wasm32.
 
 `just ci` also fails when the parts change the tree: a modified or deleted file, or a new file
 that `.gitignore` does not list. It compares the tree after the parts with the tree before them,

@@ -235,11 +235,19 @@ test-orb-both-ways:
         esac
     done
     # Natively, the async and host feature fixtures, whose `host` feature puts the runtime in their
-    # lockfiles. Not the runtime fixture, whose modules `just test-orb-macro` builds and calls
-    # natively too, nor the parity fixture, which `just test-orb-parity` builds both ways.
+    # lockfiles. Not the parity fixture, which `just test-orb-parity` builds both ways.
     for fixture in async-fixture host-feature-fixture; do
         echo "== crates/orb-macro/$fixture natively"
         cargo build --locked --manifest-path "crates/orb-macro/$fixture/Cargo.toml" --features host --target-dir "$target"
+    done
+    # Natively, the runtime fixture's default module `guest`, std and `no-std`, with the facade's
+    # `host` through the fixture's `native` feature. `just test-orb-macro` builds `guest` only as a
+    # component. It builds natively, std, and tests each module that a feature selects in place of
+    # `guest`, but `flagged`, whose native build fails today: see the native fixture's
+    # `tests/flags.rs`.
+    for features in native native,no-std; do
+        echo "== crates/orb-macro/runtime-fixture natively, with $features"
+        cargo build --locked --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --features "$features" --target-dir "$target"
     done
     # For wasm32, the native fixture, which its tests build natively. Checked, not built: two Orbs
     # of one crate export one interface of the kernel, whose symbols the crate would define twice;
