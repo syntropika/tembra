@@ -1,0 +1,6 @@
+# Files that tools write. Reviews and diff statistics can skip them.
+Cargo.lock linguist-generated
+bun.lock linguist-generated
+
+# The macro and `cargo tembra build` write each example's contract.
+examples/**/contract/** linguist-generated
