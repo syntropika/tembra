@@ -98,10 +98,15 @@ mod tests {
             json!({"tag": "err", "val": "mallory may not count"})
         );
         assert_eq!(
+            call(&mut pool, &host, &counter, "alice", "read", json!([])),
+            json!({"total": 5, "steps": 2})
+        );
+        assert_eq!(
             *counter.state::<Value>().unwrap().value().unwrap(),
             json!({"count": {"total": 5, "steps": 2}})
         );
         counter.release().unwrap();
         pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
     }
 }

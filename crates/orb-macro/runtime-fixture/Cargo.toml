@@ -36,9 +36,10 @@ archive = []
 # The next revision of the Orb that `versioned` or `lamps` selects.
 revised = []
 # The facade's `host`, for the native tests of the selected module, which install its `orb()` in a
-# native host. `native-sdk` serves `renamed`, whose crate names the facade `sdk`: Cargo refuses a
-# build whose features name the facade by both names, even through `?`.
-native = ["tembra?/host"]
+# native host, and its `authoring`, with which they read the module's WIT as a contract.
+# `native-sdk` serves `renamed`, whose crate names the facade `sdk`: Cargo refuses a build whose
+# features name the facade by both names, even through `?`.
+native = ["tembra?/host", "tembra?/authoring"]
 native-sdk = ["sdk?/host"]
 
 [dependencies]

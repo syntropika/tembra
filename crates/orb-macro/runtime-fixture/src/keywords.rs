@@ -1,6 +1,6 @@
 /// Names that are keywords of WIT, which the WIT writes with its `%` escape: the module `list`,
 /// whose world is `%list` and whose contract is `contract/%list.wit`, the method `record`, and the
-/// flag `r#type`, which enters the WIT as `%type`. The native fixture holds the same module.
+/// flag `r#type`, which enters the WIT as `%type`.
 #[cfg_attr(
     feature = "no-std",
     tembra::orb(package = "example:keywords@1.0.0", no_std)
@@ -38,16 +38,38 @@ pub mod list {
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::list::{self, Marks};
-    use crate::native::{call, hosting, ready};
+    use crate::native::{ORB, call, hosting, ready};
     use futures::FutureExt;
     use serde_json::json;
+    use tembra::contracts::{Contract, ModuleContract};
 
-    /// The module `list` is the world `%list`, and its Orb answers the method `record` under that
-    /// name, through the client and portably, the flag `r#type` crossing as `type`.
+    /// The module `list` is the world `%list`, whose contract is `contract/%list.wit`, the method
+    /// `record` is `%record` and the flag `r#type` is `%type`; the Orb declares what the plan of
+    /// that world computes.
+    #[test]
+    fn names_that_are_wit_keywords_are_escaped_natively() {
+        let words: String = list::WIT.split_whitespace().collect();
+        for expected in [
+            "world%list{exportwords;}",
+            "flagsmarks{bold,%type,}",
+            "%record:func(word:string,marks:marks)->marks;",
+        ] {
+            assert!(words.contains(expected), "{expected}\n{}", list::WIT);
+        }
+        let module = ModuleContract::new(list::WIT, None).unwrap();
+        assert_eq!(module.world(), "%list");
+        let expected = Contract::from_source("%list.wit", list::WIT, Some("%list"))
+            .unwrap()
+            .plan(ORB, 1, &Default::default())
+            .unwrap()
+            .orb;
+        assert_eq!(list::orb().unwrap().declaration(), &expected);
+    }
+
+    /// The Orb answers the method `record` under that name, through the client and portably, the
+    /// flag `r#type` crossing as `type`.
     #[test]
     fn names_that_are_wit_keywords_answer_natively() {
-        let words: String = list::WIT.split_whitespace().collect();
-        assert!(words.contains("world%list{exportwords;}"), "{}", list::WIT);
         let (mut pool, host) = hosting(list::orb().unwrap());
         let reference = ready(&mut pool, &host, "example:keywords/words@1.0.0");
         let client = list::WordsClient::new(reference.clone());

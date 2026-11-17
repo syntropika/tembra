@@ -38,7 +38,7 @@ A change keeps each invariant below. Each one names the tests that guard it, and
   - `the_facade_checks_for_wasm32_with_macros` in `crates/orb-macro/tests/configurations.rs` (`just test-configurations`).
 - A part that the native side does not support never fails a build, whatever runtime features the build enables. The module compiles, and its `orb()` names the part. Only a host that installs the Orb fails.
   - `crates/orb-macro/native-fixture/tests/unsupported.rs` (`just test-native-fixture`).
-  - The native tests of the modules `gatehouse`, `system` and `io` in `crates/orb-macro/runtime-fixture/src` (`just test-orb-macro`).
+  - The native tests of the modules `gatehouse`, `system` and `io`, and of `notebook` with its `archive` feature, in `crates/orb-macro/runtime-fixture/src` (`just test-orb-macro`).
   - `a_workspace_whose_application_enables_host_checks_beside_a_guest` in `crates/orb-macro/tests/configurations.rs`, on the mixed workspace `crates/orb-macro/config-fixtures/workspace` (`just test-configurations`).
   - The native hosts in `crates/orb-macro/config-fixtures/native-hosts` (`just test-orb-both-ways`).
 - Generated code reaches the facade only by the name that `crate = ".."` gives it, and reaches the module's items by paths that the module can see.
@@ -52,7 +52,7 @@ A change keeps each invariant below. Each one names the tests that guard it, and
 - `Host` releases on close every callback it keeps, so that a callback holding the host does not keep it alive.
   - `closing_the_host_releases_its_observer` in `crates/tembra/tests/call_context.rs` (`cargo test --locked -p tembra`).
 - Every option that the macro's guide, `crates/orb-macro/README.md`, documents has a test that builds it, both ways where the guide promises both.
-  - The modules of `crates/orb-macro/runtime-fixture`, built as components and natively (`just test-orb-macro`).
+  - The modules of `crates/orb-macro/runtime-fixture` (`just test-orb-macro`): the default one, `guest`, as a component only; each other one, under its feature, as a component, whose test calls it, and natively, where its native tests call it. The native build of `flagged` fails on `main`, so its native test runs from `crates/orb-macro/native-fixture/tests/flags.rs`, ignored until #10. `just test-orb-both-ways` builds `guest` natively.
   - Each Orb crate of the examples and the fixtures, built the way the other recipes do not (`just test-orb-both-ways`).
   - The `cargo tembra` commands, run on the crates they write (`just test-cargo-tembra`).
 - The full verification leaves the tree as it found it: no modified file, and no new file that `.gitignore` does not list.
