@@ -1608,7 +1608,11 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    primary package, the macro also writes it to the crate's `contract/<world>.wit`, the consumed
    packages nested whole after it and the standard packages it depends on in `contract/deps/`:
    the files `cargo tembra build` writes, rewritten only when their content changes, so a crate
-   used natively has the contract a compiled consumer reads, and a dependency's is never written;
+   used natively has the contract a compiled consumer reads, and a dependency's is never written.
+   Writing it, the macro removes any other `.wit` of `contract/` whose package, name and version,
+   is the module's, as the contract of a former name of its world, so each Orb module of a crate
+   needs a package of its own: two modules of one package remove each other's contract, silently,
+   and `contract/` keeps the one expanded last;
 2. the same text as a `tembra:wit` custom section of the Wasm module, and the manifest, the
    declared hooks with their composition, the contributions with their priorities, the
    services that chose a lifetime or a linger, the views of the interfaces imported by key with
