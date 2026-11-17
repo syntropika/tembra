@@ -220,6 +220,51 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
 
 ## Checks
 
+### Checks for one change
+
+Run these while you change one area. They cover less than `just ci` and take less time.
+
+First check the format of the change:
+
+```sh
+cargo fmt --all --check
+bun run format:check
+```
+
+Then run Clippy and the tests of each Rust crate you change, with all features, as CI does:
+
+```sh
+cargo clippy --locked -p <crate> --all-features --all-targets -- -D warnings
+cargo test --locked -p <crate> --all-features
+```
+
+Then run the recipe of the area. Each area below names its crates and its recipe:
+
+- The macro: `tembra-orb-macro` and `tembra-orb-native-fixture`. Clippy and the tests of both take
+  about 80 seconds cold and 40 seconds warm on 16 cores. Run `just test-orb-macro`, which runs the
+  macro's guests as components. A change to what the macro generates also needs the recipe that
+  builds it the way users do: `just test-orb-examples` for the examples,
+  `just test-configurations` for the features and targets that only Cargo sets up,
+  `just test-orb-parity` for the answers of native and compiled Orbs, and
+  `just test-orb-both-ways` for each Orb crate built the other way.
+- The runtime and the executor: `tembra-core`, `tembra-runtime`, `tembra` and
+  `tembra-executor-wasm`. Run `just test-hook-lifecycle`, and `just test-no-hooks` when you change
+  feature gates or shared bridge operations.
+- The contracts and `cargo tembra`: `tembra-contracts`, `tembra-contracts-wasm` and
+  `cargo-tembra`. Run `just test-cargo-tembra`.
+- The TypeScript SDK: no crate. Build the engines and the SDK, then check the types, lint and
+  test the SDK:
+
+  ```sh
+  just build-node build-wasm build-sdk
+  bun run typecheck
+  bun run lint
+  bun run --cwd packages/ts/sdk test
+  bun run --cwd packages/ts/sdk test:node
+  ```
+
+### The full verification
+
 `just ci` runs the full verification. It runs these parts in order:
 
 - `just check`, described below;
@@ -250,6 +295,8 @@ A new part is a recipe in `ci` and a line in the job matrix of the
 just ci
 bun run test:browser
 ```
+
+### Commands
 
 `just check` builds the engines and SDK. It checks formatting, TypeScript types and dependencies.
 It runs Clippy, oxlint, Rust tests, SDK tests and React Native adapter tests.
