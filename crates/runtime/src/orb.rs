@@ -5,7 +5,6 @@ use crate::{
 };
 use futures::{FutureExt, future::LocalBoxFuture};
 use serde::{Serialize, de::DeserializeOwned};
-#[cfg(feature = "hooks")]
 use serde_json::Value;
 #[cfg(feature = "views")]
 use std::collections::BTreeSet;
@@ -36,6 +35,17 @@ pub struct Service<E> {
     pub(crate) metadata: core::Service,
     pub(crate) implementation: Implementation,
     marker: std::marker::PhantomData<E>,
+}
+
+/// How a method bound with [`Service::method_with`] reads its portable arguments and writes its
+/// result, in place of serde, so its Rust types need no serde implementation.
+pub struct Codec<A, R> {
+    /// Read the arguments' JSON, or refuse it with a message: the call then fails with
+    /// [`Reason::Arguments`] before its callback runs.
+    pub decode: fn(Value) -> std::result::Result<A, String>,
+    /// Write the result as JSON, or refuse it with a message: the call then fails with
+    /// [`Reason::Result`].
+    pub encode: fn(R) -> std::result::Result<Value, String>,
 }
 
 impl<E: 'static> Service<E> {
@@ -118,7 +128,7 @@ impl<E: 'static> Service<E> {
                     .and_then(|environment| {
                         // Serde methods take data only; capabilities are refused and closed.
                         let arguments =
-                            serde_json::from_value(arguments.into_data()?).map_err(|error| {
+                            serde_json::from_value(arguments.data_only()?).map_err(|error| {
                                 Error::invalid(Reason::Arguments, error.to_string())
                             })?;
                         Ok(portable(environment, context, arguments))
@@ -127,6 +137,62 @@ impl<E: 'static> Service<E> {
                     serde_json::to_value(result?.await?)
                         .map(|value| Payload::data(value).into())
                         .map_err(|error| Error::invalid(Reason::Result, error.to_string()))
+                }
+                .boxed_local()
+            }),
+        );
+        self.metadata.methods.insert(name);
+        self
+    }
+
+    /// Bind one callback to a typed local entrypoint, as [`Service::method`] does, and to a
+    /// portable entrypoint that reads the arguments and writes the result with `codec` instead
+    /// of serde. Local calls never run the codec.
+    pub fn method_with<A, R, F, Fut>(
+        mut self,
+        name: impl Into<String>,
+        handle: F,
+        codec: Codec<A, R>,
+    ) -> Self
+    where
+        A: 'static,
+        R: 'static,
+        F: Fn(Rc<E>, Context, A) -> Fut + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+    {
+        let name = name.into();
+        let handle = Rc::new(handle);
+        let portable = handle.clone();
+        let Codec { decode, encode } = codec;
+        self.implementation.local.insert(
+            name.clone(),
+            Rc::new(move |environment, context, arguments| {
+                let result = environment
+                    .downcast::<E>()
+                    .map_err(|_| type_error())
+                    .and_then(|environment| {
+                        let arguments = arguments.downcast::<A>().map_err(|_| type_error())?;
+                        Ok(handle(environment, context, *arguments))
+                    });
+                async move { Ok(Box::new(result?.await?) as Box<dyn Any>) }.boxed_local()
+            }),
+        );
+        self.implementation.portable.insert(
+            name.clone(),
+            Rc::new(move |environment, context, arguments: Payload| {
+                let result = environment
+                    .downcast::<E>()
+                    .map_err(|_| type_error())
+                    .and_then(|environment| {
+                        // Codec methods take data only; capabilities are refused and closed.
+                        let arguments = decode(arguments.data_only()?)
+                            .map_err(|message| Error::invalid(Reason::Arguments, message))?;
+                        Ok(portable(environment, context, arguments))
+                    });
+                async move {
+                    encode(result?.await?)
+                        .map(|value| Payload::data(value).into())
+                        .map_err(|message| Error::invalid(Reason::Result, message))
                 }
                 .boxed_local()
             }),
@@ -215,6 +281,27 @@ pub(crate) fn type_error() -> Error {
         Reason::RustType,
         "native argument or result type does not match the method",
     )
+}
+
+/// The Orb that answers what a native Orb consumes from another: the name and API version it is
+/// installed under. An Orb that `#[tembra::orb]` generates takes one per imported interface and
+/// per hook it contributes to, as the fields of its `Providers`, which `orb(..)` requires.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Provider {
+    /// The provider's Orb name.
+    pub name: String,
+    /// The API version the provider is installed at.
+    pub api_version: u32,
+}
+
+impl Provider {
+    /// The Orb `name` at `api_version`.
+    pub fn new(name: impl Into<String>, api_version: u32) -> Self {
+        Self {
+            name: name.into(),
+            api_version,
+        }
+    }
 }
 
 /// Native Orb declarations compile with the application and dispatch typed Rust callbacks.

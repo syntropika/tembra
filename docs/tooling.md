@@ -351,6 +351,40 @@ Keys are opaque to Tembra. The application defines their meaning and authorizes 
 a key grants no permission and creates no separate Wasm heap. Native and prepared browser hosts
 use this same model. See the [compiled fixture](../crates/executor-wasm/rust-keyed-router/src/lib.rs).
 
+## Typed clients for host applications
+
+A host acquires a WIT service by name and receives an untyped reference with kebab-case method
+keys (`reference["resource-value"]()`). `client()` writes a typed client of every exported
+interface of a contract, from the same contract `build()` reads:
+
+```ts
+import { client } from "@syntropika/tembra-sdk/tooling";
+
+await client({ wit: "contract.wit", world: "calculator", out: "src/clients" });
+```
+
+Each exported interface becomes `<out>/<namespace>-<package>-<interface>.ts`, a module the
+application commits and regenerates when the contract changes. It exports the interface identity,
+the service's type (`Calculation` for `calculation`, with a `_` where the module already uses the
+name, as in `Context_` and `Promise_`) and `get`, which acquires the service of an Orb through a
+`Host` or a `Context` and wraps the reference with camelCase methods that call the kebab-case keys:
+
+```ts
+import { get } from "./clients/example-integrated-calculation.ts";
+
+const calculation = await get(host, { orb: "calculator", key: "main" });
+const total: number = await calculation.sum({ values: [3, 4, 5] });
+await calculation.resourceValue();
+calculation.reference.release();
+```
+
+The types are the values a host sends and receives: camelCase record fields, `{ tag, val }` for
+variants and results (with the declared error type), `T | null` for options, plain arrays for
+lists, `bigint` for `u64` and `s64`. Every method takes an optional `Context` last, leaves it out
+when it is `undefined`, and returns a promise. The wrapper adds no other behaviour: the contract
+still checks every value, and an interface that declares WIT resources is refused, since a host
+cannot call it by name.
+
 ## Install an artifact
 
 Applications load artifacts by location. Default SDK loaders accept only `.wasm` files.

@@ -1,0 +1,17 @@
+package example:meter@1.0.0;
+
+/// A meter another Orb keeps: each reading adds to its total. Every function is asynchronous, so a
+/// native Orb imports it as a component does.
+interface gauge {
+  /// One reading: an amount, counted `times` over.
+  record reading {
+    amount: u32,
+    times: u32,
+  }
+
+  /// Add a reading and return the total after it.
+  add: async func(reading: reading) -> u64;
+
+  /// The total so far.
+  total: async func() -> u64;
+}

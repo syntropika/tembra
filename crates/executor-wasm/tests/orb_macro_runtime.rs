@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
+    path::Path,
     rc::Rc,
 };
 use tembra::{
@@ -14,6 +15,7 @@ use tembra::{
 use tembra_executor_wasm::{
     Binding, Contract, Deterministic, Engine, Install, Limits, SystemCapability,
 };
+use tembra_orb_native_fixture::calculator;
 use wit_component::WitPrinter;
 use wit_parser::Resolve;
 
@@ -222,6 +224,20 @@ fn guests() -> [Guest; 2] {
             "interfacelending{useexample:shelves/shelf@1.0.0.{book};",
             "importshelf-ref;",
             "exportexample:shelves/shelf@1.0.0;",
+            // A case with named fields enters as a record of its own, next to the variant.
+            "recordoutcome-refused{reason:string,severity:u32,}",
+            "variantoutcome{accepted,refused(outcome-refused),deferred(u32),}",
+            "recorddecision{reviewer:string,outcome:outcome,}",
+            // Free JSON is a string holding its text, alone, in a list, in an option and in a
+            // record of the module.
+            "recordnote{title:string,body:string,}",
+            "annotated:func(document:string,note:string)->string;",
+            "notes:func(documents:list<string>)->list<note>;",
+            "object:func(note:note)->option<string>;",
+            // A newtype is the WIT type of its field, alone, in a list, in a tuple and in a record.
+            "recordmeasure{amount:f64,unit:string,}",
+            "measured:func(amount:f64,unit:string)->measure;",
+            "tally:func(measures:list<measure>,unit:string)->tuple<u32,list<string>>;",
         ] {
             assert!(words.contains(expected), "{name}: {expected}\n{wit}");
         }
@@ -317,6 +333,9 @@ fn execute(engine: Engine) {
         read(&mut pool, &host, name, counted);
         shelve(&mut pool, &host, name);
         lend(&mut pool, &host, name);
+        review(&mut pool, &host, name);
+        document(&mut pool, &host, name);
+        measure(&mut pool, &host, name);
     }
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
@@ -448,6 +467,87 @@ fn walk(pool: &mut LocalPool, host: &Host, name: &str) {
         "{name}"
     );
     walker.release().unwrap();
+}
+
+/// A native Orb of the macro keeps a `#[state]` as the JSON a component of the macro keeps for the
+/// same value: the text serde writes, as the kernel reads it. The native fixture's walker keeps a
+/// `Position` with the fields and case names of the runtime fixture's, so the two states start
+/// alike, and two walks that end in the same place, each with its fixture's moves, leave the same
+/// JSON, which a host reads from either object the same way.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_native_state_keeps_the_json_of_a_component() {
+    let bytes = component("TEMBRA_WASM_ORB_MACRO_STD");
+    let (_, contract) = contract(&bytes);
+    let roles = contract.embedded_roles(&bytes).unwrap();
+    let artifact = contract
+        .component_artifact(&bytes, "standard", 1, &roles)
+        .unwrap();
+    let engine = Engine::new(Limits::default()).unwrap();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine.load(&artifact, bound(granted())).unwrap(),
+        counters(),
+        builders(),
+        shelves(),
+        ledger(&contract),
+        calculator::orb().unwrap(),
+    ])
+    .unwrap();
+    let mut walker = |service: &str| {
+        let walker = Rc::new(host.get(service, vec!["main".into()], "alice").unwrap());
+        pool.run_until(walker.ready()).unwrap();
+        walker
+    };
+    let compiled = walker("standard::example:runtime/walker@1.0.0");
+    let native = walker("calculator::example:calculator/walker@1.0.0");
+    let (compiled_state, native_state) = (
+        compiled.state::<Value>().unwrap(),
+        native.state::<Value>().unwrap(),
+    );
+    assert_eq!(
+        *native_state.value().unwrap(),
+        *compiled_state.value().unwrap()
+    );
+    counting_call(
+        &mut pool,
+        &host,
+        &compiled,
+        "alice",
+        "walk",
+        json!([[
+            {"tag": "turn", "val": "east"},
+            {"tag": "step", "val": 3},
+            {"tag": "jump", "val": {"x": -1, "y": 2}},
+            {"tag": "rest"},
+        ]]),
+    );
+    counting_call(
+        &mut pool,
+        &host,
+        &native,
+        "alice",
+        "walk",
+        json!([[
+            {"tag": "step", "val": 2},
+            {"tag": "turn", "val": "west"},
+            {"tag": "step", "val": 1},
+            {"tag": "turn", "val": "east"},
+        ]]),
+    );
+    let walked = json!({"at": {"x": -1, "y": 2}, "facing": "East", "moves": 4});
+    assert_eq!(*compiled_state.value().unwrap(), walked);
+    assert_eq!(*native_state.value().unwrap(), walked);
+    assert_eq!(
+        compiled.state_snapshot().unwrap().1,
+        native.state_snapshot().unwrap().1
+    );
+    compiled.release().unwrap();
+    native.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
 }
 
 /// Drive the chance of the Orb `name`, which calls WASI through the interfaces its attribute
@@ -1183,4 +1283,377 @@ fn lend(pool: &mut LocalPool, host: &Host, name: &str) {
         "{name}: {refused}"
     );
     lending.release().unwrap();
+}
+
+/// Drive the reviews of the Orb `name`: a case with named fields crosses the boundary both ways as
+/// a variant case whose payload is the record of the case, `{tag, val}` with the record as its
+/// value on the portable boundary, like any case with a payload: alone, in a record of the module,
+/// in a list, in an option and in a result.
+fn review(pool: &mut LocalPool, host: &Host, name: &str) {
+    let reviews = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/reviews@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(reviews.ready()).unwrap();
+    let call = |pool: &mut LocalPool, method: &'static str, arguments: Value| {
+        counting_call(pool, host, &reviews, "alice", method, arguments)
+    };
+    let refused = json!({"tag": "refused", "val": {"reason": "empty", "severity": 3}});
+    let deferred = json!({"tag": "deferred", "val": 2});
+    let accepted = json!({"tag": "accepted"});
+    assert_eq!(
+        call(pool, "decide", json!(["ada", ""])),
+        json!({"reviewer": "ada", "outcome": refused}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "decide", json!(["bob", "hi"])),
+        json!({"reviewer": "bob", "outcome": deferred}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "decide", json!(["cy", "long enough"])),
+        json!({"reviewer": "cy", "outcome": accepted}),
+        "{name}"
+    );
+    let decisions = json!([
+        {"reviewer": "ada", "outcome": refused},
+        {"reviewer": "bob", "outcome": deferred},
+        {"reviewer": "dee", "outcome": {"tag": "refused", "val": {"reason": "off topic", "severity": 1}}},
+    ]);
+    assert_eq!(
+        call(pool, "reasons", json!([decisions])),
+        json!(["ada: empty (3)", "dee: off topic (1)"]),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "worst", json!([[accepted, deferred, refused], null])),
+        json!({"tag": "ok", "val": refused}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "worst", json!([[], deferred])),
+        json!({"tag": "ok", "val": deferred}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "worst", json!([[], null])),
+        json!({"tag": "err", "val": "no outcome"}),
+        "{name}"
+    );
+    reviews.release().unwrap();
+}
+
+/// Drive the documents of the Orb `name`: free JSON, `serde_json::Value`, crosses the boundary
+/// both ways as a WIT `string` holding its JSON text, alone, in a list, in an option and in a
+/// record of the module. Each value crosses as its text, which the component reads into a
+/// `serde_json::Value` and writes back, its object's keys in order.
+fn document(pool: &mut LocalPool, host: &Host, name: &str) {
+    let documents = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/documents@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(documents.ready()).unwrap();
+    let call = |pool: &mut LocalPool, method: &'static str, arguments: Value| {
+        counting_call(pool, host, &documents, "alice", method, arguments)
+    };
+    assert_eq!(
+        call(
+            pool,
+            "annotated",
+            json!([r#"{"tags":["a","b"],"count":2}"#, "seen"])
+        ),
+        json!(r#"{"count":2,"note":"seen","tags":["a","b"]}"#),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "annotated", json!(["[1,2]", "seen"])),
+        json!("[1,2]"),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "notes", json!([[r#"{"k":true}"#, "null"]])),
+        json!([
+            {"title": "0", "body": r#"{"k":true}"#},
+            {"title": "1", "body": "null"},
+        ]),
+        "{name}"
+    );
+    assert_eq!(
+        call(
+            pool,
+            "object",
+            json!([{"title": "t", "body": r#"{"k":1}"#}])
+        ),
+        json!(r#"{"k":1}"#),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "object", json!([{"title": "t", "body": "[1]"}])),
+        Value::Null,
+        "{name}"
+    );
+    documents.release().unwrap();
+}
+
+/// Text that holds no JSON makes the component's method panic, since reading it into the author's
+/// `serde_json::Value` has no error channel there, and the panic traps the component, as any panic
+/// in a component method does. The caller sees a component trap, `unavailable`, and the revision
+/// is retired for every caller until a reload installs the Orb again: the same object's next call
+/// fails, whatever its JSON, and so does another principal's object, which no longer activates.
+/// After the reload both are served. A native Orb fails only the call, as its arguments.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn text_without_json_traps_the_component_until_a_reload() {
+    let bytes = component("TEMBRA_WASM_ORB_MACRO_STD");
+    let (_, contract) = contract(&bytes);
+    let engine = Engine::new(Limits::default()).unwrap();
+    let load = || {
+        let roles = contract.embedded_roles(&bytes).unwrap();
+        let artifact = contract
+            .component_artifact(&bytes, "standard", 1, &roles)
+            .unwrap();
+        engine.load(&artifact, bound(granted())).unwrap()
+    };
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        load(),
+        counters(),
+        builders(),
+        shelves(),
+        ledger(&contract),
+    ])
+    .unwrap();
+    let service = "standard::example:runtime/documents@1.0.0";
+    let annotated =
+        |pool: &mut LocalPool, reference: &Rc<Reference>, principal: &'static str, text: &str| {
+            let reference = reference.clone();
+            let arguments = json!([text, "seen"]);
+            pool.run_until(host.root(principal, move |context| {
+                async move {
+                    reference
+                        .call_portable::<_, Value>(&context, "annotated", arguments)
+                        .await
+                }
+                .boxed_local()
+            }))
+        };
+    let trapped = |error: tembra::Error, reason: &str| {
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            (Code::Unavailable, reason),
+            "{error}"
+        );
+        assert!(error.message.starts_with("component trap"), "{error}");
+    };
+    let alice = Rc::new(host.get(service, vec!["main".into()], "alice").unwrap());
+    pool.run_until(alice.ready()).unwrap();
+    assert_eq!(
+        annotated(&mut pool, &alice, "alice", "{}").unwrap(),
+        json!(r#"{"note":"seen"}"#)
+    );
+    trapped(
+        annotated(&mut pool, &alice, "alice", "{").unwrap_err(),
+        "wasm_executor",
+    );
+    trapped(
+        annotated(&mut pool, &alice, "alice", "{}").unwrap_err(),
+        "wasm_executor_quarantined",
+    );
+    let bob = Rc::new(host.get(service, vec!["other".into()], "bob").unwrap());
+    trapped(
+        pool.run_until(bob.ready()).unwrap_err(),
+        "wasm_executor_quarantined",
+    );
+    let _ = bob.release();
+    pool.run_until(host.settled());
+    pool.run_until(host.reload(vec![load()], 5000)).unwrap();
+    assert_eq!(
+        annotated(&mut pool, &alice, "alice", "[1]").unwrap(),
+        json!("[1]")
+    );
+    let bob = Rc::new(host.get(service, vec!["other".into()], "bob").unwrap());
+    pool.run_until(bob.ready()).unwrap();
+    assert_eq!(
+        annotated(&mut pool, &bob, "bob", "{}").unwrap(),
+        json!(r#"{"note":"seen"}"#)
+    );
+    bob.release().unwrap();
+    alice.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
+
+/// Drive the units of the Orb `name`: a newtype is the WIT type of its field, so each crosses as
+/// its field, alone, in a list, in a tuple and in a record of the module, which the macro keeps
+/// the author's, and comes back from the newtype's `TryFrom` the same.
+fn measure(pool: &mut LocalPool, host: &Host, name: &str) {
+    let units = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/units@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(units.ready()).unwrap();
+    for (method, arguments, result) in [
+        (
+            "measured",
+            json!([2.5, "m"]),
+            json!({"amount": 2.5, "unit": "m"}),
+        ),
+        (
+            "tally",
+            json!([
+                [{"amount": 1.0, "unit": "m"}, {"amount": 2.0, "unit": "s"}],
+                "m"
+            ]),
+            json!([1, ["s"]]),
+        ),
+    ] {
+        assert_eq!(
+            counting_call(pool, host, &units, "alice", method, arguments),
+            result,
+            "{name} {method}"
+        );
+    }
+    units.release().unwrap();
+}
+
+/// A newtype that only a refusing `TryFrom` makes is native only: a component has no error channel
+/// for an argument refused before its method runs, only a trap, which would retire its revision for
+/// every caller until a reload, so it reads a newtype through `From`. A component build of a module
+/// taking such a newtype fails, and the error names the newtype, at its declaration, and says why.
+/// The runtime fixture's `native-only-newtype` feature adds such a module; the build shares the
+/// fixture's target directory, where `just test-orb-macro` built its components.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_component_build_refuses_a_newtype_only_try_from_makes() {
+    let built = std::env::var_os("TEMBRA_WASM_ORB_MACRO_STD")
+        .unwrap_or_else(|| panic!("TEMBRA_WASM_ORB_MACRO_STD is required"));
+    let target = Path::new(&built)
+        .parent()
+        .expect("the fixture's target directory");
+    let manifest =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/runtime-fixture/Cargo.toml");
+    let output = std::process::Command::new(env!("CARGO"))
+        .args([
+            "build",
+            "--locked",
+            "--release",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--features",
+            "native-only-newtype",
+        ])
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(target)
+        .output()
+        .unwrap();
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{errors}");
+    for expected in [
+        "error[E0277]: `Symbol` is native only: a component reads it from its field through `From<std::string::String>`, which `Symbol` does not implement",
+        "pub struct Symbol(String);",
+        "a newtype a component takes, which only `TryFrom` makes",
+        "a component has no error channel for an argument refused before its method runs, only a trap, which would retire its revision for every caller until a reload",
+    ] {
+        assert!(errors.contains(expected), "{expected}\n{errors}");
+    }
+}
+
+/// A build for wasm32 is a component whatever the facade's features. A guest gets `host` when its
+/// `tembra` keeps the default features, or from another crate of the build; its component keeps the
+/// bindings' `context` all the same, and answers each call as the guest built without `host` does,
+/// where the native `context` would find no call to read and trap the revision. The host feature
+/// fixture is built both ways into the fixtures' target directory, where `just test-orb-macro`
+/// built their components.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_wasm32_guest_with_the_host_feature_answers_as_a_component() {
+    let built = std::env::var_os("TEMBRA_WASM_ORB_MACRO_STD")
+        .unwrap_or_else(|| panic!("TEMBRA_WASM_ORB_MACRO_STD is required"));
+    let target = Path::new(&built)
+        .parent()
+        .expect("the fixtures' target directory");
+    let manifest =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/host-feature-fixture/Cargo.toml");
+    let answers = [&[][..], &["--features", "host"]].map(|features| {
+        let output = std::process::Command::new(env!("CARGO"))
+            .args([
+                "rustc",
+                "--locked",
+                "--release",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--crate-type",
+                "cdylib",
+            ])
+            .args(features)
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(target)
+            .args(["--", "-Clinker=wasm-component-ld"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{features:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(
+            target.join("wasm32-unknown-unknown/release/tembra_orb_host_feature_fixture.wasm"),
+        )
+        .unwrap();
+        let contract =
+            Contract::from_source("probe.wit", &embedded_wit(&bytes), Some("probe")).unwrap();
+        let artifact = contract
+            .component_artifact(&bytes, "probe", 1, &Default::default())
+            .unwrap();
+        let engine = Engine::new(Limits::default()).unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![engine.load(&artifact, Install::default()).unwrap()])
+            .unwrap();
+        let caller = Rc::new(
+            host.get(
+                "probe::example:probe/caller@1.0.0",
+                vec!["main".into()],
+                "alice",
+            )
+            .unwrap(),
+        );
+        pool.run_until(caller.ready()).unwrap();
+        // A trap would fail the first call and retire the revision for the second.
+        let answers = [(); 2].map(|()| {
+            let caller = caller.clone();
+            pool.run_until(host.root("alice", move |context| {
+                async move {
+                    caller
+                        .call_portable::<_, Value>(&context, "principal", json!([]))
+                        .await
+                }
+                .boxed_local()
+            }))
+            .map_err(|error| (error.code, error.reason))
+        });
+        caller.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        answers
+    });
+    assert_eq!(answers[0], [Ok(json!("alice")), Ok(json!("alice"))]);
+    assert_eq!(answers[1], answers[0], "built with `host`");
 }

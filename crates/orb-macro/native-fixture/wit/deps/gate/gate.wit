@@ -1,0 +1,20 @@
+package example:gate@1.0.0;
+
+/// The hook a gate declares: a waterfall, each contributor may change the admission or block it,
+/// in plan order.
+interface guard {
+  /// One admission: the value, and whether a contributor blocked it.
+  record admission {
+    value: s32,
+    blocked: bool,
+  }
+
+  apply: func(input: admission) -> admission;
+}
+
+/// The gate's service, which runs its hook over each value.
+interface admissions {
+  use guard.{admission};
+
+  admit: func(value: s32) -> admission;
+}

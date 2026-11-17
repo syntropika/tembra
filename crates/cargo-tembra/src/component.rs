@@ -6,18 +6,14 @@ use std::{
     path::{Path, PathBuf},
 };
 use tembra_contracts::{
-    ComponentRoles, Contract, HTTP_HANDLER, Item, Lifetime, Model, ServicePolicy, SystemCapability,
-    guest, system_capability,
+    ComponentRoles, Contract, HTTP_HANDLER, Item, Lifetime, Model, ModuleContract, ServicePolicy,
+    SystemCapability, guest, system_capability,
 };
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
 use wit_parser::{
-    FunctionKind, InterfaceId, PackageId, PackageName, Resolve, UnresolvedPackageGroup, WorldId,
-    WorldItem, WorldKey,
+    FunctionKind, InterfaceId, PackageId, PackageName, Resolve, WorldId, WorldItem, WorldKey,
 };
-
-/// The custom section in which the macro stores the WIT it derived from the module.
-const WIT_SECTION: &str = "tembra:wit";
 
 /// `cargo tembra wit`: print the reconstructed WIT, or write the contract with --emit.
 pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) -> Result<()> {
@@ -55,11 +51,11 @@ pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) 
 
 /// The contract of a component as WIT text, and the name of its world.
 ///
-/// A component built with the macro carries the module's own WIT in a custom section; the
-/// packages it consumes are nested after it, whole, from the directory the macro named when it
-/// is given, else from the component's types, which keep only the functions the component calls.
-/// A package a nested one builds on is nested too, though the component's types do not reach it.
-/// Any other component gets the WIT derived from its types, with the given world name.
+/// A component built with the macro carries the module's own WIT in a custom section, which
+/// `ModuleContract` reads; the packages it consumes are nested after it, whole, from the
+/// directory the macro named when it is given, else from the component's types, which keep only
+/// the functions the component calls. Any other component gets the WIT derived from its types,
+/// with the given world name.
 pub fn contract_text(
     bytes: &[u8],
     resolve: &Resolve,
@@ -67,83 +63,17 @@ pub fn contract_text(
     name: &str,
     consumed: Option<&Path>,
 ) -> Result<(String, String)> {
-    let root = resolve.worlds[world]
-        .package
-        .context("the world has no package")?;
-    match embedded_wit(bytes)? {
-        Some(text) => {
-            let package = text
-                .lines()
-                .find_map(|line| line.strip_prefix("package ")?.strip_suffix(';'))
-                .context("the tembra:wit section declares no package")?
-                .trim()
-                .to_owned();
-            let world_name = text
-                .lines()
-                .find_map(|line| line.trim_start().strip_prefix("world "))
-                .map(|rest| rest.trim_end_matches('{').trim().to_owned())
-                .context("the tembra:wit section declares no world")?;
-            // The whole consumed packages, when the macro said where they are: a provider's
-            // interface keeps the functions this component never calls, so the contract names
-            // the same interface the provider exports.
-            let whole = match consumed {
-                Some(dir) => {
-                    let mut whole = Resolve::default();
-                    whole.push_dir(dir).with_context(|| {
-                        format!("reading the consumed WIT in {}", dir.display())
-                    })?;
-                    Some(whole)
-                }
-                None => None,
-            };
-            let consumed = consumed_packages(resolve, root, &package, &text, whole.as_ref());
-            let mut text = text;
-            for (source, id) in consumed {
-                let mut printer = WitPrinter::default();
-                printer
-                    .print_package(source, id, false)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
-                text.push('\n');
-                text.push_str(&String::from(printer.output));
-            }
-            Ok((text, world_name))
-        }
+    match ModuleContract::from_component(bytes, consumed)
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+    {
+        Some(module) => Ok((module.text().to_owned(), module.world().to_owned())),
         None => Ok((derived_wit(resolve, world, name)?, name.to_owned())),
     }
 }
 
-/// The `tembra:wit` custom section of the component's core module, if the macro wrote one.
-fn embedded_wit(bytes: &[u8]) -> Result<Option<String>> {
-    embedded_section(bytes, WIT_SECTION)?
-        .map(|data| String::from_utf8(data).context("the tembra:wit section is not UTF-8"))
-        .transpose()
-}
-
-/// A custom section of the component's core module, by name.
-fn embedded_section(bytes: &[u8], name: &str) -> Result<Option<Vec<u8>>> {
-    for payload in Parser::new(0).parse_all(bytes) {
-        let Payload::ModuleSection {
-            unchecked_range, ..
-        } = payload?
-        else {
-            continue;
-        };
-        let module = &bytes[unchecked_range.start as usize..unchecked_range.end as usize];
-        for payload in Parser::new(0).parse_all(module) {
-            let Payload::CustomSection(section) = payload? else {
-                continue;
-            };
-            if section.name() == name {
-                return Ok(Some(section.data().to_vec()));
-            }
-        }
-    }
-    Ok(None)
-}
-
 /// The author's package as WIT text, the consumed packages nested in it, and a world with the
 /// given name listing what the component imports and exports.
-fn derived_wit(resolve: &Resolve, world: WorldId, name: &str) -> Result<String> {
+pub(crate) fn derived_wit(resolve: &Resolve, world: WorldId, name: &str) -> Result<String> {
     let root = resolve.worlds[world]
         .package
         .context("the world has no package")?;
@@ -193,60 +123,6 @@ fn nested<'a>(
 /// which a contract never nests.
 pub(crate) fn standard(name: &PackageName) -> bool {
     matches!(name.namespace.as_str(), "wasi" | "tembra")
-}
-
-/// The packages the module's own package `own`, written as `text`, consumes, each with the
-/// resolve to print it from: the consumed directory `whole` when it holds the package, else the
-/// component's types. First those of the component's types, in their order, then any other the
-/// module's WIT names, which the linker may have dropped from the types with an import the code
-/// never calls, then any other these packages build on: a package printed whole may name one the
-/// component never reaches. A package found nowhere is left to the reading of the contract, which
-/// names it.
-fn consumed_packages<'a>(
-    resolve: &'a Resolve,
-    root: PackageId,
-    own: &str,
-    text: &str,
-    whole: Option<&'a Resolve>,
-) -> Vec<(&'a Resolve, PackageId)> {
-    // Each package wanted, by name, with the resolve that names it.
-    let mut wanted: Vec<(PackageName, &'a Resolve)> = nested(resolve, root, |name| name != own)
-        .map(|id| (resolve.packages[id].name.clone(), resolve))
-        .collect();
-    if let Ok(group) = UnresolvedPackageGroup::parse("contract.wit", text) {
-        wanted.extend(
-            group
-                .main
-                .foreign_deps
-                .into_keys()
-                .map(|name| (name, resolve)),
-        );
-    }
-    let mut packages: Vec<(&'a Resolve, PackageId)> = Vec::new();
-    let mut next = 0;
-    while let Some((name, named_by)) = wanted.get(next).cloned() {
-        next += 1;
-        let taken = packages
-            .iter()
-            .any(|(source, id)| source.packages[*id].name == name);
-        if standard(&name) || name.to_string() == own || taken {
-            continue;
-        }
-        let Some((source, id)) = whole
-            .into_iter()
-            .chain([named_by])
-            .find_map(|source| Some((source, *source.package_names.get(&name)?)))
-        else {
-            continue;
-        };
-        packages.push((source, id));
-        wanted.extend(
-            source
-                .package_direct_deps(id)
-                .map(|dependency| (source.packages[dependency].name.clone(), source)),
-        );
-    }
-    packages
 }
 
 /// The package the component defines: the one owning the interfaces it exports without importing.

@@ -25,12 +25,13 @@
 //! carries data only. A state may hold a consumed type that `serde` can write, which the bindings
 //! derive for it in an Orb with a state.
 use crate::{
-    Candidate, Contribution, Declared, Service, Shape, ShapeKind, State, WitResource, hook_path,
-    keyed, resource_params, wasi, wit,
+    Candidate, Contribution, Declared, Newtype, Service, Shape, ShapeKind, State, WitResource,
+    hook_path, keyed, resource_params, wasi, wit,
 };
 use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet};
 use syn::{Ident, Item, LitStr, Type, ext::IdentExt, spanned::Spanned};
+use tembra_contracts::guest;
 
 /// How the world holds a consumed interface, which decides what a derived interface names through
 /// the interface's module.
@@ -85,11 +86,14 @@ impl Reexported {
 /// each under, `greeting`: the imported interfaces, the views of those imported by key, the
 /// implemented ones, the hooks it contributes to and the hooks it declares from a consumed package,
 /// and the kernel's context interface for the `context` option. With them, the modules of the Orb
-/// itself, in which a path resolves first.
+/// itself, in which a path resolves first, and the newtypes of the module, which a path naming one
+/// reaches through to its field.
 pub(crate) struct Modules {
     reexported: BTreeMap<String, Reexported>,
     /// The path of each module of the Orb from the Orb module, by scope; scope 0 is the Orb module.
     paths: Vec<Vec<Ident>>,
+    /// The newtypes of the module, by name.
+    newtypes: BTreeMap<String, Newtype>,
     /// What each module of the Orb imports, by scope, which a path written there is read through.
     uses: Vec<crate::Uses>,
 }
@@ -166,18 +170,18 @@ impl Modules {
         if context {
             if let Some(import) = imports
                 .iter()
-                .find(|import| import.value() == wit::GUEST_CONTEXT)
+                .find(|import| import.value() == guest::CONTEXT)
             {
                 return Err(syn::Error::new(
                     import.span(),
                     format!(
                         "the `context` option imports the kernel's interface {} already, which the Orb module re-exports as `context`; remove this import",
-                        wit::GUEST_CONTEXT
+                        guest::CONTEXT
                     ),
                 ));
             }
             let kernel = Reexported {
-                identity: wit::GUEST_CONTEXT.to_owned(),
+                identity: guest::CONTEXT.to_owned(),
                 role: Role::Context,
             };
             modules.insert("context".to_owned(), kernel);
@@ -324,7 +328,7 @@ impl Modules {
             namespaces.insert(namespace(package));
         }
         if context || kernel {
-            namespaces.insert(namespace(wit::GUEST_CONTEXT));
+            namespaces.insert(namespace(guest::CONTEXT));
         }
         let exporting = !services.is_empty() || !contributions.is_empty() || !declared.is_empty();
         for (ident, kind) in own {
@@ -348,7 +352,108 @@ impl Modules {
         Ok(Self {
             reexported: modules,
             paths: paths.to_vec(),
+            newtypes: BTreeMap::new(),
             uses: uses.to_vec(),
+        })
+    }
+
+    /// The same modules, with the newtypes of the module, each read by its name.
+    pub(crate) fn with_newtypes(mut self, newtypes: &[Newtype]) -> Self {
+        self.newtypes = newtypes
+            .iter()
+            .map(|newtype| (newtype.ident.to_string(), newtype.clone()))
+            .collect();
+        self
+    }
+
+    /// The newtype a type written in the module `scope` names, when it names one: a path ending in
+    /// the newtype's name, without type parameters, that no consumed interface's module reaches.
+    pub(crate) fn newtype(&self, ty: &Type, scope: usize) -> Option<&Newtype> {
+        let Type::Path(path) = ty else {
+            return None;
+        };
+        let last = path.path.segments.last()?;
+        if path.qself.is_some()
+            || !matches!(last.arguments, syn::PathArguments::None)
+            || self.named(ty, scope).is_some()
+        {
+            return None;
+        }
+        self.newtypes.get(&last.ident.to_string())
+    }
+
+    /// The newtypes a type written in the module `scope` names: itself, or inside the type
+    /// parameters of a path and the elements of a tuple, but not inside a newtype's field.
+    pub(crate) fn newtypes_in(&self, ty: &Type, scope: usize) -> Vec<&Newtype> {
+        if let Some(newtype) = self.newtype(ty, scope) {
+            return vec![newtype];
+        }
+        match ty {
+            Type::Path(path) => match path.path.segments.last().map(|last| &last.arguments) {
+                Some(syn::PathArguments::AngleBracketed(arguments)) => arguments
+                    .args
+                    .iter()
+                    .flat_map(|argument| match argument {
+                        syn::GenericArgument::Type(ty) => self.newtypes_in(ty, scope),
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            Type::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .flat_map(|element| self.newtypes_in(element, scope))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether a type written in the module `scope` names a newtype, itself or inside its type
+    /// parameters and tuples.
+    pub(crate) fn holds_newtype(&self, ty: &Type, scope: usize) -> bool {
+        !self.newtypes_in(ty, scope).is_empty()
+    }
+
+    /// How many modules the module `scope` is below the Orb module.
+    pub(crate) fn depth(&self, scope: usize) -> usize {
+        self.paths[scope].len()
+    }
+
+    /// The trait of the Orb module through which a newtype crosses the bindings, as the module
+    /// `scope` names it.
+    pub(crate) fn newtype_trait(&self, scope: usize) -> proc_macro2::TokenStream {
+        let root = crate::supers(self.depth(scope));
+        let name = quote::format_ident!("{}", crate::NEWTYPE);
+        quote::quote! { #root #name }
+    }
+
+    /// The WIT spelling of a type written in the module `scope`: a newtype as its field's type. A
+    /// newtype whose field holds it, through other newtypes too, has none.
+    pub(crate) fn spelled(&self, ty: &Type, scope: usize) -> syn::Result<String> {
+        self.spelled_within(ty, scope, &[])
+    }
+
+    /// The WIT spelling of a type written in the module `scope`, inside the fields of the newtypes
+    /// `within`, which the type may not name again.
+    fn spelled_within(&self, ty: &Type, scope: usize, within: &[&Ident]) -> syn::Result<String> {
+        wit::wit_type_with(ty, &|named| {
+            let Some(newtype) = self.newtype(named, scope) else {
+                return Ok(None);
+            };
+            if within.contains(&&newtype.ident) {
+                return Err(syn::Error::new(
+                    named.span(),
+                    format!(
+                        "`{}` holds itself through its field, which WIT cannot spell: a type that enters the WIT holds no type that holds it",
+                        newtype.ident
+                    ),
+                ));
+            }
+            let mut within = within.to_vec();
+            within.push(&newtype.ident);
+            self.spelled_within(&newtype.inner, newtype.scope, &within)
+                .map(Some)
         })
     }
 
@@ -496,16 +601,45 @@ impl Modules {
     /// looked into; so is the last name of every other path, before its type parameters, with the
     /// module of the Orb the path leads into down to the name (`leads`), through `self::`,
     /// `super::`, the sub-modules and the modules the `use` declarations bind, or the writing
-    /// module for a bare name or a path the macro cannot follow so.
+    /// module for a bare name or a path the macro cannot follow so. A type with a WIT spelling of
+    /// its own is not a name of the module: free JSON is not looked into, and a newtype, which the
+    /// WIT spells as its field, is walked as its field, in the newtype's module, once.
     fn walk<'m, 't>(
         &'m self,
         ty: &'t Type,
         scope: usize,
         in_option: bool,
         visit: &mut impl FnMut(Reached<'m, 't>),
-    ) {
+    ) where
+        'm: 't,
+    {
+        self.walk_within(ty, scope, in_option, visit, &mut Vec::new());
+    }
+
+    /// `walk`, inside the fields of the newtypes `within`, which are not read again.
+    fn walk_within<'m, 't>(
+        &'m self,
+        ty: &'t Type,
+        scope: usize,
+        in_option: bool,
+        visit: &mut impl FnMut(Reached<'m, 't>),
+        within: &mut Vec<&'m Ident>,
+    ) where
+        'm: 't,
+    {
         if let Some(named) = self.named(ty, scope) {
             visit(Reached::Consumed(Named { in_option, ..named }));
+            return;
+        }
+        if wit::free_json(ty) {
+            return;
+        }
+        if let Some(newtype) = self.newtype(ty, scope) {
+            if !within.contains(&&newtype.ident) {
+                within.push(&newtype.ident);
+                self.walk_within(&newtype.inner, newtype.scope, in_option, visit, within);
+                within.pop();
+            }
             return;
         }
         match ty {
@@ -522,14 +656,14 @@ impl Modules {
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
                         if let syn::GenericArgument::Type(ty) = argument {
-                            self.walk(ty, scope, segment.ident == "Option", visit);
+                            self.walk_within(ty, scope, segment.ident == "Option", visit, within);
                         }
                     }
                 }
             }
             Type::Tuple(tuple) => {
                 for element in &tuple.elems {
-                    self.walk(element, scope, false, visit);
+                    self.walk_within(element, scope, false, visit, within);
                 }
             }
             _ => {}
@@ -544,7 +678,9 @@ impl Modules {
         ty: &'t Type,
         scope: usize,
         out: &mut Vec<Named<'m, 't>>,
-    ) {
+    ) where
+        'm: 't,
+    {
         self.walk(ty, scope, false, &mut |reached| {
             if let Reached::Consumed(named) = reached {
                 out.push(named);
@@ -680,7 +816,10 @@ fn item_types(item: &Item) -> Vec<&Type> {
 pub(crate) fn shape_types(shape: &Shape) -> Vec<&Type> {
     match &shape.kind {
         ShapeKind::Record(fields) => fields.iter().map(|(_, ty)| ty).collect(),
-        ShapeKind::Variant(cases) => cases.iter().filter_map(|(_, ty)| ty.as_ref()).collect(),
+        ShapeKind::Variant(cases) => cases
+            .iter()
+            .flat_map(|(_, payload)| payload.types())
+            .collect(),
         ShapeKind::Enum(_) | ShapeKind::Flags(_) => Vec::new(),
     }
 }

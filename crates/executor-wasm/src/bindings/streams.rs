@@ -22,13 +22,21 @@ use std::{
 use tembra::portable::{ByteSource, ByteStream, Outcome, Payload};
 
 impl Environment {
-    /// Serve one export whose whole result is a `stream<u8>`.
+    /// Serve one export whose whole result is a `stream<u8>`. Such an export takes no `self`: its
+    /// loan leaves the payload before the arguments are read, as in `invoke_resource`, and a lent
+    /// one is refused as a data export refuses any capability, `Invalid/local_value`.
     pub(crate) async fn invoke_stream(
         &self,
         context: Context,
         slot: u32,
-        payload: Payload,
+        mut payload: Payload,
     ) -> Result<Outcome> {
+        if payload.take_receiver().is_some() {
+            return Err(tembra::Error::invalid(
+                tembra::core::Reason::LocalValue,
+                "a stream export takes data only, without a resource receiver",
+            ));
+        }
         let pipe = Arc::<Mutex<Pipe>>::default();
         let (head, published) = oneshot::channel();
         let stream = StreamCall {

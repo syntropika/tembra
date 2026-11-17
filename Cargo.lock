@@ -1884,6 +1884,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tembra-contracts",
+ "tembra-orb-native-fixture",
  "tembra-runtime",
  "tempfile",
  "tokio",
@@ -1943,11 +1944,24 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
+ "serde",
  "serde_json",
  "syn 2.0.119",
  "tembra-contracts",
+ "toml 0.8.23",
  "wit-component 0.261.0",
  "wit-parser 0.261.0",
+]
+
+[[package]]
+name = "tembra-orb-native-fixture"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "tembra",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -2971,6 +2985,7 @@ version = "0.63.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b85a987ab61d365382d25c7d47e26edd48941b3bf6e3fbf76eff918bc71dab06"
 dependencies = [
+ "bitflags",
  "wit-bindgen-rust-macro",
 ]
 

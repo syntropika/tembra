@@ -112,6 +112,7 @@ impl Host {
                     environment: result.as_ref().cloned().unwrap_or_else(|_| Rc::new(())),
                     implementation,
                     scope,
+                    issuer: Rc::default(),
                 },
             );
         result?;
@@ -122,7 +123,9 @@ impl Host {
     pub async fn dispose(&self, object: core::Id) -> Result<()> {
         let scopes = self.kernel().scopes_for_owner(core::Owner::Object(object));
         if scopes.is_empty() {
-            self.0.objects.borrow_mut().remove(&object);
+            // Its versions, and their native resources, drop outside the host's borrows.
+            let removed = self.0.objects.borrow_mut().remove(&object);
+            drop(removed);
             return Ok(());
         }
         let program = self.kernel().cleanup_scopes(scopes, None)?;

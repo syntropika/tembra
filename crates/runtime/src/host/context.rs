@@ -153,6 +153,13 @@ impl Context {
         self.host.kernel().root_principal(self.root)
     }
 
+    /// Read the canonical address of the object running this invocation, as
+    /// [`Declaration::address`] reads it while the object declares.
+    pub fn address(&self) -> Result<core::Address> {
+        let call = self.invocation()?;
+        self.host.kernel().object_address(call.object)
+    }
+
     /// The entered invocation that issues calls made from this context, if any.
     pub(crate) fn issuer(&self) -> Option<core::Id> {
         self.call.as_ref().map(|call| call.id)

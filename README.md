@@ -53,6 +53,7 @@ the same lifecycle.
 | [examples/rust-orb-shared-interface/](examples/rust-orb-shared-interface/)   | A compiled Rust orb implementing a WIT interface shared with a native orb; the host consults both                       |
 | [examples/rust-orb-import/](examples/rust-orb-import/)                       | A compiled Rust orb importing another compiled Rust orb's interface and calling it; the installer binds the two         |
 | [examples/rust-orb-wit-resource/](examples/rust-orb-wit-resource/)           | A compiled Rust orb handing out text builders as a WIT resource, and another compiled Rust orb importing and using them |
+| [examples/rust-orb-native/](examples/rust-orb-native/)                       | Two Rust orb crates implementing one WIT interface, linked into one native host that installs both through `orb()`      |
 
 ## Development
 

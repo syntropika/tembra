@@ -7,7 +7,8 @@
 //!
 //! Exported instances stay in their provider's Store. Native owners hold `Owned` capabilities
 //! whose calls pass ordinary kernel admission through their own claim. A compiled importer holds
-//! them as dynamic handles naming its own table slots.
+//! them as dynamic handles naming its own table slots. A native exporter, [`native_store`], serves
+//! the same interfaces with Rust values, which the same importer holds the same way.
 use futures::{
     FutureExt,
     executor::LocalPool,
@@ -227,6 +228,8 @@ both_engines!(
     equal_keys_open_independent_native_sessions,
     a_compiled_importer_opens_independent_keyed_sessions,
     one_revision_serves_its_sessions_one_call_at_a_time,
+    a_compiled_importer_uses_a_native_exporter,
+    a_closed_resource_of_a_compiled_exporter_answers_by_what_closed_it,
 );
 
 /// A real canonical move returns imported handles to their issuer or transfers the same
@@ -2464,4 +2467,396 @@ fn refused_nested_metadata_destroys_the_complete_resource_batch(interpreted: boo
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
     assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// A session the native `store` issues: its key and running total. Its `Drop` is its close,
+/// which `closed` counts.
+struct NativeSession {
+    key: (String, String),
+    total: Cell<u64>,
+    closed: Rc<Cell<u64>>,
+}
+
+impl tembra::portable::Issuable for NativeSession {
+    fn nominal() -> tembra::portable::Nominal {
+        tembra::portable::Nominal {
+            interface: SESSIONS.into(),
+            name: "session".into(),
+        }
+    }
+}
+
+impl Drop for NativeSession {
+    fn drop(&mut self) {
+        self.closed.set(self.closed.get() + 1);
+    }
+}
+
+/// A counter the native `store` issues: its hits. It closes uncounted, as the compiled
+/// provider's does.
+struct NativeCounter(Cell<u64>);
+
+impl tembra::portable::Issuable for NativeCounter {
+    fn nominal() -> tembra::portable::Nominal {
+        tembra::portable::Nominal {
+            interface: SESSIONS.into(),
+            name: "counter".into(),
+        }
+    }
+}
+
+/// A native `store`: the provider world's interfaces served by native code through the typed
+/// portable API, as the compiled provider serves them. Its sessions and counters are Rust values
+/// issued with `Payload::issue` wherever the compiled provider returns an owned handle, its
+/// methods read `self` with `Payload::receiver`, and `closed` answers how many sessions closed.
+/// It imports no `pace`: the functions that wait on it, and those taking a resource, which a
+/// native exporter takes none of, answer `unsupported`.
+fn native_store(closed: Rc<Cell<u64>>) -> Orb {
+    let pace = std::collections::BTreeMap::from([(
+        PACE.to_owned(),
+        tembra_executor_wasm::Binding::Orb {
+            name: "pace".into(),
+            api_version: 1,
+        },
+    )]);
+    let plan = contract("provider").plan("store", 1, &pace).unwrap();
+    let mut orb = Orb::new("store", 1);
+    for service in plan.orb.services {
+        let methods: Vec<String> = service.methods.iter().cloned().collect();
+        let mut native = Service::new(service.name, |_| Ok(())).signature(service.signature);
+        for method in methods {
+            let closed = closed.clone();
+            native = native.payload_method(method.clone(), move |_, _, payload: Payload| {
+                let served = serve(&method, payload, &closed);
+                async move { served }
+            });
+        }
+        orb = orb.service(native);
+    }
+    orb
+}
+
+/// One call of the native `store`: its arguments read from the boundary's JSON array, and every
+/// session or counter its result holds issued into the result.
+fn serve(method: &str, mut payload: Payload, closed: &Rc<Cell<u64>>) -> tembra::Result<Payload> {
+    let session = |key: (String, String), seed: u64| NativeSession {
+        key,
+        total: Cell::new(seed),
+        closed: closed.clone(),
+    };
+    let fresh = |seed: u64| session((String::new(), String::new()), seed);
+    let mut result = Payload::data(Value::Null);
+    let value = match method {
+        CONSTRUCT | "open" => {
+            let (seed,): (u64,) = arguments(payload)?;
+            json!(result.issue(fresh(seed)))
+        }
+        OPEN_KEYED => {
+            let (key, seed): ((String, String), u64) = arguments(payload)?;
+            json!(result.issue(session(key, seed)))
+        }
+        ADD => {
+            let session = payload.receiver::<NativeSession>()?;
+            let (n,): (u64,) = arguments(payload)?;
+            json!(session.with(|session| {
+                session.total.set(session.total.get() + n);
+                session.total.get()
+            })?)
+        }
+        TOTAL => {
+            let session = payload.receiver::<NativeSession>()?;
+            payload.into_data()?;
+            json!(session.with(|session| session.total.get())?)
+        }
+        KEY => {
+            let session = payload.receiver::<NativeSession>()?;
+            payload.into_data()?;
+            json!(session.with(|session| session.key.clone())?)
+        }
+        COUNTER => {
+            payload.into_data()?;
+            json!(result.issue(NativeCounter(Cell::new(0))))
+        }
+        HITS => {
+            let counter = payload.receiver::<NativeCounter>()?;
+            payload.into_data()?;
+            json!(counter.with(|counter| {
+                counter.0.set(counter.0.get() + 1);
+                counter.0.get()
+            })?)
+        }
+        "open-bundle" => {
+            let (seed, fail): (u64, bool) = arguments(payload)?;
+            if fail {
+                json!({ "tag": "err", "val": "refused" })
+            } else {
+                json!({
+                    "tag": "ok",
+                    "val": {
+                        "primary": result.issue(fresh(seed)),
+                        "optional": (seed != 0).then(|| result.issue(fresh(seed + 1))),
+                        "extras": if seed == 0 {
+                            Vec::new()
+                        } else {
+                            vec![result.issue(fresh(seed + 2)), result.issue(fresh(seed + 3))]
+                        },
+                        "count": result.issue(NativeCounter(Cell::new(0))),
+                        "seed": seed,
+                        "label": "bundle",
+                    },
+                })
+            }
+        }
+        "open-pair" => {
+            let (seed,): (u64,) = arguments(payload)?;
+            json!([result.issue(fresh(seed)), seed])
+        }
+        "choose" => {
+            let (seed,): (u64,) = arguments(payload)?;
+            if seed == 0 {
+                json!({ "tag": "empty" })
+            } else {
+                json!({ "tag": "active", "val": result.issue(fresh(seed + 1)) })
+            }
+        }
+        "closed" => {
+            payload.into_data()?;
+            json!(closed.get())
+        }
+        "label" => {
+            payload.into_data()?;
+            json!("sessions")
+        }
+        "describe" => {
+            payload.into_data()?;
+            json!("views")
+        }
+        _ => {
+            return Err(tembra::Error::new(
+                tembra::Code::Unsupported,
+                "test",
+                "not served by this provider",
+            ));
+        }
+    };
+    result.map_value(|_| Ok(value))
+}
+
+/// The arguments of a native call, read from the boundary's JSON array.
+fn arguments<A: serde::de::DeserializeOwned>(payload: Payload) -> tembra::Result<A> {
+    serde_json::from_value(payload.into_data()?)
+        .map_err(|error| tembra::Error::invalid(tembra::core::Reason::Arguments, error.to_string()))
+}
+
+/// A compiled importer uses a native exporter's resources as it uses a compiled one's: it
+/// constructs, borrows, keeps and drops them through ordinary WIT handles, and receives them
+/// nested in a result, a record, an option, a list, a tuple and a variant. Each value closes once,
+/// when the importer's handle is released after its call settles, or as the host closes.
+fn a_compiled_importer_uses_a_native_exporter(interpreted: bool) {
+    let Some(consuming) = fixture("TEMBRA_WASM_RESOURCE_CONSUMER") else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let closed = Rc::new(Cell::new(0));
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        native_store(closed.clone()),
+        consumer(&engine, &consuming, "relay", "store"),
+    ])
+    .unwrap();
+    let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
+    let call = |pool: &mut LocalPool, method: &'static str, args: Value| {
+        let relay = relay.clone();
+        root(pool, &host, async move |context| {
+            relay.call::<_, Value>(&context, method, args).await
+        })
+        .unwrap()
+    };
+    // Two equal constructions and one factory result, all closed once `pair` settles.
+    assert_eq!(call(&mut pool, "pair", json!([4, 2])), json!([6, 4, 3]));
+    assert_eq!(call(&mut pool, "closed", json!([])), json!(3));
+    // One owned session kept across calls and roots.
+    assert_eq!(call(&mut pool, "keep", json!([10])), json!(10));
+    assert_eq!(call(&mut pool, "bump", json!([5])), json!(15));
+    assert_eq!(call(&mut pool, "bump", json!([1])), json!(16));
+    assert_eq!(call(&mut pool, "closed", json!([])), json!(3));
+    call(&mut pool, "discard", json!([]));
+    assert_eq!(call(&mut pool, "closed", json!([])), json!(4));
+    // Sessions and a counter nested in a result and a record, an option and a list, a tuple and
+    // a variant; the counter closes uncounted.
+    let seed = u64::MAX - 10;
+    assert_eq!(
+        call(&mut pool, "nested", json!([seed, false])),
+        json!([seed, seed + 1, seed + 2, seed + 3, 1, seed])
+    );
+    assert_eq!(
+        call(&mut pool, "nested", json!([0, false])),
+        json!([0, 1, 0])
+    );
+    assert_eq!(call(&mut pool, "nested", json!([1, true])), json!([]));
+    assert_eq!(call(&mut pool, "closed", json!([])), json!(9));
+    assert_eq!(
+        call(&mut pool, "nested-shapes", json!([seed])),
+        json!([seed, seed, seed + 1])
+    );
+    assert_eq!(
+        call(&mut pool, "nested-shapes", json!([0])),
+        json!([0, 0, 0])
+    );
+    assert_eq!(call(&mut pool, "closed", json!([])), json!(12));
+    // Typed keys cross both boundaries; the three sessions close once the call settles.
+    let report = call(
+        &mut pool,
+        "keyed",
+        json!([
+            [FIRST_KEY.0, FIRST_KEY.1],
+            [SECOND_KEY.0, SECOND_KEY.1],
+            KEYED_SEED
+        ]),
+    );
+    let session = |key: (&str, &str), total: u64| json!({"key": [key.0, key.1], "total": total});
+    assert_eq!(
+        report["sessions"],
+        json!([
+            session(FIRST_KEY, KEYED_SEED + 1),
+            session(FIRST_KEY, KEYED_SEED + 2),
+            session(SECOND_KEY, KEYED_SEED + 3),
+        ]),
+        "{report}"
+    );
+    assert_eq!(report["closedBeforeSettlement"], json!(12), "{report}");
+    assert_eq!(closed.get(), 15);
+    assert_eq!(call(&mut pool, "describe", json!([])), json!("views"));
+    // A handle kept in the importer's Store closes once, when the host closes.
+    assert_eq!(call(&mut pool, "keep", json!([1])), json!(1));
+    relay.release().unwrap();
+    pool.run_until(host.settled());
+    assert_eq!(closed.get(), 15);
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(closed.get(), 16);
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// What a handle outliving its value answers, from a native exporter as from a compiled one:
+/// `Gone/resource` once the exporter is reloaded, `Gone/object` once the issuing object is
+/// released, and `Cancelled/root` from a root the host's close cancelled.
+fn closed_answers() -> Vec<(tembra::Code, String)> {
+    vec![
+        (tembra::Code::Gone, "resource".to_owned()),
+        (tembra::Code::Gone, "object".to_owned()),
+        (tembra::Code::Cancelled, "root".to_owned()),
+    ]
+}
+
+/// A compiled exporter's handle outliving its value answers `closed_answers`.
+fn a_closed_resource_of_a_compiled_exporter_answers_by_what_closed_it(interpreted: bool) {
+    let Some(bytes) = fixture("TEMBRA_WASM_RESOURCE_PROVIDER") else {
+        return;
+    };
+    let engine = engine(interpreted);
+    assert_eq!(
+        stale_answers(|| provider(&engine, &bytes, "store")),
+        closed_answers(),
+        "compiled"
+    );
+    assert_eq!(engine.instances(), 0);
+}
+
+/// A native exporter's handle outliving its value answers `closed_answers` too. The native
+/// exporter needs no compiled fixture, so this half runs everywhere.
+#[test]
+fn a_closed_resource_of_a_native_exporter_answers_as_a_compiled_one() {
+    let closed = Rc::new(Cell::new(0));
+    assert_eq!(
+        stale_answers(|| native_store(closed.clone())),
+        closed_answers(),
+        "native"
+    );
+    assert_eq!(closed.get(), 3, "each value closed once");
+}
+
+/// What `add` answers through a session handle kept past the reload of its exporter, past the
+/// release of the object that issued it and past the close of the host, in that order. `exporter`
+/// builds the `store` Orb, for the installation and for the reload.
+fn stale_answers(exporter: impl Fn() -> Orb) -> Vec<(tembra::Code, String)> {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![pacer(Rc::default()), exporter()])
+        .unwrap();
+    // A session of the object `store` claims.
+    let construct = |pool: &mut LocalPool, store: &Rc<Reference>| {
+        let called = store.clone();
+        root(pool, &host, async move |context| {
+            called
+                .call_portable::<_, Owned>(&context, CONSTRUCT, (1_u64,))
+                .await
+        })
+        .unwrap()
+    };
+    // What `add` answers through the session, which the call gives back.
+    let add = |pool: &mut LocalPool, session: Owned| {
+        root(pool, &host, async move |context| {
+            let refused = session
+                .call_portable::<_, u64>(&context, ADD, (1_u64,))
+                .await
+                .unwrap_err();
+            Ok((refused, session))
+        })
+        .unwrap()
+    };
+    let mut answers = Vec::new();
+    // The reload retires the revision that issued the session.
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let session = construct(&mut pool, &store);
+    pool.run_until(host.reload(vec![exporter()], 5000)).unwrap();
+    pool.run_until(host.settled());
+    let (refused, session) = add(&mut pool, session);
+    answers.push((refused.code, refused.reason));
+    drop(session);
+    // Every owner holds a claim on the object, so the kernel releases the object under them only
+    // when it fails it.
+    let session = construct(&mut pool, &store);
+    host.kernel().fail(store.object()).unwrap();
+    host.flush();
+    pool.run_until(host.settled());
+    let (refused, session) = add(&mut pool, session);
+    answers.push((refused.code, refused.reason));
+    drop(session);
+    store.release().unwrap();
+    pool.run_until(host.settled());
+    // A caller whose root the close cancels calls once the close has begun.
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let session = construct(&mut pool, &store);
+    store.release().unwrap();
+    let (begun, gate) = futures::channel::oneshot::channel();
+    let late = host
+        .spawn_root("alice", move |context| {
+            async move {
+                let _ = gate.await;
+                let refused = session
+                    .call_portable::<_, u64>(&context, ADD, (1_u64,))
+                    .await
+                    .unwrap_err();
+                Ok((refused, session))
+            }
+            .boxed_local()
+        })
+        .unwrap();
+    pool.run_until_stalled();
+    pool.run_until(async {
+        let mut close = std::pin::pin!(host.close());
+        assert!(
+            futures::poll!(close.as_mut()).is_pending(),
+            "the close waits for the caller's root"
+        );
+        begun.send(()).unwrap();
+        close.await.unwrap();
+    });
+    let (refused, session) = pool.run_until(late).unwrap().unwrap();
+    answers.push((refused.code, refused.reason));
+    drop(session);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    answers
 }
