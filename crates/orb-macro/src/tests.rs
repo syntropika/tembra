@@ -5326,14 +5326,14 @@ fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
 }
 
 /// A known derive reads some of its helper attributes as code, in the bindings' module: a string
-/// it parses as code, derivative's `value`, or the names thiserror's string captures, `{PAGE}`,
-/// and, under a glob import the macro cannot follow, `use super::*;` in the Orb module, the tokens
-/// of smart_default's `#[default(..)]` and the format arguments of thiserror's `#[error(..)]` and
-/// derive_more's `#[display(..)]`, which the glob may bring a name to. A name there that the
-/// bindings' module does not reach is refused, with the `crate::` advice; the `crate::` form
-/// expands, and so do a field of the type, a name of the prelude, a primitive type and a lowercase
-/// name before `::`, which may be a crate's. Elsewhere a word may be the derive's own syntax, as
-/// `ignore` in `#[from(ignore)]`, which stays as written.
+/// it parses as code, derivative's `value` or smart_default's `_code`, or the names thiserror's
+/// string captures, `{PAGE}`, and, under a glob import the macro cannot follow, `use super::*;` in
+/// the Orb module, the tokens of smart_default's `#[default(..)]` and the format arguments of
+/// thiserror's `#[error(..)]` and derive_more's `#[display(..)]`, which the glob may bring a name
+/// to. A name there that the bindings' module does not reach is refused, with the `crate::`
+/// advice; the `crate::` form expands, and so do a field of the type, a name of the prelude, a
+/// primitive type and a lowercase name before `::`, which may be a crate's. Elsewhere a word may be
+/// the derive's own syntax, as `ignore` in `#[from(ignore)]`, which stays as written.
 #[test]
 fn a_helper_attribute_naming_what_a_glob_or_a_string_brings_is_refused() {
     let module = |items: &str, returned: &str| {
@@ -5447,6 +5447,26 @@ fn a_helper_attribute_naming_what_a_glob_or_a_string_brings_is_refused() {
             vec![format!(
                 "const PAGE: u32 = 20; {}",
                 derivative("crate::walk::PAGE")
+            )],
+        ),
+        (
+            page("#[default(_code = \"PAGE * 2\")]"),
+            "Page",
+            "#[default(..)]",
+            "PAGE",
+            vec![page("#[default(_code = \"crate::PAGE * 2\")]")],
+        ),
+        (
+            format!(
+                "const PAGE: u32 = 20; {}",
+                page("#[default(_code = \"PAGE * 2\")]")
+            ),
+            "Page",
+            "#[default(..)]",
+            "PAGE",
+            vec![format!(
+                "const PAGE: u32 = 20; {}",
+                page("#[default(_code = \"crate::walk::PAGE * 2\")]")
             )],
         ),
     ] {

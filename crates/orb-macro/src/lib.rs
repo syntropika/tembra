@@ -5552,18 +5552,35 @@ const STANDARD_NAMES: &[&str] = &[
 /// What a known derive reads as code in the arguments of the helper attribute `name`, which then
 /// names from the bindings' module: the tokens of smart_default's `#[default(..)]` or
 /// `#[default = ..]`, the format arguments after the string of thiserror's `#[error(..)]` and of
-/// derive_more's `#[display(..)]` and `#[debug(..)]`, and, written in strings, derivative's
-/// `value = ".."`, serde's `default`, `with`, `serialize_with`, `deserialize_with` and
-/// `skip_serializing_if`, and the names the string of thiserror's `#[error(..)]` captures,
-/// `{PAGE}`, but for one a named argument after it gives, `max = ..` for `{max}`. Elsewhere a word
-/// may be the derive's own syntax, as `ignore` in `#[from(ignore)]`.
+/// derive_more's `#[display(..)]` and `#[debug(..)]`, and, written in strings, smart_default's
+/// `#[default(_code = "..")]`, derivative's `value = ".."`, serde's `default`, `with`,
+/// `serialize_with`, `deserialize_with` and `skip_serializing_if`, and the names the string of
+/// thiserror's `#[error(..)]` captures, `{PAGE}`, but for one a named argument after it gives,
+/// `max = ..` for `{max}`. Elsewhere a word may be the derive's own syntax, as `ignore` in
+/// `#[from(ignore)]`.
 fn read_as_code(
     name: &Ident,
     arguments: proc_macro2::TokenStream,
 ) -> Vec<proc_macro2::TokenStream> {
     use proc_macro2::{Spacing, TokenTree};
     if name == "default" {
-        return vec![arguments];
+        // smart_default reads `_code = ".."`, when it is the only argument, as the code in the
+        // string.
+        let trees: Vec<TokenTree> = arguments.clone().into_iter().collect();
+        let code = match trees.as_slice() {
+            [
+                TokenTree::Ident(key),
+                TokenTree::Punct(equals),
+                TokenTree::Literal(literal),
+            ] if key == "_code" && equals.as_char() == '=' => {
+                match syn::Lit::new(literal.clone()) {
+                    syn::Lit::Str(string) => string.parse().ok(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        return vec![code.unwrap_or(arguments)];
     }
     if name == "derivative" {
         return strings(arguments, &["value"]);
