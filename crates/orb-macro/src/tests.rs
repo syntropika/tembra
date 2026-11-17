@@ -4976,6 +4976,104 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
     expanded("example:office@1.0.0", &reached);
 }
 
+/// Two modules of one name, which `#[cfg(..)]`s select, are two modules: the macro reads the
+/// impls and the attributes of each, and puts a type it reads back in the type's own. A state's
+/// `Default` or a flags struct's `Clone` written in a `#[cfg(x)]` module and again in a
+/// `#[cfg(not(x))]` one of the same name gives the trait in every configuration, as the same
+/// impls side by side do; a sub-module of the second, beside a state kept out of the WIT or a
+/// type that enters it, and a type kept out of the WIT in either stay where they are written; and
+/// the second, holding a sub-module that holds a flags struct, is refused at its `#[cfg(..)]`, as
+/// any module holding one is.
+#[test]
+fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
+    let ledger = |items: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                {items}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                #[flags]
+                pub struct Access {{ pub read: bool }}
+                {items}
+                #[service]
+                pub struct Guard;
+                impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+            }}"
+        )
+    };
+    let default = |total: u32| {
+        format!(
+            "impl Default for super::Balance {{ fn default() -> Self {{ super::Balance {{ total: {total} }} }} }}"
+        )
+    };
+    let seeded = tokens(&expanded(
+        "example:ledger@1.0.0",
+        &ledger(&format!(
+            "#[cfg(feature = \"seeded\")] mod seed {{ {} }}
+             #[cfg(not(feature = \"seeded\"))] mod seed {{ {} }}",
+            default(1),
+            default(0)
+        )),
+    ));
+    assert!(
+        !seeded.contains("impl :: core :: default :: Default for Balance"),
+        "{seeded}"
+    );
+    let clone = "impl Clone for super::Access { fn clone(&self) -> Self { *self } }";
+    let cloned = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(&format!(
+            "#[cfg(feature = \"audit\")] mod hands {{ {clone} }}
+             #[cfg(not(feature = \"audit\"))] mod hands {{ {clone} }}"
+        )),
+    ));
+    assert!(
+        cloned.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)]"),
+        "{cloned}"
+    );
+    let audit = "#[cfg(feature = \"audit\")] mod audit { pub struct Entry { pub at: u64 } }
+        #[cfg(not(feature = \"audit\"))] mod audit { pub struct Entry { pub at: u32 } mod sink {} }";
+    for module in [ledger(audit), office(audit)] {
+        let kept = tokens(&expanded("example:ledger@1.0.0", &module));
+        for written in [
+            "# [cfg (feature = \"audit\")] mod audit { pub struct Entry { pub at : u64 } }",
+            "# [cfg (not (feature = \"audit\"))] mod audit { pub struct Entry { pub at : u32 } mod sink { } }",
+        ] {
+            assert!(kept.contains(written), "{written}\n{kept}");
+        }
+    }
+    let error = refused(
+        "example:office@1.0.0",
+        "mod office {
+            #[cfg(feature = \"audit\")]
+            mod rights {}
+            #[cfg(not(feature = \"audit\"))]
+            pub mod rights {
+                pub mod grants {
+                    #[flags]
+                    pub struct Access { pub read: bool }
+                }
+            }
+            #[service]
+            pub struct Guard;
+            impl Guard { pub fn check(access: rights::grants::Access) -> bool { access.read } }
+        }",
+    );
+    assert!(
+        error.contains("`#[cfg(..)]` on the module `rights` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute"),
+        "{error}"
+    );
+}
+
 /// The bindings' module reads the helper attributes the generated type takes, so one it would not
 /// know there is refused on the author's type: one whose arguments name what the type's module
 /// declares or imports, which a path from `crate::` names from anywhere; an attribute macro the

@@ -518,6 +518,9 @@ fn marked_function<'a>(
 /// macro generates for it, and its sub-modules. The Orb module itself is the root, without a name.
 struct Module {
     ident: Option<Ident>,
+    /// The module's scope, as the scan numbers the modules: each before those it holds, which come
+    /// before its next sibling. Two modules of one name, which `#[cfg(..)]`s select, are two.
+    scope: usize,
     attrs: Vec<Attribute>,
     vis: Visibility,
     unsafety: Option<syn::token::Unsafe>,
@@ -527,17 +530,35 @@ struct Module {
 }
 
 impl Module {
-    /// The module at `path` below this one, which the scan registered.
-    fn at(&mut self, path: &[Ident]) -> &mut Module {
+    /// The module of scope `scope`, which the scan registered below this one.
+    fn at(&mut self, scope: usize) -> &mut Module {
         let mut module = self;
-        for segment in path {
+        while module.scope != scope {
             module = module
                 .children
                 .iter_mut()
-                .find(|child| child.ident.as_ref() == Some(segment))
+                .rev()
+                .find(|child| child.scope <= scope)
                 .expect("a scanned sub-module");
         }
         module
+    }
+
+    /// The module of scope `scope`, which the scan registered below this one, and the modules
+    /// holding it, from this one down to it.
+    fn around(&self, scope: usize) -> Vec<&Module> {
+        let mut around = vec![self];
+        let mut module = self;
+        while module.scope != scope {
+            module = module
+                .children
+                .iter()
+                .rev()
+                .find(|child| child.scope <= scope)
+                .expect("a scanned sub-module");
+            around.push(module);
+        }
+        around
     }
 
     fn tokens(&self) -> proc_macro2::TokenStream {
@@ -857,6 +878,7 @@ impl Scan {
                     }
                     children.push(Module {
                         ident: Some(module.ident),
+                        scope: child,
                         attrs: module.attrs,
                         vis: module.vis,
                         unsafety: module.unsafety,
@@ -1320,6 +1342,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let (items, children) = scan.scan(items, 0)?;
     let mut tree = Module {
         ident: None,
+        scope: 0,
         attrs: Vec::new(),
         vis: Visibility::Inherited,
         unsafety: None,
@@ -1795,14 +1818,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             })
             .filter_map(|attribute| applying(&attribute.meta))
             .collect();
-        if let Some(refusal) = uncovered(
-            &hands,
-            derived,
-            "Default",
-            &state.ident,
-            &mut tree,
-            &modules,
-        ) {
+        if let Some(refusal) = uncovered(&hands, derived, "Default", &state.ident, &tree) {
             return Err(refusal);
         }
     }
@@ -1968,7 +1984,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                     })
                     .filter_map(|attribute| applying(&attribute.meta))
                     .collect();
-                if let Some(refusal) = uncovered(&hands, under, name, &ident, &mut tree, &modules) {
+                if let Some(refusal) = uncovered(&hands, under, name, &ident, &tree) {
                     return Err(refusal);
                 }
             }
@@ -1999,11 +2015,11 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 attrs.push(syn::parse_quote!(#[derive(#(#paths),*)]));
             }
         }
-        tree.at(&modules[scope]).items.push(item);
+        tree.at(scope).items.push(item);
     }
     // A flags struct that enters the WIT stays the author's, with what the bindings call on it.
     flags::check_hooks(&shapes, &declared, &consumed_modules)?;
-    flags::check_modules(&shapes, &mut tree, &modules)?;
+    flags::check_modules(&shapes, &tree)?;
     let mut implemented_elsewhere = flags::emit(
         &shapes,
         &mut tree,
@@ -2031,7 +2047,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             &shape.ident,
             shape.scope,
         );
-        let mut implemented = Elsewhere::by_hand(&hands, &shape.ident, &mut tree, &modules);
+        let mut implemented = Elsewhere::by_hand(&hands, &shape.ident, &tree);
         let macro_default = states.iter().any(|state| {
             state.ident == shape.ident && state.scope == shape.scope && !state.authored_default
         });
@@ -2293,7 +2309,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     }
     for ((interface, scope), imports) in &grouped {
         let root = supers(modules[*scope].len());
-        tree.at(&modules[*scope]).generated.push(quote! {
+        tree.at(*scope).generated.push(quote! {
             pub use #root exports::#ns_ident::#name_ident::#interface::{#(#imports),*};
         });
     }
@@ -2305,7 +2321,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .filter(|shape| !shape.carried.derives.is_empty())
     {
         let paths = &shape.carried.derives;
-        tree.at(&modules[shape.scope]).generated.push(quote! {
+        tree.at(shape.scope).generated.push(quote! {
             #(#[allow(unused_imports)] use #paths as _;)*
         });
     }
@@ -2360,7 +2376,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 let path = relative(depth, &modules[resource.scope], &resource.ident);
                 quote! { type #camel = #path; }
             });
-        tree.at(&modules[service.scope]).generated.push(quote! {
+        tree.at(service.scope).generated.push(quote! {
             impl #module::Guest for #root __TembraExports {
                 #(#owned)*
                 #(#functions)*
@@ -2373,14 +2389,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             let resource_root = supers(modules[resource.scope].len());
             let resource_module =
                 quote! { #resource_root exports::#ns_ident::#name_ident::#interface };
-            tree.at(&modules[resource.scope])
-                .generated
-                .push(derived_resource(
-                    resource,
-                    &resource_module,
-                    &handle_types,
-                    &consumed_modules,
-                ));
+            tree.at(resource.scope).generated.push(derived_resource(
+                resource,
+                &resource_module,
+                &handle_types,
+                &consumed_modules,
+            ));
         }
     }
     // An implemented interface's bridge takes its signatures from the WIT: the functions forward
@@ -2398,9 +2412,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             &wit_resources,
             &modules,
         )?;
-        tree.at(&modules[service.scope]).generated.push(bridge);
+        tree.at(service.scope).generated.push(bridge);
         for (scope, implementation) in implementations {
-            tree.at(&modules[scope]).generated.push(implementation);
+            tree.at(scope).generated.push(implementation);
         }
     }
     // Implemented and imported interfaces are re-exported under their own names, like hooks, in
@@ -2452,13 +2466,11 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             .as_ref()
             .map(|ty| quote! { -> #ty })
             .unwrap_or_default();
-        tree.at(&modules[contribution.scope])
-            .generated
-            .push(quote! {
-                impl #module::Guest for #root __TembraExports {
-                    fn #callback(#param: #ty) #result { #target(#param) }
-                }
-            });
+        tree.at(contribution.scope).generated.push(quote! {
+            impl #module::Guest for #root __TembraExports {
+                fn #callback(#param: #ty) #result { #target(#param) }
+            }
+        });
     }
     // The manifest travels with the component, like the WIT: the contributions with their
     // priorities, the declarations with their composition, the services that chose a
@@ -2541,7 +2553,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         )
         .collect();
     for scope in &alloc_scopes {
-        tree.at(&modules[*scope])
+        tree.at(*scope)
             .generated
             .push(quote! { extern crate alloc as __tembra_alloc; });
     }
@@ -2562,7 +2574,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             defining.as_ref(),
             depth,
         )?;
-        tree.at(&modules[declaration.scope]).generated.push(code);
+        tree.at(declaration.scope).generated.push(code);
     }
     let conversions = defining.as_ref().map(|path| {
         conversions(
@@ -4220,12 +4232,11 @@ impl Elsewhere {
     fn by_hand(
         hands: &BTreeMap<String, Vec<(usize, syn::ItemImpl)>>,
         owner: &Ident,
-        tree: &mut Module,
-        modules: &[Vec<Ident>],
+        tree: &Module,
     ) -> Self {
         let mut elsewhere = Self::default();
         for (name, impls) in hands {
-            match uncovered(impls, Vec::new(), name, owner, tree, modules) {
+            match uncovered(impls, Vec::new(), name, owner, tree) {
                 None => {
                     elsewhere.traits.insert(name.clone());
                 }
@@ -4252,26 +4263,26 @@ fn uncovered(
     mut derived: Vec<Predicate>,
     name: &str,
     owner: &Ident,
-    tree: &mut Module,
-    modules: &[Vec<Ident>],
+    tree: &Module,
 ) -> Option<syn::Error> {
     let mut first = None;
     for (scope, block) in hands {
         // The attributes that may drop the impl, its own first, then those of each module around
         // it, the nearest first, with the module's name.
-        let path = &modules[*scope];
         let mut dropping: Vec<(Attribute, Option<Ident>)> = block
             .attrs
             .iter()
             .map(|attribute| (attribute.clone(), None))
             .collect();
-        for depth in (1..=path.len()).rev() {
-            let module = &path[depth - 1];
-            let attrs = &tree.at(&path[..depth]).attrs;
+        for module in tree.around(*scope).into_iter().rev() {
+            let Some(ident) = &module.ident else {
+                continue;
+            };
             dropping.extend(
-                attrs
+                module
+                    .attrs
                     .iter()
-                    .map(|attribute| (attribute.clone(), Some(module.clone()))),
+                    .map(|attribute| (attribute.clone(), Some(ident.clone()))),
             );
         }
         dropping.retain(|(attribute, _)| conditional(&attribute.meta));

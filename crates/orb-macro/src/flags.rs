@@ -185,20 +185,18 @@ pub(crate) fn check_hooks(
 /// struct through every module of its path (`remapped`), in every configuration, also where the
 /// attribute is off and the compiler drops the module, and the struct with it. The module nearest
 /// the struct is checked first, as the scan checks one holding a struct the macro marks.
-pub(crate) fn check_modules(
-    shapes: &[Shape],
-    tree: &mut Module,
-    modules: &[Vec<Ident>],
-) -> syn::Result<()> {
+pub(crate) fn check_modules(shapes: &[Shape], tree: &Module) -> syn::Result<()> {
     for shape in shapes
         .iter()
         .filter(|shape| matches!(shape.kind, ShapeKind::Flags(_)))
     {
-        let path = &modules[shape.scope];
-        for depth in (1..=path.len()).rev() {
+        for module in tree.around(shape.scope).into_iter().rev() {
+            let Some(ident) = &module.ident else {
+                continue;
+            };
             crate::unconditional_marked(
-                &tree.at(&path[..depth]).attrs,
-                &format!("module `{}` holding the flags", path[depth - 1]),
+                &module.attrs,
+                &format!("module `{ident}` holding the flags"),
                 &shape.ident,
                 "maps the WIT flags onto it",
             )?;
@@ -382,7 +380,7 @@ pub(crate) fn emit(
             wanted.push(("Serialize", quote! { ::serde::Serialize }));
             wanted.push(("Deserialize", quote! { ::serde::Deserialize }));
         }
-        let mut has = Elsewhere::by_hand(&implemented, &ident, tree, modules);
+        let mut has = Elsewhere::by_hand(&implemented, &ident, tree);
         let mut missing = Vec::new();
         for (name, path) in &wanted {
             if crate::derives(&item.attrs, name) {
@@ -410,7 +408,7 @@ pub(crate) fn emit(
             item.attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
         }
         let lowered = bits(&item);
-        let module = tree.at(&modules[shape.scope]);
+        let module = tree.at(shape.scope);
         module.items.push(Item::Struct(item));
         module.generated.push(lowered);
     }
@@ -459,8 +457,8 @@ fn trait_impls(
     names: impl Fn(&Type, usize) -> bool,
 ) -> Vec<(usize, syn::ItemImpl)> {
     let mut found = Vec::new();
-    for (scope, module) in modules.iter().enumerate() {
-        for item in &tree.at(module).items {
+    for scope in 0..modules.len() {
+        for item in &tree.at(scope).items {
             if let Item::Impl(block) = item
                 && block.trait_.is_some()
                 && names(&block.self_ty, scope)
