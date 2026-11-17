@@ -123,10 +123,12 @@ struct Leads {
 }
 
 /// What a walk through a type reaches: a name through a consumed interface's module, or the last
-/// name of another path, `Vec` and `Entry` in `Vec<Entry>`, which may name a type of the module.
+/// name of another path, `Vec` and `Entry` in `Vec<Entry>`, which may name a type of the module,
+/// with the module of the Orb the path names it in, by scope: the one the path leads into,
+/// `super::sessions::Token`, or the one writing it.
 enum Reached<'m, 't> {
     Consumed(Named<'m, 't>),
-    Module(&'t Ident),
+    Module(&'t Ident, usize),
 }
 
 impl Modules {
@@ -487,7 +489,9 @@ impl Modules {
     /// Walk a type written in the module `scope`: itself, then the type parameters of a path and
     /// the elements of a tuple. Each name a consumed interface's module reaches is reported, with
     /// whether it is the value of an `Option`, which `in_option` says of the type itself, and not
-    /// looked into; so is the last name of every other path, before its type parameters.
+    /// looked into; so is the last name of every other path, before its type parameters, with the
+    /// module of the Orb the path leads into (`module_of`), or the writing module for a bare name
+    /// or a path the macro cannot follow.
     fn walk<'m, 't>(
         &'m self,
         ty: &'t Type,
@@ -504,7 +508,10 @@ impl Modules {
                 let Some(segment) = path.path.segments.last() else {
                     return;
                 };
-                visit(Reached::Module(&segment.ident));
+                let module = crate::module_of(&path.path, &self.paths[scope])
+                    .and_then(|own| self.paths.iter().position(|path| *path == own))
+                    .unwrap_or(scope);
+                visit(Reached::Module(&segment.ident, module));
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
                         if let syn::GenericArgument::Type(ty) = argument {
@@ -543,11 +550,20 @@ impl Modules {
     /// and none of the names a consumed interface's module reaches, which are no types of the
     /// module.
     pub(crate) fn references(&self, ty: &Type, scope: usize, out: &mut Vec<Ident>) {
+        let mut placed = Vec::new();
+        self.references_in(ty, scope, &mut placed);
+        out.extend(placed.into_iter().map(|(ident, _)| ident));
+    }
+
+    /// `references`, each name with the module of the Orb the path names its type in, by scope:
+    /// the module a path leads into, `sessions` for `super::sessions::Token` written in `tickets`,
+    /// or the writing module for a bare name, where the name resolves as in Rust.
+    pub(crate) fn references_in(&self, ty: &Type, scope: usize, out: &mut Vec<(Ident, usize)>) {
         self.walk(ty, scope, false, &mut |reached| {
-            if let Reached::Module(ident) = reached
+            if let Reached::Module(ident, module) = reached
                 && !wit::BUILTIN.contains(&ident.to_string().as_str())
             {
-                out.push(ident.clone());
+                out.push((ident.clone(), module));
             }
         });
     }

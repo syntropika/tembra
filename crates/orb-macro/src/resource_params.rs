@@ -222,8 +222,10 @@ fn taking_error(
 /// Each resource of the module a type written in the module `scope` holds, with the record or
 /// variant of the module that holds it, if one does: the resource itself or inside options,
 /// results, lists and tuples, or in the fields and cases of the records and variants the type
-/// reaches, followed by name as the WIT names them, each name resolved in the module that writes
-/// it first, where a type of any shape among `types` keeps it from the resources of other modules.
+/// reaches, followed by name as the WIT names them, each name resolved first in the module its
+/// path names it in, the one a path leads into or the one writing a bare name
+/// (`Modules::references_in`), where a type of any shape among `types` keeps it from the resources
+/// of other modules.
 fn held<'a>(
     ty: &Type,
     scope: usize,
@@ -233,10 +235,10 @@ fn held<'a>(
     modules: &Modules,
 ) -> Vec<(&'a WitResource, Option<&'a Ident>)> {
     let mut mentioned = Vec::new();
-    modules.references(ty, scope, &mut mentioned);
+    modules.references_in(ty, scope, &mut mentioned);
     let mut pending: Vec<(Ident, usize, Option<&'a Ident>)> = mentioned
         .into_iter()
-        .map(|ident| (ident, scope, None))
+        .map(|(ident, scope)| (ident, scope, None))
         .collect();
     let mut seen = BTreeSet::new();
     let mut held = Vec::new();

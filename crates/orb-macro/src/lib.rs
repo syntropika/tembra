@@ -3687,13 +3687,14 @@ fn own_or_only<T>(named: impl IntoIterator<Item = (usize, T)>, scope: usize) -> 
 /// resource's function or a derived hook's input reaches; the others, with their shapes, go back
 /// to their modules as ordinary Rust. The resources of an implemented interface reach nothing:
 /// their functions speak the consumed package's types, whatever the module's own are called. A
-/// name resolves by `own_or_only`: to the type of the module naming it, a resource included, else
-/// to the only resource of that name, else to the only type of that name in the Orb; two of other
-/// modules are ambiguous, a type the module does not declare is an error, and a resource is a type
-/// of its own. A type of any shape the module declares, one of `types`, keeps the name from the
-/// resources and the types of other modules wherever the module writes it, in a signature or in a
-/// field, as in Rust. What a consumed interface's module names, a type or a handle, is no type of
-/// the module.
+/// name resolves by `own_or_only` in the module its path names it in, the one a path leads into,
+/// `super::sessions::Token`, or the one writing a bare name (`Modules::references_in`): to the type
+/// of that module, a resource included, else to the only resource of that name, else to the only
+/// type of that name in the Orb; two of other modules are ambiguous, a type the module does not
+/// declare is an error, and a resource is a type of its own. A type of any shape the module
+/// declares, one of `types`, keeps the name from the resources and the types of other modules
+/// wherever the module writes it, in a signature or in a field, as in Rust. What a consumed
+/// interface's module names, a type or a handle, is no type of the module.
 fn reachable(
     candidates: Vec<Candidate>,
     services: &[Service],
@@ -3712,9 +3713,7 @@ fn reachable(
     }
     let mut pending: Vec<(Ident, usize)> = Vec::new();
     let mention = |ty: &Type, scope: usize, pending: &mut Vec<(Ident, usize)>| {
-        let mut idents = Vec::new();
-        modules.references(ty, scope, &mut idents);
-        pending.extend(idents.into_iter().map(|ident| (ident, scope)));
+        modules.references_in(ty, scope, pending);
     };
     for function in resource_params::derived(services, resources) {
         for (_, ty, _) in function.params {

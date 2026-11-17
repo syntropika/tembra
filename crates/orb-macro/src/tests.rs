@@ -6810,6 +6810,57 @@ fn a_type_the_module_declares_takes_its_name_before_a_resource() {
     expanded("example:desk@1.0.0", &desk(alias, "Tickets"));
 }
 
+/// A path into another module of the Orb names its type there, as in Rust: `super::sessions::Token`
+/// or `super::model::Entry`, written in a module declaring a `Token` or an `Entry` of its own, is
+/// the other module's resource or record, which the bare name would not be, so the function takes
+/// the resource or returns the record as it would after a `use` of the type.
+#[test]
+fn a_path_into_another_module_names_its_type_there() {
+    let module = expanded(
+        "example:desk@1.0.0",
+        "mod desk {
+            pub mod tickets {
+                pub struct Token(pub u32);
+                #[service]
+                pub struct Tickets;
+                impl Tickets { pub fn check(token: super::sessions::Token) -> u32 { 0 } }
+            }
+            pub mod sessions {
+                #[wit_resource(service = Tickets)]
+                pub struct Token;
+                impl Token { pub fn id(&self) -> u32 { 0 } }
+                #[service]
+                pub struct Sessions;
+                impl Sessions { pub fn count() -> u32 { 0 } }
+            }
+        }",
+    );
+    let text = resolved(&module);
+    assert!(
+        text.contains("  check: func(token: token) -> u32;\n"),
+        "{text}"
+    );
+    let module = expanded(
+        "example:books@1.0.0",
+        "mod books {
+            pub mod model { pub struct Entry { pub id: u32 } }
+            pub mod api {
+                pub struct Entry(pub u32);
+                #[service]
+                pub struct Shelf;
+                impl Shelf { pub fn first() -> super::model::Entry { todo!() } }
+            }
+        }",
+    );
+    let text = resolved(&module);
+    for expected in [
+        "  record entry {\n    id: u32,\n  }\n",
+        "  first: func() -> entry;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
 /// A type the module declares takes its name there wherever the module writes it, as in Rust: a
 /// tuple struct named like another module's record, in a parameter or in a record's field, is
 /// refused as a type of the module that cannot enter the WIT, not read as that record, and so is
