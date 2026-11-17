@@ -2,11 +2,12 @@
 use anyhow::{Context, Result, bail};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Write,
     path::{Path, PathBuf},
 };
 use tembra_contracts::{
-    ComponentRoles, Contract, HTTP_HANDLER, Lifetime, ServicePolicy, SystemCapability, guest,
-    system_capability,
+    ComponentRoles, Contract, HTTP_HANDLER, Item, Lifetime, Model, ServicePolicy, SystemCapability,
+    guest, system_capability,
 };
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
@@ -342,7 +343,17 @@ pub fn inspect(
         Some((contract, ..)) => self::roles(contract, &bytes)?,
         None => ComponentRoles::default(),
     };
-    summary(&resolve, world, "orb", &roles);
+    let model = contract
+        .as_ref()
+        .map(|(contract, ..)| contract.prepared().model());
+    summary(
+        &mut std::io::stdout(),
+        &resolve,
+        world,
+        "orb",
+        &roles,
+        model,
+    )?;
     if let Some((contract, name, wit_dir)) = contract {
         println!("checked against world {name} of {}:", wit_dir.display());
         match contract.component_artifact(&bytes, "orb", 1, &roles) {
@@ -437,8 +448,19 @@ fn classify_import(id: &str, handler_only: bool) -> Import {
 /// handler, hooks declared and contributed to, kernel-managed state and resources, and imports
 /// with the grant they will need at installation; an import by key with the interface whose
 /// objects it reaches, and not the interface itself when the world imports it only for the types
-/// the view `use`s.
-pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &ComponentRoles) {
+/// the view `use`s. An import of an interface the world exports that the contract's `model`
+/// pairs with no export (`Model::pairs`) is one elaboration added for the types another import
+/// `use`s: installation binds it like any other import when it holds a resource, and so the
+/// summary lists it, and to nothing otherwise. Without the contract, such an import is left out.
+/// Written to `out`.
+pub fn summary(
+    out: &mut impl Write,
+    resolve: &Resolve,
+    world: WorldId,
+    orb_name: &str,
+    roles: &ComponentRoles,
+    model: Option<&Model>,
+) -> std::io::Result<()> {
     let ComponentRoles {
         contributions,
         hooks,
@@ -448,7 +470,7 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
     let world = &resolve.worlds[world];
     let (mut state, mut resources) = (false, false);
     let ingress = world.exports.keys().any(|key| is_ingress(resolve, key));
-    println!("exports, the services of {orb_name}:");
+    writeln!(out, "exports, the services of {orb_name}:")?;
     for (key, item) in &world.exports {
         let id = world_key(resolve, key, None);
         if contributions.contains_key(&id) || hooks.contains_key(&id) {
@@ -479,45 +501,56 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
                 }
                 _ => String::new(),
             };
-            println!(
+            writeln!(
+                out,
                 "  {orb_name}::{id}  methods: {}{policy}",
                 methods.join(", ")
-            );
+            )?;
         } else {
-            println!("  {id}");
+            writeln!(out, "  {id}")?;
         }
     }
     if ingress {
-        println!(
+        writeln!(
+            out,
             "incoming HTTP handler: called by the host's ingress, never a portable Orb service ({HTTP_HANDLER})"
-        );
+        )?;
     }
     if !hooks.is_empty() {
-        println!("hooks declared, run by the kernel's plan of contributions:");
+        writeln!(
+            out,
+            "hooks declared, run by the kernel's plan of contributions:"
+        )?;
         for (id, composition) in hooks {
-            println!(
+            writeln!(
+                out,
                 "  {id}  {}",
                 serde_json::json!(composition).as_str().unwrap_or_default()
-            );
+            )?;
         }
     }
     if !contributions.is_empty() {
-        println!("hook contributions, bound to the provider with Install::requires:");
+        writeln!(
+            out,
+            "hook contributions, bound to the provider with Install::requires:"
+        )?;
         for (id, priority) in contributions {
-            println!("  {id}  priority {priority}");
+            writeln!(out, "  {id}  priority {priority}")?;
         }
     }
     if state {
-        println!(
+        writeln!(
+            out,
             "kernel-managed state: the kernel keeps the state of this Orb's service objects ({})",
             guest::STATE
-        );
+        )?;
     }
     if resources {
-        println!(
+        writeln!(
+            out,
             "kernel-managed resources: the kernel opens and closes the resources of this Orb's root ({})",
             guest::RESOURCE
-        );
+        )?;
     }
     // An Orb serving incoming HTTP without the HTTP client gets no HTTP grant: planning binds its
     // HTTP types to the ingress.
@@ -534,17 +567,30 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
         let WorldItem::Interface { id: interface, .. } = item else {
             continue;
         };
-        if resolve.interfaces[*interface].functions.is_empty() {
+        let id = world_key(resolve, key, None);
+        // An import of an interface the world exports besides, which the contract pairs with no
+        // export, holding a resource: installation binds it to the provider the installer names,
+        // the one serving the import that `use`s the resource, whether the component calls any
+        // of its functions or not.
+        let exported = world.exports.contains_key(key);
+        let bound = exported
+            && model.is_some_and(|model| {
+                model.imports.iter().any(|entry| {
+                    entry.key == id
+                        && matches!(&entry.item, Item::Interface(import)
+                            if !model.pairs(import) && import.callable())
+                })
+            });
+        if resolve.interfaces[*interface].functions.is_empty() && !bound {
             continue; // types only: nothing to bind
         }
-        let id = world_key(resolve, key, None);
         if contributions.contains_key(&id) || hooks.contains_key(&id) || guest::reserved(&id) {
             // Bound to the provider through the contribution, the entry to the Orb's own hook,
             // or served by the kernel.
             context |= id == guest::CONTEXT;
             continue;
         }
-        if world.exports.contains_key(key) {
+        if exported && !bound {
             // The roles name every hook, so an import of an interface the world exports besides
             // is one elaboration added for the types a view `use`s, the view of the interface the
             // Orb implements: the kernel binds the view alone.
@@ -557,39 +603,42 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
         }
     }
     if !ingress_types.is_empty() {
-        println!(
+        writeln!(
+            out,
             "incoming HTTP types: a handler-only Orb needs no grant for them ({})",
             ingress_types.join(", ")
-        );
+        )?;
     }
     if context {
-        println!(
+        writeln!(
+            out,
             "kernel-served context: the call's principal and cancellation, the object's address and the log ({})",
             guest::CONTEXT
-        );
+        )?;
     }
     if requires.is_empty() && grants.is_empty() {
         if contributions.is_empty() && hooks.is_empty() {
-            println!("imports: none; the installer grants nothing");
+            writeln!(out, "imports: none; the installer grants nothing")?;
         } else {
-            println!("other imports: none; the installer grants nothing");
+            writeln!(out, "other imports: none; the installer grants nothing")?;
         }
     }
     if !requires.is_empty() {
-        println!("imports of other Orbs, bound with Install::requires:");
+        writeln!(out, "imports of other Orbs, bound with Install::requires:")?;
         for id in requires {
             match references.get(&id) {
-                Some(target) => println!("  {id}  by key, the objects of {target}"),
-                None => println!("  {id}"),
+                Some(target) => writeln!(out, "  {id}  by key, the objects of {target}")?,
+                None => writeln!(out, "  {id}")?,
             }
         }
     }
     if !grants.is_empty() {
-        println!("WASI imports, grants the installer must give:");
+        writeln!(out, "WASI imports, grants the installer must give:")?;
         for (kind, ids) in grants {
-            println!("  {kind}: {}", ids.join(", "));
+            writeln!(out, "  {kind}: {}", ids.join(", "))?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
