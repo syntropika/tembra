@@ -30,7 +30,8 @@ pub use wit_bindgen as __wit_bindgen;
 #[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
 pub use tembra_executor_wasm as wasm;
 
-/// Expand the input only when this crate links the native runtime, through its `host` feature.
+/// Expand the input only when this crate links the native runtime, through its `host` feature,
+/// and builds for a target other than wasm32.
 ///
 /// `#[tembra::orb]` wraps its native output in it: `orb()`, the clients and every other item
 /// that names the runtime, such as `Orb` or `Service`. Invoke it in item position with those
@@ -46,8 +47,10 @@ pub use tembra_executor_wasm as wasm;
 /// The macro reads this crate's features, not the caller's, and Cargo unifies them across a
 /// build. A native host that depends on an Orb crate enables `host`, so the items exist. A
 /// component build of the same crate enables only `macros`, so the macro expands to nothing and
-/// the runtime is not linked.
-#[cfg(feature = "host")]
+/// the runtime is not linked. A build for wasm32 is a component whatever the features, as the
+/// macro's `export!` is, so the macro expands to nothing there too: a guest whose `tembra` keeps
+/// the default features, or gets `host` from another crate of the build, stays a component.
+#[cfg(all(feature = "host", not(target_arch = "wasm32")))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __host {
@@ -56,8 +59,8 @@ macro_rules! __host {
     };
 }
 
-/// Without `host`, the input is dropped; the other definition describes the macro.
-#[cfg(not(feature = "host"))]
+/// Without `host`, or for wasm32, the input is dropped; the other definition describes the macro.
+#[cfg(any(not(feature = "host"), target_arch = "wasm32"))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __host {
@@ -65,18 +68,19 @@ macro_rules! __host {
 }
 
 // A build without `host` compiles this only because the macro drops it: `Orb` exists only with
-// `host`.
+// `host`. A build for wasm32 drops it too, whatever the features.
 __host! {
     const _: Option<Orb> = None;
+    const _: () = assert!(!cfg!(target_arch = "wasm32"));
 }
 
-/// Expand the input only when this crate does not link the native runtime: the counterpart of
-/// `__host!`, for an item a component build has and a native host replaces with its own, of the
-/// same name, from `__host!`.
+/// Expand the input only where `__host!` drops its own: the counterpart of `__host!`, for an item
+/// a component build has and a native host replaces with its own, of the same name, from
+/// `__host!`.
 ///
 /// `#[tembra::orb]` re-exports the bindings' `context` module through it, by the absolute path, so
 /// a native host gets the `context` the native side writes in its place.
-#[cfg(not(feature = "host"))]
+#[cfg(any(not(feature = "host"), target_arch = "wasm32"))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __guest {
@@ -85,15 +89,15 @@ macro_rules! __guest {
     };
 }
 
-/// With `host`, the input is dropped; the other definition describes the macro.
-#[cfg(feature = "host")]
+/// With `host`, outside wasm32, the input is dropped; the other definition describes the macro.
+#[cfg(all(feature = "host", not(target_arch = "wasm32")))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __guest {
     ($($item:tt)*) => {};
 }
 
-// A build with `host` compiles this only because the macro drops it.
+// A build with `host`, outside wasm32, compiles this only because the macro drops it.
 __guest! {
-    const _: () = assert!(!cfg!(feature = "host"));
+    const _: () = assert!(!cfg!(feature = "host") || cfg!(target_arch = "wasm32"));
 }

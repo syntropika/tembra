@@ -1573,3 +1573,87 @@ fn a_component_build_refuses_a_newtype_only_try_from_makes() {
         assert!(errors.contains(expected), "{expected}\n{errors}");
     }
 }
+
+/// A build for wasm32 is a component whatever the facade's features. A guest gets `host` when its
+/// `tembra` keeps the default features, or from another crate of the build; its component keeps the
+/// bindings' `context` all the same, and answers each call as the guest built without `host` does,
+/// where the native `context` would find no call to read and trap the revision. The host feature
+/// fixture is built both ways into the fixtures' target directory, where `just test-orb-macro`
+/// built their components.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_wasm32_guest_with_the_host_feature_answers_as_a_component() {
+    let built = std::env::var_os("TEMBRA_WASM_ORB_MACRO_STD")
+        .unwrap_or_else(|| panic!("TEMBRA_WASM_ORB_MACRO_STD is required"));
+    let target = Path::new(&built)
+        .parent()
+        .expect("the fixtures' target directory");
+    let manifest =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/host-feature-fixture/Cargo.toml");
+    let answers = [&[][..], &["--features", "host"]].map(|features| {
+        let output = std::process::Command::new(env!("CARGO"))
+            .args([
+                "rustc",
+                "--locked",
+                "--release",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--crate-type",
+                "cdylib",
+            ])
+            .args(features)
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(target)
+            .args(["--", "-Clinker=wasm-component-ld"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{features:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(
+            target.join("wasm32-unknown-unknown/release/tembra_orb_host_feature_fixture.wasm"),
+        )
+        .unwrap();
+        let contract =
+            Contract::from_source("probe.wit", &embedded_wit(&bytes), Some("probe")).unwrap();
+        let artifact = contract
+            .component_artifact(&bytes, "probe", 1, &Default::default())
+            .unwrap();
+        let engine = Engine::new(Limits::default()).unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![engine.load(&artifact, Install::default()).unwrap()])
+            .unwrap();
+        let caller = Rc::new(
+            host.get(
+                "probe::example:probe/caller@1.0.0",
+                vec!["main".into()],
+                "alice",
+            )
+            .unwrap(),
+        );
+        pool.run_until(caller.ready()).unwrap();
+        // A trap would fail the first call and retire the revision for the second.
+        let answers = [(); 2].map(|()| {
+            let caller = caller.clone();
+            pool.run_until(host.root("alice", move |context| {
+                async move {
+                    caller
+                        .call_portable::<_, Value>(&context, "principal", json!([]))
+                        .await
+                }
+                .boxed_local()
+            }))
+            .map_err(|error| (error.code, error.reason))
+        });
+        caller.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        answers
+    });
+    assert_eq!(answers[0], [Ok(json!("alice")), Ok(json!("alice"))]);
+    assert_eq!(answers[1], answers[0], "built with `host`");
+}

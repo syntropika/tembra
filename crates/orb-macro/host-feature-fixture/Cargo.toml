@@ -1,0 +1,23 @@
+[package]
+name = "tembra-orb-host-feature-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+# The facade's `host` feature, which a guest gets when its `tembra` keeps the default features, or
+# from another crate of the build: a build for wasm32 is a component all the same, which
+# `executor-wasm/tests/orb_macro_runtime.rs` checks.
+host = ["tembra/host"]
+
+[dependencies]
+tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
+
+# The runtime fixture's, so that a build shares its dependencies in the fixtures' target directory.
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+strip = "symbols"

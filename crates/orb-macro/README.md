@@ -1128,14 +1128,16 @@ let sum: u32 = calculator::MathClient::new(math).add(&context, 1, 2).await?;
 ```
 
 The native items sit inside `tembra::__host!`, a hidden macro of the facade that expands its input
-only where the facade's `host` feature is on, and Cargo unifies features across a build: a native
-host that depends on the Orb crate and on `tembra` with `host`, the default, gets `orb()`; a
-component build enables only `macros`, gets none of it, and the component stays the same. The
-generated code names the facade as `::tembra`, so an Orb crate depends on it under that name and
-needs no dependency of its own for the runtime or its JSON; a host whose `tembra` lacks `host` finds
-no `orb()`. The crate is rebuilt when its manifest changes, so `orb()` follows the table. See
-[rust-orb-native](../../examples/rust-orb-native/README.md), where one host links two Orb crates
-that export the same interface.
+only where the facade's `host` feature is on, outside wasm32, and Cargo unifies features across a
+build: a native host that depends on the Orb crate and on `tembra` with `host`, the default, gets
+`orb()`; a component build enables only `macros`, gets none of it, and the component stays the
+same. A build for wasm32 is a component whatever the features, as the macro's `export!` is, so a
+guest whose `tembra` keeps the default features, or gets `host` from another crate of the build,
+gets none of it either. The generated code names the facade as `::tembra`, so an Orb crate depends
+on it under that name and needs no dependency of its own for the runtime or its JSON; a host whose
+`tembra` lacks `host` finds no `orb()`. The crate is rebuilt when its manifest changes, so `orb()`
+follows the table. See [rust-orb-native](../../examples/rust-orb-native/README.md), where one host
+links two Orb crates that export the same interface.
 
 A native host can lend the Orb values a component cannot be given. The struct marked `#[inputs]`
 is the argument of `orb(..)`, and of `orb_named(..)` after the name and API version, one value for
@@ -1292,9 +1294,14 @@ bindings' `context`, through `tembra::__guest!`, the facade's counterpart of `te
 
 These functions serve a method's body and the futures it awaits, nothing else. In a `#[create]`,
 a `#[root]`, a task or a resource's closure, or a future spawned off the call, there is no call to
-read: they panic there, and the host's executor does not catch the panic. A create reads its
-object's address with `declaration.address()` instead, and a method reads what a future it spawns
-needs before handing it over.
+read: they panic there. Except in a spawned future, the runtime catches the panic, as it catches a
+method's, and fails what panicked with the code `unavailable` and the reason `callback`:
+`Host::get` answers that error for a `#[create]`, `Host::install` for a `#[root]`, and an object's
+`ready()` for a resource the object declares that fails to open; `Host::errors` holds it for one
+that fails to close, and a task ends. A root resource that fails to open closes the Orb's root
+instead: its objects' `ready()` answers `cancelled`. A spawned future panics in the executor that
+polls it. A create reads its object's address with `declaration.address()` instead, and a method
+reads what a future it spawns needs before handing it over.
 
 A `#[wit_resource]` struct is natively a value the Orb issues as a capability of its resource type,
 as `tembra::portable::Issuable` names it: the resource's constructor and static functions, and a
@@ -1686,7 +1693,7 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    which reaches the slot in a component build, inside `tembra::__guest!`, and natively, inside
    `tembra::__host!`, the resource of the Orb whose method runs, from a hidden table of the Orb's
    resources that the Orb's create fills;
-10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, or
+10. inside `tembra::__host!`, so only in a native build that links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
     `pub fn orb_named(name, api_version, ..)`, whose Orb's create declares the root's resources and
     runs its `#[root]`, from one
