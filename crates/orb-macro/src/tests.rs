@@ -2600,6 +2600,153 @@ fn a_namesake_of_a_flags_struct_in_another_module_keeps_its_impls() {
     }
 }
 
+/// An impl names the type through a `use` the macro follows to a `crate::` path, through a module
+/// a glob import brings in, `pinned::Balance` after `use super::*;`, or through an alias of the
+/// type's own name, `pub type Access = super::rights::Access;`: the macro cannot place the
+/// `crate::` path such a `use` leads to, so the name counts by its uniqueness among the types of
+/// the Orb's modules, as a name a glob import the macro cannot follow brings does, and such an
+/// alias stands for the type it names, as a `use` does. A glob import from a module of the Orb is
+/// followed to the type that module declares, whatever namesake a third module declares. A
+/// `crate::` path written on the impl itself leaves the Orb module, as before: it may name a
+/// namesake outside the Orb, whose impl is not the type's.
+#[test]
+fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
+    let office = |ops: &str, legacy: &str| {
+        format!(
+            "mod office {{
+                pub mod rights {{
+                    #[flags]
+                    pub struct Access {{ pub read: bool, pub write: bool }}
+                    #[service]
+                    pub struct Guard;
+                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
+                pub mod ops {{
+                    {ops}
+                }}
+                {legacy}
+            }}"
+        )
+    };
+    let clone = "impl Clone for Access { fn clone(&self) -> Self { *self } }";
+    let bitor = "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }";
+    let bits = "impl Access { pub fn bits(&self) -> u32 { 0 } }";
+    let without_clone = "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }";
+    for (ops, legacy) in [
+        (format!("use crate::office::rights::Access; {clone}"), ""),
+        (
+            "use super::*; impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"
+                .to_owned(),
+            "",
+        ),
+        (
+            format!("pub type Access = super::rights::Access; {clone}"),
+            "",
+        ),
+        (
+            format!("use super::rights::*; {clone}"),
+            "pub mod legacy { pub struct Access(pub u32); }",
+        ),
+    ] {
+        let generated = tokens(&expanded("example:office@1.0.0", &office(&ops, legacy)));
+        assert!(generated.contains(without_clone), "{ops}\n{generated}");
+    }
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "impl Clone for crate::elsewhere::Access { fn clone(&self) -> Self { todo!() } }",
+            "",
+        ),
+    ));
+    assert!(
+        generated.contains(
+            "# [derive (:: core :: clone :: Clone , :: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
+        ),
+        "{generated}"
+    );
+    for (ops, message) in [
+        (
+            format!("use crate::office::rights::Access; {bitor}"),
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            format!("use crate::office::rights::Access; {bits}"),
+            "`Access::bits` takes a name the macro gives a #[flags] struct",
+        ),
+        (
+            format!("pub type Access = super::rights::Access; {bitor}"),
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &office(&ops, ""));
+        assert!(error.contains(message), "{ops}: {error}");
+    }
+    // A state's `Default` written so is the author's.
+    let ledger = |items: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+                {items}
+            }}"
+        )
+    };
+    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 7 } } }";
+    let written = "impl :: core :: default :: Default for";
+    for items in [
+        format!("pub mod defaults {{ use crate::ledger::Balance; {default} }}"),
+        format!("pub mod api {{ pub type Balance = super::Balance; {default} }}"),
+    ] {
+        let generated = tokens(&expanded("example:ledger@1.0.0", &ledger(&items)));
+        assert!(!generated.contains(written), "{items}\n{generated}");
+    }
+    let generated = tokens(&expanded(
+        "example:ledger@1.0.0",
+        &ledger("impl Default for crate::elsewhere::Balance { fn default() -> Self { todo!() } }"),
+    ));
+    assert!(generated.contains(written), "{generated}");
+    let generated = tokens(&expanded(
+        "example:ledger@1.0.0",
+        "mod ledger {
+            pub mod pinned {
+                #[state]
+                pub struct Balance { pub total: i64 }
+                #[service]
+                pub struct Pinned;
+                impl Pinned { pub fn add(amount: i64) -> i64 { amount } }
+            }
+            pub mod defaults {
+                use super::*;
+                impl Default for pinned::Balance { fn default() -> Self { pinned::Balance { total: 7 } } }
+            }
+        }",
+    ));
+    assert!(!generated.contains(written), "{generated}");
+    // A type holding a resource handle has the `Clone` a type holding it derives when the macro
+    // sees it implemented, through such a `use` too.
+    expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            #[wit_resource]
+            pub struct Pen { pub ink: u32 }
+            impl Pen { pub fn ink(&self) -> u32 { self.ink } }
+            pub struct Lease { pub pen: Pen }
+            #[derive(Clone)]
+            pub struct Desk { pub lease: Lease }
+            pub mod hands {
+                use crate::walk::Lease;
+                impl Clone for Lease { fn clone(&self) -> Self { todo!() } }
+            }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn lend() -> Desk { todo!() } }
+        }",
+    );
+}
+
 /// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
 /// `#[cfg_attr(..)]`: a field, a case or a case's payload under `#[cfg(..)]`, which the WIT would
 /// hold in every configuration, is refused, on a flags as on a record, an enum or a variant, and

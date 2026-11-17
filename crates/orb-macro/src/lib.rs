@@ -609,12 +609,10 @@ struct Scan {
     /// What each module imports, by scope.
     uses: Vec<Uses>,
     /// Every type each module declares, with its scope: a struct of any shape, an enum, a type
-    /// alias or a union, candidate for the WIT or not, which tell the type an `impl` names apart
-    /// from a namesake a `use` brings in.
-    types: Vec<(usize, Ident)>,
-    /// The same types but the aliases of a namesake (`aliases_namesake`), which stand for the
-    /// type they name, as a `use` does: a name the module writes resolves to one of them before a
-    /// resource of another module.
+    /// alias or a union, candidate for the WIT or not, but the aliases of a namesake
+    /// (`aliases_namesake`), which stand for the type they name, as a `use` does. A name the
+    /// module writes resolves to one of them before a resource or a record of another module, and
+    /// they tell the type an `impl` names apart from a namesake a `use` brings in.
     own_types: Vec<(usize, Ident)>,
 }
 
@@ -843,11 +841,10 @@ impl Scan {
                 Item::Union(item) => Some(&item.ident),
                 _ => None,
             };
-            if let Some(ident) = declared_type {
-                self.types.push((scope, ident.clone()));
-                if !matches!(&item, Item::Type(alias) if aliases_namesake(alias)) {
-                    self.own_types.push((scope, ident.clone()));
-                }
+            if let Some(ident) = declared_type
+                && !matches!(&item, Item::Type(alias) if aliases_namesake(alias))
+            {
+                self.own_types.push((scope, ident.clone()));
             }
             match item {
                 Item::Mod(module) => {
@@ -1336,7 +1333,6 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         default_impls: Vec::new(),
         marked: Vec::new(),
         uses: vec![Uses::default()],
-        types: Vec::new(),
         own_types: Vec::new(),
     };
     let (items, children) = scan.scan(items, 0)?;
@@ -1364,7 +1360,6 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         default_impls,
         marked,
         uses,
-        types: declared_types,
         own_types,
         ..
     } = scan;
@@ -1790,7 +1785,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                         &states,
                         &modules,
                         &uses,
-                        &declared_types,
+                        &own_types,
                     )
                 })
                 .cloned()
@@ -1939,7 +1934,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             // is `serde`'s by its name, as one a crate-root `#[macro_use]` brings.
             let derived = serde_derived(attrs, scope, &uses, &modules, &ident, true);
             let by_hand: Vec<(String, (usize, syn::ItemImpl))> =
-                flags::impls_of(&mut tree, &modules, &uses, &declared_types, &ident, scope)
+                flags::impls_of(&mut tree, &modules, &uses, &own_types, &ident, scope)
                     .into_iter()
                     .filter_map(|(written, block)| {
                         let (_, path, _) = block.trait_.as_ref()?;
@@ -2029,7 +2024,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &modules,
         &impls,
         &uses,
-        &declared_types,
+        &own_types,
         !states.is_empty(),
     )?;
     // What each other type that enters the WIT implements besides what the bindings implement for
@@ -2046,7 +2041,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             &mut tree,
             &modules,
             &uses,
-            &declared_types,
+            &own_types,
             &shape.ident,
             shape.scope,
         );
@@ -2844,10 +2839,12 @@ fn implemented_by(derive: &Ident, attrs: &[Attribute]) -> Vec<String> {
 }
 
 /// Whether the type of an `impl Default for ..`, written in the module `scope`, is `state`: its
-/// path, followed from that module through the module's `use`s, `self::`, `super::` and
-/// sub-modules (`type_module`), ends at the state; a path ending at another type of the Orb module
-/// is not the state, and one leaving the Orb module neither. A name the macro cannot follow, one a
-/// glob import brings in, is the state when no other state has its name.
+/// path, followed from that module through the module's `use`s, `self::`, `super::`, sub-modules
+/// and the glob imports from the Orb's modules (`type_module`), ends at the state; a path ending at
+/// another type of the Orb module, one of `declared`, is not the state, and one leaving the Orb
+/// module through a crate neither. A name the macro cannot place, one a glob import from a module
+/// it does not read brings in or one reached through `crate::`, is the state when no other state
+/// has its name.
 fn names_state(
     ty: &Type,
     scope: usize,
@@ -2910,11 +2907,18 @@ fn module_of(path: &syn::Path, from: &[Ident]) -> Option<Vec<Ident>> {
 }
 
 /// The module, by scope, in which a type path written in the module `scope` names its type, with
-/// the type's name there. The path's prefix is followed as a glob import's is (`glob_module`):
-/// through the `use` binding its first name, `self::`, `super::` and the sub-modules of the Orb.
-/// A single name a `use` of the module binds, `Access` after `use super::rights::Access;`, stands
-/// for the path it imports, and so does one the module reached re-exports. `None` for a path that
-/// leaves the Orb module, through a crate, `crate::` or `Self`.
+/// the type's name there: the module declares the type, or binds nothing of the name, so a glob
+/// import from a module the macro does not read, or the prelude, brings it, and the name is placed
+/// by its uniqueness (`flags::names`). The path's prefix is followed as a glob import's is
+/// (`glob_module`): through the `use` binding its first name, `self::`, `super::`, the sub-modules
+/// of the Orb and the modules its glob imports bring in. A single name a `use` of the module
+/// binds, `Access` after `use super::rights::Access;`, stands for the path it imports, and so does
+/// one the module reached re-exports; one the module neither binds nor declares is followed through
+/// its glob imports to the module of the Orb that binds or declares it (`through_globs`). A `use`
+/// leading to a path through `crate::`, which the macro cannot place, binds a name it cannot place
+/// either, as a glob import from outside the Orb does: the name stands alone, in the module that
+/// binds it. `None` for a path that leaves the Orb module through a crate, `Self` or a `crate::`
+/// written in the path itself, which may name a namesake outside the Orb.
 fn type_module(
     path: &syn::Path,
     scope: usize,
@@ -2930,12 +2934,17 @@ fn type_module(
         .iter()
         .map(|segment| segment.ident.clone())
         .collect();
+    // Whether a `use` has replaced the name by the path it imports.
+    let mut imported = false;
     // Each step consumes the path's prefix or replaces the name by what a `use` binds it to;
     // declarations binding one another in a circle would never end.
     for _ in 0..64 {
         let (name, prefix) = segments.split_last()?;
         let (name, prefix) = (name.clone(), prefix.to_vec());
-        if !prefix.is_empty() {
+        if let Some(first) = prefix.first() {
+            if *first == "crate" {
+                return imported.then_some((scope, name));
+            }
             let prefix = Named {
                 global: false,
                 segments: prefix,
@@ -2949,8 +2958,15 @@ fn type_module(
             {
                 return None;
             }
-            Some(bound) => segments = bound.segments.clone(),
-            None => return Some((scope, name)),
+            Some(bound) => {
+                segments = bound.segments.clone();
+                imported = true;
+            }
+            None if uses[scope].items.contains(&name.to_string()) => return Some((scope, name)),
+            None => match through_globs(&name, scope, uses, modules) {
+                Globbed::In(module) => scope = module,
+                Globbed::Outside | Globbed::Nowhere => return Some((scope, name)),
+            },
         }
     }
     None
@@ -4782,20 +4798,21 @@ enum Globbed {
 
 /// Where the glob imports of the module `scope` bring `name` from: the first module of the Orb,
 /// through the module's globs and those of the modules they import from, that binds the name with
-/// `use` or declares a sub-module of that name.
+/// `use` or declares an item of that name, a sub-module included. Each glob's own path is read
+/// without this step (`module_from`): a glob may import from a module another glob brings in, and
+/// following those in a circle would never end.
 fn through_globs(name: &Ident, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> Globbed {
     let mut outside = false;
     let mut seen = BTreeSet::from([scope]);
     let mut pending = vec![scope];
     while let Some(scope) = pending.pop() {
         for glob in &uses[scope].globs {
-            let Some(module) = glob_module(glob, scope, uses, modules) else {
+            let Some(module) = module_from(glob, scope, uses, modules, false) else {
                 outside = true;
                 continue;
             };
-            let mut child = modules[module].clone();
-            child.push(name.clone());
-            if uses[module].names.contains_key(&name.to_string()) || modules.contains(&child) {
+            let name = name.to_string();
+            if uses[module].names.contains_key(&name) || uses[module].items.contains(&name) {
                 return Globbed::In(module);
             }
             if seen.insert(module) {
@@ -4811,10 +4828,23 @@ fn through_globs(name: &Ident, scope: usize, uses: &[Uses], modules: &[Vec<Ident
 }
 
 /// The module of the Orb that a glob import written in the module `scope` imports from, by scope:
-/// `self`, `super`, a sub-module by name, or what a `use` of the module binds one of those to;
-/// `None` for a module the macro does not read, one of a crate, under `crate::` or above the Orb
-/// module.
+/// `self`, `super`, a sub-module by name, what a `use` of the module binds one of those to, or a
+/// module another glob import of the module brings in, `pinned` after `use super::*;`
+/// (`through_globs`); `None` for a module the macro does not read, one of a crate, under `crate::`
+/// or above the Orb module.
 fn glob_module(glob: &Named, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> Option<usize> {
+    module_from(glob, scope, uses, modules, true)
+}
+
+/// `glob_module`, following a first name the module neither binds nor declares a sub-module of
+/// through the module's glob imports only when `globs` is set.
+fn module_from(
+    glob: &Named,
+    scope: usize,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+    globs: bool,
+) -> Option<usize> {
     if glob.global {
         return None;
     }
@@ -4846,9 +4876,21 @@ fn glob_module(glob: &Named, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]
             continue;
         }
         let mut child = modules[scope].clone();
-        child.push(first);
-        scope = modules.iter().position(|module| *module == child)?;
-        segments = rest;
+        child.push(first.clone());
+        if let Some(index) = modules.iter().position(|module| *module == child) {
+            scope = index;
+            segments = rest;
+            continue;
+        }
+        // A name the module neither binds nor declares a sub-module of: a glob import may bring
+        // the module in from another module of the Orb, where the name resolves next.
+        if !globs {
+            return None;
+        }
+        let Globbed::In(module) = through_globs(&first, scope, uses, modules) else {
+            return None;
+        };
+        scope = module;
     }
     None
 }

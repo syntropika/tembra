@@ -471,12 +471,15 @@ fn trait_impls(
 }
 
 /// Whether a type, written in the module `scope`, is the type `ident` of the module `home`: a path
-/// that names it in that module, followed through the module's `use`s, `self::`, `super::` and
-/// the sub-modules (`type_module`), as `Access` in its own module, `model::Access` from the Orb
-/// module and `Access` after `use super::model::Access;` in any module. A name the macro cannot
-/// place, one a glob import brings into a module declaring no type of that name, is the type when
-/// no other type of the Orb's modules has its name, as the state's `impl Default` is read; a path
-/// leaving the Orb module is not the type.
+/// that names it in that module, followed through the module's `use`s, `self::`, `super::`, the
+/// sub-modules and the glob imports from the Orb's modules (`type_module`), as `Access` in its own
+/// module, `model::Access` from the Orb module and `Access` after `use super::model::Access;` or
+/// `use super::model::*;` in any module. A name the macro cannot place, one a glob import from a
+/// module it does not read brings into a module declaring no type of that name, or one reached
+/// through `crate::`, is the type when no other type of the Orb's modules has its name, as the
+/// state's `impl Default` is read; `declared` are those types, an alias of a namesake left out,
+/// which stands for the type it names as a `use` does. A path leaving the Orb module through a
+/// crate is not the type.
 fn names(
     ty: &Type,
     scope: usize,
