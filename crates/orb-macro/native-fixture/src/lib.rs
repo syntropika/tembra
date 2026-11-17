@@ -12,7 +12,10 @@
 //! `wit/deps/`, and its `orb(..)` takes the gate. The module `counters` rewrites with the
 //! macro a native Orb its test also writes by hand against the runtime's API. `abacus` and
 //! `restrung` are one Orb before and after a reload that gives its root's resource a new version,
-//! and `reframed` that Orb after a reload that gives only its package a new version.
+//! and `reframed` that Orb after a reload that gives only its package a new version. `dice`,
+//! `turnstile`, `checkpoint` and `desk` hold what the native side does not cover yet, a WASI
+//! import, a synchronous import, a hook declaration and a record holding a resource: they compile
+//! here all the same, and their `orb()` answers an error naming it.
 //! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
@@ -1675,6 +1678,119 @@ pub mod reframed {
                 beads.slid += by;
                 beads.slid
             })
+        }
+    }
+}
+
+/// Rolls a die with the host's secure random source, through a WASI import, which the native side
+/// does not cover yet: the module compiles where the runtime is linked, and its `orb()` answers an
+/// error naming the import.
+#[tembra::orb(package = "example:dice@1.0.0", import = "wasi:random/random@0.3.0")]
+pub mod dice {
+    /// The die.
+    #[service]
+    pub struct Die;
+
+    impl Die {
+        /// A roll, from 1 to 6.
+        pub fn roll() -> u64 {
+            random::get_random_u64() % 6 + 1
+        }
+    }
+}
+
+/// Passes values through the gate of the package in `wit/deps/`, whose `admit` is synchronous: a
+/// native method could not wait for it, so the import works in a component build only, and the
+/// module's `orb()` answers an error naming it.
+#[tembra::orb(
+    package = "example:turnstile@1.0.0",
+    wit = "wit",
+    import = "example:gate/admissions@1.0.0"
+)]
+pub mod turnstile {
+    /// The entrance.
+    #[service]
+    pub struct Entrance;
+
+    impl Entrance {
+        /// Whether the gate lets the value through.
+        pub fn pass(value: i32) -> bool {
+            !admissions::admit(value).blocked
+        }
+    }
+}
+
+/// Declares a hook, whose `run` is synchronous: a native method could not wait for the hook's
+/// contributions, so the declaration works in a component build only, and the module's `orb()`
+/// answers an error naming it.
+#[tembra::orb(package = "example:checkpoint@1.0.0")]
+pub mod checkpoint {
+    /// The hook: a waterfall, each contributor may change the inspection, in plan order.
+    #[hook(composition = waterfall, input = Inspection)]
+    pub struct Inspect;
+
+    /// One inspection: the value, and whether a contributor stopped it.
+    pub struct Inspection {
+        pub value: i32,
+        pub stopped: bool,
+    }
+
+    /// The inspector.
+    #[service]
+    pub struct Inspector;
+
+    impl Inspector {
+        /// Run the hook over a fresh inspection of the value.
+        pub fn inspect(value: i32) -> Inspection {
+            Inspect::run(Inspection {
+                value,
+                stopped: false,
+            })
+        }
+    }
+}
+
+/// Lends sessions in a record beside their count: a record holding a resource is the bindings'
+/// type, whose handle only a component creates, so the module's `orb()` answers an error naming
+/// the record's field, where a tuple would carry the resource natively too.
+#[tembra::orb(package = "example:desk@1.0.0")]
+pub mod desk {
+    /// One session.
+    #[wit_resource]
+    pub struct Session {
+        n: u32,
+    }
+
+    impl Session {
+        /// A session numbered `n`.
+        #[constructor]
+        pub fn new(n: u32) -> Session {
+            Session { n }
+        }
+
+        /// The session's number.
+        pub fn number(&self) -> u32 {
+            self.n
+        }
+    }
+
+    /// A session and its count.
+    pub struct Lease {
+        pub session: Session,
+        pub count: u32,
+    }
+
+    /// The desk.
+    #[service]
+    pub struct Sessions;
+
+    impl Sessions {
+        /// Lend a session numbered `n`, counted once.
+        pub fn lend(n: u32) -> Lease {
+            Lease {
+                session: exports::example::desk::sessions::Session::new(Session::new(n)),
+                count: 1,
+            }
         }
     }
 }

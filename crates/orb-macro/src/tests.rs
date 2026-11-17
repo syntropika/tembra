@@ -150,6 +150,32 @@ fn native(module: &ItemMod, path: &[&str]) -> String {
         .join(" ")
 }
 
+/// The native items of a module the native side does not cover yet, as `native` reads them, for a
+/// module without inputs or the `context` option, named as `orb_with` names it: `orb()` and
+/// `orb_named`, which answer the error naming what, `message`, where the runtime is linked.
+pub(crate) fn unsupported(message: &str) -> String {
+    let doc = format!(
+        " The Orb for a native host, which the native side does not build yet: it answers an error with the code `unsupported`, saying that {message}. A component build of the module is unaffected."
+    );
+    quote::quote! {
+        #[doc = #doc]
+        pub fn orb() -> ::tembra::Result<::tembra::Orb> {
+            orb_named("book", 1u32)
+        }
+
+        #[doc = #doc]
+        pub fn orb_named(name: &str, api_version: u32) -> ::tembra::Result<::tembra::Orb> {
+            let _ = (name, api_version);
+            ::core::result::Result::Err(::tembra::Error::new(
+                ::tembra::core::Code::Unsupported,
+                "native",
+                #message
+            ))
+        }
+    }
+    .to_string()
+}
+
 const PACKAGE: &str = "example:book@1.0.0";
 
 fn ledger(attribute: &str) -> String {
@@ -8406,8 +8432,8 @@ fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
 /// With `context`, a native host gets a native `context` in the Orb module, in place of the
 /// component's: the kernel interface's types and its functions, which read the call whose method
 /// is being polled. Each method's future, local ones too, runs in the scope of its call, which a
-/// sub-module's service reaches through `super::`. A refused module keeps its `context`, so the
-/// author's calls to it add no errors to the refusal.
+/// sub-module's service reaches through `super::`. A module the native side does not cover keeps
+/// its `context` beside the `orb()` that answers the refusal, so the author's calls to it compile.
 #[test]
 fn the_native_context_reads_the_call_each_method_runs_for() {
     let module = orb_with(
@@ -8467,9 +8493,9 @@ fn the_native_context_reads_the_call_each_method_runs_for() {
     .unwrap_or_else(|error| panic!("{error}"));
     let refused = native(&refused, &[]);
     assert!(
-        refused.starts_with(
-            ":: core :: compile_error ! (\"the import of wasi:random/random@0.3.0 is not supported natively yet\") ;"
-        ),
+        refused.starts_with(&unsupported(
+            "the import of wasi:random/random@0.3.0 is not supported natively yet"
+        )),
         "{refused}"
     );
     assert!(refused.contains("pub mod context {"), "{refused}");
@@ -8693,11 +8719,7 @@ fn the_native_client_refuses_two_methods_of_one_name() {
     ] {
         let module = orb_with(options("example:desk@1.0.0", None), &module)
             .unwrap_or_else(|error| panic!("{message}: {error}"));
-        assert_eq!(
-            native(&module, &[]),
-            format!(":: core :: compile_error ! (\"{message}\") ;"),
-            "{message}"
-        );
+        assert_eq!(native(&module, &[]), unsupported(message), "{message}");
         assert!(wit(&module).starts_with("package "), "{message}");
     }
 }
@@ -8787,11 +8809,7 @@ fn the_native_side_refuses_a_resource_it_cannot_carry() {
     ] {
         let module = orb_with(options("example:desk@1.0.0", None), &DESK.replace(from, to))
             .unwrap_or_else(|error| panic!("{message}: {error}"));
-        assert_eq!(
-            native(&module, &[]),
-            format!(":: core :: compile_error ! (\"{message}\") ;"),
-            "{message}"
-        );
+        assert_eq!(native(&module, &[]), unsupported(&message), "{message}");
         assert!(wit(&module).starts_with("package "), "{message}");
     }
 }
@@ -9016,10 +9034,10 @@ fn the_orbs_create_declares_its_root_resources_natively() {
     }
 }
 
-/// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
-/// component build of the module is unaffected: a WASI import, an import, plain or by key, of an
-/// interface with a synchronous function, and a hook declaration, whose `run` is synchronous, both
-/// of which work in a component build only, each named.
+/// What the native side does not cover yet leaves the module compiling inside the facade's wrapper,
+/// with an `orb()` that answers an error naming it, and a component build of the module unaffected:
+/// a WASI import, an import, plain or by key, of an interface with a synchronous function, and a
+/// hook declaration, whose `run` is synchronous, both of which work in a component build only.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
@@ -9060,11 +9078,7 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
     ] {
         let module =
             orb_with(options, &module).unwrap_or_else(|error| panic!("{message}: {error}"));
-        assert_eq!(
-            native(&module, &[]),
-            format!(":: core :: compile_error ! (\"{message}\") ;"),
-            "{message}"
-        );
+        assert_eq!(native(&module, &[]), unsupported(&message), "{message}");
         assert!(wit(&module).starts_with("package "), "{message}");
     }
 }
@@ -9378,7 +9392,9 @@ fn a_type_of_an_implemented_interface_gets_its_codec_from_the_wit() {
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         native(&module, &[]),
-        ":: core :: compile_error ! (\"`Keeper::add` takes `book::Entry`, a type of the implemented interface example:ledger/book@1.0.0 that is or holds a resource, which the native side does not cover yet\") ;"
+        unsupported(
+            "`Keeper::add` takes `book::Entry`, a type of the implemented interface example:ledger/book@1.0.0 that is or holds a resource, which the native side does not cover yet"
+        )
     );
 }
 

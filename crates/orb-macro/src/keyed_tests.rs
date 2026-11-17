@@ -201,11 +201,11 @@ fn the_attribute_writes_a_keyed_import_in_parentheses() {
     .to_string();
     // The macro accepts the module; its native side alone, inside the facade's wrapper, refuses
     // the keyed import, whose interface has a synchronous function: it works in a component build
-    // only.
-    assert_eq!(accepted.matches("compile_error").count(), 1, "{accepted}");
+    // only, so the native `orb()` answers that error.
+    assert!(!accepted.contains("compile_error"), "{accepted}");
     assert!(
         accepted.contains(
-            ":: tembra :: __host ! { :: core :: compile_error ! (\"the import of example:counters/counter@1.0.0 by key works in a component build only: its function `add` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`\") ; }"
+            ":: tembra :: Error :: new (:: tembra :: core :: Code :: Unsupported , \"native\" , \"the import of example:counters/counter@1.0.0 by key works in a component build only: its function `add` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`\")"
         ),
         "{accepted}"
     );

@@ -24,20 +24,21 @@
 //! every method runs in the scope of its Orb, whose resources their `with` reaches natively. An
 //! import of another Orb's interface whose functions are all `async func` calls the provider the
 //! host names through the kernel, and a contribution joins the plan of the hook of the Orb the
-//! host names, see `providers`. What the native side does not cover yet is a compile error inside
-//! the same wrapper, naming the item; a component build of the module is unaffected.
+//! host names, see `providers`. What the native side does not cover yet leaves the module
+//! compiling, with an `orb()` that answers an error naming the item, so only a host that builds
+//! the Orb fails; a component build of the module is unaffected.
 use crate::{
     Analysis, Function, Newtype, Payload, Resource, Service, Shape, ShapeKind, WitResource,
     camel_ident, foreign::Role, metadata::Metadata, rust_ident, wit,
 };
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
-use quote::{format_ident, quote, quote_spanned};
+use quote::{format_ident, quote};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
 };
-use syn::{Ident, LitStr, Type, spanned::Spanned};
+use syn::{Ident, Type};
 use tembra_contracts::javascript_name;
 use wit_parser::{TypeDefKind, TypeId};
 
@@ -55,13 +56,15 @@ pub(crate) struct Native {
 }
 
 /// Write the native side of the module: `orb()` with the registration of every service, the
-/// client of each and the JSON of every type that enters the WIT, or the compile error for what
-/// the native side does not cover yet, or for a manifest whose `metadata` could not be read; with
-/// the `context` option, the native `context` too, which the author's code calls either way.
+/// client of each and the JSON of every type that enters the WIT; for what the native side does not
+/// cover yet, an `orb()` that answers the error naming it; or the compile error for a manifest whose
+/// `metadata` could not be read. With the `context` option, the native `context` too, which the
+/// author's code calls either way.
 pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>) -> Native {
     let context = analysis.options.context.then(context_module);
-    let refusal = |Refused(error)| Native {
-        root: wrapped(quote! { #error #context }),
+    // The items the native side writes in place of the Orb, beside `context`.
+    let alone = |items: TokenStream| Native {
+        root: wrapped(quote! { #items #context }),
         nested: Vec::new(),
         served: BTreeSet::new(),
     };
@@ -69,8 +72,13 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
     // a native build alone.
     let metadata = match metadata {
         Ok(metadata) => metadata,
-        Err(error) => return refusal(Refused(error.to_compile_error())),
+        Err(error) => return alone(error.to_compile_error()),
     };
+    let inputs = analysis
+        .inputs
+        .as_ref()
+        .map(|inputs| crate::from_root(&analysis.modules[inputs.scope], &inputs.ident));
+    let refusal = |Refused(message)| alone(unsupported(metadata, inputs.as_ref(), &message));
     // The interfaces the module imports from other Orbs and the hooks it contributes to, which
     // `orb(..)` takes the providers of.
     let consumed = providers::imports(analysis).and_then(|imports| {
@@ -165,10 +173,6 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         .into_iter()
         .filter_map(|id| consumed_codec(id, &analysis.consumed_types))
         .collect();
-    let inputs = analysis
-        .inputs
-        .as_ref()
-        .map(|inputs| crate::from_root(&analysis.modules[inputs.scope], &inputs.ident));
     // The Orb's `#[root]` is its create, which takes the inputs too.
     let create = analysis
         .root
@@ -897,13 +901,50 @@ fn boundary_at(depth: usize) -> TokenStream {
     quote! { #root #boundary }
 }
 
-/// What the native side does not cover yet, as the compile error reported where the runtime is
-/// linked, at the item.
-struct Refused(TokenStream);
+/// What the native side does not cover yet: the message, naming the item, of the error the module's
+/// `orb()` answers where the runtime is linked.
+struct Refused(String);
 
-fn refused(span: Span, message: &str) -> Refused {
-    let message = LitStr::new(message, span);
-    Refused(quote_spanned! { span => ::core::compile_error!(#message); })
+fn refused(message: &str) -> Refused {
+    Refused(message.to_owned())
+}
+
+/// `orb()` and `orb_named` of a module the native side does not cover yet, which answer the error
+/// with the code `unsupported`, the reason `native` and `message`, naming what. The module compiles
+/// where the runtime is linked, as it must: Cargo enables the facade's `host` for a guest whenever
+/// another crate of the build does, and only a host that builds the Orb fails. They take the inputs
+/// of an `#[inputs]` struct, as they would otherwise, and no providers.
+fn unsupported(metadata: &Metadata, inputs: Option<&TokenStream>, message: &str) -> TokenStream {
+    let name = &metadata.name;
+    let version = metadata.api_version;
+    let doc = format!(
+        " The Orb for a native host, which the native side does not build yet: it answers an error with the code `unsupported`, saying that {message}. A component build of the module is unaffected."
+    );
+    let parameter = inputs.map(|path| quote! { inputs: #path });
+    let named_parameter = inputs.map(|path| quote! { , inputs: #path });
+    let argument = inputs.map(|_| quote! { , inputs });
+    let unused = inputs.map(|_| quote! { let _ = inputs; });
+    quote! {
+        #[doc = #doc]
+        pub fn orb(#parameter) -> ::tembra::Result<::tembra::Orb> {
+            orb_named(#name, #version #argument)
+        }
+
+        #[doc = #doc]
+        pub fn orb_named(
+            name: &str,
+            api_version: u32
+            #named_parameter
+        ) -> ::tembra::Result<::tembra::Orb> {
+            let _ = (name, api_version);
+            #unused
+            ::core::result::Result::Err(::tembra::Error::new(
+                ::tembra::core::Code::Unsupported,
+                "native",
+                #message
+            ))
+        }
+    }
 }
 
 /// Whether the native side covers the module's hook declarations: a declared hook's `run` is
@@ -912,13 +953,10 @@ fn refused(span: Span, message: &str) -> Refused {
 /// not cover first, and `providers::contributions` the contributions.
 fn covered(analysis: &Analysis) -> Result<(), Refused> {
     if let Some(declaration) = analysis.declared.first() {
-        return Err(refused(
-            declaration.ident.span(),
-            &format!(
-                "the declaration of the hook {} works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook",
-                declaration.hook
-            ),
-        ));
+        return Err(refused(&format!(
+            "the declaration of the hook {} works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook",
+            declaration.hook
+        )));
     }
     Ok(())
 }
@@ -1197,14 +1235,11 @@ fn signature<'a>(
     analysis: &Analysis,
 ) -> Result<(Vec<Kind<'a>>, Option<(&'a Type, Kind<'a>)>), Refused> {
     let place = |role: &str, ty: &Type, uncovered: Uncovered| {
-        refused(
-            ty.span(),
-            &format!(
-                "`{owner}` {role} `{}`{}",
-                spelled(ty),
-                uncovered.described(ty)
-            ),
-        )
+        refused(&format!(
+            "`{owner}` {role} `{}`{}",
+            spelled(ty),
+            uncovered.described(ty)
+        ))
     };
     let mut kinds = Vec::new();
     for (_, ty, _) in params {
@@ -1901,15 +1936,12 @@ fn client_ident(service: &Service) -> Ident {
 /// one, naming both.
 fn client_names(service: &Service, analysis: &Analysis) -> Result<(), Refused> {
     let mut names: BTreeMap<String, String> = BTreeMap::new();
-    let mut claim = |name: String, what: String, span: Span| {
+    let mut claim = |name: String, what: String| {
         if let Some(previous) = names.get(&name) {
-            return Err(refused(
-                span,
-                &format!(
-                    "the client of `{}` would name both {previous} and {what} `{name}`; rename one of them",
-                    service.ident
-                ),
-            ));
+            return Err(refused(&format!(
+                "the client of `{}` would name both {previous} and {what} `{name}`; rename one of them",
+                service.ident
+            )));
         }
         names.insert(name, what);
         Ok(())
@@ -1921,19 +1953,19 @@ fn client_names(service: &Service, analysis: &Analysis) -> Result<(), Refused> {
             function.ident.to_string()
         };
         let what = format!("the function `{}::{}`", service.ident, function.ident);
-        claim(name, what, function.ident.span())?;
+        claim(name, what)?;
     }
     for resource in owned_resources(service, analysis) {
         let ident = &resource.ident;
         let snake = ident.to_string().to_snake_case();
-        if let Some(constructor) = &resource.constructor {
+        if resource.constructor.is_some() {
             let what = format!("the constructor of `{ident}`");
-            claim(format!("new_{snake}"), what, constructor.ident.span())?;
+            claim(format!("new_{snake}"), what)?;
         }
         for function in &resource.statics {
             let what = format!("the static function `{ident}::{}`", function.ident);
             let name = format!("{snake}_{}", function.ident);
-            claim(name, what, function.ident.span())?;
+            claim(name, what)?;
         }
     }
     Ok(())
@@ -2193,16 +2225,13 @@ fn codec(
     analysis: &Analysis,
 ) -> Result<TokenStream, Refused> {
     let place = |role: &str, ty: &Type, uncovered: Uncovered| {
-        refused(
-            ty.span(),
-            &format!(
-                "`{}::{}` {role} `{}`{}",
-                service.ident,
-                function.ident,
-                spelled(ty),
-                uncovered.described(ty)
-            ),
-        )
+        refused(&format!(
+            "`{}::{}` {role} `{}`{}",
+            service.ident,
+            function.ident,
+            spelled(ty),
+            uncovered.described(ty)
+        ))
     };
     let boundary = boundary(service.scope, analysis);
     let mut kinds = Vec::new();
@@ -2940,10 +2969,11 @@ fn member<'a>(
     analysis: &Analysis,
 ) -> Result<Kind<'a>, Refused> {
     let refusal = |uncovered: Uncovered| {
-        refused(
-            ty.span(),
-            &format!("{place} `{}`{}", spelled(ty), uncovered.described(ty)),
-        )
+        refused(&format!(
+            "{place} `{}`{}",
+            spelled(ty),
+            uncovered.described(ty)
+        ))
     };
     let kind = kind(ty, shape.scope, analysis).map_err(refusal)?;
     match kind.resource() {
@@ -3003,14 +3033,11 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
     } = newtype;
     let boundary = boundary(*scope, analysis);
     let kind = kind(inner, *scope, analysis).map_err(|uncovered| {
-        refused(
-            inner.span(),
-            &format!(
-                "the field of `{ident}` is `{}`{}",
-                spelled(inner),
-                uncovered.described(inner)
-            ),
-        )
+        refused(&format!(
+            "the field of `{ident}` is `{}`{}",
+            spelled(inner),
+            uncovered.described(inner)
+        ))
     })?;
     let read = decode(&kind, quote! { value }, &boundary);
     let written = encode(&kind, quote! { self.0 }, &boundary);

@@ -1308,8 +1308,9 @@ as `tembra::portable::Issuable` names it: the resource's constructor and static 
 function whose result holds the struct, alone or in an `Option`, a `Result`, a `Vec` or a tuple,
 issue what they return into the call's result, and each method reads its `self` from the call. A
 record or a variant holding the struct is component-only: the bindings replace it with a type
-holding their handle, which only a component creates, so where the runtime is linked it is a
-compile error. A tuple carries the resource beside its data in both builds:
+holding their handle, which only a component creates, so where the runtime is linked the module's
+`orb()` answers an error naming it, as for all the native side does not cover yet, see the end of
+this section. A tuple carries the resource beside its data in both builds:
 
 ```rust,ignore
 impl Texts {
@@ -1326,8 +1327,8 @@ closes, running its `Drop`, with its last owner, or when that object is reloaded
 host closes. A method may be `async`: its call holds the value until it ends, through the guard of
 `Receiver::guard`, so `&self` stays valid across its awaits, as in a component, also when the Orb is
 reloaded meanwhile, after which the value closes once the call has ended. Natively a resource is
-only returned, or borrowed as a method's `self`: a function taking one is a compile error where the
-runtime is linked.
+only returned, or borrowed as a method's `self`: where the runtime is linked, a function taking one
+makes the module's `orb()` answer an error naming it.
 
 These functions have no local entrypoint, so the service's client calls them portably, through the
 codec, and answers each resource as its handle type, `<Resource>Handle`, `BuilderHandle` for
@@ -1350,7 +1351,8 @@ drop(builder); // drops the resource: the Orb's value closes
 ```
 
 Two methods of one name on a client, such as a function `new_builder` of the service beside the
-constructor of `Builder`, are a compile error where the runtime is linked, naming both.
+constructor of `Builder`, make the module's `orb()` answer an error naming both, where the runtime
+is linked.
 `BuilderHandle::try_from(owned)` wraps an `Owned` handle of the resource, such as one
 `call_portable` delivers. An `Owned` handle of another resource type comes back as the error, still
 open, so a caller holding a resource of an interface with several resource types can try the
@@ -1421,8 +1423,9 @@ ends the method that made it with that error, where it traps a component. As the
 functions, the imported functions serve the methods and the contributions of the Orb and the
 futures they await, and panic elsewhere. A native method has no fiber of its own to suspend while
 the kernel completes a call, as a component's call has, so a synchronous imported function cannot
-wait for its answer: an import of an interface with a synchronous function, plain or by key, is a
-compile error where the runtime is linked, and works in a component build of the same module.
+wait for its answer: an import of an interface with a synchronous function, plain or by key, makes
+the module's `orb()` answer an error naming it where the runtime is linked, and works in a
+component build of the same module.
 
 A [contribution to a hook](#contributing-to-a-hook) serves a native host too. `Providers` names the
 Orb that declares each hook the module contributes to, under the name of the hook's module,
@@ -1433,10 +1436,10 @@ it reads the hook's input with the codec, runs the author's function and writes 
 It runs in the Orb's root, as a component's contribution does: with the root's resources, its
 imports and the call's `context`, whose `object()` is an empty key and the principal `host`, and
 with no state. The runtime's contributions come with the facade's `hooks` feature, which a host
-that installs such an Orb enables. A [hook declaration](#declaring-a-hook) is a compile error where
-the runtime is linked: its `run` is synchronous, and natively a method has no fiber to suspend
-while the kernel runs the hook's contributions, so the declaration works in a component build of
-the module only.
+that installs such an Orb enables. A [hook declaration](#declaring-a-hook) makes the module's
+`orb()` answer an error naming it where the runtime is linked: its `run` is synchronous, and
+natively a method has no fiber to suspend while the kernel runs the hook's contributions, so the
+declaration works in a component build of the module only.
 
 The bindings of the kernel's `tembra:guest` package, which a module with a state, a root resource
 or the `context` option imports, are a module named `tembra` inside the Orb module, which hides the
@@ -1447,11 +1450,15 @@ Today the native side covers services whose functions take and return numbers, `
 `char`, free JSON, records, enums, variants, flags, newtypes, `Result`s, and `Vec`, `Option` and
 tuples of them, the types of an implemented or imported interface or of a hook among them, WIT
 resources as above, states, the resources of the Orb's root, the imports of interfaces of
-`async func`s and contributions to hooks. A type of a consumed interface that holds a resource, an
-import of an interface with a resource and a WASI import are compile errors where the runtime is
-linked, naming the item, until the native side covers them, and so is an `Option` of an `Option`,
-which the boundary's JSON cannot tell from `None`; a component build of the same module is
-unaffected.
+`async func`s and contributions to hooks. What it does not cover yet, such as a type of a consumed
+interface that holds a resource, an import of an interface with a resource, a WASI import or an
+`Option` of an `Option`, which the boundary's JSON cannot tell from `None`, and the other cases
+above, leaves the module compiling where the runtime is linked: its `orb()` and `orb_named(..)`,
+which take the inputs if the module has an `#[inputs]` struct and no providers, answer an error
+with the code `unsupported` and the reason `native`, naming the item, so only a host that installs
+the Orb fails. Cargo enables the facade's `host` for an Orb crate whenever another crate of the
+build does, so a compile error there would also fail builds that never install the Orb, such as
+`cargo check --workspace`. A component build of the same module is unaffected.
 
 ## Moving a hand-written service to the macro
 

@@ -30,10 +30,10 @@ use super::{
 };
 use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident, wit};
 use heck::ToSnakeCase;
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::BTreeSet;
-use syn::{Ident, LitStr, spanned::Spanned};
+use syn::Ident;
 use tembra_contracts::Contract;
 use wit_parser::FunctionKind;
 
@@ -69,14 +69,13 @@ impl Import<'_> {
 /// returning what the codec does not cover.
 pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
     let mut imports = Vec::new();
-    for (literal, identity) in analysis.options.imports.iter().zip(&analysis.imports) {
+    for identity in &analysis.imports {
         if crate::wasi::is_wasi(identity) {
-            return Err(refused(
-                literal.span(),
-                &format!("the import of {identity} is not supported natively yet"),
-            ));
+            return Err(refused(&format!(
+                "the import of {identity} is not supported natively yet"
+            )));
         }
-        served(analysis, literal, identity, false)?;
+        served(analysis, identity, false)?;
         let interface = analysis
             .consumed_types
             .interface(identity)
@@ -87,8 +86,8 @@ pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
         let [_, _, field] = hook_path(identity);
         imports.push((field, identity.as_str(), None));
     }
-    for (literal, view) in analysis.options.keyed.iter().zip(&analysis.views) {
-        served(analysis, literal, &view.target, true)?;
+    for view in &analysis.views {
+        served(analysis, &view.target, true)?;
         imports.push((rust_ident(&view.name), view.target.as_str(), Some(view)));
     }
     if imports.is_empty() {
@@ -130,10 +129,9 @@ fn contract(analysis: &Analysis) -> Result<Contract, Refused> {
 
 /// The refusal of a contract the derived WIT does not resolve as.
 fn unresolved(error: tembra_contracts::Error) -> Refused {
-    refused(
-        Span::call_site(),
-        &format!("the derived WIT does not resolve as a contract: {error}"),
-    )
+    refused(&format!(
+        "the derived WIT does not resolve as a contract: {error}"
+    ))
 }
 
 /// A hook the module contributes to, which the native side adds to the Orb.
@@ -152,14 +150,11 @@ pub(super) fn contributions(analysis: &Analysis) -> Result<Vec<Contributed<'_>>,
     for contribution in &analysis.contributions {
         let owner = &contribution.ident;
         let place = |role: &str, ty: &syn::Type, uncovered: Uncovered| {
-            refused(
-                ty.span(),
-                &format!(
-                    "`{owner}` {role} `{}`{}",
-                    spelled(ty),
-                    uncovered.described(ty)
-                ),
-            )
+            refused(&format!(
+                "`{owner}` {role} `{}`{}",
+                spelled(ty),
+                uncovered.described(ty)
+            ))
         };
         let (_, input) = &contribution.param;
         argument(input, contribution.scope, analysis)
@@ -316,15 +311,10 @@ pub(super) fn contribution(
     }
 }
 
-/// Whether the native side serves the import of `identity`, as the attribute writes it, `literal`,
-/// by key or not: every function of the interface is an `async func` taking and returning what the
-/// codec covers, and the interface has no resource.
-fn served(
-    analysis: &Analysis,
-    literal: &LitStr,
-    identity: &str,
-    by_key: bool,
-) -> Result<(), Refused> {
+/// Whether the native side serves the import of `identity`, by key or not: every function of the
+/// interface is an `async func` taking and returning what the codec covers, and the interface has
+/// no resource.
+fn served(analysis: &Analysis, identity: &str, by_key: bool) -> Result<(), Refused> {
     let interface = analysis
         .consumed_types
         .interface(identity)
@@ -347,22 +337,16 @@ fn served(
         })
         .map(|(name, _)| name)
     {
-        return Err(refused(
-            literal.span(),
-            &format!(
-                "{import}, an interface with the resource `{name}`, is not supported natively yet"
-            ),
-        ));
+        return Err(refused(&format!(
+            "{import}, an interface with the resource `{name}`, is not supported natively yet"
+        )));
     }
     for function in interface.functions.values() {
         let name = &function.name;
         if matches!(function.kind, FunctionKind::Freestanding) {
-            return Err(refused(
-                literal.span(),
-                &format!(
-                    "{import} works in a component build only: its function `{name}` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`"
-                ),
-            ));
+            return Err(refused(&format!(
+                "{import} works in a component build only: its function `{name}` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`"
+            )));
         }
         let types = function
             .params
@@ -371,12 +355,9 @@ fn served(
             .chain(function.result);
         for ty in types {
             if let Err(what) = wit_kind(ty, &analysis.consumed_types, 1) {
-                return Err(refused(
-                    literal.span(),
-                    &format!(
-                        "{import} is not supported natively yet: its function `{name}` takes or returns {what}"
-                    ),
-                ));
+                return Err(refused(&format!(
+                    "{import} is not supported natively yet: its function `{name}` takes or returns {what}"
+                )));
             }
         }
     }
