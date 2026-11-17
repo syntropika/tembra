@@ -5521,6 +5521,63 @@ fn a_type_the_module_declares_takes_its_name_before_a_resource() {
     expanded("example:desk@1.0.0", &desk(alias, "Tickets"));
 }
 
+/// A type the module declares takes its name there wherever the module writes it, as in Rust: a
+/// tuple struct named like another module's record, in a parameter or in a record's field, is
+/// refused as a type of the module that cannot enter the WIT, not read as that record, and so is
+/// one in a field named like another module's resource. A module that declares no type of the
+/// name, importing it, still takes the other module's type.
+#[test]
+fn a_type_the_module_declares_takes_its_name_before_another_modules_record() {
+    let desk = |tickets: &str, shelves: &str| {
+        format!(
+            "mod desk {{
+                pub mod tickets {{
+                    {tickets}
+                    #[service]
+                    pub struct Tickets;
+                }}
+                pub mod shelves {{
+                    {shelves}
+                    #[service]
+                    pub struct Shelves;
+                    impl Shelves {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
+            }}"
+        )
+    };
+    let record = "pub struct Token { pub id: u32 }";
+    let resource = "#[wit_resource(service = Tickets)]
+        pub struct Token { id: u32 }
+        impl Token { pub fn id(&self) -> u32 { self.id } }";
+    let parameter = "impl Tickets { pub fn check(token: Token) -> u32 { 0 } }";
+    let field = "pub struct Pass { pub token: Token }
+        impl Tickets { pub fn check(pass: Pass) -> bool { true } }";
+    for (uses, shelves) in [(parameter, record), (field, record), (field, resource)] {
+        let error = refused(
+            "example:desk@1.0.0",
+            &desk(&format!("pub struct Token(pub u32);\n{uses}"), shelves),
+        );
+        assert!(
+            error.contains("`Token` is used by a service method or a hook but is not a struct or enum of this module"),
+            "{uses}\n{shelves}: {error}"
+        );
+        expanded(
+            "example:desk@1.0.0",
+            &desk(&format!("use super::shelves::Token;\n{uses}"), shelves),
+        );
+    }
+    let text = wit(&expanded(
+        "example:desk@1.0.0",
+        &desk(&format!("use super::shelves::Token;\n{parameter}"), record),
+    ));
+    for expected in [
+        "  record token {\n    id: u32,\n  }\n",
+        "  check: func(token: token) -> u32;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
 /// Two resources of one name in other modules are as ambiguous as two records: a function of a
 /// third module taking that name is refused, whichever of the two the module imports, and expands
 /// once one of them takes another name.

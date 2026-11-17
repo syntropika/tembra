@@ -3523,8 +3523,9 @@ fn own_or_only<T>(named: impl IntoIterator<Item = (usize, T)>, scope: usize) -> 
 /// to the only resource of that name, else to the only type of that name in the Orb; two of other
 /// modules are ambiguous, a type the module does not declare is an error, and a resource is a type
 /// of its own. A type of any shape the module declares, one of `types`, keeps the name from the
-/// resources of other modules. What a consumed interface's module names, a type or a handle, is no
-/// type of the module.
+/// resources and the types of other modules wherever the module writes it, in a signature or in a
+/// field, as in Rust. What a consumed interface's module names, a type or a handle, is no type of
+/// the module.
 fn reachable(
     candidates: Vec<Candidate>,
     services: &[Service],
@@ -3575,9 +3576,13 @@ fn reachable(
         let named = indexes
             .iter()
             .map(|&index| (candidates[index].scope, index));
-        let index = match own_or_only(named, scope) {
+        // A type the module declares keeps the name from the candidates of other modules too, so
+        // one that is no candidate is an error, as a type the module does not declare is.
+        let index = match own_or_only(named, scope)
+            .filter(|&index| candidates[index].scope == scope || !declares)
+        {
             Some(index) if !shared => index,
-            None if indexes.is_empty() && !shared => {
+            None if declares || (indexes.is_empty() && !shared) => {
                 return Err(syn::Error::new(
                     ident.span(),
                     format!(
