@@ -84,7 +84,7 @@ fn redefined(
     Ok(())
 }
 
-/// What [`Contract::from_dir`] reads of a directory: the bundled standard packages resolved, with
+/// What [`Contract::from_dir`] and [`Contract::from_source_in`] read of a directory: the bundled standard packages resolved, with
 /// their names and the unresolved packages they were read from, the directory's own packages, and
 /// those of its `deps/`.
 type ReadDir = (
@@ -259,27 +259,13 @@ impl Contract {
         Self::elaborate(resolve, standard, known, (path, main), dependencies, world)
     }
 
-    /// Read a WIT directory and its `deps/` as [`Self::from_dir`] reads them, and refuse what it
-    /// refuses before it selects a world: a definition of a bundled standard package, but for a
-    /// `deps/` file that is the bundled contract line for line; an encoded package that disagrees
-    /// with the bundled one of its name; and a package an encoded dependency defines already. The
-    /// `#[tembra::orb]` macro asks it of the directory of the packages a module consumes.
-    pub fn check_dir(path: impl AsRef<Path>) -> Result<(), Error> {
-        let path = path.as_ref();
-        let (resolve, standard, _, main, dependencies) = read_dir(path)?;
-        dependencies
-            .iter()
-            .map(|(origin, group)| (origin.as_path(), group))
-            .chain([(path, &main)])
-            .try_for_each(|(origin, group)| redefined(&resolve, &standard, origin, group))
-    }
-
     /// Resolve a world's own WIT source with the packages of a directory, as the bindings of an
     /// Orb module read `path` and `inline` together: the packages the source names and does not
-    /// define come from the directory and its `deps/`, read as [`Self::from_dir`] reads them. The
-    /// bundled standard packages are resolved already and answer for the directory's copies of
-    /// them, whatever their text, as they do when `cargo tembra build` nests the packages a module
-    /// consumes into its contract.
+    /// define come from the directory and its `deps/`, read and refused as [`Self::from_dir`] reads
+    /// and refuses them: a definition of a bundled standard package, but for a `deps/` file that is
+    /// the bundled contract line for line, an encoded package that disagrees with the bundled one
+    /// of its name, and a package an encoded dependency defines already. The `#[tembra::orb]`
+    /// macro resolves its derived WIT so, once per expansion.
     pub fn from_source_in(
         dir: impl AsRef<Path>,
         name: &str,
@@ -287,14 +273,10 @@ impl Contract {
         world: Option<&str>,
     ) -> Result<Self, Error> {
         let dir = dir.as_ref();
-        let (mut resolve, known) = crate::standard::resolve()?;
-        let standard: BTreeSet<_> = resolve.package_names.keys().cloned().collect();
+        let (resolve, standard, known, consumed, deps) = read_dir(dir)?;
         let main = parse_source(name, source)?;
-        let consumed =
-            UnresolvedPackageGroup::parse_dir(dir).map_err(|error| package(dir, error))?;
         let mut dependencies = vec![(dir.to_path_buf(), consumed)];
-        dependencies.extend(self::dependencies(&mut resolve, &dir.join("deps"))?);
-        dependencies.retain(|(_, group)| !standard.contains(&group.main.name));
+        dependencies.extend(deps);
         Self::elaborate(
             resolve,
             standard,

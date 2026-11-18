@@ -1687,11 +1687,14 @@ fn expand(
     let analysis = analyze(options, module)?;
     let native = native::emit(&analysis, metadata.as_ref());
     let component = component(&analysis, &native.nested, &native.served)?;
-    check_profile(&analysis)?;
-    check_roles(&analysis)?;
+    // Once both sides accepted the module, the derived WIT resolved as a contract, once, with the
+    // consumed directory read and checked as `cargo tembra build` reads it: what the runtime
+    // carries, the roles, and the signature of each service, from the WIT.
+    let contract = resolved(&analysis)?;
+    check_profile(&analysis, &contract)?;
+    check_roles(&analysis, &contract)?;
     let native = native.root;
-    // Last, once both sides accepted the module: the signature of each service, from the WIT.
-    let signatures = signatures(&analysis)?;
+    let signatures = signatures(&analysis, &contract)?;
     // The contract follows the module: `contract/<world>.wit` with the consumed packages nested
     // and `contract/deps/` with the standard packages, the files `cargo tembra build` writes,
     // rewritten only when their content changes. A compile error names what went wrong.
@@ -3252,7 +3255,7 @@ fn component(
 /// what a signature carries, such as an option of an option, and on the resources it moves: a
 /// derived function takes owned resources of its own interface or of an interface the world
 /// imports, and returns resources of its own interface only.
-fn check_profile(analysis: &Analysis) -> syn::Result<()> {
+fn check_profile(analysis: &Analysis, contract: &tembra_contracts::Contract) -> syn::Result<()> {
     // Each derived function, by its interface's identity and its WIT name, with what the errors
     // call it and where: a derived hook's callback, `apply`, is the hook's.
     let functions: Vec<(String, String, String, Span)> =
@@ -3281,10 +3284,6 @@ fn check_profile(analysis: &Analysis) -> syn::Result<()> {
                     }),
             )
             .collect();
-    if functions.is_empty() {
-        return Ok(());
-    }
-    let contract = resolved(analysis)?;
     for (identity, wit_name, name, span) in functions {
         let refused = |error: tembra_contracts::Error| {
             syn::Error::new(
@@ -3324,7 +3323,7 @@ fn manifest(analysis: &Analysis) -> EmbeddedManifest {
 /// `cargo tembra build` runs on the roles it packages: each is checked alone, with the error on
 /// the struct. A service without a function of the contract, which a native host alone serves,
 /// has no role in a component: its linger is the kernel's `admits_linger`'s to check.
-fn check_roles(analysis: &Analysis) -> syn::Result<()> {
+fn check_roles(analysis: &Analysis, contract: &tembra_contracts::Contract) -> syn::Result<()> {
     // A service with no role in a component, which a native host alone serves, still installs with
     // its policy, which the kernel checks by `admits_linger`.
     for service in &analysis.services {
@@ -3347,10 +3346,6 @@ fn check_roles(analysis: &Analysis) -> syn::Result<()> {
         .iter()
         .filter(|service| service.role().is_some() && service.planned(&analysis.wit_resources))
         .collect();
-    if declarations.is_empty() && services.is_empty() {
-        return Ok(());
-    }
-    let contract = resolved(analysis)?;
     let check = |roles: ComponentRoles, span: Span| {
         contract
             .check_roles(&roles)
@@ -3374,9 +3369,19 @@ fn check_roles(analysis: &Analysis) -> syn::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has resolved a derived WIT as a contract, for the test that an
+    /// expansion resolves it once.
+    pub(crate) static CONTRACT_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The derived WIT, resolved as a contract with the consumed packages the way `cargo tembra build`
-/// reads it.
+/// reads it: tembra-contracts reads the consumed directory and refuses what `Contract::from_dir`
+/// refuses, such as a copy of a bundled package that differs from it.
 fn resolved(analysis: &Analysis) -> syn::Result<tembra_contracts::Contract> {
+    #[cfg(test)]
+    CONTRACT_RESOLUTIONS.set(CONTRACT_RESOLUTIONS.get() + 1);
     // The world as the WIT text names it, escaped when the module's name is a WIT keyword.
     let file = format!("{}.wit", analysis.world);
     let world = wit::escaped(&analysis.world);
@@ -3400,7 +3405,10 @@ fn resolved(analysis: &Analysis) -> syn::Result<tembra_contracts::Contract> {
 /// native Orb of the module declares it on its `Service`. Each goes in the module, beside the
 /// `WIT` both sides share, as a hidden constant named after the service, `__TEMBRA_SIGNATURE_LEDGER`
 /// for `Ledger`.
-fn signatures(analysis: &Analysis) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+fn signatures(
+    analysis: &Analysis,
+    contract: &tembra_contracts::Contract,
+) -> syn::Result<Vec<proc_macro2::TokenStream>> {
     let Analysis {
         package,
         services,
@@ -3410,7 +3418,7 @@ fn signatures(analysis: &Analysis) -> syn::Result<Vec<proc_macro2::TokenStream>>
     if services.is_empty() {
         return Ok(Vec::new());
     }
-    let signatures = resolved(analysis)?.service_signatures().map_err(|error| {
+    let signatures = contract.service_signatures().map_err(|error| {
         syn::Error::new(
             Span::call_site(),
             format!("the derived WIT does not resolve as a contract: {error}"),

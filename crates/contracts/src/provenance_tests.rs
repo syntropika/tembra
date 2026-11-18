@@ -361,14 +361,17 @@ fn dependency_errors_name_the_dependency_and_duplicates_are_refused() {
         error.contains("wasi:clocks@0.3.0") && error.contains("bundled"),
         "{error}"
     );
-    // `check_dir` refuses each directory as `from_dir` does, before any world is selected, and
-    // reads the others as `from_dir` reads them: an exact copy of a bundled contract in `deps/`
-    // adds nothing.
+    // `from_source_in`, which resolves an Orb module's own WIT with the directory it consumes,
+    // refuses each directory as `from_dir` does, and reads the others as `from_dir` reads them: an
+    // exact copy of a bundled contract in `deps/` adds nothing.
+    let mine = "package probe:mine; world mine {}";
+    let module =
+        |dir: &std::path::Path| Contract::from_source_in(dir, "mine.wit", mine, Some("mine"));
     for refused in [&broken, &folder, &vendored] {
         let read = Contract::from_dir(refused.path(), Some("app"))
             .err()
             .unwrap();
-        assert_eq!(Contract::check_dir(refused.path()), Err(read));
+        assert_eq!(module(refused.path()).err(), Some(read));
     }
     let clocks = crate::WASI_SOURCES
         .iter()
@@ -377,7 +380,7 @@ fn dependency_errors_name_the_dependency_and_duplicates_are_refused() {
         .unwrap();
     let copied = directory(&[("app.wit", main.as_bytes()), ("deps/clocks.wit", clocks)]);
     Contract::from_dir(copied.path(), Some("app")).unwrap();
-    assert_eq!(Contract::check_dir(copied.path()), Ok(()));
+    module(copied.path()).unwrap();
     let error = Contract::from_source(
         "dup.wit",
         "package probe:dup; package wasi:random@0.3.0 { interface random { get: func() -> u64; } } world app {}",

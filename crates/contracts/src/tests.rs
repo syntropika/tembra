@@ -88,18 +88,16 @@ interface types {
 /// A world's own WIT resolves with the packages of a directory, as the bindings of an Orb module
 /// read `path` and `inline` together: a type the source `use`s from the directory's package
 /// shapes its signature, and the bundled packages answer its imports, a copy of one in the
-/// directory's `deps/` adding nothing, whatever its comments. It reads as the same world nested
-/// whole.
+/// directory's `deps/` adding nothing when it is the bundled file line for line. It reads as the
+/// same world nested whole. A copy that differs, if only in its comments, is refused, as
+/// `from_dir` refuses it.
 #[test]
 fn a_source_resolves_with_the_packages_of_a_directory() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("ledger.wit"), LEDGER).unwrap();
     std::fs::create_dir(dir.path().join("deps")).unwrap();
-    std::fs::write(
-        dir.path().join("deps").join("tembra-guest.wit"),
-        format!("{}// A local note.\n", crate::guest::SOURCE),
-    )
-    .unwrap();
+    let copy = dir.path().join("deps").join("tembra-guest.wit");
+    std::fs::write(&copy, crate::guest::SOURCE).unwrap();
     let source = "package example:keeper@1.0.0;
 interface book {
   use example:ledger/types@1.0.0.{entry};
@@ -123,6 +121,18 @@ world keeper {
         ["example:keeper/book@1.0.0"]
     );
     assert_eq!(signatures, whole.service_signatures().unwrap());
+    std::fs::write(&copy, format!("{}// A local note.\n", crate::guest::SOURCE)).unwrap();
+    let refused = Contract::from_source_in(dir.path(), "keeper.wit", source, Some("keeper"))
+        .err()
+        .unwrap()
+        .0;
+    assert_eq!(
+        refused,
+        format!(
+            "WIT package tembra:guest@1.0.0 in {} is already provided by the standard contracts bundled with Tembra; remove the duplicate",
+            copy.display()
+        )
+    );
     // Without the directory, the source names a package it does not hold.
     let error = Contract::from_source("keeper.wit", source, Some("keeper"))
         .err()

@@ -657,19 +657,17 @@ pub(crate) type Copies = BTreeMap<PackageName, Vec<PathBuf>>;
 
 /// The bundled packages the consumed packages, read from the consumed directory, hold copies of,
 /// as a contract `cargo tembra build` wrote holds them in its `deps/`: the inline WIT leaves those
-/// out, since the bindings would read them twice. The directory is read first as
-/// `Contract::from_dir` reads it, and its error is tembra-contracts' (`Contract::check_dir`): a
-/// copy of a bundled package, a WASI package Tembra serves or the kernel's, is accepted only in a
-/// file of `deps/` that is the bundled file line for line, or decoded from an encoded file of
-/// `deps/` that agrees with the bundled package. A copy decoded so comes with the files it was
-/// decoded from, which hold only the parts of the package they use; but for the kernel's package
+/// out, since the bindings would read them twice. Whether a copy of a bundled package, a WASI
+/// package Tembra serves or the kernel's, is one is tembra-contracts' to say, once the expansion
+/// resolves the derived WIT with the directory (`resolved`): only a file of `deps/` that is the
+/// bundled file line for line, or an encoded file of `deps/` that agrees with the bundled
+/// package. A copy decoded so comes with the files it was decoded from, which hold only the parts of the package they use; but for the kernel's package
 /// where the macro brings it itself, for a state, a resource or the context, `kernel`: a copy of
 /// it decoded so is then an error asking to remove it.
 pub(crate) fn bundled_copies(parsed: &Parsed, kernel: bool) -> syn::Result<Copies> {
     let Some(dir) = parsed.dir() else {
         return Ok(Copies::new());
     };
-    tembra_contracts::Contract::check_dir(dir.path()).map_err(|cause| error(cause.to_string()))?;
     let (consumed, sources) = (dir.packages()?, dir.sources()?);
     // The bundled packages by the names their sources declare: resolved together with the
     // consumed ones, each would be found as its own copy.
@@ -722,7 +720,7 @@ pub(crate) fn bundled_copies(parsed: &Parsed, kernel: bool) -> syn::Result<Copie
 
 /// The packages the encoded files of `deps/` hold, each with the files that hold it: each `.wat`
 /// file, and each `.wit` or `.wasm` file that starts with the wasm magic `\0asm`, decoded apart.
-/// `Contract::check_dir` has read them already.
+/// tembra-contracts checks them against the bundled packages.
 fn decoded(deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec<PathBuf>>> {
     let failed = |path: &Path, cause: &dyn std::fmt::Display| {
         error(format!(

@@ -8854,6 +8854,9 @@ fn only_the_library_target_writes_the_contract() {
 /// implemented interface and an imported one, a hook it contributes to, an interface imported by
 /// key, a type of an import in a derived signature and in a state, whose serde derives make the
 /// expansion read the WIT as the bindings do, and a WASI import, which nests the bundled packages.
+/// The derived WIT is resolved as a contract once, which reads the directory as `cargo tembra
+/// build` reads it, for the checks of the signatures, of the roles and of the consumed copies of
+/// the bundled packages, and for the signature of each service.
 #[test]
 fn an_expansion_reads_the_consumed_directory_and_the_bundled_packages_once() {
     let dir = consumed(
@@ -8890,6 +8893,7 @@ interface counter {
     };
     let directories = super::wit::DIRECTORY_PARSES.get();
     let bundled = super::wasi::BUNDLED_PARSES.get();
+    let resolutions = super::CONTRACT_RESOLUTIONS.get();
     let module = expanded_with(
         options,
         "mod keeper {
@@ -8931,9 +8935,10 @@ interface counter {
         (
             super::wit::DIRECTORY_PARSES.get() - directories,
             super::wasi::BUNDLED_PARSES.get() - bundled,
+            super::CONTRACT_RESOLUTIONS.get() - resolutions,
         ),
-        (1, 1),
-        "the consumed directory and the bundled WASI packages are read once each"
+        (1, 1, 1),
+        "the consumed directory and the bundled WASI packages are read once each, and the contract resolved once"
     );
 }
 
