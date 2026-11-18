@@ -257,6 +257,17 @@ fn scenarios() -> Vec<Scenario> {
             ],
         ),
         row(
+            StateJson,
+            "a state holding an enum serde tags inside its own object, beside the author's derives, reads back the JSON serde writes for it",
+            vec![
+                State("sketching"),
+                Call("sketching", "circle", json!([3])),
+                State("sketching"),
+                Call("sketching", "square", json!([4])),
+                State("sketching"),
+            ],
+        ),
+        row(
             WitResources,
             "a constructor issues a tally its caller owns, whose methods read it through the handle, and dropping the handle drops it",
             vec![
@@ -778,4 +789,41 @@ fn the_native_build_and_the_component_answer_alike() {
     compiled.close();
     assert_eq!(engine.instances(), 0);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A state holding an enum `serde` tags inside its own object, `#[serde(tag = "kind")]`, with the
+/// author's derives beside the attribute, keeps the JSON `serde` writes for it and reads it back:
+/// natively here, and as a component in the parity scenario, which answers alike.
+#[test]
+fn a_state_with_an_internally_tagged_enum_round_trips() {
+    let providers = parity::Providers {
+        dial: Provider::new(DIALS, 1),
+        dial_ref: Provider::new(DIALS, 1),
+    };
+    let mut native = Build::new("native", parity::orb(providers).unwrap());
+    let answers: Vec<Value> = native
+        .run(vec![
+            Step::State("sketching"),
+            Step::Call("sketching", "circle", json!([3])),
+            Step::State("sketching"),
+            Step::Call("sketching", "square", json!([4])),
+            Step::State("sketching"),
+        ])
+        .into_iter()
+        .map(|answer| match answer.outcome {
+            Outcome::Value(value) => value,
+            outcome => panic!("{outcome:?}"),
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            json!({ "shape": { "kind": "Dot" }, "strokes": 0 }),
+            json!(3),
+            json!({ "shape": { "kind": "Circle", "radius": 3 }, "strokes": 1 }),
+            json!(4),
+            json!({ "shape": { "kind": "Square", "side": 4 }, "strokes": 2 }),
+        ]
+    );
+    native.close();
 }

@@ -5,9 +5,10 @@
 //!
 //! Each module of the Orb serves one feature of that test's list. `imports` turns the dials of
 //! another Orb, through the plain import and the view of the import by key; `cancellation` stops
-//! awaiting a call of the plain import; `ledger` keeps a state; `tallies` issues WIT resources;
-//! `checks` takes and returns what the boundary checks; and `names` names the types of `checks`
-//! through a `use` with `as` and an alias. A new scenario is a module here, or a
+//! awaiting a call of the plain import; `ledger` keeps a state, and `sketching` one holding an
+//! internally tagged enum; `tallies` issues WIT resources; `checks` takes and returns what the
+//! boundary checks; and `names` names the types of `checks` through a `use` with `as` and an
+//! alias. A new scenario is a module here, or a
 //! function of one, and a row of the test's list. The Orb holds nothing a native host refuses by
 //! design, a hook declaration, a synchronous import or a WASI import, and nothing native only.
 
@@ -179,6 +180,62 @@ pub mod parity {
             /// The book as the kernel keeps it.
             pub fn kept() -> Book {
                 Book::read()
+            }
+        }
+    }
+
+    /// Keeps a sketch in a state that stays out of the WIT, whose shape is an enum `serde` tags
+    /// inside its own object, `#[serde(tag = "kind")]`: the serde derives are the author's, so the
+    /// helper attribute follows them.
+    pub mod sketching {
+        /// The shape drawn, tagged by `kind`.
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        #[serde(tag = "kind")]
+        pub enum Shape {
+            #[default]
+            Dot,
+            Circle {
+                radius: u32,
+            },
+            Square {
+                side: u32,
+            },
+        }
+
+        /// The sketch of one sketching object, which the kernel keeps.
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Sketch {
+            pub shape: Shape,
+            pub strokes: u32,
+        }
+
+        #[service]
+        pub struct Sketching;
+
+        impl Sketching {
+            /// Draw a circle of `radius` and return the radius the state reads back.
+            pub fn circle(radius: u32) -> u32 {
+                Sketch::update(|sketch| {
+                    sketch.shape = Shape::Circle { radius };
+                    sketch.strokes += 1;
+                });
+                match Sketch::read().shape {
+                    Shape::Circle { radius } => radius,
+                    Shape::Dot | Shape::Square { .. } => 0,
+                }
+            }
+
+            /// Draw a square of `side` and return the side the state reads back.
+            pub fn square(side: u32) -> u32 {
+                Sketch::update(|sketch| {
+                    sketch.shape = Shape::Square { side };
+                    sketch.strokes += 1;
+                });
+                match Sketch::read().shape {
+                    Shape::Square { side } => side,
+                    Shape::Dot | Shape::Circle { .. } => 0,
+                }
             }
         }
     }
