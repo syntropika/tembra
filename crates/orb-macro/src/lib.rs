@@ -589,6 +589,9 @@ struct Newtype {
     inner: Type,
     /// The module declaring the struct, by scope; 0 is the Orb module.
     scope: usize,
+    /// The first attribute of the field that drops it where a configuration is off
+    /// (`conditional`), which the macro cannot evaluate once the newtype enters the WIT.
+    conditional: Option<Attribute>,
 }
 
 /// The newtype a struct is, if it is one: a tuple struct of one field, without generic parameters.
@@ -603,6 +606,11 @@ fn newtype(item: &syn::ItemStruct, scope: usize) -> Option<Newtype> {
         ident: item.ident.clone(),
         inner: field.ty.clone(),
         scope,
+        conditional: field
+            .attrs
+            .iter()
+            .find(|attribute| conditional(&attribute.meta))
+            .cloned(),
     })
 }
 
@@ -2448,6 +2456,18 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &consumed_modules,
     );
     for (newtype, _) in &newtypes {
+        // The WIT spells the newtype as its field, before the compiler evaluates the field's
+        // attributes.
+        if let Some(attribute) = &newtype.conditional {
+            return Err(syn::Error::new(
+                attribute.span(),
+                format!(
+                    "{} on the field of the newtype `{1}`: `{1}` enters the WIT as its field, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration; remove the attribute, or keep `{1}` out of the WIT",
+                    written_condition(attribute),
+                    newtype.ident
+                ),
+            ));
+        }
         let mut held = Vec::new();
         consumed_modules.references(&newtype.inner, newtype.scope, &mut held);
         if let Some(resource) = held.iter().find_map(|name| {
@@ -4644,11 +4664,34 @@ fn conditional(meta: &syn::Meta) -> bool {
     if !meta.path().is_ident("cfg_attr") {
         return false;
     }
-    let wrapped = meta.require_list().and_then(|list| {
-        list.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated)
-    });
+    meta.require_list()
+        .is_ok_and(|list| wraps_cfg(list.tokens.clone()))
+}
+
+/// Whether the arguments of a `#[cfg_attr(..)]` wrap a `#[cfg(..)]` after the configuration
+/// predicate, directly or through another `#[cfg_attr(..)]`. They are read token by token, split at
+/// the commas outside any group, since an attribute there may be no `syn::Meta`, `doc = m!{..}`.
+fn wraps_cfg(arguments: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::{Delimiter, TokenTree};
+    let mut attributes: Vec<Vec<TokenTree>> = vec![Vec::new()];
+    for tree in arguments {
+        match &tree {
+            TokenTree::Punct(punct) if punct.as_char() == ',' => attributes.push(Vec::new()),
+            _ => attributes.last_mut().expect("one at least").push(tree),
+        }
+    }
     // The first is the configuration predicate.
-    wrapped.is_ok_and(|wrapped| wrapped.iter().skip(1).any(conditional))
+    attributes
+        .iter()
+        .skip(1)
+        .any(|attribute| match attribute.as_slice() {
+            [TokenTree::Ident(name), TokenTree::Group(group)]
+                if group.delimiter() == Delimiter::Parenthesis =>
+            {
+                name == "cfg" || (name == "cfg_attr" && wraps_cfg(group.stream()))
+            }
+            _ => false,
+        })
 }
 
 /// How the errors write an attribute that drops what it sits on where a configuration is off
@@ -5881,6 +5924,7 @@ fn newtype_conversions(
         ident,
         inner,
         scope,
+        ..
     } = newtype;
     // A newtype holds no resource: the analysis refuses one.
     let resources = BTreeMap::new();

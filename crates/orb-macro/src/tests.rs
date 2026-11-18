@@ -2810,7 +2810,9 @@ fn an_impls_type_resolves_as_a_contract_types_name() {
 /// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
 /// `#[cfg_attr(..)]`: a field, a case or a case's payload under `#[cfg(..)]`, which the WIT would
 /// hold in every configuration, is refused, on a record, an enum or a variant, and so is the
-/// type, a field or a case under a `#[cfg_attr(..)]` wrapping a `#[cfg(..)]`, at any depth; any
+/// type, a field or a case under a `#[cfg_attr(..)]` wrapping a `#[cfg(..)]`, at any depth and
+/// beside any attribute, one that is no `syn::Meta` included, and the field of a newtype that
+/// enters the WIT under either; any
 /// other `#[cfg_attr(..)]` on the type or on a member is the compiler's to evaluate, on the
 /// author's type. Kept out of the WIT, the same type is the author's, as written.
 #[test]
@@ -2855,6 +2857,21 @@ fn what_the_macro_cannot_evaluate_is_refused() {
             "pub enum Level { Read, #[cfg_attr(test, cfg_attr(docsrs, cfg(feature = \"admin\")))] Admin }",
             "Level",
             "`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the case `Level::Admin`: `Level` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the case in every configuration",
+        ),
+        (
+            "pub struct Grant { pub who: String, #[cfg_attr(test, cfg(feature = \"audit\"), doc = m!{why})] pub reason: String }",
+            "Grant",
+            "`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the field `Grant::reason`: `Grant` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration",
+        ),
+        (
+            "pub struct Spot(#[cfg(feature = \"x\")] pub u32);",
+            "Spot",
+            "`#[cfg(..)]` on the field of the newtype `Spot`: `Spot` enters the WIT as its field, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration",
+        ),
+        (
+            "pub struct Spot(#[cfg_attr(test, cfg(feature = \"x\"))] pub u32);",
+            "Spot",
+            "`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the field of the newtype `Spot`: `Spot` enters the WIT as its field",
         ),
     ] {
         let error = refused("example:office@1.0.0", &module(types, returned));

@@ -3181,6 +3181,7 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
         ident,
         inner,
         scope,
+        ..
     } = newtype;
     let facade = &analysis.options.facade();
     let boundary = boundary(*scope, analysis);
