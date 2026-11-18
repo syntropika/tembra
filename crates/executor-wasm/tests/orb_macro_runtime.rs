@@ -2122,6 +2122,21 @@ fn hooks_a_component_declares_compose_their_contributions() {
     module_natively("hooks");
 }
 
+/// A module that contributes to a hook builds whatever the runtime's features: as a component, std
+/// and freestanding, and natively with the facade's `host` alone, where its `orb(..)` answers an
+/// error naming the runtime's `hooks`, and with `hooks`, where its contribution joins the hook of
+/// a native gate. The module is `contributor` of the runtime fixture.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_contribution_builds_with_or_without_the_runtimes_hooks() {
+    for features in ["contributor", "contributor,no-std"] {
+        let component = module_component(features);
+        module_artifact(&component, "contributor");
+    }
+    module_natively("contributor");
+    module_natively("contributor,native-hooks");
+}
+
 /// A state's version across a reload, in a component build, std and freestanding: the counter of
 /// the `versioned` feature keeps its state at version 1, and its next revision, built with
 /// `revised`, at version 2. The versions are compared on reload. Changing the version of a living

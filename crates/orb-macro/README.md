@@ -1440,7 +1440,8 @@ it reads the hook's input with the codec, runs the author's function and writes 
 It runs in the Orb's root, as a component's contribution does: with the root's resources, its
 imports and the call's `context`, whose `object()` is an empty key and the principal `host`, and
 with no state. The runtime's contributions come with the facade's `hooks` feature, which a host
-that installs such an Orb enables. A [hook declaration](#declaring-a-hook) makes the module's
+that installs such an Orb enables. Without it the module still compiles, and its `orb(..)`
+answers an error with the code `unsupported`, naming the feature. A [hook declaration](#declaring-a-hook) makes the module's
 `orb()` answer an error naming it where the runtime is linked: its `run` is synchronous, and
 natively a method has no fiber to suspend while the kernel runs the hook's contributions, so the
 declaration works in a component build of the module only.

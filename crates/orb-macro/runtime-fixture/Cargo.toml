@@ -27,6 +27,7 @@ renamed = ["dep:sdk"]
 flagged = ["dep:tembra"]
 steady = ["dep:tembra"]
 hooks = ["dep:tembra"]
+contributor = ["dep:tembra"]
 versioned = ["dep:tembra"]
 lamps = ["dep:tembra"]
 system = ["dep:tembra"]
@@ -41,6 +42,9 @@ revised = []
 # features name the facade by both names, even through `?`.
 native = ["tembra?/host", "tembra?/authoring"]
 native-sdk = ["sdk?/host"]
+# `native` with the runtime's `hooks`, with which the module that `contributor` selects contributes
+# natively; without it, its `orb(..)` answers an error naming the feature.
+native-hooks = ["native", "tembra?/hooks"]
 
 [dependencies]
 tembra = { path = "../../tembra", default-features = false, features = ["macros"], optional = true }

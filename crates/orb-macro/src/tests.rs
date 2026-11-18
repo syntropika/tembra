@@ -9257,7 +9257,7 @@ fn a_contribution_joins_the_hook_natively() {
         "pub fn orb (providers : Providers) -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"book\" , 1u32 , providers) }",
         "pub struct Providers { # [doc = \" The Orb that declares the hook `example:admission/guard@1.0.0`, which this Orb contributes to.\"] pub guard : :: tembra :: Provider , }",
         "let requirement = entry (& mut requirements , & providers . guard) ? ; requirement . hooks . insert (:: std :: string :: String :: from (\"example:admission/guard@1.0.0\")) ;",
-        "let orb = self :: __TembraRegistry :: < 1 > :: __tembra_contribution_admit (orb , & providers . guard . name , & resources) ; :: core :: result :: Result :: Ok (orb)",
+        "let orb = self :: __TembraRegistry :: < 1 > :: __tembra_contribution_admit (orb , & providers . guard . name , & resources) ? ; :: core :: result :: Result :: Ok (orb)",
         "impl __TembraBoundary for exports :: example :: admission :: guard :: Admission {",
     ] {
         assert!(root.contains(expected), "{expected}\n{root}");
@@ -9265,7 +9265,9 @@ fn a_contribution_joins_the_hook_natively() {
     assert!(!root.contains("__tembra_import"), "{root}");
     let filters = native(&module, &["filters"]);
     for expected in [
-        "pub (crate) fn __tembra_contribution_admit (orb : :: tembra :: Orb , target : & str , resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >) -> :: tembra :: Orb { orb . contribute_portable (target , \"example:admission/guard@1.0.0\" ,",
+        "pub (crate) fn __tembra_contribution_admit (orb : :: tembra :: Orb , target : & str , resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >) -> :: tembra :: Result < :: tembra :: Orb > { :: tembra :: __hooks ! { { :: core :: result :: Result :: Ok (orb . contribute_portable (target , \"example:admission/guard@1.0.0\" ,",
+        // Without the runtime's `hooks`, the error naming the feature, which `orb(..)` answers.
+        "{ { let _ = (orb , target , resources) ; :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: core :: Code :: Unsupported , \"native\" , \"the contribution of `admit` to the hook example:admission/guard@1.0.0 needs the runtime's `hooks`: enable the facade's `hooks` feature in the host that installs this Orb\")) } } }",
         ", - 7i32 , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | __tembra_context : :: tembra :: Context , __tembra_input : :: tembra :: serde_json :: Value | self :: super :: context :: __scoped (__tembra_context . clone () , self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ;",
         "let input = read (__tembra_input) . map_err (| message | { :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }) ? ; let value = admit (input) ;",
         "write (value) . map_err (| message | { :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Result , message) })",

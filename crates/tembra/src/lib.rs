@@ -128,3 +128,33 @@ macro_rules! __freestanding {
 __freestanding! {
     const _: () = assert!(!cfg!(feature = "host"));
 }
+
+/// Expand the first braced input when this crate links the runtime's hooks, through its `hooks`
+/// feature, and the second otherwise: `::tembra::__hooks! { { with } { without } }`, in
+/// expression position, each input an expression.
+///
+/// The native side of `#[tembra::orb]` adds a contribution to a hook through it, by the absolute
+/// path: `Orb::contribute_portable` exists only with `hooks`, so without it the contribution
+/// answers an error naming the feature, and the module still compiles. The macro reads this
+/// crate's features, which Cargo unifies across a build.
+#[cfg(feature = "hooks")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __hooks {
+    ({ $($with:tt)* } { $($without:tt)* }) => {
+        $($with)*
+    };
+}
+
+/// Without `hooks`, the second input; the other definition describes the macro.
+#[cfg(not(feature = "hooks"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __hooks {
+    ({ $($with:tt)* } { $($without:tt)* }) => {
+        $($without)*
+    };
+}
+
+// Each build selects the input of its features.
+const _: () = assert!(__hooks! { { cfg!(feature = "hooks") } { !cfg!(feature = "hooks") } });

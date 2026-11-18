@@ -138,7 +138,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         let table = resources.then(|| quote! { , &resources });
         let imports = imported.then(|| quote! { , &imports });
         contributed.push(quote! {
-            self::#registry::<#registered>::#function(orb, &providers.#field.name #table #imports)
+            self::#registry::<#registered>::#function(orb, &providers.#field.name #table #imports)?
         });
         by_scope
             .entry(scope)
