@@ -138,7 +138,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         let table = resources.then(|| quote! { , &resources });
         let imports = imported.then(|| quote! { , &imports });
         contributed.push(quote! {
-            self::#registry::<#registered>::#function(orb, &providers.#field.name #table #imports)
+            self::#registry::<#registered>::#function(orb, &providers.#field.name #table #imports)?
         });
         by_scope
             .entry(scope)
@@ -1730,11 +1730,25 @@ fn resource_handle(resource: &WitResource, analysis: &Analysis) -> Result<TokenS
 /// `new_<resource>` for the constructor, `new_cursor` for `Cursor`, and `<resource>_<function>`
 /// for each static function, `cursor_open` for `Cursor::open`, each called portably, as the
 /// client's functions whose result holds a resource are, answering the resource as its handle type.
+/// None without either, so a resource's module that cannot see the client still compiles; with
+/// one, and a client that module cannot see, the refusal `orb()` answers.
 fn resource_client(
     resource: &WitResource,
     service: &Service,
     analysis: &Analysis,
 ) -> Result<TokenStream, Refused> {
+    // A constructor or a static function goes on the client, which the resource's module may not
+    // see: the Orb's `orb()` then answers why, and a component build is unaffected.
+    if resource.constructor.is_some() || !resource.statics.is_empty() {
+        crate::client_seen(
+            service,
+            &analysis.modules[service.scope],
+            &analysis.seen_from[service.scope],
+            &analysis.modules[resource.scope],
+            &resource.ident,
+        )
+        .map_err(Refused)?;
+    }
     let facade = &analysis.options.facade();
     let ident = &resource.ident;
     let name = wit::kebab(ident);
@@ -1813,6 +1827,11 @@ fn resource_client(
                 #body
             }
         });
+    }
+    // Without a constructor or a static function, the resource's module names no client, which it
+    // may not see; with one, it was refused above.
+    if methods.is_empty() {
+        return Ok(TokenStream::new());
     }
     Ok(quote! {
         impl #client {

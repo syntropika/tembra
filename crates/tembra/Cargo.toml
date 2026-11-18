@@ -80,7 +80,7 @@ tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2", optional
 futures-timer = "3"
 futures.workspace = true
 serde.workspace = true
-serde_json = { workspace = true, features = ["arbitrary_precision"] }
+serde_json.workspace = true
 
 [[test]]
 name = "contract_facade"

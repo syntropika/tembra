@@ -93,6 +93,7 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     let mut cargo = Command::new("cargo");
     cargo
         .arg("rustc")
+        .arg("--lib")
         .arg("--manifest-path")
         .arg(&manifest_path)
         .arg("--target")

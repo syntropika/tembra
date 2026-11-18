@@ -98,7 +98,7 @@ fn expansion(
         Ok(tokens) => tokens,
         Err(error) => {
             let error = error.to_compile_error();
-            let prelude = freestanding.then(prelude);
+            let prelude = freestanding.then(|| prelude(facade_of(&attribute).as_ref()));
             quote! { #error #prelude }
         }
     }
@@ -157,18 +157,56 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
 
 /// The runtime prelude of a `no_std` component: the allocator and a panic handler that traps, for
 /// the Wasm target. On the host the crate builds with std, so `cargo check` and rust-analyzer
-/// need no Wasm target.
-fn prelude() -> proc_macro2::TokenStream {
-    quote! {
-        #[cfg(target_arch = "wasm32")]
-        #[global_allocator]
-        static __TEMBRA_ALLOCATOR: ::dlmalloc::GlobalDlmalloc = ::dlmalloc::GlobalDlmalloc;
-
+/// need no Wasm target. The panic handler goes through the facade, named `facade`, which drops it
+/// when the facade links std, with `host` or `contracts`: std's would then be a second. The
+/// invocation is for wasm32 only, so a native build never resolves the facade's path. Without a
+/// facade, for an attribute whose `crate = ".."` the macro refused, the handler is written as it
+/// is, since no path to the facade resolves: the build reports the refusal alone, unless a
+/// feature that links std also reports the second handler.
+fn prelude(facade: Option<&Ident>) -> proc_macro2::TokenStream {
+    let handler = quote! {
         #[cfg(target_arch = "wasm32")]
         #[panic_handler]
         fn __tembra_panic(_: &::core::panic::PanicInfo<'_>) -> ! {
             ::core::arch::wasm32::unreachable()
         }
+    };
+    let handler = match facade {
+        Some(facade) => quote! {
+            #[cfg(target_arch = "wasm32")]
+            ::#facade::__freestanding! { #handler }
+        },
+        None => handler,
+    };
+    quote! {
+        #[cfg(target_arch = "wasm32")]
+        #[global_allocator]
+        static __TEMBRA_ALLOCATOR: ::dlmalloc::GlobalDlmalloc = ::dlmalloc::GlobalDlmalloc;
+
+        #handler
+    }
+}
+
+/// The facade's name that the attribute's `crate = ".."` gives, read from the tokens, so that an
+/// attribute the macro refuses still has it; `tembra` without one, and none for a `crate = ".."`
+/// that names no Rust identifier, which the macro refuses.
+fn facade_of(attribute: &proc_macro2::TokenStream) -> Option<Ident> {
+    let tokens: Vec<_> = attribute.clone().into_iter().collect();
+    let named = tokens.windows(3).find_map(|window| match window {
+        [
+            proc_macro2::TokenTree::Ident(key),
+            proc_macro2::TokenTree::Punct(equals),
+            proc_macro2::TokenTree::Literal(literal),
+        ] if key == "crate" && equals.as_char() == '=' => Some(
+            syn::parse_str::<LitStr>(&literal.to_string())
+                .ok()
+                .and_then(|name| name.parse::<Ident>().ok()),
+        ),
+        _ => None,
+    });
+    match named {
+        Some(facade) => facade,
+        None => Some(Ident::new("tembra", Span::call_site())),
     }
 }
 
@@ -1016,6 +1054,46 @@ fn check_seen(
     ))
 }
 
+/// Why the native side cannot build an Orb whose WIT resource `resource`, with a constructor or a
+/// static function, sits in the module at `from`, when that module cannot name the native client
+/// of its service, `service`, declared in the module at `path`, where `seen_from` says each module
+/// of the path is visible: the native side writes those functions on the client, in the resource's
+/// module. The message names the module of the path and the service to make visible to it; the
+/// Orb's `orb()` answers it, and a component build, which needs no client, is never refused for
+/// it. Writing the calls in the service's module instead would name the parameter types from
+/// there, and raising a visibility would change the author's code. A `pub(in crate::..)` module or
+/// service counts as visible everywhere, as `reach` leaves it to the compiler, which reports one
+/// the resource's module cannot see.
+fn client_seen(
+    service: &Service,
+    path: &[Ident],
+    seen_from: &[usize],
+    from: &[Ident],
+    resource: &Ident,
+) -> Result<(), String> {
+    let module = seen_from
+        .iter()
+        .position(|&depth| !from.starts_with(&path[..depth]))
+        .map(|position| format!("the module `{}`", path[position]));
+    let declared = path.len().saturating_sub(reach(&service.vis));
+    let hidden =
+        (!from.starts_with(&path[..declared])).then(|| format!("the service `{}`", service.ident));
+    let hidden: Vec<String> = module.into_iter().chain(hidden).collect();
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let viewer = if from.is_empty() {
+        "the Orb module".to_owned()
+    } else {
+        format!("the module {}", describe(from))
+    };
+    Err(format!(
+        "`{resource}` has a constructor or a static function, which a native build writes on the client of its service `{}` in {viewer}, which cannot see it: make {} visible to {viewer}, at least `pub(crate)`",
+        service.ident,
+        hidden.join(" and ")
+    ))
+}
+
 /// Whether a type alias names a namesake, `pub type Token = super::sessions::Token;`: a path
 /// ending in the alias's own name, with generics on neither, which the alias stands for as
 /// `use super::sessions::Token;` would.
@@ -1701,6 +1779,9 @@ struct Analysis {
     ident: Ident,
     /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
     modules: Vec<Vec<Ident>>,
+    /// Where each module of each module's path is visible, by scope, as the scan found it: the
+    /// depth of the module of the path it is visible in, and so in every module below that one.
+    seen_from: Vec<Vec<usize>>,
     /// The Orb module and its sub-modules with the author's items that stay theirs: the types
     /// that stay out of the WIT, with the serde derives a state needs of them, the flags that
     /// enter it, with the functions the bindings call on them, and the types the macro converts,
@@ -3175,6 +3256,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         vis: module.vis,
         ident: module.ident,
         modules,
+        seen_from,
         tree,
         services,
         wit_resources,
@@ -3772,7 +3854,7 @@ fn component(
             #with
         });
     };
-    let runtime_prelude = options.no_std.then(prelude);
+    let runtime_prelude = options.no_std.then(|| prelude(Some(&options.facade())));
     // A component cannot serve a native-only module, so its build refuses the module at each
     // marker, every one at once; a host build compiles none of these errors.
     let refusals = analysis.native_only.iter().map(|NativeOnly { name, span }| {

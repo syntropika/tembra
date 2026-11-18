@@ -34,15 +34,16 @@ Give every production method a short doc sentence that states its purpose or gua
 A change keeps each invariant below. Each one names the tests that guard it, and the recipe in parentheses runs them. A change that adds a case to an invariant adds a test for it. A case that is known to break an invariant is named under it, with the pull request that fixes it, which removes the line.
 
 - A build for wasm32 is a component, whatever the facade's features. A guest gets the facade's `host` feature when its `tembra` keeps the default features, or when another crate of the build enables it. Its component still answers each call as the guest built without `host` does.
-  - `a_wasm32_guest_with_the_host_feature_answers_as_a_component` in `crates/executor-wasm/tests/orb_macro_runtime.rs`, which builds `crates/orb-macro/host-feature-fixture` both ways (`just test-orb-macro`).
+  - `a_wasm32_guest_with_the_host_feature_answers_as_a_component` in `crates/executor-wasm/tests/orb_macro_runtime.rs`, which builds `crates/orb-macro/host-feature-fixture` both ways, std and `no_std` (`just test-orb-macro`).
   - `the_facade_checks_for_wasm32_with_macros` in `crates/orb-macro/tests/configurations.rs` (`just test-configurations`).
-  - Known to break it: a `no_std` guest built for wasm32 with `host` fails with E0152, a duplicate `panic_impl`. #8 fixes it.
+  - `a_freestanding_guest_builds_for_wasm32_whatever_links_std` in `crates/orb-macro/tests/configurations.rs`, which builds the `no_std` guest `crates/orb-macro/config-fixtures/freestanding` with no facade feature, `host` and `contracts` (`just test-configurations`).
 - A part that the native side does not support never fails a build, whatever runtime features the build enables. The module compiles, and its `orb()` names the part. Only a host that installs the Orb fails.
   - `crates/orb-macro/native-fixture/tests/unsupported.rs` (`just test-native-fixture`).
+  - `a_resource_with_a_constructor_beside_a_private_service_fails_the_installation` in `crates/orb-macro/native-fixture/tests/burrow.rs` (`just test-native-fixture`), and `a_resource_that_cannot_see_its_client_builds_as_a_component` in `crates/orb-macro/tests/configurations.rs`, on `crates/orb-macro/config-fixtures/hidden-client` (`just test-configurations`).
   - The native tests of the modules `gatehouse`, `system` and `io`, and of `notebook` with its `archive` feature, in `crates/orb-macro/runtime-fixture/src` (`just test-orb-macro`).
-  - `a_workspace_whose_application_enables_host_checks_beside_a_guest` in `crates/orb-macro/tests/configurations.rs`, on the mixed workspace `crates/orb-macro/config-fixtures/workspace` (`just test-configurations`).
+  - The native tests of the module `contributor` in `crates/orb-macro/runtime-fixture/src`, which `a_contribution_builds_with_or_without_the_runtimes_hooks` in `crates/executor-wasm/tests/orb_macro_runtime.rs` runs with the facade's `host` alone and with `hooks` (`just test-orb-macro`).
+  - `a_workspace_whose_application_enables_host_checks_beside_a_guest` in `crates/orb-macro/tests/configurations.rs`, on the mixed workspace `crates/orb-macro/config-fixtures/workspace`, whose guests declare a hook and contribute to one beside an application that enables `host` without `hooks` (`just test-configurations`).
   - The native hosts in `crates/orb-macro/config-fixtures/native-hosts` (`just test-orb-both-ways`).
-  - Known to break it: a workspace whose guest contributes to a hook, beside an application that enables `host` without `hooks`, fails `cargo check --workspace` with E0599, since `Orb::contribute_portable` exists only with the runtime's `hooks`. #8 fixes it.
 - Generated code reaches the facade only by the name that `crate = ".."` gives it, and reaches the module's items by paths that the module can see.
   - `examples/rust-orb-native/italian`, which builds as a component and natively (`just test-orb-examples`).
   - `crates/orb-macro/native-fixture/tests/trail.rs` (`just test-native-fixture`).

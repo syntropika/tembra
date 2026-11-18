@@ -7,6 +7,8 @@ extern crate alloc;
 
 #[cfg(feature = "configured")]
 mod configured;
+#[cfg(feature = "contributor")]
+mod contributor;
 #[cfg(feature = "flagged")]
 mod flagged;
 #[cfg(feature = "hooks")]
