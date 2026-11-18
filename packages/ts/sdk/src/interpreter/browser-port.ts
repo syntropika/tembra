@@ -179,17 +179,37 @@ export class BrowserPort implements InterpreterPort {
     // Standard calls observe the caller's cancellation and end with this callback.
     const ended = new AbortController();
     const signal = scope.signal ? combinedSignal(scope.signal, ended.signal) : ended.signal;
-    const timer = setTimeout(() => {
-      this.#poisoned = true;
-      ended.abort();
-      scope.cancel();
-      rejectDeadline(new Error("Interpreter callback exceeded its wall time limit"));
-    }, this.timeout);
+    // The one timeout of this callback, which poisons the port when it first happens.
+    let timeout: Error | undefined;
+    const expired = () => {
+      if (!timeout) {
+        timeout = new Error("Interpreter callback exceeded its wall time limit");
+        this.#poisoned = true;
+        ended.abort();
+        scope.cancel();
+      }
+      return timeout;
+    };
+    const started = performance.now();
+    const timer = setTimeout(() => rejectDeadline(expired()), this.timeout);
+    // An outcome of a guest step after the deadline, a result or a failure, is a timeout too: a
+    // step holds the thread past it and runs the timer late.
+    const step = <V>(operation: () => V): V => {
+      let outcome: { value: V } | { error: unknown };
+      try {
+        outcome = { value: this.guard(operation) };
+      } catch (error) {
+        outcome = { error };
+      }
+      if (performance.now() - started > this.timeout) throw expired();
+      if ("error" in outcome) throw outcome.error;
+      return outcome.value;
+    };
     try {
       const input = this.bounded(packet);
-      let progress = this.guard(() => this.guest!.start(input));
+      let progress = step(() => this.guest!.start(input));
       while (!progress.outcome) {
-        if (this.#poisoned) throw new Error("Interpreter callback exceeded its wall time limit");
+        if (timeout) throw timeout;
         for (const effect of progress.effects) {
           if (pending.size >= 128 || pending.has(effect.id))
             throw new Error("Invalid interpreter effect queue");
@@ -243,10 +263,10 @@ export class BrowserPort implements InterpreterPort {
           if (!response.ok)
             this.standard?.discard({ issued: response.issued ?? [], reads: response.reads });
         }
-        progress = this.guard(() => this.guest!.resume(completed));
+        progress = step(() => this.guest!.resume(completed));
       }
       finished = true;
-      if (this.#poisoned) throw new Error("Interpreter callback exceeded its wall time limit");
+      if (timeout) throw timeout;
       return this.text(progress.outcome);
     } finally {
       clearTimeout(timer);

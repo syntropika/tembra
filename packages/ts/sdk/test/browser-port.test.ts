@@ -350,3 +350,53 @@ test("an unpublished real standard read is poisoned through the browser port's c
   await port.close();
   expect(standard.size).toBe(0);
 });
+
+/** Hold this thread, as a busy guest step does: nothing else runs, the deadline's timer included. */
+function hold(milliseconds: number) {
+  const until = performance.now() + milliseconds;
+  while (performance.now() < until) {
+    // Spin.
+  }
+}
+
+test("a result after the callback's deadline is a timeout, even before its late timer runs", async () => {
+  const port = new BrowserPort(
+    20,
+    async () => {},
+    () => {},
+  );
+  port.guest = guest({
+    start: () => {
+      hold(50);
+      return { outcome: { ok: true, value: "42", interrupted: false }, effects: [] };
+    },
+  });
+  await expect(port.execute("{}", scope())).rejects.toThrow("wall time limit");
+  await expect(port.execute("{}", scope())).rejects.toThrow("closed or busy");
+  await port.close();
+});
+
+test("a guest failure after the callback's deadline is a timeout too", async () => {
+  const port = new BrowserPort(
+    20,
+    async () => {},
+    () => {},
+  );
+  port.guest = guest({
+    start: () => ({
+      effects: [{ id: 1, packet: JSON.stringify({ operation: "wait", milliseconds: 1 }) }],
+    }),
+    resume: () => {
+      hold(50);
+      return {
+        outcome: { ok: false, value: "the guest's own failure", interrupted: false },
+        effects: [],
+      };
+    },
+  });
+  await expect(port.execute("{}", scope({ async: async () => null }))).rejects.toThrow(
+    "wall time limit",
+  );
+  await expect(port.execute("{}", scope())).rejects.toThrow("closed or busy");
+  await port.close();
+});
