@@ -1873,3 +1873,55 @@ pub mod trail {
         }
     }
 }
+
+/// A sketch whose state holds what `serde` reads through its buffer: an internally tagged enum
+/// and a flattened struct, each holding an `f64`, which natively read back as in a component.
+#[tembra::orb(package = "example:sketch@1.0.0")]
+pub mod sketch {
+    /// The shape drawn, tagged by `kind` inside its own object. The derives of `serde` are the
+    /// author's, which its attribute follows.
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "kind")]
+    pub enum Shape {
+        #[default]
+        Dot,
+        Circle {
+            radius: f64,
+        },
+    }
+
+    /// How large the sketch is drawn, whose fields sit beside the shape's in the state's JSON.
+    #[derive(Default)]
+    pub struct Size {
+        pub scale: f64,
+    }
+
+    /// The sketch an object keeps.
+    #[state(service = Pad)]
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct Sketch {
+        pub shape: Shape,
+        #[serde(flatten)]
+        pub size: Size,
+    }
+
+    /// Draws one sketch per object.
+    #[service]
+    pub struct Pad;
+
+    impl Pad {
+        /// Draw a circle of `radius` at `scale`, and return the radius and the scale the state
+        /// reads back.
+        pub fn circle(radius: f64, scale: f64) -> (f64, f64) {
+            Sketch::update(|sketch| {
+                sketch.shape = Shape::Circle { radius };
+                sketch.size.scale = scale;
+            });
+            let sketch = Sketch::read();
+            match sketch.shape {
+                Shape::Circle { radius } => (radius, sketch.size.scale),
+                Shape::Dot => (0.0, sketch.size.scale),
+            }
+        }
+    }
+}

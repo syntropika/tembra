@@ -19,7 +19,7 @@ telemetry = ["tembra-core/telemetry"]
 tembra-core.workspace = true
 futures.workspace = true
 serde.workspace = true
-serde_json = { workspace = true, features = ["arbitrary_precision"] }
+serde_json.workspace = true
 futures-timer = "3"
 
 [lints]
