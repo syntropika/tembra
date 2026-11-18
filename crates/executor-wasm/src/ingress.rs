@@ -130,6 +130,14 @@ impl Exchange {
 
     /// Record the first delivery outcome; anything but the end of the body closes the request.
     fn settle(&self, delivery: Delivery) {
+        if self.record(delivery) {
+            self.close_request();
+        }
+    }
+
+    /// Record the first delivery outcome, and tell whether the request must close: the caller
+    /// closes it once the body it took away is dropped.
+    fn record(&self, delivery: Delivery) -> bool {
         let first = self.delivery.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -137,9 +145,22 @@ impl Exchange {
             *current = Some(delivery);
             true
         });
-        if first && delivery != Delivery::Eof {
+        first && delivery != Delivery::Eof
+    }
+
+    /// End delivery before the body's end: drop the body, then close the request, so a guest
+    /// that sees its request end already finds its response writer's reader gone.
+    fn end(&self, delivery: Delivery) {
+        // Recorded under the slot's lock, so a concurrent `respond` sees the end.
+        let mut slot = self.response.lock().expect("ingress response");
+        let body = slot.take();
+        let close = self.record(delivery);
+        drop(slot);
+        drop(body);
+        if close {
             self.close_request();
         }
+        self.response_waker.wake();
     }
 
     /// Whether the request body was closed for the guest.
@@ -175,35 +196,19 @@ impl Exchange {
     /// Cancellation: close the request, and drop the response body here so the guest's writer
     /// sees its reader gone; the application's next poll reports the abort.
     pub(crate) fn abort(&self) {
-        // Settled under the slot's lock, so a concurrent `respond` sees the abort.
-        let mut slot = self.response.lock().expect("ingress response");
-        let body = slot.take();
-        self.settle(Delivery::Aborted);
-        drop(slot);
-        drop(body);
-        self.response_waker.wake();
+        self.end(Delivery::Aborted);
     }
 
     /// A client disconnect reported by a platform carrier: drop the body now, as dropping a
     /// [`ResponseBody`] does, before the request closes, so the guest's next write fails.
     fn disconnect(&self) {
-        let mut slot = self.response.lock().expect("ingress response");
-        let body = slot.take();
-        self.settle(Delivery::Dropped);
-        drop(slot);
-        drop(body);
-        self.response_waker.wake();
+        self.end(Delivery::Dropped);
     }
 
     /// A terminal call failure: take the body away before the Store (and with it the guest's
     /// stream) is dropped, so the application reads an error instead of a truncated end.
     pub(crate) fn fail(&self) {
-        let mut slot = self.response.lock().expect("ingress response");
-        let body = slot.take();
-        self.settle(Delivery::Broken);
-        drop(slot);
-        drop(body);
-        self.response_waker.wake();
+        self.end(Delivery::Broken);
     }
 
     /// Whether delivery has ended, whichever way.
@@ -379,8 +384,11 @@ impl Drop for ResponseBody {
             .lock()
             .ok()
             .and_then(|mut body| body.take());
-        self.exchange.settle(Delivery::Dropped);
+        let close = self.exchange.record(Delivery::Dropped);
         drop(body);
+        if close {
+            self.exchange.close_request();
+        }
     }
 }
 
@@ -673,5 +681,56 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
         let frame = futures::executor::block_on(body.frame()).unwrap();
         assert!(frame.unwrap_err().to_string().contains("cancelled"));
+    }
+
+    /// A response body that records whether the request was closed when it was dropped.
+    struct Witness {
+        exchange: Arc<Exchange>,
+        closed: Arc<Mutex<Option<bool>>>,
+    }
+    impl Body for Witness {
+        type Data = Bytes;
+        type Error = HttpError;
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<Option<std::result::Result<Frame<Bytes>, HttpError>>> {
+            Poll::Pending
+        }
+    }
+    impl Drop for Witness {
+        fn drop(&mut self) {
+            *self.closed.lock().unwrap() = Some(self.exchange.request_closed());
+        }
+    }
+
+    /// Each end before the body's end drops the body before it closes the request, so a guest
+    /// that sees its request end already finds its response writer's reader gone.
+    #[test]
+    fn an_early_end_drops_the_body_before_it_closes_the_request() {
+        type End = fn(&Arc<Exchange>, ResponseBody);
+        let ends: [(&str, End); 4] = [
+            ("abort", |exchange, _body| exchange.abort()),
+            ("disconnect", |exchange, _body| exchange.disconnect()),
+            ("fail", |exchange, _body| exchange.fail()),
+            ("drop", |_exchange, body| drop(body)),
+        ];
+        for (name, end) in ends {
+            let exchange = Exchange::new();
+            let closed = Arc::new(Mutex::new(None));
+            let (head, published) = oneshot::channel();
+            let witness = Witness {
+                exchange: exchange.clone(),
+                closed: closed.clone(),
+            };
+            IngressCall::publish(&exchange, head, http::Response::new(witness.boxed_unsync()));
+            let body = futures::executor::block_on(published)
+                .unwrap()
+                .unwrap()
+                .into_body();
+            end(&exchange, body);
+            assert_eq!(*closed.lock().unwrap(), Some(false), "{name}");
+            assert!(exchange.request_closed(), "{name}");
+        }
     }
 }

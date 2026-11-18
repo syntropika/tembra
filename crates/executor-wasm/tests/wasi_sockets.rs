@@ -10,6 +10,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
     rc::Rc,
+    sync::atomic::{AtomicU16, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -149,13 +150,32 @@ fn err(value: tembra::Result<Value>) -> String {
     value["val"].as_str().unwrap().to_owned()
 }
 
-/// A loopback port nobody listens on right now.
+/// A loopback port nobody listens on right now, for a guest that binds it by number.
+///
+/// A port the OS picked and this test released could be picked again, by the implicit binds and
+/// connects of the tests running beside it, before the guest binds it. So the port comes from
+/// below the ephemeral range, which the OS never picks: only an explicit bind can take it. Each
+/// call moves on to the next port, from a start that differs between processes.
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    // Below the default ephemeral ranges: 32768 on Linux, 49152 on macOS and Windows.
+    const FIRST: u16 = 20_000;
+    const PORTS: u16 = 12_700;
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    if let Ok(range) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") {
+        let low: u16 = range.split_whitespace().next().unwrap().parse().unwrap();
+        assert!(
+            FIRST + PORTS <= low,
+            "the ephemeral range starts at {low}, inside the ports this test names"
+        );
+    }
+    let start = std::process::id() % 127 * 100;
+    loop {
+        let next = start + u32::from(NEXT.fetch_add(1, Ordering::Relaxed));
+        let port = FIRST + (next % u32::from(PORTS)) as u16;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// TCP idle drop, UDP with a granted and a denied peer, listen/accept of real clients, and name
