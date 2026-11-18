@@ -3,7 +3,7 @@ error[E0592]: duplicate definitions with name `handle`
   |
 1 | / #[tembra::orb(
 2 | |     package = "example:router@1.0.0",
-3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+3 | |     wit = "consumed/counters",
 4 | |     import("example:counters/handles@1.0.0", keyed)
 5 | | )]
   | |  ^
@@ -18,7 +18,7 @@ error[E0034]: multiple applicable items in scope
   |
 1 | / #[tembra::orb(
 2 | |     package = "example:router@1.0.0",
-3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+3 | |     wit = "consumed/counters",
 4 | |     import("example:counters/handles@1.0.0", keyed)
 5 | | )]
   | |__^ multiple `handle` found
@@ -28,7 +28,7 @@ note: candidate #1 is defined in an impl for the type `Handles`
   |
 1 | / #[tembra::orb(
 2 | |     package = "example:router@1.0.0",
-3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+3 | |     wit = "consumed/counters",
 4 | |     import("example:counters/handles@1.0.0", keyed)
 5 | | )]
   | |__^
@@ -37,7 +37,7 @@ note: candidate #2 is defined in an impl for the type `Handles`
   |
 1 | / #[tembra::orb(
 2 | |     package = "example:router@1.0.0",
-3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+3 | |     wit = "consumed/counters",
 4 | |     import("example:counters/handles@1.0.0", keyed)
 5 | | )]
   | |__^

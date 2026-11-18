@@ -1,6 +1,6 @@
 #[tembra::orb(
     package = "example:keeping@1.0.0",
-    wit = "../../../../crates/orb-macro/compile-fail/wit/counters"
+    wit = "consumed/counters"
 )]
 mod keeping {
     #[service("example:counters/book@1.0.0")]

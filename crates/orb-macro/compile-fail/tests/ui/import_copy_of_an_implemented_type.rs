@@ -1,6 +1,6 @@
 #[tembra::orb(
     package = "example:router@1.0.0",
-    wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+    wit = "consumed/counters",
     import("example:counters/counter@1.0.0", keyed)
 )]
 mod proxy {

@@ -6,7 +6,7 @@ mod plotter {
         pub last: Option<Point>,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, serde::Deserialize)]
     pub struct Point {
         pub x: i32,
         pub y: i32,
