@@ -1,0 +1,5 @@
+error: `Entry` is named through `crate::`, which the macro cannot place in the Orb module; name it from this module, through `self::`, `super::` or a `use` of the Orb's modules, `use self::model::Entry;`
+  --> tests/ui/contract_type_through_crate.rs:13:27
+   |
+13 |         pub fn first() -> crate::books::model::Entry {
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^

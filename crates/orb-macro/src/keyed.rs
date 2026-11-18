@@ -34,9 +34,6 @@ pub(crate) struct View {
     pub name: String,
     /// The view's WIT: an interface of the Orb's package, with its documentation.
     pub text: String,
-    /// The provider interface's types the view `use`s, by their WIT names: those its functions
-    /// name, the only ones the view's module re-exports.
-    pub used: BTreeSet<String>,
 }
 
 /// Read the parenthesized form of the attribute's `import` option,
@@ -121,14 +118,9 @@ pub(crate) fn views(
         if let Some(clash) = clash {
             return Err(syn::Error::new(literal.span(), clash));
         }
-        let (text, used) = view_text(resolve, dir.path(), &target, &name)
+        let text = view_text(resolve, dir.path(), &target, &name)
             .map_err(|message| syn::Error::new(literal.span(), message))?;
-        views.push(View {
-            target,
-            name,
-            text,
-            used,
-        });
+        views.push(View { target, name, text });
     }
     Ok(views)
 }
@@ -142,13 +134,8 @@ pub(crate) fn view_name(target: &str) -> String {
 /// The view's WIT: the provider interface's types its functions name, `use`d from it; a resource
 /// of the provider interface's name whose methods are the interface's functions, each `async`
 /// exactly when the function is, with its documentation; and `get`, the acquisition the kernel
-/// answers with the object of a key or the reason it refused it. With it, the names it `use`s.
-fn view_text(
-    resolve: &Resolve,
-    dir: &Path,
-    target: &str,
-    name: &str,
-) -> Result<(String, BTreeSet<String>), String> {
+/// answers with the object of a key or the reason it refused it.
+fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<String, String> {
     let interface =
         crate::wit::interface(resolve, dir, target).map_err(|error| error.to_string())?;
     let resource = interface.name.clone().unwrap_or_default();
@@ -174,6 +161,8 @@ fn view_text(
                 ));
             }
         };
+        // rustc would report the name defined twice on the whole attribute, naming neither the
+        // import nor the function.
         let method = crate::rust_ident(&function.name).to_string();
         if HANDLE_METHODS.contains(&method.as_str()) {
             return Err(format!(
@@ -199,7 +188,7 @@ fn view_text(
                 function.name
             ),
             Carried::Unsupported(problem) => format!(
-                "{target} cannot be imported by key: `{}` carries {problem}, which the runtime refuses in a signature",
+                "{target} cannot be imported by key: `{}` carries {problem}",
                 function.name
             ),
         };
@@ -276,7 +265,7 @@ fn view_text(
         escaped(&resource)
     ));
     text.push_str("}\n");
-    Ok((text, spelling.used))
+    Ok(text)
 }
 
 /// Whether a type of an interface is a resource, defined there or `use`d from another interface.
@@ -353,7 +342,7 @@ impl Spelling<'_> {
                     }
                     if let Some(problem) = unsupported(self.resolve, ty) {
                         return Err(Carried::Unsupported(format!(
-                            "{problem} in the type `{type_name}`"
+                            "the type `{type_name}`, which the runtime refuses in a signature: {problem}"
                         )));
                     }
                     self.used.insert(type_name.clone());
@@ -384,7 +373,7 @@ impl Spelling<'_> {
                         return Err(match no_data(self.resolve, ty) {
                             Some(problem) => Carried::NoData(problem.to_owned()),
                             None => match unsupported(self.resolve, ty) {
-                                Some(problem) => Carried::Unsupported(problem.to_owned()),
+                                Some(problem) => Carried::Unsupported(refused(&problem)),
                                 None => Carried::NoData("a type without a name".to_owned()),
                             },
                         });
@@ -393,12 +382,17 @@ impl Spelling<'_> {
                 // What the runtime refuses of the type itself, its parts spelled: an option of an
                 // option.
                 if let Some(problem) = unsupported(self.resolve, ty) {
-                    return Err(Carried::Unsupported(problem.to_owned()));
+                    return Err(Carried::Unsupported(refused(&problem)));
                 }
                 spelled
             }
         })
     }
+}
+
+/// A type without a name the runtime refuses in a signature, for the errors.
+fn refused(problem: &str) -> String {
+    format!("a type the runtime refuses in a signature: {problem}")
 }
 
 /// What a type holds anywhere that is no data, if anything, as `no_data_itself` finds it in each

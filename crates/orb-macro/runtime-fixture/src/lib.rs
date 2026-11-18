@@ -5,6 +5,8 @@
 #![cfg_attr(all(target_arch = "wasm32", feature = "no-std"), no_std)]
 extern crate alloc;
 
+#[cfg(feature = "authored")]
+mod authored;
 #[cfg(feature = "configured")]
 mod configured;
 #[cfg(feature = "contributor")]
@@ -82,13 +84,15 @@ mod guest {
 
     /// A point on a grid.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub struct Point {
         pub x: i32,
         pub y: i32,
     }
 
     /// Where a walker faces; a fresh walker faces north.
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub enum Heading {
         #[default]
         North,
@@ -109,7 +113,7 @@ mod guest {
     /// Where a walker stands, kept by the kernel. Its derived `Default` is its initial value: at
     /// the origin, facing north, without a move.
     #[state(service = Walker)]
-    #[derive(Debug, Default, PartialEq)]
+    #[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct Position {
         pub at: Point,
         pub facing: Heading,
@@ -248,11 +252,12 @@ mod guest {
         /// The last tally a readings object took, and how many readings it made, kept by the
         /// kernel as the JSON `serde` writes for the provider's record.
         #[state(service = Readings)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Recorded {
             pub last: Option<counter::Tally>,
             pub readings: u32,
             /// How many readings were thrown away: no build holds the field, as `any()` is never
-            /// on, and the `Default` the macro writes for the state leaves it out with it.
+            /// on, and the `Default` the state derives leaves it out with it.
             #[cfg(any())]
             pub discarded: u32,
         }
@@ -448,6 +453,16 @@ mod guest {
         }
     }
 
+    /// A tally opened, or why none was: an enum with a case with named fields, which stays this
+    /// one, converted at the boundary, the tally it holds included.
+    pub enum Opening {
+        Opened { tally: Tally, at: u32 },
+        Refused { reason: String },
+    }
+
+    /// The tally under another name, which the tallies' functions take and return as the tally.
+    use self::Tally as Counted;
+
     #[service]
     pub struct Tallies;
 
@@ -471,16 +486,49 @@ mod guest {
                 .collect()
         }
 
+        /// Open a tally at `at`, or refuse one above a thousand. The tally crosses in the record
+        /// of the case, wrapped into its handle.
+        pub fn open(at: u32) -> Opening {
+            if at > 1000 {
+                Opening::Refused {
+                    reason: String::from("above a thousand"),
+                }
+            } else {
+                Opening::Opened {
+                    tally: Tally::new(at),
+                    at,
+                }
+            }
+        }
+
+        /// Take an opening back: the total of the tally it holds, taken back from its handle, or
+        /// none.
+        pub fn settle(opening: Opening) -> Option<u32> {
+            match opening {
+                Opening::Opened { tally, .. } => Some(tally.total.get()),
+                Opening::Refused { .. } => None,
+            }
+        }
+
+        /// Take a tally, named through a `use` that renames it, beside a step: its total plus the
+        /// step.
+        pub fn close_with(pair: (Counted, u32)) -> u32 {
+            pair.0.total.get() + pair.1
+        }
+
+        /// Start a tally, named through a `use` that renames it.
+        pub fn restart(at: u32) -> Counted {
+            Tally::new(at)
+        }
+
         /// How many tallies were destroyed.
         pub fn dropped() -> u32 {
             DROPPED.load(core::sync::atomic::Ordering::Relaxed)
         }
     }
 
-    /// What a holder may do with a document: each field is a flag of the WIT `flags`. The struct
-    /// stays this one; the bindings take it as it is.
-    #[flags]
-    #[derive(Default, PartialEq)]
+    /// What a holder may do with a document: a record of `bool` fields.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct Access {
         pub read: bool,
         pub write: bool,
@@ -495,6 +543,7 @@ mod guest {
 
     /// The last access a permits object granted and how many grants it made, kept by the kernel.
     #[state(service = Permits)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Granted {
         pub last: Access,
         pub grants: u32,
@@ -504,7 +553,7 @@ mod guest {
     pub struct Permits;
 
     impl Permits {
-        /// The access with exactly the flags `access` lacks.
+        /// The access with exactly the fields `access` lacks set.
         pub fn invert(access: Access) -> Access {
             Access {
                 read: !access.read,
@@ -522,13 +571,17 @@ mod guest {
             Grant { who, access }
         }
 
-        /// The flags any of the grants or `extra` sets.
+        /// The fields any of the grants or `extra` sets.
         pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Access {
             grants
                 .iter()
                 .map(|grant| grant.access)
                 .chain(extra)
-                .fold(Access::default(), |all, access| all | access)
+                .fold(Access::default(), |all, access| Access {
+                    read: all.read || access.read,
+                    write: all.write || access.write,
+                    share: all.share || access.share,
+                })
         }
 
         /// What the kernel keeps for this object.

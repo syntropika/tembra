@@ -25,6 +25,7 @@ pub mod steady {
 
     /// The count of one counter object, kept by the kernel: the consumed record.
     #[state]
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub struct Kept {
         pub count: counter::Count,
     }

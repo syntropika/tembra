@@ -5,8 +5,10 @@
 //!
 //! Each module of the Orb serves one feature of that test's list. `imports` turns the dials of
 //! another Orb, through the plain import and the view of the import by key; `cancellation` stops
-//! awaiting a call of the plain import; `ledger` keeps a state; `tallies` issues WIT resources;
-//! and `checks` takes and returns what the boundary checks. A new scenario is a module here, or a
+//! awaiting a call of the plain import; `ledger` keeps a state, and `sketching` one holding an
+//! internally tagged enum; `tallies` issues WIT resources; `checks` takes and returns what the
+//! boundary checks; and `names` names the types of `checks` through a `use` with `as` and an
+//! alias. A new scenario is a module here, or a
 //! function of one, and a row of the test's list. The Orb holds nothing a native host refuses by
 //! design, a hook declaration, a synchronous import or a WASI import, and nothing native only.
 
@@ -95,15 +97,18 @@ pub mod parity {
     }
 
     /// Keeps a book in a state, which the kernel stores as the JSON `serde` writes for it: a list
-    /// of records, an option of a variant with a case of each kind, a 64-bit balance and a flags.
+    /// of records, an option of a variant with a case of each kind, a 64-bit balance and a record of
+    /// `bool` fields.
     pub mod ledger {
         /// One deposit.
+        #[derive(serde::Serialize, serde::Deserialize)]
         pub struct Entry {
             pub label: String,
             pub amount: u64,
         }
 
         /// What moved the balance last.
+        #[derive(serde::Serialize, serde::Deserialize)]
         pub enum Movement {
             Opened,
             Deposit(u64),
@@ -111,8 +116,7 @@ pub mod parity {
         }
 
         /// What the book went through. The state's `Default` starts it from its own.
-        #[flags]
-        #[derive(Default)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Marks {
             pub audited: bool,
             pub disputed: bool,
@@ -120,6 +124,7 @@ pub mod parity {
 
         /// The book of one ledger object, which the kernel keeps.
         #[state(service = Ledger)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Book {
             pub entries: Vec<Entry>,
             pub last: Option<Movement>,
@@ -175,6 +180,62 @@ pub mod parity {
             /// The book as the kernel keeps it.
             pub fn kept() -> Book {
                 Book::read()
+            }
+        }
+    }
+
+    /// Keeps a sketch in a state that stays out of the WIT, whose shape is an enum `serde` tags
+    /// inside its own object, `#[serde(tag = "kind")]`: the serde derives are the author's, so the
+    /// helper attribute follows them.
+    pub mod sketching {
+        /// The shape drawn, tagged by `kind`.
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        #[serde(tag = "kind")]
+        pub enum Shape {
+            #[default]
+            Dot,
+            Circle {
+                radius: u32,
+            },
+            Square {
+                side: u32,
+            },
+        }
+
+        /// The sketch of one sketching object, which the kernel keeps.
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Sketch {
+            pub shape: Shape,
+            pub strokes: u32,
+        }
+
+        #[service]
+        pub struct Sketching;
+
+        impl Sketching {
+            /// Draw a circle of `radius` and return the radius the state reads back.
+            pub fn circle(radius: u32) -> u32 {
+                Sketch::update(|sketch| {
+                    sketch.shape = Shape::Circle { radius };
+                    sketch.strokes += 1;
+                });
+                match Sketch::read().shape {
+                    Shape::Circle { radius } => radius,
+                    Shape::Dot | Shape::Square { .. } => 0,
+                }
+            }
+
+            /// Draw a square of `side` and return the side the state reads back.
+            pub fn square(side: u32) -> u32 {
+                Sketch::update(|sketch| {
+                    sketch.shape = Shape::Square { side };
+                    sketch.strokes += 1;
+                });
+                match Sketch::read().shape {
+                    Shape::Square { side } => side,
+                    Shape::Dot | Shape::Circle { .. } => 0,
+                }
             }
         }
     }
@@ -270,6 +331,7 @@ pub mod parity {
         }
 
         /// A colour.
+        #[derive(Debug)]
         pub enum Colour {
             Red,
             Green,
@@ -282,7 +344,6 @@ pub mod parity {
         }
 
         /// Switches.
-        #[flags]
         pub struct Switches {
             pub on: bool,
             pub loud: bool,
@@ -348,6 +409,33 @@ pub mod parity {
                 } else {
                     Err(format!("{value} is odd"))
                 }
+            }
+        }
+    }
+
+    /// Names the types of `checks` as rustc resolves them: through a `use` that renames the type
+    /// and through an alias that is only a path, which the WIT spells `point` and `colour`.
+    pub mod names {
+        use super::checks::Point as Spot;
+
+        /// The colour of `checks`, under another name.
+        pub type Hue = super::checks::Colour;
+
+        #[service]
+        pub struct Names;
+
+        impl Names {
+            /// The point mirrored through the origin.
+            pub fn mirrored(spot: Spot) -> Spot {
+                Spot {
+                    x: -spot.x,
+                    y: -spot.y,
+                }
+            }
+
+            /// Whether the colour is red.
+            pub fn red(hue: Hue) -> bool {
+                matches!(hue, Hue::Red)
             }
         }
     }

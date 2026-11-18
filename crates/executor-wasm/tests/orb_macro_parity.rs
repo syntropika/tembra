@@ -247,9 +247,24 @@ fn scenarios() -> Vec<Scenario> {
                 Call("ledger", "deposit", json!(["food", 7])),
                 Call("ledger", "transfer", json!(["bob", 5])),
                 Call("ledger", "transfer", json!(["carol", 1_u64 << 60])),
-                Call("ledger", "mark", json!([{ "audited": true }])),
+                Call(
+                    "ledger",
+                    "mark",
+                    json!([{ "audited": true, "disputed": false }]),
+                ),
                 State("ledger"),
                 Call("ledger", "kept", json!([])),
+            ],
+        ),
+        row(
+            StateJson,
+            "a state holding an enum serde tags inside its own object, beside the author's derives, reads back the JSON serde writes for it",
+            vec![
+                State("sketching"),
+                Call("sketching", "circle", json!([3])),
+                State("sketching"),
+                Call("sketching", "square", json!([4])),
+                State("sketching"),
             ],
         ),
         row(
@@ -317,11 +332,21 @@ fn scenarios() -> Vec<Scenario> {
                 Call("checks", "named", json!(["green"])),
                 Call("checks", "area", json!([{ "tag": "square", "val": 3 }])),
                 Call("checks", "area", json!([{ "tag": "dot" }])),
-                Call("checks", "flipped", json!([{ "on": true }])),
+                Call("checks", "flipped", json!([{ "on": true, "loud": false }])),
                 Call("checks", "or-zero", json!([null])),
                 Call("checks", "or-zero", json!([18_446_744_073_709_551_615_u64])),
                 Call("checks", "halve", json!([4])),
                 Call("checks", "halve", json!([3])),
+            ],
+        ),
+        row(
+            ErrorCodes,
+            "a type named through a renaming `use` or an alias reads and answers as the type itself",
+            vec![
+                Call("names", "mirrored", json!([{ "x": 1, "y": -2 }])),
+                Call("names", "red", json!(["red"])),
+                Call("names", "red", json!(["green"])),
+                Call("names", "red", json!(["purple"])),
             ],
         ),
         row(
@@ -349,7 +374,11 @@ fn scenarios() -> Vec<Scenario> {
                 Call("checks", "named", json!(["purple"])),
                 Call("checks", "area", json!([{ "tag": "circle", "val": 1 }])),
                 Call("checks", "area", json!([{ "tag": "square" }])),
-                Call("checks", "flipped", json!([{ "on": true, "dim": true }])),
+                Call(
+                    "checks",
+                    "flipped",
+                    json!([{ "on": true, "loud": false, "dim": true }]),
+                ),
                 Call("checks", "or-zero", json!([18_446_744_073_709_551_616_f64])),
             ],
         ),
@@ -760,4 +789,41 @@ fn the_native_build_and_the_component_answer_alike() {
     compiled.close();
     assert_eq!(engine.instances(), 0);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A state holding an enum `serde` tags inside its own object, `#[serde(tag = "kind")]`, with the
+/// author's derives beside the attribute, keeps the JSON `serde` writes for it and reads it back:
+/// natively here, and as a component in the parity scenario, which answers alike.
+#[test]
+fn a_state_with_an_internally_tagged_enum_round_trips() {
+    let providers = parity::Providers {
+        dial: Provider::new(DIALS, 1),
+        dial_ref: Provider::new(DIALS, 1),
+    };
+    let mut native = Build::new("native", parity::orb(providers).unwrap());
+    let answers: Vec<Value> = native
+        .run(vec![
+            Step::State("sketching"),
+            Step::Call("sketching", "circle", json!([3])),
+            Step::State("sketching"),
+            Step::Call("sketching", "square", json!([4])),
+            Step::State("sketching"),
+        ])
+        .into_iter()
+        .map(|answer| match answer.outcome {
+            Outcome::Value(value) => value,
+            outcome => panic!("{outcome:?}"),
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            json!({ "shape": { "kind": "Dot" }, "strokes": 0 }),
+            json!(3),
+            json!({ "shape": { "kind": "Circle", "radius": 3 }, "strokes": 1 }),
+            json!(4),
+            json!({ "shape": { "kind": "Square", "side": 4 }, "strokes": 2 }),
+        ]
+    );
+    native.close();
 }

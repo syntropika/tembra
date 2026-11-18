@@ -1,0 +1,46 @@
+error[E0277]: the trait bound `Tally: Default` is not satisfied
+ --> tests/ui/state_without_default.rs:5:16
+  |
+5 |     pub struct Tally {
+  |                ^^^^^ the trait `Default` is not implemented for `Tally`
+  |
+help: consider annotating `Tally` with `#[derive(Default)]`
+  |
+5 +     #[derive(Default)]
+6 |     pub struct Tally {
+  |
+
+error[E0277]: the trait bound `Tally: Default` is not satisfied
+ --> tests/ui/state_without_default.rs:5:16
+  |
+5 |     pub struct Tally {
+  |                ^^^^^ the trait `Default` is not implemented for `Tally`
+  |
+note: required by a bound in `state`
+ --> tests/ui/state_without_default.rs:5:16
+  |
+5 |     pub struct Tally {
+  |                ^^^^^ required by this bound in `state`
+help: consider annotating `Tally` with `#[derive(Default)]`
+  |
+5 +     #[derive(Default)]
+6 |     pub struct Tally {
+  |
+
+error[E0277]: the trait bound `Tally: Default` is not satisfied
+ --> tests/ui/state_without_default.rs:5:16
+  |
+5 |     pub struct Tally {
+  |                ^^^^^ the trait `Default` is not implemented for `Tally`
+  |
+note: required by a bound in `declare`
+ --> tests/ui/state_without_default.rs:1:1
+  |
+1 | #[tembra::orb(package = "example:counter@1.0.0")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `declare`
+  = note: this error originates in the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `Tally` with `#[derive(Default)]`
+  |
+5 +     #[derive(Default)]
+6 |     pub struct Tally {
+  |

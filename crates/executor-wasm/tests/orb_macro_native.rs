@@ -66,7 +66,7 @@ const RELAY_MODULE: &str = r#"(module
   (import "example:calculator/plotter@1.0.0" "settled"
     (func $settled (param i32 i64 i32 i64) (result i64)))
   (import "example:calculator/plotter@1.0.0" "redrawn"
-    (func $redrawn (param i32 i32 i32 i32 i32 i32)))
+    (func $redrawn (param i32 i32 i32 i32 i32 i32 i32)))
   (import "example:calculator/plotter@1.0.0" "sorted"
     (func $sorted (param i32 i32 i32)))
   (memory (export "memory") 1)
@@ -95,15 +95,15 @@ const RELAY_MODULE: &str = r#"(module
     i32.const 16)
   (func (export "example:calculator/relay@1.0.0#settled") (param i32 i64 i32 i64) (result i64)
     local.get 0 local.get 1 local.get 2 local.get 3 call $settled)
-  (func (export "example:calculator/relay@1.0.0#redrawn") (param i32 i32 i32 i32 i32) (result i32)
-    local.get 0 local.get 1 local.get 2 local.get 3 local.get 4 i32.const 16 call $redrawn
+  (func (export "example:calculator/relay@1.0.0#redrawn") (param i32 i32 i32 i32 i32 i32) (result i32)
+    local.get 0 local.get 1 local.get 2 local.get 3 local.get 4 local.get 5 i32.const 16 call $redrawn
     i32.const 16)
   (func (export "example:calculator/relay@1.0.0#sorted") (param i32 i32) (result i32)
     local.get 0 local.get 1 i32.const 16 call $sorted
     i32.const 16))"#;
 
 /// A compiled consumer calls the native provider with records, an enum, a variant with a case
-/// carrying a record, a flags, options, results and 64-bit integers, and gets back what a
+/// carrying a record, a record of `bool` fields, options, results and 64-bit integers, and gets back what a
 /// portable caller of the provider gets: the codec reads what the consumer's lifting writes and
 /// writes what its lowering reads, which the consumer's contract checks on the way.
 #[test]
@@ -171,9 +171,12 @@ fn a_compiled_consumer_calls_the_native_orb_of_the_macro() {
             "redrawn",
             json!([{
                 "shape": { "tag": "square", "val": 2 },
-                "pen": { "dashedLine": true }
+                "pen": { "filled": false, "dashedLine": true }
             }, 3]),
-            json!({ "shape": { "tag": "square", "val": 6 }, "pen": { "filled": true } }),
+            json!({
+                "shape": { "tag": "square", "val": 6 },
+                "pen": { "filled": true, "dashedLine": false }
+            }),
         ),
         (
             "sorted",

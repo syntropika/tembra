@@ -110,7 +110,7 @@ impl Host {
     ) -> Result<Resource> {
         let mut inner = self.inner.borrow_mut();
         inner.owner(owner)?;
-        if name.is_empty() || version == 0 {
+        if name.is_empty() || !valid_version(version) {
             return Err(Error::invalid(
                 Reason::Resource,
                 "resource name and version are required",

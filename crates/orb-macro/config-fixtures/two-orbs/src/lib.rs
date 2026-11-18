@@ -6,6 +6,7 @@
 pub mod tally {
     /// The count of one counter object.
     #[state]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Count {
         pub total: i64,
     }
@@ -26,6 +27,7 @@ pub mod tally {
 pub mod shelf {
     /// The books of one rack object.
     #[state]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Books {
         pub count: u32,
     }

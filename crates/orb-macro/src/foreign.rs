@@ -5,9 +5,9 @@
 //! `#[service("example:ledger/book@1.0.0")]`, `guard::Admission` for a hook the module contributes
 //! to. So does a field or a case of a record or a variant of the module that enters the WIT, and a
 //! parameter names the handle of an imported interface's resource the same way, `texts::Builder`,
-//! itself or in a record or a variant of the module that no derived function returns, as the
-//! runtime moves such a handle anywhere into an argument but returns a resource only from the
-//! interface that defines it.
+//! itself or in a record or a variant of the module. Where the runtime carries a resource, into an
+//! argument but out of a result only from the interface that defines it, is tembra-contracts' rule,
+//! which the expansion checks of the derived WIT afterwards.
 //! The derived interface `use`s each name from the interface that defines it, so its bindings name
 //! the type the author's code holds: a value crosses as it is, with no copy and no conversion.
 //!
@@ -28,17 +28,16 @@ use crate::{
     Candidate, Contribution, Declared, Newtype, Service, Shape, ShapeKind, State, WitResource,
     hook_path, keyed, resource_params, wasi, wit,
 };
-use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet};
-use syn::{Ident, Item, LitStr, Type, ext::IdentExt, spanned::Spanned};
+use syn::{Ident, Item, LitStr, Type, spanned::Spanned};
 use tembra_contracts::guest;
 
 /// How the world holds a consumed interface, which decides what a derived interface names through
 /// the interface's module.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
-    /// Another Orb's interface, imported: its types, and its resources' handles as parameters,
-    /// alone or in the records and variants of the module that no derived function returns.
+    /// Another Orb's interface, imported: its types, and its resources' handles, alone or in the
+    /// records and variants of the module.
     Imported,
     /// Another Orb's interface, imported by key, whose view the Orb module re-exports: the
     /// interface's types the view uses, but not the view's objects.
@@ -92,69 +91,70 @@ pub(crate) struct Modules {
     reexported: BTreeMap<String, Reexported>,
     /// The path of each module of the Orb from the Orb module, by scope; scope 0 is the Orb module.
     paths: Vec<Vec<Ident>>,
-    /// The newtypes of the module, by name.
-    newtypes: BTreeMap<String, Newtype>,
+    /// The newtypes of the module.
+    newtypes: Vec<Newtype>,
     /// What each module of the Orb imports, by scope, which a path written there is read through.
     uses: Vec<crate::Uses>,
 }
 
 /// A name a type path reaches through a consumed interface's module, `greeting::Entry`: the
-/// interface, the module's name, the name and the path itself, for the errors, and whether the
-/// path is the value of an `Option`, `Option<greeting::Entry>`.
+/// interface, the module's name, the name and the path itself, for the errors.
 #[derive(Clone)]
 pub(crate) struct Named<'m, 't> {
     pub interface: &'m Reexported,
     pub module: &'m str,
-    pub ident: &'t Ident,
+    /// The type's name in the interface, which a `use` may have imported under another.
+    pub ident: Ident,
     pub ty: &'t Type,
-    pub in_option: bool,
-    /// Whether the path leads into the bindings' own module of the interface's import,
-    /// `self::example::counters::counter::Tally`, rather than through the module the Orb module
-    /// re-exports: the import's copy of the type, whatever that module holds.
-    pub through_import: bool,
-    /// Where the `use` declarations of the modules the path passes lead it, when they do, for the
-    /// errors: "`example::counters::counter::Tally` of the Orb module" for `counter::Tally` after
-    /// `use super::example::counters::counter;`.
-    pub led: Option<String>,
 }
 
-/// Where a type path leads, read as far as `Modules::leads` follows it: what is left of the path,
-/// whether a `use` declaration led it there and the walk stopped in the Orb module, and the module
-/// of the Orb it stopped in, by scope, none once it left the Orb module.
+/// Where a type path leads once `Modules::resolve` stops following it: what is left of the path.
 struct Leads {
     segments: Vec<Ident>,
-    used: bool,
-    rooted: bool,
-    scope: Option<usize>,
 }
 
-/// What a walk through a type reaches: a name through a consumed interface's module, or the last
-/// name of another path, `Vec` and `Entry` in `Vec<Entry>`, which may name a type of the module,
-/// with the module of the Orb the path names it in, by scope: the one the path leads into,
-/// `super::sessions::Token`, or the one writing it.
+/// Where a type path written in a module of the Orb leads, as rustc resolves it there
+/// (`Modules::resolve`).
+enum Resolution {
+    /// The name `ident` in the module of the Orb `scope`, which declares a type of the name, or
+    /// declares and imports nothing of it.
+    Module(Ident, usize),
+    /// A path the macro follows no further: into a module it does not read, a crate's, a
+    /// consumed interface's or the bindings'.
+    Stopped(Leads),
+    /// A form the macro does not follow, a glob import or a path through `crate::`, with how to
+    /// write the name.
+    Refused(String),
+    /// An alias that is more than a path, which a contract type cannot name, with how to write it,
+    /// and the alias's name in the module declaring it, by scope.
+    Composite(String, Ident, usize),
+}
+
+/// What a walk through a type reaches: a name through a consumed interface's module, the name of
+/// a type of the module, with the module of the Orb it resolves in, by scope (`Modules::resolve`),
+/// `Vec` and `Entry` in `Vec<Entry>`, or a name the macro refuses to follow, with why and whether
+/// the macro cannot follow it anywhere, as it cannot a glob import or a `crate::` path, rather than
+/// only to a contract type, an alias that is more than a path or a type outside the Orb module.
 enum Reached<'m, 't> {
     Consumed(Named<'m, 't>),
-    Module(&'t Ident, usize),
+    Module(Ident, usize),
+    Refused(syn::Error, bool),
 }
 
 impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
     /// interface imported by key under its view's, and with `context`, the attribute's option, the
-    /// kernel's context interface under `context`. `kernel` says whether a state or a resource
-    /// makes the world import the kernel's interfaces, `package` is the Orb's package, `imports`
+    /// kernel's context interface under `context`. `imports`
     /// are the attribute's literals, read as identities already; `paths` are the Orb's own modules
-    /// and `uses` what each imports, by scope; `own` are the names the Orb module's items take
-    /// where a module takes its name (`own_names`). Another interface under a name already taken is
-    /// an error on it, naming both, and so is a second role of an interface, or one role twice,
-    /// which the world cannot hold, an import of the kernel's context interface beside the option,
-    /// and a plain import of an interface the module implements, which would make the world a
-    /// hook's. An item of the Orb module under the name of a re-exported module, or of a module the
-    /// bindings declare there, is an error on the item, naming both.
+    /// and `uses` what each imports, by scope. Another interface under a name already taken is an
+    /// error on it, naming both, and so is a second role of an interface, or one role twice, which
+    /// the world cannot hold, an import of the kernel's context interface beside the option, and a
+    /// plain import of an interface the module implements, which would make the world a hook's. An
+    /// item of the Orb module under the name of a re-exported module, or of a module the bindings
+    /// declare there, is left to rustc, which reports the name defined twice on the item.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         context: bool,
-        kernel: bool,
-        package: &str,
         imports: &[LitStr],
         keyed: &[String],
         services: &[Service],
@@ -162,7 +162,6 @@ impl Modules {
         declared: &[Declared],
         paths: &[Vec<Ident>],
         uses: &[crate::Uses],
-        own: &[(Ident, &str)],
     ) -> syn::Result<Self> {
         let mut modules = BTreeMap::new();
         // The option keeps no span: its name is taken first, so the error falls on the interface
@@ -280,106 +279,36 @@ impl Modules {
             };
             return Err(syn::Error::new(span, message));
         }
-        // The Orb module holds its items beside the modules it re-exports: one of its own names
-        // taken by a re-exported module would be defined twice, `r#ledger` as `ledger`. The option
-        // keeps no span, so the error falls on the item for every re-export.
-        for (ident, kind) in own {
-            if let Some(reexported) = modules.get(&ident.unraw().to_string()) {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    format!(
-                        "`{ident}` is the name of the Orb module's own {kind} and of the module it re-exports for {}; rename its own {kind}",
-                        reexported.described()
-                    ),
-                ));
-            }
-        }
-        // The bindings declare in the Orb module `exports`, the module of the interfaces the world
-        // exports, and the module of each namespace of the interfaces it imports itself: those the
-        // attribute imports, the consumed hooks, the views and the derived hooks, interfaces of the
-        // Orb's package, and the kernel's for the `context` option, a state or a resource. An
-        // interface the world imports because one of those `use`s it, which the macro does not
-        // read here, may bring another namespace, which the compiler judges.
-        let namespace = |identity: &str| {
-            crate::rust_ident(crate::Identity::of(identity).namespace)
-                .unraw()
-                .to_string()
-        };
-        let mut namespaces: BTreeSet<String> = imports
-            .iter()
-            .map(|literal| namespace(&literal.value()))
-            .chain(
-                contributions
-                    .iter()
-                    .map(|contribution| namespace(&contribution.hook)),
-            )
-            .chain(
-                declared
-                    .iter()
-                    .filter(|declaration| declaration.input.is_none())
-                    .map(|declaration| namespace(&declaration.hook)),
-            )
-            .collect();
-        if !keyed.is_empty()
-            || declared
-                .iter()
-                .any(|declaration| declaration.input.is_some())
-        {
-            namespaces.insert(namespace(package));
-        }
-        if context || kernel {
-            namespaces.insert(namespace(guest::CONTEXT));
-        }
-        let exporting = !services.is_empty() || !contributions.is_empty() || !declared.is_empty();
-        for (ident, kind) in own {
-            let name = ident.unraw().to_string();
-            let holding = if name == "exports" && exporting {
-                "the interfaces the world exports".to_owned()
-            } else if namespaces.contains(&name) {
-                format!(
-                    "the namespace `{name}`, which holds the interfaces the world imports from it"
-                )
-            } else {
-                continue;
-            };
-            return Err(syn::Error::new(
-                ident.span(),
-                format!(
-                    "`{ident}` is the name of the Orb module's own {kind} and of the bindings' module of {holding}; rename its own {kind}"
-                ),
-            ));
-        }
         Ok(Self {
             reexported: modules,
             paths: paths.to_vec(),
-            newtypes: BTreeMap::new(),
+            newtypes: Vec::new(),
             uses: uses.to_vec(),
         })
     }
 
-    /// The same modules, with the newtypes of the module, each read by its name.
+    /// The same modules, with the newtypes of the module.
     pub(crate) fn with_newtypes(mut self, newtypes: &[Newtype]) -> Self {
-        self.newtypes = newtypes
-            .iter()
-            .map(|newtype| (newtype.ident.to_string(), newtype.clone()))
-            .collect();
+        self.newtypes = newtypes.to_vec();
         self
     }
 
-    /// The newtype a type written in the module `scope` names, when it names one: a path ending in
-    /// the newtype's name, without type parameters, that no consumed interface's module reaches.
+    /// The newtype a type written in the module `scope` names, when it names one: a path without
+    /// type parameters that resolves to the newtype (`resolve`).
     pub(crate) fn newtype(&self, ty: &Type, scope: usize) -> Option<&Newtype> {
         let Type::Path(path) = ty else {
             return None;
         };
         let last = path.path.segments.last()?;
-        if path.qself.is_some()
-            || !matches!(last.arguments, syn::PathArguments::None)
-            || self.named(ty, scope).is_some()
-        {
+        if path.qself.is_some() || !matches!(last.arguments, syn::PathArguments::None) {
             return None;
         }
-        self.newtypes.get(&last.ident.to_string())
+        let Resolution::Module(ident, module) = self.resolve(&path.path, scope) else {
+            return None;
+        };
+        self.newtypes
+            .iter()
+            .find(|newtype| newtype.ident == ident && newtype.scope == module)
     }
 
     /// The newtypes a type written in the module `scope` names: itself, or inside the type
@@ -415,6 +344,11 @@ impl Modules {
         !self.newtypes_in(ty, scope).is_empty()
     }
 
+    /// The path of the module `scope` from the Orb module.
+    pub(crate) fn path(&self, scope: usize) -> &[Ident] {
+        &self.paths[scope]
+    }
+
     /// How many modules the module `scope` is below the Orb module.
     pub(crate) fn depth(&self, scope: usize) -> usize {
         self.paths[scope].len()
@@ -428,6 +362,14 @@ impl Modules {
         quote::quote! { #root #name }
     }
 
+    /// The path of the trait `IMPORT_NEWTYPE`, which the Orb module declares, from the module
+    /// `scope`.
+    pub(crate) fn import_newtype_trait(&self, scope: usize) -> proc_macro2::TokenStream {
+        let root = crate::supers(self.depth(scope));
+        let name = quote::format_ident!("{}", crate::IMPORT_NEWTYPE);
+        quote::quote! { #root #name }
+    }
+
     /// The WIT spelling of a type written in the module `scope`: a newtype as its field's type. A
     /// newtype whose field holds it, through other newtypes too, has none.
     pub(crate) fn spelled(&self, ty: &Type, scope: usize) -> syn::Result<String> {
@@ -435,13 +377,18 @@ impl Modules {
     }
 
     /// The WIT spelling of a type written in the module `scope`, inside the fields of the newtypes
-    /// `within`, which the type may not name again.
-    fn spelled_within(&self, ty: &Type, scope: usize, within: &[&Ident]) -> syn::Result<String> {
+    /// `within`, each by its name and its module, which the type may not name again.
+    fn spelled_within(
+        &self,
+        ty: &Type,
+        scope: usize,
+        within: &[(&Ident, usize)],
+    ) -> syn::Result<String> {
         wit::wit_type_with(ty, &|named| {
             let Some(newtype) = self.newtype(named, scope) else {
-                return Ok(None);
+                return Ok(self.wit_name(named, scope));
             };
-            if within.contains(&&newtype.ident) {
+            if within.contains(&(&newtype.ident, newtype.scope)) {
                 return Err(syn::Error::new(
                     named.span(),
                     format!(
@@ -451,193 +398,327 @@ impl Modules {
                 ));
             }
             let mut within = within.to_vec();
-            within.push(&newtype.ident);
+            within.push((&newtype.ident, newtype.scope));
             self.spelled_within(&newtype.inner, newtype.scope, &within)
                 .map(Some)
         })
     }
 
+    /// The WIT name of a type written in the module `scope`, by the name of the type it resolves
+    /// to, `entry` for `Item` after `use model::Entry as Item;`: a type of the module or of a
+    /// consumed interface. `None` for a name the macro does not resolve.
+    fn wit_name(&self, ty: &Type, scope: usize) -> Option<String> {
+        let ident = match self.named(ty, scope) {
+            Some(named) => named.ident,
+            None => {
+                let Type::Path(path) = ty else {
+                    return None;
+                };
+                let Resolution::Module(ident, _) = self.resolve(&path.path, scope) else {
+                    return None;
+                };
+                ident
+            }
+        };
+        Some(wit::escaped(&wit::kebab(&ident)))
+    }
+
     /// The name a type reaches through a consumed interface's module, when it is such a path:
-    /// `greeting::Entry`, or any path ending so, written in the module `scope`. A path that leads
-    /// into a module of the Orb names a type of the module, whatever that module is called: the
-    /// author's `greeting::Banner` next to a `mod greeting` of their own resolves there first. The
-    /// kernel's context module reaches none.
+    /// `greeting::Entry`, any path ending so, or a name a `use` or an alias leads there, written
+    /// in the module `scope` (`resolve`). A path that leads into a module of the Orb names a type
+    /// of the module, whatever that module is called: the author's `greeting::Banner` next to a
+    /// `mod greeting` of their own resolves there first. The kernel's context module reaches none.
     pub(crate) fn named<'m, 't>(&'m self, ty: &'t Type, scope: usize) -> Option<Named<'m, 't>> {
         let Type::Path(path) = ty else {
             return None;
         };
-        let segments: Vec<&syn::PathSegment> = path.path.segments.iter().collect();
-        let [.., module, item] = segments.as_slice() else {
+        let written = path.path.segments.last()?;
+        if path.qself.is_some() || !matches!(written.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let Resolution::Stopped(leads) = self.resolve(&path.path, scope) else {
             return None;
         };
-        if path.qself.is_some() || !matches!(item.arguments, syn::PathArguments::None) {
+        let [.., module, item] = leads.segments.as_slice() else {
             return None;
-        }
-        if let Some(own) = crate::module_of(&path.path, &self.paths[scope])
-            && self.paths.contains(&own)
-        {
-            return None;
-        }
-        let (module, interface) = self.reexported.get_key_value(&module.ident.to_string())?;
+        };
+        let (module, interface) = self.reexported.get_key_value(&module.to_string())?;
         if interface.role == Role::Context {
             return None;
         }
-        // The bindings put an interface's import in `namespace::package::interface` and its export
-        // under `exports`: a path that leads through the namespace and the package, not under
-        // `exports`, is the import module's, `self::example::counters::counter::Tally`, or
-        // `counter::Tally` after `use super::example::counters::counter;`.
-        let identity = crate::Identity::of(&interface.identity);
-        let leads = self.leads(&path.path, scope);
-        let through_import = matches!(
-            leads.segments.as_slice(),
-            [before @ .., namespace, package, _, _]
-                if *namespace == crate::rust_ident(identity.namespace)
-                    && *package == crate::rust_ident(identity.package)
-                    && before.last().is_none_or(|exports| exports != "exports")
-        );
-        let led = leads.used.then(|| {
-            let reached = leads
-                .segments
-                .iter()
-                .map(Ident::to_string)
-                .collect::<Vec<_>>()
-                .join("::");
-            if leads.rooted {
-                format!("`{reached}` of the Orb module")
-            } else {
-                format!("`{reached}`")
-            }
-        });
+        let mut ident = item.clone();
+        ident.set_span(written.ident.span());
         Some(Named {
             interface,
             module,
-            ident: &item.ident,
+            ident,
             ty,
-            in_option: false,
-            through_import,
-            led,
         })
     }
 
-    /// Where a type path written in the module `scope` leads, read as far as the macro follows
-    /// it: through `self::`, `super::` and the sub-modules of the Orb, the names the `use`
-    /// declarations of each module it passes bind, and the glob imports from the Orb's modules
-    /// that bind them. It stops at the type's own name, at a crate, `crate::` or a module above
-    /// the Orb module, and at a name nothing it reads binds, such as the modules the bindings
-    /// declare in the Orb module, where what is left is the path from the module it stopped in.
-    fn leads(&self, path: &syn::Path, scope: usize) -> Leads {
-        let mut leads = Leads {
-            segments: path
-                .segments
-                .iter()
-                .map(|segment| segment.ident.clone())
-                .collect(),
-            used: false,
-            rooted: false,
-            scope: None,
+    /// The type of the Orb's modules a type written in the module `scope` names, by its own name
+    /// and the module declaring it, when its path resolves to one (`resolve`): `Entry` of `model`
+    /// for `Item` after `use super::model::Entry as Item;`.
+    pub(crate) fn module_type(&self, ty: &Type, scope: usize) -> Option<(Ident, usize)> {
+        let Type::Path(path) = ty else {
+            return None;
         };
-        if path.leading_colon.is_some() {
-            return leads;
+        if path.qself.is_some() {
+            return None;
         }
-        let mut scope = Some(scope);
+        match self.resolve(&path.path, scope) {
+            Resolution::Module(ident, module) => Some((ident, module)),
+            Resolution::Stopped(_) | Resolution::Refused(_) | Resolution::Composite(..) => None,
+        }
+    }
+
+    /// Where a type path written in the module `scope` leads, as rustc resolves it inside the Orb
+    /// module: through `self::`, `super::` and the sub-modules of the Orb, the names the `use`
+    /// declarations of each module it passes bind, with `as` and in groups, a sub-module's
+    /// `pub use` included, and the aliases that are only a path, `type Item = model::Entry;`, to
+    /// the type's own name in the module that declares it, or to a module that declares nothing
+    /// of the name. It stops at a crate or a module above the Orb module, and at a name nothing it
+    /// reads binds, such as the modules the bindings declare in the Orb module and the consumed
+    /// interfaces' modules the Orb module re-exports. A glob import, a path through `crate::` and
+    /// an alias that is more than a path are refused, each with how to write the name.
+    fn resolve(&self, path: &syn::Path, scope: usize) -> Resolution {
+        self.resolve_within(path, scope, 0)
+    }
+
+    /// `resolve`, `depth` aliases deep: aliases naming one another in a circle would never end.
+    fn resolve_within(&self, path: &syn::Path, scope: usize, depth: usize) -> Resolution {
+        let mut segments: Vec<Ident> = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.clone())
+            .collect();
+        let outside = |segments: Vec<Ident>| Resolution::Stopped(Leads { segments });
+        if path.leading_colon.is_some() {
+            return outside(segments);
+        }
+        let written = path.segments.last().map(|segment| &segment.ident);
+        let mut at = scope;
         // Each step consumes a name or replaces one by what a declaration binds it to;
         // declarations binding one another in a circle would never end.
         for _ in 0..64 {
-            let (Some(at), [first, rest @ ..]) = (scope, leads.segments.as_slice()) else {
+            let Some((first, rest)) = segments.split_first() else {
                 break;
             };
-            if rest.is_empty() {
-                break;
-            }
             let (first, rest) = (first.clone(), rest.to_vec());
-            if first == "self" {
-                leads.segments = rest;
-                continue;
-            }
-            if first == "super" {
-                scope = crate::parent(at, &self.paths);
-                if scope.is_some() {
-                    leads.segments = rest;
+            let name = first.to_string();
+            let uses = &self.uses[at];
+            if rest.is_empty() {
+                if let Some(alias) = uses.aliases.get(&name) {
+                    return self.aliased(alias, at, depth);
                 }
+                if uses.items.contains(&name) {
+                    return Resolution::Module(first, at);
+                }
+            }
+            if first == "self" && !rest.is_empty() {
+                segments = rest;
                 continue;
             }
-            if first == "crate" || first == "Self" {
-                scope = None;
+            if first == "super" && !rest.is_empty() {
+                let Some(parent) = crate::parent(at, &self.paths) else {
+                    return outside(segments);
+                };
+                at = parent;
+                segments = rest;
                 continue;
             }
-            if let Some(bound) = self.uses[at].names.get(&first.to_string()) {
+            if first == "crate" {
+                return Resolution::Refused(self.through_crate(written, &rest, scope));
+            }
+            if first == "Self" {
+                return outside(segments);
+            }
+            if let Some(bound) = uses.names.get(&name) {
                 // `use name;` brings the crate `name` into scope.
                 if bound.global || (bound.segments.len() == 1 && bound.segments[0] == first) {
-                    scope = None;
-                    continue;
+                    return outside(bound.segments.iter().cloned().chain(rest).collect());
                 }
-                leads.segments = bound.segments.iter().cloned().chain(rest).collect();
-                leads.used = true;
+                segments = bound.segments.iter().cloned().chain(rest).collect();
                 continue;
+            }
+            if rest.is_empty() {
+                if !wit::BUILTIN.contains(&name.as_str())
+                    && let Some(module) = crate::through_globs(&first, at, &self.uses, &self.paths)
+                {
+                    return Resolution::Refused(self.globbed(&first, scope, module));
+                }
+                return Resolution::Module(first, at);
             }
             let mut child = self.paths[at].clone();
             child.push(first.clone());
             if let Some(index) = self.paths.iter().position(|module| *module == child) {
-                scope = Some(index);
-                leads.segments = rest;
+                at = index;
+                segments = rest;
                 continue;
             }
-            match crate::through_globs(&first, at, &self.uses, &self.paths) {
-                crate::Globbed::In(module) => {
-                    scope = Some(module);
-                    leads.used = true;
-                }
-                crate::Globbed::Outside | crate::Globbed::Nowhere => break,
+            if let Some(module) = crate::through_globs(&first, at, &self.uses, &self.paths) {
+                return Resolution::Refused(self.globbed(&first, scope, module));
             }
+            break;
         }
-        leads.rooted = scope == Some(0);
-        leads.scope = scope;
-        leads
+        Resolution::Stopped(Leads { segments })
+    }
+
+    /// Where the alias `alias` of the module `scope` leads (`resolve`): an alias that is only a
+    /// path, without type parameters, to the type it names, a type of the Orb's modules or of a
+    /// consumed interface; to itself, a type of the module, when its path names neither, as
+    /// `type Token = u32;` does. One that is more than a path is refused.
+    fn aliased(&self, alias: &syn::ItemType, scope: usize, depth: usize) -> Resolution {
+        let ident = &alias.ident;
+        let Type::Path(target) = &*alias.ty else {
+            return more_than_a_path(alias, scope);
+        };
+        if !alias.generics.params.is_empty()
+            || target.qself.is_some()
+            || target
+                .path
+                .segments
+                .iter()
+                .any(|segment| !segment.arguments.is_none())
+        {
+            return more_than_a_path(alias, scope);
+        }
+        if depth >= 64 {
+            return Resolution::Module(ident.clone(), scope);
+        }
+        match self.resolve_within(&target.path, scope, depth + 1) {
+            Resolution::Module(name, module)
+                if self.uses[module].items.contains(&name.to_string()) =>
+            {
+                Resolution::Module(name, module)
+            }
+            Resolution::Stopped(leads)
+                if matches!(
+                    leads.segments.as_slice(),
+                    [.., module, _] if self.reexported.contains_key(&module.to_string())
+                ) =>
+            {
+                Resolution::Stopped(leads)
+            }
+            Resolution::Refused(why) => Resolution::Refused(why),
+            Resolution::Composite(why, alias, module) => Resolution::Composite(why, alias, module),
+            _ => Resolution::Module(ident.clone(), scope),
+        }
+    }
+
+    /// Why `name`, in a path written in the module `scope`, is not followed through the glob
+    /// import that brings it from the module `module`, with the `use` that imports it by name in
+    /// `scope`.
+    fn globbed(&self, name: &Ident, scope: usize, module: usize) -> String {
+        format!(
+            "`{name}` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `use {};`",
+            self.declared_use(name, scope, module)
+        )
+    }
+
+    /// Why `written`, a path written in the module `scope` through `crate::` and then `rest`, is
+    /// not followed, with the `use` that names it from `scope` when a module of the Orb whose path
+    /// ends the path of `rest` declares it.
+    fn through_crate(&self, written: Option<&Ident>, rest: &[Ident], scope: usize) -> String {
+        let name = written.map_or_else(String::new, Ident::to_string);
+        let why = format!(
+            "`{name}` is named through `crate::`, which the macro cannot place in the Orb module; name it from this module, through `self::`, `super::` or a `use` of the Orb's modules"
+        );
+        let Some((declared, modules)) = rest.split_last() else {
+            return why;
+        };
+        // The longest path of the Orb's modules that ends the written one.
+        let module = (0..self.paths.len())
+            .filter(|&module| {
+                self.uses[module].items.contains(&declared.to_string())
+                    && modules.ends_with(&self.paths[module])
+            })
+            .max_by_key(|&module| self.paths[module].len());
+        let Some(module) = module else {
+            return why;
+        };
+        format!(
+            "{why}, `use {}::{declared}{};`",
+            self.path_to(scope, module),
+            renamed(declared, &name)
+        )
+    }
+
+    /// The path of the `use`, written in the module `scope`, that imports `name` of the module
+    /// `module` by name: from the module that declares it when `module` only imports it.
+    fn declared_use(&self, name: &Ident, scope: usize, module: usize) -> String {
+        if !self.uses[module].items.contains(&name.to_string())
+            && let Resolution::Module(declared, at) =
+                self.resolve(&syn::Path::from(name.clone()), module)
+            && self.uses[at].items.contains(&declared.to_string())
+        {
+            return format!(
+                "{}::{declared}{}",
+                self.path_to(scope, at),
+                renamed(&declared, &name.to_string())
+            );
+        }
+        format!("{}::{name}", self.path_to(scope, module))
+    }
+
+    /// The path from the module `from` to the module `to`, both by scope, as a `use` written in
+    /// `from` spells it: `super::model`, `self::model`, `super`.
+    pub(crate) fn path_to(&self, from: usize, to: usize) -> String {
+        let (from, to) = (&self.paths[from], &self.paths[to]);
+        let shared = from
+            .iter()
+            .zip(to)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let up = from.len() - shared;
+        let mut segments: Vec<String> = if up == 0 {
+            vec!["self".to_owned()]
+        } else {
+            vec!["super".to_owned(); up]
+        };
+        segments.extend(to[shared..].iter().map(Ident::to_string));
+        segments.join("::")
     }
 
     /// Walk a type written in the module `scope`: itself, then the type parameters of a path and
-    /// the elements of a tuple. Each name a consumed interface's module reaches is reported, with
-    /// whether it is the value of an `Option`, which `in_option` says of the type itself, and not
-    /// looked into; so is the last name of every other path, before its type parameters, with the
-    /// module of the Orb the path leads into down to the name (`leads`), through `self::`,
-    /// `super::`, the sub-modules and the modules the `use` declarations bind, or the writing
-    /// module for a bare name or a path the macro cannot follow so. A type with a WIT spelling of
-    /// its own is not a name of the module: free JSON is not looked into, and a newtype, which the
-    /// WIT spells as its field, is walked as its field, in the newtype's module, once.
-    fn walk<'m, 't>(
-        &'m self,
-        ty: &'t Type,
-        scope: usize,
-        in_option: bool,
-        visit: &mut impl FnMut(Reached<'m, 't>),
-    ) where
+    /// the elements of a tuple. Each name a consumed interface's module reaches is reported, and
+    /// not looked into; so is the name of every other path, before its type parameters, with the
+    /// module of the Orb it resolves in (`resolve`): the type's own name in the module declaring
+    /// it, or the writing module for a name of a crate's, such as `Vec`. A name declared outside
+    /// the Orb module, or one the macro refuses to follow, is reported with why. A type with a WIT
+    /// spelling of its own is not a name of the module: free JSON is not looked into, and a
+    /// newtype, which the WIT spells as its field, is walked as its field, in the newtype's
+    /// module, once.
+    fn walk<'m, 't>(&'m self, ty: &'t Type, scope: usize, visit: &mut impl FnMut(Reached<'m, 't>))
+    where
         'm: 't,
     {
-        self.walk_within(ty, scope, in_option, visit, &mut Vec::new());
+        self.walk_within(ty, scope, visit, &mut Vec::new());
     }
 
-    /// `walk`, inside the fields of the newtypes `within`, which are not read again.
+    /// `walk`, inside the fields of the newtypes `within`, each by its name and its module, which
+    /// are not read again.
     fn walk_within<'m, 't>(
         &'m self,
         ty: &'t Type,
         scope: usize,
-        in_option: bool,
         visit: &mut impl FnMut(Reached<'m, 't>),
-        within: &mut Vec<&'m Ident>,
+        within: &mut Vec<(&'m Ident, usize)>,
     ) where
         'm: 't,
     {
         if let Some(named) = self.named(ty, scope) {
-            visit(Reached::Consumed(Named { in_option, ..named }));
+            visit(Reached::Consumed(named));
             return;
         }
         if wit::free_json(ty) {
             return;
         }
         if let Some(newtype) = self.newtype(ty, scope) {
-            if !within.contains(&&newtype.ident) {
-                within.push(&newtype.ident);
-                self.walk_within(&newtype.inner, newtype.scope, in_option, visit, within);
+            let key = (&newtype.ident, newtype.scope);
+            if !within.contains(&key) {
+                within.push(key);
+                self.walk_within(&newtype.inner, newtype.scope, visit, within);
                 within.pop();
             }
             return;
@@ -647,32 +728,134 @@ impl Modules {
                 let Some(segment) = path.path.segments.last() else {
                     return;
                 };
-                let leads = self.leads(&path.path, scope);
-                let module = match (leads.scope, leads.segments.as_slice()) {
-                    (Some(module), [_]) => module,
-                    _ => scope,
-                };
-                visit(Reached::Module(&segment.ident, module));
+                let builtin = wit::BUILTIN.contains(&segment.ident.to_string().as_str());
+                match self.resolve(&path.path, scope) {
+                    Resolution::Module(mut ident, module) => {
+                        ident.set_span(segment.ident.span());
+                        visit(Reached::Module(ident, module));
+                    }
+                    Resolution::Stopped(_) if builtin => {
+                        visit(Reached::Module(segment.ident.clone(), scope));
+                    }
+                    Resolution::Stopped(_) => {
+                        let ident = &segment.ident;
+                        // Free JSON imported by `use` reads as such a name: it is free JSON only
+                        // by its path.
+                        let hint = if ident == "Value" {
+                            "; for free JSON, write it by its path, `serde_json::Value`"
+                        } else {
+                            ""
+                        };
+                        visit(Reached::Refused(
+                            syn::Error::new_spanned(
+                                path,
+                                format!(
+                                    "`{ident}` is declared outside the Orb module, or in a module the macro does not read: a contract type is declared inside the Orb module, or is a consumed interface's type, named through its module, `greeting::Entry`, or a `use` of it{hint}"
+                                ),
+                            ),
+                            false,
+                        ));
+                    }
+                    Resolution::Refused(why) => {
+                        visit(Reached::Refused(syn::Error::new_spanned(path, why), true));
+                    }
+                    Resolution::Composite(why, ..) => {
+                        visit(Reached::Refused(syn::Error::new_spanned(path, why), false));
+                    }
+                }
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
                         if let syn::GenericArgument::Type(ty) = argument {
-                            self.walk_within(ty, scope, segment.ident == "Option", visit, within);
+                            self.walk_within(ty, scope, visit, within);
                         }
                     }
                 }
             }
             Type::Tuple(tuple) => {
                 for element in &tuple.elems {
-                    self.walk_within(element, scope, false, visit, within);
+                    self.walk_within(element, scope, visit, within);
                 }
             }
+            Type::Array(array) => self.walk_within(&array.elem, scope, visit, within),
             _ => {}
         }
     }
 
+    /// The types of the aliases that are more than a path, `type Items = Vec<catalog::Item>;`,
+    /// which a type written in the module `scope` names, itself or inside the type parameters of a
+    /// path, the elements of a tuple and an array, however the name reaches the alias, through a
+    /// module path or a `use` included, each with the module declaring the alias, where its type
+    /// is written: `resolve` follows none of them, and a state's types are followed into them
+    /// (`state_types`).
+    fn composite_aliases(&self, ty: &Type, scope: usize) -> Vec<(&Type, usize)> {
+        match ty {
+            Type::Path(path) => {
+                let mut found = Vec::new();
+                if path.qself.is_none()
+                    && let Resolution::Composite(_, alias, module) = self.resolve(&path.path, scope)
+                    && let Some(alias) = self.uses[module].aliases.get(&alias.to_string())
+                {
+                    found.push((&*alias.ty, module));
+                }
+                if let Some(syn::PathArguments::AngleBracketed(arguments)) =
+                    path.path.segments.last().map(|segment| &segment.arguments)
+                {
+                    for argument in &arguments.args {
+                        if let syn::GenericArgument::Type(ty) = argument {
+                            found.extend(self.composite_aliases(ty, scope));
+                        }
+                    }
+                }
+                found
+            }
+            Type::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .flat_map(|ty| self.composite_aliases(ty, scope))
+                .collect(),
+            Type::Array(array) => self.composite_aliases(&array.elem, scope),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Refuse a type written in the module `scope` that names, itself or inside its type
+    /// parameters and tuples, a type the macro does not follow (`resolve`): through a glob
+    /// import, `crate::` or an alias that is more than a path, or declared outside the Orb module.
+    pub(crate) fn resolved(&self, ty: &Type, scope: usize) -> syn::Result<()> {
+        self.refused(ty, scope, false)
+    }
+
+    /// Refuse a type written in the module `scope` that names a type through a form the macro
+    /// cannot follow anywhere, a glob import or `crate::`, as in a state's fields, which may hold
+    /// any type, but whose module types the macro follows to what they hold.
+    fn followed(&self, ty: &Type, scope: usize) -> syn::Result<()> {
+        self.refused(ty, scope, true)
+    }
+
+    /// The first refusal of a type written in the module `scope` (`resolved`), only of the forms
+    /// the macro cannot follow anywhere when `unfollowed`.
+    fn refused(&self, ty: &Type, scope: usize, unfollowed: bool) -> syn::Result<()> {
+        let mut refused = None;
+        self.walk(ty, scope, &mut |reached| {
+            if let Reached::Refused(error, anywhere) = reached
+                && (anywhere || !unfollowed)
+            {
+                refused.get_or_insert(error);
+            }
+        });
+        refused.map_or(Ok(()), Err)
+    }
+
+    /// `resolved`, for each type the fields of a struct or the payloads of an enum's cases hold,
+    /// the item declared in the module `scope`.
+    pub(crate) fn item_resolved(&self, item: &Item, scope: usize) -> syn::Result<()> {
+        item_types(item)
+            .into_iter()
+            .try_for_each(|ty| self.resolved(ty, scope))
+    }
+
     /// Each name a type written in the module `scope` reaches through a consumed interface's
-    /// module: itself, or inside the type parameters of a path and the elements of a tuple, each
-    /// with whether it is the value of an `Option`.
+    /// module: itself, or inside the type parameters of a path and the elements of a tuple.
     pub(crate) fn named_in<'m, 't>(
         &'m self,
         ty: &'t Type,
@@ -681,7 +864,7 @@ impl Modules {
     ) where
         'm: 't,
     {
-        self.walk(ty, scope, false, &mut |reached| {
+        self.walk(ty, scope, &mut |reached| {
             if let Reached::Consumed(named) = reached {
                 out.push(named);
             }
@@ -702,11 +885,11 @@ impl Modules {
     /// the module a path leads into, `sessions` for `super::sessions::Token` written in `tickets`,
     /// or the writing module for a bare name, where the name resolves as in Rust.
     pub(crate) fn references_in(&self, ty: &Type, scope: usize, out: &mut Vec<(Ident, usize)>) {
-        self.walk(ty, scope, false, &mut |reached| {
+        self.walk(ty, scope, &mut |reached| {
             if let Reached::Module(ident, module) = reached
                 && !wit::BUILTIN.contains(&ident.to_string().as_str())
             {
-                out.push((ident.clone(), module));
+                out.push((ident, module));
             }
         });
     }
@@ -739,63 +922,26 @@ impl Modules {
     }
 }
 
-/// The names the items of the Orb module take in the type namespace, where a module the Orb module
-/// re-exports takes its own, each with what the item is, for the errors: its sub-modules, types and
-/// traits, its `extern crate`s, and what a `use` imports with `self` (`self_imports`). A plain
-/// `use` may import a function, which takes its name in the value namespace and compiles beside
-/// such a module, and an item under `#[cfg(..)]` is gone where its configuration is off: the
-/// compiler judges those.
-pub(crate) fn own_names(items: &[Item]) -> Vec<(Ident, &'static str)> {
-    let mut names = Vec::new();
-    for item in items {
-        let (attrs, bound) = match item {
-            Item::Mod(item) => (&item.attrs, vec![(item.ident.clone(), "module")]),
-            Item::Struct(item) => (&item.attrs, vec![(item.ident.clone(), "struct")]),
-            Item::Enum(item) => (&item.attrs, vec![(item.ident.clone(), "enum")]),
-            Item::Union(item) => (&item.attrs, vec![(item.ident.clone(), "union")]),
-            Item::Type(item) => (&item.attrs, vec![(item.ident.clone(), "type alias")]),
-            Item::Trait(item) => (&item.attrs, vec![(item.ident.clone(), "trait")]),
-            Item::TraitAlias(item) => (&item.attrs, vec![(item.ident.clone(), "trait alias")]),
-            Item::ExternCrate(item) => {
-                let ident = item
-                    .rename
-                    .as_ref()
-                    .map_or(&item.ident, |(_, rename)| rename);
-                (&item.attrs, vec![(ident.clone(), "`extern crate`")])
-            }
-            Item::Use(item) => {
-                let mut imported = Vec::new();
-                self_imports(&item.tree, None, &mut imported);
-                let bound = imported.into_iter().map(|ident| (ident, "import"));
-                (&item.attrs, bound.collect())
-            }
-            _ => continue,
-        };
-        if !attrs
-            .iter()
-            .any(|attribute| crate::conditional(&attribute.meta))
-        {
-            names.extend(bound.into_iter().filter(|(ident, _)| ident != "_"));
-        }
+/// The `as` a `use` of the type `declared` needs to bind it as `name`: none for its own name.
+fn renamed(declared: &Ident, name: &str) -> String {
+    if *declared == name {
+        String::new()
+    } else {
+        format!(" as {name}")
     }
-    names
 }
 
-/// Each name a `use` tree binds with `self`, `crate::util::ledger::{self}` or `{self as ledger}`,
-/// which imports from the type namespace alone, whatever the path leads to. `parent` is the name
-/// before the tree in the path.
-fn self_imports(tree: &syn::UseTree, parent: Option<&Ident>, out: &mut Vec<Ident>) {
-    match tree {
-        syn::UseTree::Path(path) => self_imports(&path.tree, Some(&path.ident), out),
-        syn::UseTree::Name(name) if name.ident == "self" => out.extend(parent.cloned()),
-        syn::UseTree::Rename(rename) if rename.ident == "self" => out.push(rename.rename.clone()),
-        syn::UseTree::Group(group) => {
-            for tree in &group.items {
-                self_imports(tree, parent, out);
-            }
-        }
-        _ => {}
-    }
+/// Why the alias `alias` of the module `scope`, more than a path, does not name a contract type.
+fn more_than_a_path(alias: &syn::ItemType, scope: usize) -> Resolution {
+    let ident = &alias.ident;
+    let ty = quote::ToTokens::to_token_stream(&alias.ty).to_string();
+    Resolution::Composite(
+        format!(
+            "`{ident}` is an alias of `{ty}`, which is more than a path: the macro follows an alias of a contract type only when it names the type by its path, `type {ident} = model::Entry;`; write `{ty}` where `{ident}` stands"
+        ),
+        ident.clone(),
+        scope,
+    )
 }
 
 /// The types of a struct's fields, or of the payloads of an enum's cases.
@@ -820,7 +966,7 @@ pub(crate) fn shape_types(shape: &Shape) -> Vec<&Type> {
             .iter()
             .flat_map(|(_, payload)| payload.types())
             .collect(),
-        ShapeKind::Enum(_) | ShapeKind::Flags(_) => Vec::new(),
+        ShapeKind::Enum(_) => Vec::new(),
     }
 }
 
@@ -868,11 +1014,10 @@ enum Place<'a> {
         interface: &'a Ident,
     },
     /// A field or a case of `shape`, a type of the module that the interface of the service
-    /// `interface` defines, and the derived function whose result reaches `shape`, if one does.
+    /// `interface` defines.
     Field {
         shape: &'a Ident,
         interface: &'a Ident,
-        returned: Option<Returning<'a>>,
     },
     /// The input of the derived hook `hook`, or a field or a case of the type `via` it reaches.
     Input {
@@ -884,15 +1029,6 @@ enum Place<'a> {
         state: &'a Ident,
         via: Option<Ident>,
     },
-}
-
-/// A derived function whose result reaches a type of the module: its name, its result type, where
-/// the error points, and the type of the module the result names, which holds the reached type.
-#[derive(Clone, Copy)]
-struct Returning<'a> {
-    function: &'a str,
-    result: &'a Type,
-    via: &'a Ident,
 }
 
 impl Place<'_> {
@@ -917,14 +1053,12 @@ impl Place<'_> {
 }
 
 /// What the uses of the consumed interfaces are read from: the consumed modules and the packages
-/// the expansion parses, the views of the interfaces imported by key, the module's services,
-/// resources, contributions and declared hooks, the types that enter the WIT with the interface
-/// defining each, and the states with the module types that stay out of the WIT, which a state's
-/// fields may reach.
+/// the expansion parses, the module's services, resources, contributions and declared hooks, the
+/// types that enter the WIT with the interface defining each, and the states with the module types
+/// that stay out of the WIT, which a state's fields may reach.
 pub(crate) struct Reach<'a> {
     pub modules: &'a Modules,
     pub parsed: &'a wit::Parsed,
-    pub views: &'a [keyed::View],
     pub services: &'a [Service],
     pub resources: &'a [WitResource],
     pub contributions: &'a [Contribution],
@@ -935,19 +1069,31 @@ pub(crate) struct Reach<'a> {
     pub unreached: &'a [Candidate],
 }
 
+/// What the module reaches of the consumed interfaces (`foreign`).
+#[derive(Default)]
+pub(crate) struct Consumption {
+    /// What each derived interface `use`s from the consumed interfaces, by the interface's WIT
+    /// name.
+    pub uses: BTreeMap<String, Vec<Foreign>>,
+    /// The consumed records, variants and enums a state holds, directly or through the types of
+    /// the module, and those they hold in turn, by full name, `ns:name/interface@version/type`:
+    /// the bindings derive serde's traits on these alone.
+    pub serialized: BTreeSet<String>,
+}
+
 /// What each derived interface `use`s from the consumed interfaces, by the interface's WIT name,
-/// once every item a consumed interface's module names is checked where it is named. A derived
+/// and the consumed types a state holds (`Consumption`), once every item a consumed interface's module
+/// names is checked where it is named. A derived
 /// function, a constructor and a type of the module that enters the WIT name the data types of an
 /// interface imported, plainly or by key, or implemented, or of a hook the module contributes to,
-/// and a parameter the handles of an imported interface's resources, itself or in a type of the
-/// module that no derived function returns; a derived hook's input names none; a state names the
+/// and the handles of their resources, which tembra-contracts' check of the derived WIT refuses
+/// where the runtime does not carry them; a derived hook's input names none; a state names the
 /// data types that `serde` can write. Nothing is read from the consumed packages when nothing
 /// names them.
-pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Foreign>>> {
+pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<Consumption> {
     let Reach {
         modules,
         parsed,
-        views,
         services,
         resources,
         contributions,
@@ -980,7 +1126,6 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         .iter()
         .filter(|declaration| declaration.input.is_some())
         .collect();
-    let returned = returned(&functions, shapes, modules);
     for shape in shapes {
         let Some(interface) = placement.get(&shape.ident.to_string()) else {
             continue;
@@ -994,9 +1139,6 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             None => Place::Field {
                 shape: &shape.ident,
                 interface,
-                returned: returned
-                    .get(&(shape.ident.to_string(), shape.scope))
-                    .copied(),
             },
         };
         for ty in shape_types(shape) {
@@ -1012,7 +1154,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         found_in(modules, input, hook.scope, place, &mut found);
     }
     for state in states {
-        for (ty, via, scope) in state_types(state, shapes, unreached, modules) {
+        for (ty, via, scope) in state_types(state, shapes, unreached, modules)? {
             let place = Place::State {
                 state: &state.ident,
                 via: via.cloned(),
@@ -1021,7 +1163,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         }
     }
     if found.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(Consumption::default());
     }
     // The consumed interfaces the world exports: the implemented ones, the hooks the module
     // contributes to and those it declares from a consumed package.
@@ -1053,52 +1195,26 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             .collect(),
     )?;
     let mut foreign: BTreeMap<String, Vec<Foreign>> = BTreeMap::new();
+    let mut serialized = BTreeSet::new();
     for (named, place) in &found {
         let items = &defined[&named.interface.identity];
         // A view's module holds its resource, named after the interface, and re-exports the types
-        // the view uses, whatever else the interface defines.
-        if named.interface.role == Role::Keyed {
-            if *named.ident == view_object(&named.interface.identity) {
-                return Err(syn::Error::new(
-                    named.ty.span(),
-                    format!(
-                        "{} `{}`, an object of {}: such an object belongs to the call that acquired it, so a derived interface takes and returns none",
-                        place.subject(),
-                        named.ident,
-                        named.interface.described()
-                    ),
-                ));
-            }
-            let used = &views
-                .iter()
-                .find(|view| view.target == named.interface.identity)
-                .expect("a view of each interface imported by key")
-                .used;
-            if !used
-                .iter()
-                .any(|name| crate::type_ident(name) == *named.ident)
-            {
-                let listed = if used.is_empty() {
-                    "and they name none".to_owned()
-                } else {
-                    used.iter()
-                        .map(|name| format!("`{}`", crate::type_ident(name)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                return Err(syn::Error::new(
-                    named.ty.span(),
-                    format!(
-                        "{} `{}`, which names no type of the view `{}`: the view of {}, uses only the types the interface's functions name, {listed}",
-                        place.subject(),
-                        named.ident,
-                        named.module,
-                        named.interface.described()
-                    ),
-                ));
-            }
+        // the view uses, whatever else the interface defines: rustc reports another name on the
+        // path.
+        if named.interface.role == Role::Keyed
+            && named.ident == view_object(&named.interface.identity)
+        {
+            return Err(syn::Error::new(
+                named.ty.span(),
+                format!(
+                    "{} `{}`, an object of {}: such an object belongs to the call that acquired it, so a derived interface takes and returns none",
+                    place.subject(),
+                    named.ident,
+                    named.interface.described()
+                ),
+            ));
         }
-        let Some(definition) = items.get(named.ident) else {
+        let Some(definition) = items.get(&named.ident) else {
             return Err(syn::Error::new(
                 named.ty.span(),
                 format!(
@@ -1113,8 +1229,17 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         let dependency = exported
             .iter()
             .find(|interface| items.depends.contains(&interface.identity));
-        let Some(interface) = checked(named, definition, place, declared, dependency, modules)?
-        else {
+        let checked = checked(named, definition, place, declared, dependency, modules)?;
+        if let (
+            Place::State { .. },
+            wit::Kind::Type {
+                serialized: held, ..
+            },
+        ) = (place, &definition.kind)
+        {
+            serialized.extend(held.iter().cloned());
+        }
+        let Some(interface) = checked else {
             continue;
         };
         let uses = foreign.entry(wit::kebab(interface)).or_default();
@@ -1132,11 +1257,14 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             }
         };
         let names = &mut uses[index].names;
-        if !names.iter().any(|(_, known)| known == named.ident) {
+        if !names.iter().any(|(_, known)| *known == named.ident) {
             names.push((definition.name.clone(), named.ident.clone()));
         }
     }
-    Ok(foreign)
+    Ok(Consumption {
+        uses: foreign,
+        serialized,
+    })
 }
 
 /// The type of the objects the view of a keyed import gives the interface `identity`, which takes
@@ -1159,59 +1287,6 @@ fn found_in<'a, 'p>(
     found.extend(named.into_iter().map(|named| (named, place.clone())));
 }
 
-/// The types of the module the results of the derived functions reach, by name and by the module
-/// declaring each, with the first function returning it: the types a result names, itself or
-/// inside its containers, and those their fields and cases reach in turn, as the runtime looks
-/// into a result. A name resolves by `own_or_only`: to the type of the module naming it, else to
-/// the only type of that name in the Orb.
-fn returned<'f>(
-    functions: &'f [resource_params::Derived<'f>],
-    shapes: &'f [Shape],
-    modules: &Modules,
-) -> BTreeMap<(String, usize), Returning<'f>> {
-    let mut returned: BTreeMap<(String, usize), Returning<'f>> = BTreeMap::new();
-    for function in functions {
-        let Some(result) = function.result else {
-            continue;
-        };
-        let mut named = Vec::new();
-        modules.references(result, function.scope, &mut named);
-        let mut pending: Vec<(Ident, usize, Option<&'f Ident>)> = named
-            .into_iter()
-            .map(|ident| (ident, function.scope, None))
-            .collect();
-        while let Some((ident, scope, via)) = pending.pop() {
-            let named = shapes
-                .iter()
-                .filter(|shape| shape.ident == ident)
-                .map(|shape| (shape.scope, shape));
-            let Some(shape) = crate::own_or_only(named, scope) else {
-                continue;
-            };
-            let key = (ident.to_string(), shape.scope);
-            if returned.contains_key(&key) {
-                continue;
-            }
-            let via = via.unwrap_or(&shape.ident);
-            returned.insert(
-                key,
-                Returning {
-                    function: &function.name,
-                    result,
-                    via,
-                },
-            );
-            pending.extend(
-                shape
-                    .references
-                    .iter()
-                    .map(|(reference, scope)| (reference.clone(), *scope, Some(via))),
-            );
-        }
-    }
-    returned
-}
-
 /// Check one item a consumed interface's module names where it is named, and return the service
 /// whose derived interface `use`s it, if one does. `dependency` is an interface the world exports
 /// that the consumed interface depends on, if there is one.
@@ -1224,7 +1299,7 @@ fn checked<'a>(
     modules: &Modules,
 ) -> syn::Result<Option<&'a Ident>> {
     let subject = place.subject();
-    let ident = named.ident;
+    let ident = &named.ident;
     let interface = named.interface;
     let of = interface.described();
     let refuse = |reason: String| -> syn::Result<Option<&'a Ident>> {
@@ -1270,37 +1345,18 @@ fn checked<'a>(
             "{what} of {of}: a derived hook's input holds the types of the module, not those of a consumed interface"
         ));
     }
-    let (interface_of, returned) = match place {
-        Place::Param { interface, .. } => (*interface, false),
-        Place::Result { interface, .. } => (*interface, true),
-        Place::Field { interface, .. } => (*interface, false),
+    let interface_of = match place {
+        Place::Param { interface, .. }
+        | Place::Result { interface, .. }
+        | Place::Field { interface, .. } => *interface,
         Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
     };
     // A path into the bindings' module of the import of an interface the world exports names the
     // import's copy of its types, as the view of its keyed import does, while a derived interface,
     // exported, takes the copy of the export, which the module the Orb module re-exports for an
-    // implemented interface and a contributed hook names; a declared hook's module is the import's
-    // too, which its rule refuses below. The two copies are one type where the export holds none
-    // of its own, for a type the interface `use`s from an interface the world only imports.
-    if named.through_import
-        && definition.copied
-        && let Some(takes) = match interface.role {
-            Role::Implemented => Some("an implemented interface"),
-            Role::Contributed => Some("a hook"),
-            _ => None,
-        }
-    {
-        let module = named.module;
-        let written = named.ty.to_token_stream().to_string().replace(' ', "");
-        let led = named
-            .led
-            .as_ref()
-            .map(|led| format!(", a `use` leading it to {led}"))
-            .unwrap_or_default();
-        return refuse(format!(
-            "{what} of {of}, through the bindings' module of its import: a derived interface takes the types of {takes} from its export, as `{module}::{ident}` names them; `{written}` is the import's{led}"
-        ));
-    }
+    // implemented interface and a contributed hook names: rustc reports the mismatch on the
+    // author's signature. A declared hook's module is the import's too, which its rule refuses
+    // below.
     // The `run` of a hook the module declares, for the errors.
     let run = || {
         declared
@@ -1312,25 +1368,18 @@ fn checked<'a>(
     // The view of an interface the world exports, one the module implements or a hook it
     // contributes to or declares, names the import's copy of the interface's types, while a
     // derived interface, exported, takes the copy of its export, which the implemented interface's
-    // or the contributed hook's module names; a declared hook's module names the import's too. The
-    // two copies are one type where the export holds none of its own.
+    // or the contributed hook's module names, so rustc reports the mismatch on the author's
+    // signature; a declared hook's module names the import's too, so no path names the export's.
+    // The two copies are one type where the export holds none of its own.
     if interface.role == Role::Keyed
         && definition.copied
-        && let Some((module, role)) = modules.exporting(&interface.identity)
+        && let Some((module, Role::Declared)) = modules.exporting(&interface.identity)
     {
         let view = named.module;
-        return match role {
-            Role::Implemented => refuse(format!(
-                "{what} of {of} and implements: a derived interface takes the types of an implemented interface from its export, as `{module}::{ident}` names them; `{view}::{ident}` is the import's"
-            )),
-            Role::Contributed => refuse(format!(
-                "{what} of {of} and contributes to: a derived interface takes the types of a hook from its export, as `{module}::{ident}` names them; `{view}::{ident}` is the import's"
-            )),
-            _ => refuse(format!(
-                "{what} of {of} and declares: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{view}::{ident}`, `{module}::{ident}` and {} are the import's; use a type of the module",
-                run()
-            )),
-        };
+        return refuse(format!(
+            "{what} of {of} and declares: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{view}::{ident}`, `{module}::{ident}` and {} are the import's; use a type of the module",
+            run()
+        ));
     }
     // A WASI interface's type or resource, named through the WASI interface's module or through
     // a consumed interface that `use`s it: the runtime carries neither between Orbs.
@@ -1371,44 +1420,12 @@ fn checked<'a>(
                 run()
             ))
         }
-        // The runtime moves an owned handle of an imported interface anywhere into an argument,
-        // in a record or a variant of the module too, and returns a resource only from the
-        // interface that defines it, wherever the result holds it.
-        (Role::Imported, wit::Kind::Resource) => match place {
-            Place::Param { .. } | Place::Field { returned: None, .. } => Ok(Some(interface_of)),
-            Place::Result { .. } => refuse(format!(
-                "{what} of {of}: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle but returns none"
-            )),
-            Place::Field {
-                returned: Some(returning),
-                ..
-            } => {
-                let Returning {
-                    function,
-                    result,
-                    via,
-                } = returning;
-                Err(syn::Error::new(
-                    result.span(),
-                    format!(
-                        "`{function}` returns `{via}`, which holds `{ident}`, {what} of {of}: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none"
-                    ),
-                ))
-            }
-            Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
-        },
-        (Role::Implemented | Role::Contributed | Role::Declared, wit::Kind::Resource)
-            if returned =>
-        {
-            refuse(format!(
-                "{what} of {of}: the runtime returns a resource only from the interface that defines it"
-            ))
-        }
-        (Role::Implemented | Role::Contributed | Role::Declared, wit::Kind::Resource) => {
-            refuse(format!(
-                "{what} of {of}: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"
-            ))
-        }
+        // Where the runtime carries the handle is tembra-contracts' check of the derived WIT,
+        // `check_profile`'s.
+        (
+            Role::Imported | Role::Implemented | Role::Contributed | Role::Declared,
+            wit::Kind::Resource,
+        ) => Ok(Some(interface_of)),
         (Role::Keyed, wit::Kind::Resource) => refuse(format!(
             "{what} of {of}: the objects of a view carry data, so an interface with a resource is not imported by key"
         )),
@@ -1428,10 +1445,7 @@ fn checked<'a>(
                 ..
             },
         ) => refuse(format!(
-            "{what} of {of} that holds {problem}, which the runtime refuses in a signature"
-        )),
-        (_, wit::Kind::Type { option: true, .. }) if named.in_option => refuse(format!(
-            "{what} of {of}, in an `Option`, and `{ident}` is an option itself: an option of an option, which the runtime refuses in a signature; use an enum of the module with a case for each"
+            "{what} of {of}, which the runtime refuses in a signature: {problem}"
         )),
         (_, wit::Kind::Type { .. }) => Ok(Some(interface_of)),
     }
@@ -1439,14 +1453,16 @@ fn checked<'a>(
 
 /// The types of a state's fields and of the module types they reach, each once, with the module
 /// type that holds it, `None` for the state's own fields, and the module the holder is declared
-/// in. A name resolves as `serialized` resolves it, by `own_or_only`: to the type of the module
-/// naming it, else to the one type of that name in the Orb.
+/// in: a struct with named fields, an enum or a tuple struct of the module, newtype or not, and
+/// the type of an alias that is more than a path, which a type names. A name resolves to the type
+/// of the module that declares it; one the macro cannot follow, through a glob import or
+/// `crate::`, is an error (`Modules::followed`).
 fn state_types<'a>(
     state: &State,
     shapes: &'a [Shape],
     unreached: &'a [Candidate],
-    modules: &Modules,
-) -> Vec<(&'a Type, Option<&'a Ident>, usize)> {
+    modules: &'a Modules,
+) -> syn::Result<Vec<(&'a Type, Option<&'a Ident>, usize)>> {
     // Each type of the module, by its name and its module, with the types it holds.
     let declared: Vec<(&'a Ident, usize, Vec<&'a Type>)> = shapes
         .iter()
@@ -1459,34 +1475,53 @@ fn state_types<'a>(
             )
         }))
         .collect();
-    let resolve = |name: &Ident, scope: usize| {
+    // A struct with named fields or an enum of the module, else a tuple struct, by the name it
+    // resolves to in its module, with the types it holds, each with the module it is written in.
+    type Held<'h> = Vec<(&'h Type, usize)>;
+    let resolve = |name: &Ident, scope: usize| -> Option<(&'a Ident, usize, Held<'a>)> {
         let named = declared
             .iter()
             .filter(|(ident, _, _)| *ident == name)
             .map(|entry| (entry.1, entry));
-        crate::own_or_only(named, scope)
+        if let Some((ident, scope, held)) = crate::declared_in(named, scope) {
+            let held = held.iter().map(|ty| (*ty, *scope)).collect();
+            return Some((ident, *scope, held));
+        }
+        let (ident, fields) = modules.uses[scope].tuples.get(&name.to_string())?;
+        Some((ident, scope, fields.iter().map(|ty| (ty, scope)).collect()))
     };
     let mut types = Vec::new();
     let mut seen = BTreeSet::new();
     let mut pending = vec![(state.ident.clone(), state.scope, true)];
     while let Some((name, scope, own)) = pending.pop() {
-        let Some((ident, scope, held)) = resolve(&name, scope) else {
+        let Some((ident, scope, mut held)) = resolve(&name, scope) else {
             continue;
         };
-        if !seen.insert((ident.to_string(), *scope)) {
+        if !seen.insert((ident.to_string(), scope)) {
             continue;
         }
-        let via = (!own).then_some(*ident);
-        for ty in held {
-            types.push((*ty, via, *scope));
+        let via = (!own).then_some(ident);
+        // The types of the aliases the held types name are held too, each once, in the module
+        // declaring the alias.
+        let mut aliased: BTreeSet<*const Type> = BTreeSet::new();
+        let mut next = 0;
+        while let Some(&(ty, scope)) = held.get(next) {
+            next += 1;
+            modules.followed(ty, scope)?;
+            types.push((ty, via, scope));
             let mut references = Vec::new();
-            modules.references(ty, *scope, &mut references);
+            modules.references_in(ty, scope, &mut references);
             pending.extend(
                 references
                     .into_iter()
-                    .map(|reference| (reference, *scope, false)),
+                    .map(|(reference, scope)| (reference, scope, false)),
             );
+            for alias in modules.composite_aliases(ty, scope) {
+                if aliased.insert(alias.0) {
+                    held.push(alias);
+                }
+            }
         }
     }
-    types
+    Ok(types)
 }

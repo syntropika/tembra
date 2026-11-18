@@ -62,7 +62,11 @@ pub(crate) struct Native {
 /// cover yet, an `orb()` that answers the error naming it; or the compile error for a manifest whose
 /// `metadata` could not be read. With the `context` option, the native `context` too, which the
 /// author's code calls either way.
-pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>) -> Native {
+pub(crate) fn emit(
+    analysis: &Analysis,
+    metadata: Result<&Metadata, &syn::Error>,
+    contract: Result<&tembra_contracts::Contract, &syn::Error>,
+) -> Native {
     let facade = &analysis.options.facade();
     let context = analysis.options.context.then(|| context_module(facade));
     // The items the native side writes in place of the Orb, beside `context`.
@@ -85,9 +89,9 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         |Refused(message)| alone(unsupported(metadata, inputs.as_ref(), &message, facade));
     // The interfaces the module imports from other Orbs and the hooks it contributes to, which
     // `orb(..)` takes the providers of.
-    let consumed = providers::imports(analysis).and_then(|imports| {
+    let consumed = providers::imports(analysis, contract).and_then(|imports| {
         covered(analysis)?;
-        Ok((imports, providers::contributions(analysis)?))
+        Ok((imports, providers::contributions(analysis, contract)?))
     });
     let (imports, contributions) = match consumed {
         Ok(consumed) => consumed,
@@ -2392,7 +2396,7 @@ fn codec(
 }
 
 /// A type as the author wrote it, for the errors: `Vec<Point>`.
-fn spelled(ty: &Type) -> String {
+pub(crate) fn spelled(ty: &Type) -> String {
     quote!(#ty).to_string().replace(' ', "").replace(',', ", ")
 }
 
@@ -2417,7 +2421,7 @@ enum Kind<'a> {
     Tuple(Vec<Kind<'a>>),
     /// `result<ok, err>`: `{"tag": "ok" | "err", "val": ..}`, without `val` for a side `()`.
     Result(Option<Box<Kind<'a>>>, Option<Box<Kind<'a>>>),
-    /// A record, an enum, a variant, a flags or a newtype of the module, or a record, a variant,
+    /// A record, an enum, a variant or a newtype of the module, or a record, a variant,
     /// an enum or a flags of a consumed interface: its own JSON, through the boundary trait it
     /// implements.
     Named(Cow<'a, Type>),
@@ -2532,7 +2536,7 @@ fn kind<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>,
                 ("Vec" | "Option" | "Result", _) => Err(uncovered(
                     "a container without its types; such types are not supported natively yet",
                 )),
-                _ => named(ty, &segment.ident, scope, analysis),
+                _ => named(ty, scope, analysis),
             }
         }
         _ => Err(uncovered(
@@ -2562,13 +2566,10 @@ fn argument<'a>(
 
 /// The kind of a type of the module or of a consumed interface: a type that enters the WIT from
 /// the module, a newtype and a type of an interface the module implements read and write their
-/// own JSON, and a resource is issued; the others are refused, saying what they are.
-fn named<'a>(
-    ty: &'a Type,
-    ident: &Ident,
-    scope: usize,
-    analysis: &Analysis,
-) -> Result<Kind<'a>, Uncovered<'a>> {
+/// own JSON, and a resource is issued; the others are refused, saying what they are. A name of the
+/// module is the type it resolves to (`Modules::module_type`).
+fn named<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>, Uncovered<'a>> {
+    let declared = analysis.consumed_modules.module_type(ty, scope);
     let reason = if let Some(named) = analysis.consumed_modules.named(ty, scope) {
         let identity = &named.interface.identity;
         // A type of an interface the module implements or imports, by name or by key, or of a hook
@@ -2577,7 +2578,7 @@ fn named<'a>(
             named.interface.role,
             Role::Implemented | Role::Imported | Role::Keyed | Role::Contributed
         )
-        .then(|| analysis.consumed_types.named(identity, named.ident))
+        .then(|| analysis.consumed_types.named(identity, &named.ident))
         .flatten();
         match defined {
             Some(defined) => {
@@ -2598,15 +2599,20 @@ fn named<'a>(
                 "a type of the consumed interface {identity}; consumed types are not supported natively yet"
             ),
         }
-    } else if analysis.shapes.iter().any(|shape| shape.ident == *ident)
-        || analysis.consumed_modules.newtype(ty, scope).is_some()
+    } else if declared.as_ref().is_some_and(|(ident, module)| {
+        analysis
+            .shapes
+            .iter()
+            .any(|shape| shape.ident == *ident && shape.scope == *module)
+    }) || analysis.consumed_modules.newtype(ty, scope).is_some()
     {
         return Ok(Kind::Named(Cow::Borrowed(ty)));
-    } else if let Some(resource) = analysis
-        .wit_resources
-        .iter()
-        .find(|resource| resource.ident == *ident)
-    {
+    } else if let Some(resource) = declared.as_ref().and_then(|(ident, module)| {
+        analysis
+            .wit_resources
+            .iter()
+            .find(|resource| resource.ident == *ident && resource.scope == *module)
+    }) {
         return Ok(Kind::Resource {
             ty,
             handle: handle_path(resource, scope, analysis),
@@ -3114,8 +3120,8 @@ fn record_encode(
 /// The kind of a member of the type of the module `shape`, written in its module, or its refusal,
 /// after `place`, which names the member: "the field `count` of `Entry` is". A member holding a
 /// resource is refused, pointing to a tuple, which carries the resource natively too: a record or
-/// a variant holding one is component-only, since the bindings generate such a type, with their
-/// handle in the resource's place, which only a component can create.
+/// a variant holding one is component-only, since only a component's conversions wrap the
+/// resource into the bindings' handle and take it back.
 fn member<'a>(
     ty: &'a Type,
     place: &str,
@@ -3134,7 +3140,7 @@ fn member<'a>(
         Some(resource) => Err(refusal(Uncovered {
             ty: resource,
             reason: format!(
-                "a resource; a record or a variant holding a resource is component-only, since the bindings replace it with their type, whose handle only a component creates: to return the resource natively too, return it in a tuple beside the data, such as `-> ({}, String)`",
+                "a resource; a record or a variant holding a resource is component-only, since the native boundary carries a resource beside the data, as a handle, never inside the JSON of a record: to return the resource natively too, return it in a tuple beside the data, such as `-> ({}, String)`",
                 spelled(resource)
             ),
         })),
@@ -3143,12 +3149,11 @@ fn member<'a>(
 }
 
 /// The members of a record of `shape`, or of the record of one of its cases, `owner` for the
-/// errors: each in the Rust field the author names, when the type stays the author's, or the one
-/// the bindings name after its WIT name.
+/// errors: each in the Rust field the author names, keyed by the lowerCamelCase form of its WIT
+/// name.
 fn members<'a>(
     fields: &'a [(Ident, Type)],
     owner: &str,
-    authored: bool,
     shape: &Shape,
     analysis: &Analysis,
 ) -> Result<Vec<Member<'a>>, Refused> {
@@ -3157,11 +3162,7 @@ fn members<'a>(
         .map(|(field, ty)| {
             let name = wit::kebab(field);
             Ok(Member {
-                field: if authored {
-                    field.clone()
-                } else {
-                    rust_ident(&name)
-                },
+                field: field.clone(),
                 key: javascript_name(&name),
                 kind: member(
                     ty,
@@ -3184,6 +3185,7 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
         ident,
         inner,
         scope,
+        ..
     } = newtype;
     let facade = &analysis.options.facade();
     let boundary = boundary(*scope, analysis);
@@ -3213,21 +3215,17 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
 /// own module, where its members are visible: a record as an object of its fields, keyed by the
 /// lowerCamelCase form of their WIT names; an enum as the WIT name of its case; a variant as an
 /// object of its case's `tag` and payload, `val`, the record of a case with named fields as an
-/// object too; a flags as an object of the flags set, each `true`, which reads a flag left out as
-/// unset. The members and cases are named as the bindings generate them, but those of a type the
-/// macro converts and of a flags, which stay the author's. A member the codec does not cover is
-/// refused, naming it.
+/// object too. Every type stays the author's, so the members and cases are named as the author
+/// wrote them. A member the codec does not cover is refused, naming it.
 fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let facade = &analysis.options.facade();
     let ident = &shape.ident;
     let boundary = boundary(shape.scope, analysis);
-    let converted = analysis.converted.contains_key(&ident.to_string());
     let member = |ty, place: String| member(ty, &place, shape, analysis);
-    let members =
-        |fields, owner: String, authored| members(fields, &owner, authored, shape, analysis);
+    let members = |fields, owner: String| members(fields, &owner, shape, analysis);
     let (decode, encode) = match &shape.kind {
         ShapeKind::Record(fields) => {
-            let members = members(fields, ident.to_string(), converted)?;
+            let members = members(fields, ident.to_string())?;
             let bound = elements(members.len());
             let fields = members.iter().map(|member| &member.field);
             let decode = record_decode(
@@ -3245,34 +3243,29 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
         }
         ShapeKind::Enum(cases) => {
             let tags: Vec<String> = cases.iter().map(wit::kebab).collect();
-            enum_codec(&tags, facade)
+            enum_codec(cases, &tags, facade)
         }
         ShapeKind::Variant(cases) => {
             let mut reads = Vec::new();
             let mut writes = Vec::new();
             for (case, payload) in cases {
                 let tag = wit::kebab(case);
-                let named = if converted {
-                    case.clone()
-                } else {
-                    camel_ident(&tag)
-                };
+                let named = case;
                 match payload {
                     Payload::None => {
-                        let (read, written) = variant_case(&tag, &named, None, &boundary, facade);
+                        let (read, written) = variant_case(&tag, named, None, &boundary, facade);
                         reads.push(read);
                         writes.push(written);
                     }
                     Payload::Unnamed(ty) => {
                         let kind = member(ty, format!("the case `{ident}::{case}` carries"))?;
                         let (read, written) =
-                            variant_case(&tag, &named, Some(&kind), &boundary, facade);
+                            variant_case(&tag, named, Some(&kind), &boundary, facade);
                         reads.push(read);
                         writes.push(written);
                     }
-                    // Only in an enum the macro converts: the author's case, with its fields.
                     Payload::Named(fields) => {
-                        let members = members(fields, format!("{ident}::{case}"), true)?;
+                        let members = members(fields, format!("{ident}::{case}"))?;
                         let read = record_decode(
                             quote! { item },
                             quote! { Self::#named },
@@ -3291,60 +3284,6 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
             }
             let decode = tagged_decode(quote! { value }, "a variant", reads, facade);
             (decode, quote! { match self { #(#writes,)* } })
-        }
-        ShapeKind::Flags(item) => {
-            let fields: Vec<&Ident> = item
-                .fields
-                .iter()
-                .filter_map(|field| field.ident.as_ref())
-                .collect();
-            let keys: Vec<String> = fields
-                .iter()
-                .map(|field| javascript_name(&wit::kebab(field)))
-                .collect();
-            let decode = quote! {
-                match value {
-                    ::#facade::serde_json::Value::Object(object) => {
-                        let mut flags = Self { #(#fields: false),* };
-                        for (key, set) in object {
-                            let flag = match key.as_str() {
-                                #(#keys => &mut flags.#fields,)*
-                                _ => {
-                                    return ::core::result::Result::Err(
-                                        ::std::format!("unknown flag `{}`", key)
-                                    );
-                                }
-                            };
-                            match set {
-                                ::#facade::serde_json::Value::Bool(set) => *flag = set,
-                                _ => {
-                                    return ::core::result::Result::Err(::std::format!(
-                                        "expected the flag `{}` as a boolean",
-                                        key
-                                    ));
-                                }
-                            }
-                        }
-                        ::core::result::Result::Ok(flags)
-                    }
-                    _ => ::core::result::Result::Err(::std::string::String::from(
-                        "expected flags as an object of booleans",
-                    )),
-                }
-            };
-            let encode = quote! {
-                let mut flags = ::#facade::serde_json::Map::new();
-                #(
-                    if self.#fields {
-                        flags.insert(
-                            ::std::string::String::from(#keys),
-                            ::#facade::serde_json::Value::Bool(true),
-                        );
-                    }
-                )*
-                ::core::result::Result::Ok(::#facade::serde_json::Value::Object(flags))
-            };
-            (decode, encode)
         }
     };
     Ok(boundary_impl(
@@ -3382,11 +3321,10 @@ fn boundary_impl(
     }
 }
 
-/// The JSON of an enum whose cases' WIT names are `tags`, which the bindings name in
-/// UpperCamelCase: the WIT name of its case, read from `value` and written from `self`, the JSON of
-/// the facade named `facade`.
-fn enum_codec(tags: &[String], facade: &Ident) -> (TokenStream, TokenStream) {
-    let cases: Vec<Ident> = tags.iter().map(|tag| camel_ident(tag)).collect();
+/// The JSON of an enum whose Rust cases are `cases`, the author's for a type of the module and the
+/// bindings' UpperCamelCase for a consumed type, with their WIT names `tags`: the WIT name of its
+/// case, read from `value` and written from `self`, the JSON of the facade named `facade`.
+fn enum_codec(cases: &[Ident], tags: &[String], facade: &Ident) -> (TokenStream, TokenStream) {
     let decode = quote! {
         match value {
             ::#facade::serde_json::Value::String(case) => match case.as_str() {
@@ -3494,7 +3432,8 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes, facade: &Ident) -> Opt
                 .iter()
                 .map(|case| case.name.clone())
                 .collect();
-            enum_codec(&tags, facade)
+            let cases: Vec<Ident> = tags.iter().map(|tag| camel_ident(tag)).collect();
+            enum_codec(&cases, &tags, facade)
         }
         TypeDefKind::Variant(variant) => {
             let mut reads = Vec::new();

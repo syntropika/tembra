@@ -178,14 +178,14 @@ pub mod calculator {
     }
 
     /// A point of the plotter's grid: 64-bit coordinates cross the boundary as exact numbers.
-    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct Point {
         pub x: i64,
         pub y: i64,
     }
 
     /// Where the pen moves.
-    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
     pub enum Heading {
         North,
         East,
@@ -194,7 +194,7 @@ pub mod calculator {
     }
 
     /// What the plotter draws: a case without a value, one with a value, and one with named fields,
-    /// which carries a record of its own, so the macro keeps the enum the author's.
+    /// which carries a record of its own.
     #[derive(Debug, Clone, PartialEq)]
     pub enum Shape {
         Dot,
@@ -202,9 +202,8 @@ pub mod calculator {
         Rect { width: u32, height: u32 },
     }
 
-    /// How a shape is drawn.
-    #[flags]
-    #[derive(PartialEq)]
+    /// How a shape is drawn: a record of `bool` fields.
+    #[derive(Debug, Clone, PartialEq)]
     pub struct Pen {
         pub filled: bool,
         pub dashed_line: bool,
@@ -213,7 +212,7 @@ pub mod calculator {
     /// The moves of a walk, in a private module: their JSON is written there, and the Orb module's
     /// services name them by path.
     mod moves {
-        /// One move of a walk: no case has named fields, so the bindings generate the enum.
+        /// One move of a walk: a case with a value, one with another module type, one without.
         #[derive(Debug, Clone, Copy, PartialEq)]
         pub enum Move {
             Turn(super::Heading),
@@ -232,8 +231,7 @@ pub mod calculator {
         pub pen: Pen,
     }
 
-    /// Plots on a grid, with records, enums, variants, flags, options, results and 64-bit
-    /// integers.
+    /// Plots on a grid, with records, enums, variants, options, results and 64-bit integers.
     #[service]
     pub struct Plotter;
 
@@ -292,7 +290,7 @@ pub mod calculator {
             area.unwrap_or(fallback)
         }
 
-        /// The stroke with its shape scaled by the factor and each flag of its pen flipped.
+        /// The stroke with its shape scaled by the factor and each field of its pen flipped.
         pub fn redrawn(stroke: Stroke, factor: u32) -> Stroke {
             let shape = match stroke.shape {
                 Shape::Dot => Shape::Dot,
@@ -333,7 +331,7 @@ pub mod calculator {
     /// serde writes, the same in both, which is that of the runtime fixture's walker: `{"at": {"x":
     /// 0, "y": 0}, "facing": "North", "moves": 0}` to start with.
     #[state(service = Walker)]
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct Position {
         pub at: Point,
         pub facing: Heading,
@@ -649,6 +647,7 @@ pub mod calculator {
         /// How many totals the accumulators an object of the service issued stored in the
         /// calculator's memory, which the kernel keeps for the object.
         #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Stored {
             pub count: u32,
         }
@@ -1095,6 +1094,7 @@ pub mod library {
 
     /// How many books one shelf holds, which the kernel keeps for each shelf.
     #[state(service = Shelf)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Shelved {
         pub books: u32,
     }
@@ -1224,6 +1224,7 @@ pub mod worker {
 pub mod meters {
     /// The total of one meter, which the kernel keeps for each object.
     #[state(service = Gauge)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Total {
         pub total: u64,
     }
@@ -1755,9 +1756,10 @@ pub mod checkpoint {
     }
 }
 
-/// Lends sessions in a record beside their count: a record holding a resource is the bindings'
-/// type, whose handle only a component creates, so the module's `orb()` answers an error naming
-/// the record's field, where a tuple would carry the resource natively too.
+/// Lends sessions in a record beside their count: a record holding a resource is the author's,
+/// whose resource a component's bridge wraps into the bindings' handle, while the native boundary
+/// carries a resource only beside the data, so the module's `orb()` answers an error naming the
+/// record's field, where a tuple would carry the resource natively too.
 #[tembra::orb(package = "example:desk@1.0.0")]
 pub mod desk {
     /// One session.
@@ -1793,7 +1795,7 @@ pub mod desk {
         /// Lend a session numbered `n`, counted once.
         pub fn lend(n: u32) -> Lease {
             Lease {
-                session: exports::example::desk::sessions::Session::new(Session::new(n)),
+                session: Session::new(n),
                 count: 1,
             }
         }
@@ -1895,14 +1897,14 @@ pub mod sketch {
     }
 
     /// How large the sketch is drawn, whose fields sit beside the shape's in the state's JSON.
-    #[derive(Default)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Size {
         pub scale: f64,
     }
 
     /// The sketch an object keeps.
     #[state(service = Pad)]
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Sketch {
         pub shape: Shape,
         #[serde(flatten)]

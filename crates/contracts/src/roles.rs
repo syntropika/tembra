@@ -41,7 +41,7 @@ impl PreparedContract {
 
     /// Each policy names an exported service interface: one with functions that is neither a
     /// hook callback, nor a kernel callback, nor the incoming HTTP handler. Host-lifetime objects
-    /// cannot linger, as the kernel rules.
+    /// cannot linger, by the kernel's own rule (`tembra_core::admits_linger`).
     fn check_service_policies(&self, roles: &ComponentRoles) -> Result<(), Error> {
         for (identity, policy) in &roles.services {
             let exported = self.model().exports.iter().any(|entry| {
@@ -58,7 +58,7 @@ impl PreparedContract {
                     "{identity}: a service policy names an exported service interface"
                 )));
             }
-            if policy.lifetime == Lifetime::Host && policy.linger_ms != 0 {
+            if !tembra_core::admits_linger(policy.lifetime.into(), policy.linger_ms) {
                 return Err(Error(format!(
                     "{identity}: host-lifetime objects cannot linger"
                 )));

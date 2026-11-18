@@ -10,6 +10,9 @@ mod tally {
 
     /// The state of one counter object: its total and the number of additions made.
     #[state(version = 1)]
+    // A state derives its initial value, `Default`, and the traits of `serde` with which the
+    // kernel keeps it as JSON.
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Count {
         pub total: i64,
         pub steps: u32,

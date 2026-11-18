@@ -56,6 +56,7 @@ entries are a `#[state]` of the keeper's objects, so a keeper remembers across r
 
 ```rust
 #[state]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Entries { pub entries: Vec<book::Entry> }
 ```
 
@@ -63,7 +64,7 @@ The state holds the shared package's own record, `book::Entry`, as the functions
 it, with no copy into a type of the module: in an Orb with a state the bindings give the package's
 records `serde`'s derives, so the kernel keeps the entries as the JSON `serde` writes for them. A
 state is not part of the contract unless a method of a derived service mentions it, so `Entries` is
-an ordinary struct of the module, with `serde` derives the macro adds.
+an ordinary struct of the module, with the `Default` and `serde` derives its author writes.
 
 ## Build
 

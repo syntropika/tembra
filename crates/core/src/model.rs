@@ -32,6 +32,44 @@ impl Lifetime {
     }
 }
 
+/// The members every reference to a service object has, which the kernel refuses as method names
+/// when it installs an Orb, in the lowerCamelCase spelling of the official JavaScript bindings.
+pub const RESERVED_MEMBERS: [&str; 6] = ["then", "release", "state", "ready", "status", "opaque"];
+
+/// Whether a service method's name is a member every reference has, one of [`RESERVED_MEMBERS`],
+/// which the kernel refuses when it installs an Orb.
+pub fn reserved_member(name: &str) -> bool {
+    RESERVED_MEMBERS.contains(&name)
+}
+
+/// Whether the kernel admits the version of a state or of a resource's contract: versions start
+/// at 1.
+pub const fn valid_version(version: Version) -> bool {
+    version != 0
+}
+
+/// Whether the kernel admits a service's objects of `lifetime` lingering `linger_ms` once
+/// unreferenced: a host-lifetime object lives until the host closes, and never lingers.
+pub const fn admits_linger(lifetime: Lifetime, linger_ms: u32) -> bool {
+    !matches!(lifetime, Lifetime::Host) || linger_ms == 0
+}
+
+/// The principal the host creates host-lifetime objects for itself as, when it installs the Orb.
+pub const HOST_PRINCIPAL: &str = "host";
+
+/// Whether the kernel admits an object of `lifetime` acquired by `principal`: a host-lifetime
+/// object belongs to the host, [`HOST_PRINCIPAL`].
+pub fn admits_principal(lifetime: Lifetime, principal: &str) -> bool {
+    !matches!(lifetime, Lifetime::Host) || principal == HOST_PRINCIPAL
+}
+
+/// Whether the kernel admits an object of `lifetime` at `address`: a host-lifetime object lives
+/// at the key `main` of the host principal (`admits_principal`).
+pub(crate) fn admits_address(lifetime: Lifetime, address: &Address) -> bool {
+    !matches!(lifetime, Lifetime::Host)
+        || (address.key == ["main"] && admits_principal(lifetime, &address.principal))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Service {
     /// Canonical contract identity when this service participates in typed ABI matching.
@@ -286,4 +324,25 @@ pub struct Migration {
     pub expected_revision: u64,
     pub value: Id,
     pub state_version: Version,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_host_lifetime_object_lives_at_main_of_the_host() {
+        let address = |key: &str, principal: &str| Address {
+            service: "ledger".into(),
+            key: vec![key.into()],
+            principal: principal.into(),
+        };
+        assert!(admits_address(Lifetime::Host, &address("main", "host")));
+        assert!(!admits_address(Lifetime::Host, &address("other", "host")));
+        assert!(!admits_address(Lifetime::Host, &address("main", "alice")));
+        assert!(admits_address(
+            Lifetime::Referenced,
+            &address("other", "alice")
+        ));
+    }
 }

@@ -107,20 +107,17 @@ fn validate_orb(orb: &Orb) -> Result<()> {
     for service in &orb.services {
         if service.name.is_empty()
             || !services.insert(&service.name)
-            || service.methods.iter().any(|m| {
-                m.is_empty()
-                    || matches!(
-                        m.as_str(),
-                        "then" | "release" | "state" | "ready" | "status" | "opaque"
-                    )
-            })
+            || service
+                .methods
+                .iter()
+                .any(|m| m.is_empty() || reserved_member(m))
         {
             return Err(Error::invalid(
                 Reason::Service,
                 "invalid or duplicate service/member name",
             ));
         }
-        if service.lifetime == Lifetime::Host && service.linger_ms != 0 {
+        if !admits_linger(service.lifetime, service.linger_ms) {
             return Err(Error::invalid(
                 Reason::Linger,
                 "host-lifetime objects cannot linger",

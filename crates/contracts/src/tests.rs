@@ -88,18 +88,16 @@ interface types {
 /// A world's own WIT resolves with the packages of a directory, as the bindings of an Orb module
 /// read `path` and `inline` together: a type the source `use`s from the directory's package
 /// shapes its signature, and the bundled packages answer its imports, a copy of one in the
-/// directory's `deps/` adding nothing, whatever its comments. It reads as the same world nested
-/// whole.
+/// directory's `deps/` adding nothing when it is the bundled file line for line. It reads as the
+/// same world nested whole. A copy that differs, if only in its comments, is refused, as
+/// `from_dir` refuses it.
 #[test]
 fn a_source_resolves_with_the_packages_of_a_directory() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("ledger.wit"), LEDGER).unwrap();
     std::fs::create_dir(dir.path().join("deps")).unwrap();
-    std::fs::write(
-        dir.path().join("deps").join("tembra-guest.wit"),
-        format!("{}// A local note.\n", crate::guest::SOURCE),
-    )
-    .unwrap();
+    let copy = dir.path().join("deps").join("tembra-guest.wit");
+    std::fs::write(&copy, crate::guest::SOURCE).unwrap();
     let source = "package example:keeper@1.0.0;
 interface book {
   use example:ledger/types@1.0.0.{entry};
@@ -123,6 +121,18 @@ world keeper {
         ["example:keeper/book@1.0.0"]
     );
     assert_eq!(signatures, whole.service_signatures().unwrap());
+    std::fs::write(&copy, format!("{}// A local note.\n", crate::guest::SOURCE)).unwrap();
+    let refused = Contract::from_source_in(dir.path(), "keeper.wit", source, Some("keeper"))
+        .err()
+        .unwrap()
+        .0;
+    assert_eq!(
+        refused,
+        format!(
+            "WIT package tembra:guest@1.0.0 in {} is already provided by the standard contracts bundled with Tembra; remove the duplicate",
+            copy.display()
+        )
+    );
     // Without the directory, the source names a package it does not hold.
     let error = Contract::from_source("keeper.wit", source, Some("keeper"))
         .err()
@@ -687,4 +697,127 @@ fn a_contract_read_from_wit_names_its_types_outside_the_describe_graph_and_the_a
     let described: serde_json::Value =
         serde_json::from_str(&first.request(r#"{"kind":"describe"}"#)).unwrap();
     assert_eq!(described["ok"], graph);
+}
+
+/// `check_value_type` is the value profile's rule on one type, which the `#[tembra::orb]` macro
+/// asks of a consumed type it names: what a signature may carry is accepted, and an option of an
+/// option, through an alias too, a map and a list of a fixed length are refused, each as the
+/// resource profile `cargo tembra build` checks refuses an exported signature holding it, and so
+/// is a handle, which is no data.
+#[test]
+fn one_type_is_checked_as_a_signature_is() {
+    const TYPES: &str = "use things.{thing};
+        type maybe = option<u32>;
+        record fine { name: string, tags: list<option<u8>>, pair: tuple<s64, char> }
+        record twice { value: option<maybe> }
+        record keyed { value: map<string, u32> }
+        record fixed { value: list<u8, 4> }
+        record owned { value: thing }";
+    let mut resolve = wit_parser::Resolve::default();
+    resolve
+        .push_str(
+            "values.wit",
+            &format!(
+                "package test:values@1.0.0; interface things {{ resource thing; }} \
+                 interface types {{ {TYPES} }}"
+            ),
+        )
+        .unwrap();
+    let interface = resolve
+        .interfaces
+        .iter()
+        .find(|(_, interface)| interface.name.as_deref() == Some("types"))
+        .map(|(_, interface)| interface)
+        .unwrap();
+    let checked =
+        |name: &str| check_value_type(&resolve, wit_parser::Type::Id(interface.types[name]));
+    assert_eq!(checked("fine"), Ok(()));
+    for (name, refused) in [
+        ("twice", "nested options require a tagged option codec"),
+        (
+            "keyed",
+            "map requires a dedicated interpreter value adapter",
+        ),
+        (
+            "fixed",
+            "fixed-length list requires a dedicated interpreter value adapter",
+        ),
+    ] {
+        assert_eq!(checked(name), Err(Error(refused.into())), "{name}");
+        let source = format!(
+            "package test:values@1.0.0; interface things {{ resource thing; }}
+            interface types {{ {TYPES} take: func(value: {name}); }}
+            world app {{ export types; }}"
+        );
+        let contract = Contract::from_source("values.wit", &source, Some("app")).unwrap();
+        assert_eq!(
+            contract.check_resource_profile(),
+            Err(Error(refused.into())),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        checked("owned"),
+        Err(Error(
+            "own requires a dedicated interpreter value adapter".into()
+        ))
+    );
+}
+
+/// `Contract::check_roles` checks the roles a component's manifest gives as `cargo tembra build`
+/// checks them when it packages the component, and the `#[tembra::orb]` macro asks it of the
+/// roles it embeds: a declared hook's callback fits its composition, and a host-lifetime service
+/// does not linger.
+#[test]
+fn roles_are_checked_against_the_contract() {
+    let contract = Contract::from_source(
+        "roles.wit",
+        "package test:roles@1.0.0;
+        interface gate { record ticket { value: s32 } apply: func(input: ticket) -> ticket; }
+        interface desk { open: func() -> u32; }
+        world app { import gate; export gate; export desk; }",
+        Some("app"),
+    )
+    .unwrap();
+    let hook = |composition| ComponentRoles {
+        hooks: BTreeMap::from([("test:roles/gate@1.0.0".into(), composition)]),
+        ..ComponentRoles::default()
+    };
+    assert_eq!(
+        contract.check_roles(&hook(HookComposition::Waterfall)),
+        Ok(())
+    );
+    assert_eq!(
+        contract.check_roles(&hook(HookComposition::Series)),
+        Err(Error(
+            "test:roles/gate@1.0.0: series callbacks must return no value".into()
+        ))
+    );
+    assert_eq!(
+        contract.check_roles(&hook(HookComposition::Bail)),
+        Err(Error(
+            "test:roles/gate@1.0.0: bail callbacks must return an option".into()
+        ))
+    );
+    let service = |lifetime, linger_ms| ComponentRoles {
+        services: BTreeMap::from([(
+            "test:roles/desk@1.0.0".into(),
+            ServicePolicy {
+                lifetime,
+                linger_ms,
+            },
+        )]),
+        ..ComponentRoles::default()
+    };
+    assert_eq!(contract.check_roles(&service(Lifetime::Host, 0)), Ok(()));
+    assert_eq!(
+        contract.check_roles(&service(Lifetime::Referenced, 5)),
+        Ok(())
+    );
+    assert_eq!(
+        contract.check_roles(&service(Lifetime::Host, 5)),
+        Err(Error(
+            "test:roles/desk@1.0.0: host-lifetime objects cannot linger".into()
+        ))
+    );
 }

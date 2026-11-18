@@ -11,7 +11,7 @@ use std::{
 use tembra::{
     Context, Host, Orb, Reference, Service,
     core::Code,
-    portable::{Capability, Issued, Nominal, Owned, Payload},
+    portable::{Capability, Delivered, Issued, Nominal, Owned, Payload},
 };
 use tembra_contracts::ModuleContract;
 use tembra_executor_wasm::{
@@ -154,7 +154,7 @@ struct Guest {
 /// as for any compiled component, and requires four Orbs: the provider of the keyed import's view
 /// and of the plain import, the provider of the texts import, the keeper of the shelves the Orb
 /// reaches by key, and the keeper of the ledger it imports and never calls, whose interface has a
-/// resource and so a provider. The WIT holds the author's flags and `use`s the consumed packages'
+/// resource and so a provider. The WIT holds the author's records and `use`s the consumed packages'
 /// records as they define them: `readings` the tally of the imported interface, `library` and
 /// `lending` the book and the topic of the shelf the Orb implements, which its world imports only
 /// through the shelf view's `use`, `speller` the builder of the texts, in a record of the module.
@@ -217,7 +217,7 @@ fn guests() -> [Guest; 2] {
         assert_eq!(required, [BUILDERS, COUNTERS, LEDGER, SHELVES], "{name}");
         let words: String = wit.split_whitespace().collect();
         for expected in [
-            "flagsaccess{read,write,share,}",
+            "recordaccess{read:bool,write:bool,share:bool,}",
             "interfacereadings{useexample:counters/counter@1.0.0.{tally};",
             "interfacelibrary{useexample:shelves/shelf@1.0.0.{book,topic};",
             "interfacespeller{useexample:texts/texts@1.0.0.{builder};",
@@ -460,7 +460,7 @@ fn walk(pool: &mut LocalPool, host: &Host, name: &str) {
     assert_eq!(call(pool, "at-start", json!([])), json!(true), "{name}");
     assert_eq!(
         call(pool, "describe", json!([])),
-        json!("Position { at: Point { x: 0, y: 0 }, facing: Heading::North, moves: 6 }"),
+        json!("Position { at: Point { x: 0, y: 0 }, facing: North, moves: 6 }"),
         "{name}"
     );
     assert_eq!(
@@ -852,8 +852,9 @@ fn count(pool: &mut LocalPool, host: &Host, name: &str) {
 }
 
 /// Drive the tallies of the Orb `name`: each owned tally passed to `close`, to `close-all` in a
-/// list and an option, or to another tally's `absorb` leaves the caller and the provider's handle
-/// table, and the guest drops the value it took back.
+/// list and an option, to another tally's `absorb`, or to `settle` in the record of a case with
+/// named fields, which `open` returns it in, leaves the caller and the provider's handle table,
+/// and the guest drops the value it took back.
 fn tally(pool: &mut LocalPool, host: &Host, engine: &Engine, name: &str) {
     /// Run one operation under a fresh root of `alice`.
     fn root<T: 'static>(
@@ -922,14 +923,54 @@ fn tally(pool: &mut LocalPool, host: &Host, engine: &Engine, name: &str) {
     assert_eq!(total, json!(30), "{name}");
     assert_eq!(dropped(pool), json!(6), "{name}");
     assert_eq!(engine.resources(), 0, "{name}");
+
+    // A case with named fields holds a tally: the record of the case carries its handle, out and
+    // back in, and an opening without one carries none.
+    let opened = {
+        let tallies = tallies.clone();
+        root(pool, host, async move |context| {
+            tallies
+                .call_portable::<_, Delivered>(&context, "open", (7_u32,))
+                .await
+        })
+    };
+    assert_eq!(
+        opened.value,
+        json!({"tag": "opened", "val": {"tally": 0, "at": 7}}),
+        "{name}"
+    );
+    assert_eq!(engine.resources(), 1, "{name}");
+    let mut payload = Payload::data(json!([opened.value]));
+    for owned in opened.owned {
+        payload.attach_argument(owned).unwrap();
+    }
+    assert_eq!(call(pool, "settle", payload), json!(7), "{name}");
+    assert_eq!(engine.resources(), 0, "{name}");
+    assert_eq!(dropped(pool), json!(7), "{name}");
+
+    // A tally named through a `use` that renames it crosses as the tally: wrapped into its handle
+    // when returned, and taken back from it in a tuple beside a step.
+    let restarted = issue(pool, "restart", 4);
+    assert_eq!(engine.resources(), 1, "{name}");
+    let mut payload = Payload::data(json!([[0, 3]]));
+    payload.attach_argument(restarted).unwrap();
+    assert_eq!(call(pool, "close-with", payload), json!(7), "{name}");
+    assert_eq!(engine.resources(), 0, "{name}");
+    assert_eq!(dropped(pool), json!(8), "{name}");
+    let refused = call(pool, "open", Payload::data(json!([2000])));
+    assert_eq!(
+        refused,
+        json!({"tag": "refused", "val": {"reason": "above a thousand"}}),
+        "{name}"
+    );
+    assert_eq!(engine.resources(), 0, "{name}");
     tallies.release().unwrap();
 }
 
-/// Drive the permits of the Orb `name`. A flags value, the author's struct of `bool` fields,
-/// crosses the boundary both ways: as a parameter and a result, inside a record, a list and an
-/// option, and in a state the kernel keeps as JSON. It is an object of its set flags on the
-/// portable boundary, a flag left out unset; the state's JSON is serde's, every field of the
-/// struct.
+/// Drive the permits of the Orb `name`. A record of `bool` fields crosses the boundary both ways:
+/// as a parameter and a result, inside a record, a list and an option, and in a state the kernel
+/// keeps as JSON. It is an object of every field on the portable boundary, as serde writes it in
+/// the state.
 fn permit(pool: &mut LocalPool, host: &Host, name: &str) {
     let permits = Rc::new(
         host.get(
@@ -944,48 +985,44 @@ fn permit(pool: &mut LocalPool, host: &Host, name: &str) {
     let call = |pool: &mut LocalPool, method: &'static str, arguments: Value| {
         counting_call(pool, host, &permits, "alice", method, arguments)
     };
+    let access = |read: bool, write: bool, share: bool| json!({"read": read, "write": write, "share": share});
     assert_eq!(
         *state.value().unwrap(),
-        json!({"last": {"read": false, "write": false, "share": false}, "grants": 0}),
+        json!({"last": access(false, false, false), "grants": 0}),
         "{name}"
     );
     assert_eq!(
-        call(pool, "invert", json!([{"read": true, "share": true}])),
-        json!({"write": true}),
+        call(pool, "invert", json!([access(true, false, true)])),
+        access(false, true, false),
         "{name}"
     );
     assert_eq!(
-        call(pool, "invert", json!([{}])),
-        json!({"read": true, "write": true, "share": true}),
-        "{name}"
-    );
-    assert_eq!(
-        call(pool, "give", json!(["ada", {"write": true, "share": true}])),
-        json!({"who": "ada", "access": {"write": true, "share": true}}),
+        call(pool, "give", json!(["ada", access(false, true, true)])),
+        json!({"who": "ada", "access": access(false, true, true)}),
         "{name}"
     );
     assert_eq!(
         *state.value().unwrap(),
-        json!({"last": {"read": false, "write": true, "share": true}, "grants": 1}),
+        json!({"last": access(false, true, true), "grants": 1}),
         "{name}"
     );
     assert_eq!(
         call(pool, "kept", json!([])),
-        json!({"last": {"write": true, "share": true}, "grants": 1}),
+        json!({"last": access(false, true, true), "grants": 1}),
         "{name}"
     );
     let grants = json!([
-        {"who": "ada", "access": {"read": true}},
-        {"who": "bob", "access": {"share": true}},
+        {"who": "ada", "access": access(true, false, false)},
+        {"who": "bob", "access": access(false, false, true)},
     ]);
     assert_eq!(
         call(pool, "merged", json!([grants, null])),
-        json!({"read": true, "share": true}),
+        access(true, false, true),
         "{name}"
     );
     assert_eq!(
-        call(pool, "merged", json!([[], {"write": true}])),
-        json!({"write": true}),
+        call(pool, "merged", json!([[], access(false, true, false)])),
+        access(false, true, false),
         "{name}"
     );
     permits.release().unwrap();
@@ -1799,8 +1836,8 @@ fn ready(pool: &mut LocalPool, host: &Host, name: &str) -> Rc<Reference> {
 
 /// Names that are keywords of WIT, in a component build, std and freestanding, and natively: the
 /// module `list` of the `keywords` feature is the world `%list`, whose contract `cargo tembra
-/// build` writes to `contract/%list.wit`, its method `record` is `%record` and its flag `r#type`
-/// is `%type`. The component answers the method under its WIT name, and the flag crosses both
+/// build` writes to `contract/%list.wit`, its method `record` is `%record` and its field `type_`
+/// is `%type`. The component answers the method under its WIT name, and the field crosses both
 /// ways, `type` in the boundary's JSON; so does the module's `orb()` in the fixture's native test.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
@@ -1812,7 +1849,7 @@ fn names_that_are_wit_keywords_answer_both_ways() {
         let (words, text) = (words(&module), module.text());
         for expected in [
             "world%list{exportwords;}",
-            "flagsmarks{bold,%type,}",
+            "recordmarks{bold:bool,%type:bool,}",
             "%record:func(word:string,marks:marks)->marks;",
         ] {
             assert!(words.contains(expected), "{features}: {expected}\n{text}");
@@ -1825,22 +1862,119 @@ fn names_that_are_wit_keywords_answer_both_ways() {
             counting_call(&mut pool, &host, &reference, "alice", "record", arguments)
         };
         assert_eq!(
-            record(json!(["List", {"bold": true}])),
+            record(json!(["List", {"bold": true, "type": false}])),
             json!({"bold": true, "type": true}),
             "{features}"
         );
         assert_eq!(
-            record(json!(["list", {"type": true}])),
-            json!({"type": true}),
+            record(json!(["list", {"bold": false, "type": true}])),
+            json!({"bold": false, "type": true}),
             "{features}"
         );
-        assert_eq!(record(json!(["list", {}])), json!({}), "{features}");
+        assert_eq!(
+            record(json!(["list", {"bold": false, "type": false}])),
+            json!({"bold": false, "type": false}),
+            "{features}"
+        );
         reference.release().unwrap();
         pool.run_until(host.close()).unwrap();
         assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
     }
     assert_eq!(engine.instances(), 0);
     module_natively("keywords");
+}
+
+/// The author's types, in a component build, std and freestanding, and natively: the module
+/// `requests` of the `authored` feature declares a record in a sub-module with a private field, a
+/// field `r#type` and a case `HTTP`, which the bindings spell `type_` and `Http`, and a function's
+/// error enum with a hand `impl Display`. Each stays the author's type, converted at the boundary:
+/// the private field crosses as `seen`, the field as `type`, the case as `http`, and the refusal's
+/// words come from the author's `Display`; so does the module's `orb()` in the fixture's native
+/// test.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn the_authors_types_answer_both_ways() {
+    let engine = Engine::new(Limits::default()).unwrap();
+    for features in ["authored", "authored,no-std"] {
+        let (module, orb) = module_orb(&engine, &module_component(features), "authored");
+        let (words, text) = (words(&module), module.text());
+        for expected in [
+            "recordrequest{path:string,%type:scheme,seen:u32,}",
+            "enumscheme{http,https,}",
+            "recordrefusal-too-long{length:u32,}",
+            "recordrefusal-stale{seen:u32,}",
+            "variantrefusal{empty,too-long(refusal-too-long),stale(refusal-stale),}",
+            "fresh:func(path:string)->request;",
+            "route:func(request:request)->result<request,refusal>;",
+            "explain:func(refusal:refusal)->string;",
+        ] {
+            assert!(words.contains(expected), "{features}: {expected}\n{text}");
+        }
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let reference = ready(&mut pool, &host, "authored::example:authored/router@1.0.0");
+        let mut route = |method: &'static str, arguments: Value| {
+            counting_call(&mut pool, &host, &reference, "alice", method, arguments)
+        };
+        assert_eq!(
+            route(
+                "route",
+                json!([{"path": "secure", "type": "http", "seen": 2}])
+            ),
+            json!({"tag": "ok", "val": {"path": "secure", "type": "https", "seen": 3}}),
+            "{features}"
+        );
+        assert_eq!(
+            route(
+                "route",
+                json!([{"path": "plain", "type": "http", "seen": 0}])
+            ),
+            json!({"tag": "ok", "val": {"path": "plain", "type": "http", "seen": 1}}),
+            "{features}"
+        );
+        assert_eq!(
+            route("route", json!([{"path": "", "type": "https", "seen": 0}])),
+            json!({"tag": "err", "val": {"tag": "empty"}}),
+            "{features}"
+        );
+        assert_eq!(
+            route(
+                "route",
+                json!([{"path": "much-too-long", "type": "https", "seen": 0}])
+            ),
+            json!({"tag": "err", "val": {"tag": "too-long", "val": {"length": 13}}}),
+            "{features}"
+        );
+        assert_eq!(
+            route(
+                "explain",
+                json!([{"tag": "too-long", "val": {"length": 13}}])
+            ),
+            json!("the path has 13 characters"),
+            "{features}"
+        );
+        assert_eq!(
+            route("explain", json!([{"tag": "empty"}])),
+            json!("the path is empty"),
+            "{features}"
+        );
+        assert_eq!(
+            route("fresh", json!(["new"])),
+            json!({"path": "new", "type": "http", "seen": 0}),
+            "{features}"
+        );
+        assert_eq!(
+            route("route", json!([{"path": "old", "type": "http", "seen": 3}])),
+            json!({"tag": "err", "val": {"tag": "stale", "val": {"seen": 3}}}),
+            "{features}"
+        );
+        reference.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("authored");
 }
 
 /// A native Orb contributing to the series hook `hook` of the Orb `provider`, at priority 0: it
@@ -2008,24 +2142,35 @@ fn a_renamed_facade_serves_the_copies_both_ways() {
 
 /// The hooks the gatehouse declares, its desk, and the Orb it is installed as.
 const VISITS: &str = "example:gatehouse/visits@1.0.0";
+const SPOTS: &str = "example:gatehouse/spots@1.0.0";
+const DOORS: &str = "example:gatehouse/doors@1.0.0";
 const ROOMS: &str = "example:gatehouse/rooms@1.0.0";
 const GUARD: &str = "example:admission/guard@1.0.0";
 const DESK: &str = "gatehouse::example:gatehouse/desk@1.0.0";
 
 /// A native Orb contributing twice to each hook of the gatehouse, at the priorities -1 and 1:
-/// both see each visit, which they note in `seen`; the first answers a room above the ground floor
+/// both see each visit and each spot, which they note in `seen`; the first answers a room above the ground floor
 /// only and the second any floor; the first adds one to an admission and the second blocks one
 /// above ten.
 fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> Orb {
     let signature = |hook: &str| contract.function_signature(hook, "apply", true).unwrap();
     let visits = tembra::Hook::<Value, ()>::series(VISITS).signature(signature(VISITS));
+    let spots = tembra::Hook::<Value, ()>::series(SPOTS).signature(signature(SPOTS));
+    let doors = tembra::Hook::<Value, ()>::series(DOORS).signature(signature(DOORS));
     let rooms = tembra::Hook::<u32, Option<u32>>::bail(ROOMS).signature(signature(ROOMS));
     let guard = tembra::Hook::<Value, Value>::waterfall(GUARD).signature(signature(GUARD));
     let mut watch = Orb::new("watch", 1).requires(tembra::core::Requirement {
         orb: "gatehouse".into(),
         api_version: 1,
         methods: Default::default(),
-        hooks: [VISITS.into(), ROOMS.into(), GUARD.into()].into(),
+        hooks: [
+            VISITS.into(),
+            SPOTS.into(),
+            DOORS.into(),
+            ROOMS.into(),
+            GUARD.into(),
+        ]
+        .into(),
         signatures: Default::default(),
         hook_signatures: Default::default(),
     });
@@ -2033,6 +2178,20 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
         let seen = seen.clone();
         watch = watch.contribute("gatehouse", &visits, priority, move |_, visit: Value| {
             seen.borrow_mut().push((priority, visit));
+            async { Ok(()) }
+        });
+    }
+    for priority in [-1, 1] {
+        let seen = seen.clone();
+        watch = watch.contribute("gatehouse", &spots, priority, move |_, spot: Value| {
+            seen.borrow_mut().push((priority, spot));
+            async { Ok(()) }
+        });
+    }
+    for priority in [-1, 1] {
+        let seen = seen.clone();
+        watch = watch.contribute("gatehouse", &doors, priority, move |_, door: Value| {
+            seen.borrow_mut().push((priority, door));
             async { Ok(()) }
         });
     }
@@ -2053,18 +2212,33 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
         })
 }
 
-/// Hook declarations of each composition, in a component build, std and freestanding: the module
-/// `gatehouse` of the `hooks` feature declares a series and a bail from their input, and the
-/// waterfall of a consumed package by its identity, which the component's roles name with their
-/// compositions. Native contributions answer them in plan order: every contribution to the series
-/// sees each visit, the first answer of the bail gives the room, and each contribution to the
-/// waterfall changes the admission in turn. Without contributions, the series ends, the bail
-/// answers nothing and the waterfall hands its input back. Natively, the module compiles, and its
-/// `orb()` refuses the declarations, which only a component serves.
+/// Hook declarations of each composition, in a component build, std and freestanding, on the
+/// compiled and on the interpreted engine: the module `gatehouse` of the `hooks` feature declares
+/// a series whose input holds a newtype, a series whose input is a newtype holding a record of the
+/// module, a series in a module of no imports whose input is a newtype of a `String` declared in
+/// another, and a bail from their input, and the waterfall of a consumed package by its identity,
+/// which the component's roles name with their compositions. Native contributions answer them in
+/// plan order: every contribution to a series sees each visit, spot and door, a newtype as its
+/// field, the first answer of the bail gives the room, and each contribution to the waterfall
+/// changes the admission in turn. Without contributions, the series end, the bail answers nothing
+/// and the waterfall hands its input back. Natively, the module compiles, and its `orb()` refuses
+/// the declarations, which only a component serves.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
 fn hooks_a_component_declares_compose_their_contributions() {
-    let engine = Engine::new(Limits::default()).unwrap();
+    for engine in [
+        Engine::new(Limits::default()).unwrap(),
+        Engine::interpreted(Limits::default()).unwrap(),
+    ] {
+        compose_the_declared_hooks(&engine);
+        assert_eq!(engine.instances(), 0);
+    }
+    module_natively("hooks");
+}
+
+/// Load the gatehouse into `engine`, std and freestanding, with and without contributions, and
+/// run each of its hooks (`hooks_a_component_declares_compose_their_contributions`).
+fn compose_the_declared_hooks(engine: &Engine) {
     for features in ["hooks", "hooks,no-std"] {
         let component = module_component(features);
         let (module, artifact) = module_artifact(&component, "gatehouse");
@@ -2076,7 +2250,9 @@ fn hooks_a_component_declares_compose_their_contributions() {
                     GUARD.to_owned(),
                     tembra_contracts::HookComposition::Waterfall
                 ),
+                (DOORS.to_owned(), tembra_contracts::HookComposition::Series),
                 (ROOMS.to_owned(), tembra_contracts::HookComposition::Bail),
+                (SPOTS.to_owned(), tembra_contracts::HookComposition::Series),
                 (VISITS.to_owned(), tembra_contracts::HookComposition::Series),
             ]),
             "{features}"
@@ -2095,13 +2271,24 @@ fn hooks_a_component_declares_compose_their_contributions() {
                 counting_call(&mut pool, &host, &desk, "alice", method, arguments)
             };
             assert_eq!(call("visit", json!(["ada", 9])), Value::Null, "{features}");
+            assert_eq!(call("go", json!([3, "east"])), Value::Null, "{features}");
+            assert_eq!(call("knock", json!(["east"])), Value::Null, "{features}");
             let rooms = [0, 3].map(|floor| call("room", json!([floor])));
             let admitted = [5, 10].map(|value| call("admit", json!([value])));
             let visit = json!({"who": "ada", "hour": 9});
+            let spot = json!({"floor": 3, "door": "east"});
+            let door = json!("east");
             if contributed {
                 assert_eq!(
                     *seen.borrow(),
-                    [(-1, visit.clone()), (1, visit)],
+                    [
+                        (-1, visit.clone()),
+                        (1, visit),
+                        (-1, spot.clone()),
+                        (1, spot),
+                        (-1, door.clone()),
+                        (1, door)
+                    ],
                     "{features}"
                 );
                 assert_eq!(rooms, [json!(0), json!(300)], "{features}");
@@ -2124,8 +2311,6 @@ fn hooks_a_component_declares_compose_their_contributions() {
             assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
         }
     }
-    assert_eq!(engine.instances(), 0);
-    module_natively("hooks");
 }
 
 /// A module that contributes to a hook builds whatever the runtime's features: as a component, std

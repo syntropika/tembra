@@ -69,6 +69,28 @@ pub(crate) fn world(
     Ok((prepared, lowering.ids))
 }
 
+/// Check one WIT type of `resolve` as the runtime checks each type of a signature before it
+/// installs an Orb ([`PreparedContract::check_value_profile`], and through the resource profile
+/// `cargo tembra build` checks): an option of an option, a map, a list of a fixed length and what
+/// is no data are refused. The `#[tembra::orb]` macro asks it of a consumed type it names, so the
+/// error comes at `cargo check`, from the same rule.
+pub fn check_value_type(resolve: &Resolve, ty: Type) -> Result<(), Error> {
+    let mut lowering = Lowering {
+        resolve,
+        types: Vec::new(),
+        ids: HashMap::new(),
+    };
+    let ty = lowering.ty(ty, 0)?;
+    let prepared = PreparedContract::new(Model {
+        world: "value".into(),
+        package: None,
+        types: lowering.types,
+        imports: Vec::new(),
+        exports: Vec::new(),
+    })?;
+    prepared.supported(ty, 0)
+}
+
 impl Lowering<'_> {
     /// Lower an interface's functions and record whether it declares resources.
     fn interface(&mut self, id: InterfaceId, explicit: bool) -> Result<Interface, Error> {

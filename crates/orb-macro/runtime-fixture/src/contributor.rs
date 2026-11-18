@@ -12,8 +12,8 @@
 pub mod contributor {
     /// Raise each admitted value by one.
     #[hook("example:admission/guard@1.0.0")]
-    pub fn raise(input: guard::Admission) -> guard::Admission {
-        guard::Admission {
+    pub fn raise(input: guard::Admission) -> guard::Verdict {
+        guard::Verdict {
             value: input.value + 1,
             blocked: input.blocked,
         }

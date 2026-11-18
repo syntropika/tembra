@@ -1,0 +1,28 @@
+error[E0603]: module `c` is private
+  --> tests/ui/wit_resource_hidden_from_its_service.rs:23:33
+   |
+23 |             pub fn lend() -> b::c::Pen {
+   |                                 ^  --- struct `Pen` is not publicly re-exported
+   |                                 |
+   |                                 private module
+   |
+note: the module `c` is defined here
+  --> tests/ui/wit_resource_hidden_from_its_service.rs:5:17
+   |
+ 5 |             mod c {
+   |                 ^
+
+error[E0603]: module `c` is private
+ --> tests/ui/wit_resource_hidden_from_its_service.rs:5:17
+  |
+5 |             mod c {
+  |                 ^ private module
+6 |                 #[wit_resource(service = Walker)]
+7 |                 pub struct Pen {
+  |                            --- struct `Pen` is not publicly re-exported
+  |
+note: the module `c` is defined here
+ --> tests/ui/wit_resource_hidden_from_its_service.rs:5:17
+  |
+5 |             mod c {
+  |                 ^

@@ -4,7 +4,7 @@ use crate::resource_params::{self, Derived};
 use crate::{
     Composition, Declared, Function, Handles, Payload, Service, Shape, ShapeKind, WitResource,
 };
-use heck::{ToKebabCase, ToUpperCamelCase};
+use heck::ToKebabCase;
 use proc_macro2::Span;
 use std::{
     cell::OnceCell,
@@ -263,9 +263,7 @@ struct Interface<'a> {
 /// interface defines; then the view of each interface imported by key. Then a world using the
 /// kernel's interfaces for its states, resources and context, importing every consumed interface
 /// and every view, importing and exporting every hook, consumed or derived, and exporting every
-/// service interface, derived or implemented. Returns the text and, by interface name, the WIT
-/// names of the types each interface `use`s from the others, which its bindings' module declares
-/// as aliases beside the types it defines.
+/// service interface, derived or implemented.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
@@ -274,7 +272,7 @@ pub(crate) fn render<'a>(
     imports: &[String],
     views: &[crate::keyed::View],
     kernel: Kernel,
-) -> syn::Result<(String, BTreeMap<String, BTreeSet<String>>)> {
+) -> syn::Result<String> {
     let Items {
         shapes,
         placement,
@@ -453,7 +451,14 @@ pub(crate) fn render<'a>(
             .iter()
             .find(|hook| &hook.ident == interface.ident)
         {
-            let (_, spelling) = hook.input.as_ref().expect("a derived hook");
+            // An input naming a newtype is spelled with the newtype as its field's type, which
+            // the newtypes of the module, known after the hook was read, give.
+            let (ty, spelling) = hook.input.as_ref().expect("a derived hook");
+            let spelling = if modules.holds_newtype(ty, hook.scope) {
+                &modules.spelled(ty, hook.scope)?
+            } else {
+                spelling
+            };
             let result = match hook.composition {
                 Composition::Series => String::new(),
                 Composition::Waterfall => format!(" -> {spelling}"),
@@ -518,18 +523,7 @@ pub(crate) fn render<'a>(
         }
     }
     wit.push_str("}\n");
-    let used = interfaces
-        .iter()
-        .map(|interface| {
-            let names = interface
-                .uses
-                .iter()
-                .flat_map(|(_, names)| names.iter().cloned())
-                .collect();
-            (interface.name.clone(), names)
-        })
-        .collect();
-    Ok((wit, used))
+    Ok(wit)
 }
 
 /// One function of an interface or a resource, with its `///` lines, at the given indentation.
@@ -663,19 +657,13 @@ pub(crate) type Copies = BTreeMap<PackageName, Vec<PathBuf>>;
 
 /// The bundled packages the consumed packages, read from the consumed directory, hold copies of,
 /// as a contract `cargo tembra build` wrote holds them in its `deps/`: the inline WIT leaves those
-/// out, since the bindings would read them twice. Every consumed package named as a bundled one, a
-/// WASI package Tembra serves or the kernel's, is checked as `Contract::from_dir` checks it,
-/// whether the Orb uses it or not. One decoded from an encoded file of `deps/` has no source to
-/// compare: it is a copy, with the files it was decoded from, once `from_dir`'s merge of the
-/// encoded files accepts it (`merged`), but for the kernel's package where the macro brings it
-/// itself, for a state, a resource or the context, `kernel`: a copy of it decoded so is then an
-/// error asking to remove it. Any other must be read from a file of `deps/` itself: a copy in a
-/// directory of `deps/` or in the directory itself, even line for line, is `from_dir`'s error
-/// naming that directory. And that file must be the bundled file line for line, whatever its line
-/// endings (`tembra_contracts::bundled`): a copy nested in a file of another package, the one its
-/// `package` line declares as wit-parser reads it, even line for line, is `from_dir`'s error
-/// naming that file, and a file of the package that differs, if only in its comments, is an error
-/// naming the file, the package and what it is.
+/// out, since the bindings would read them twice. Whether a copy of a bundled package, a WASI
+/// package Tembra serves or the kernel's, is one is tembra-contracts' to say, once the expansion
+/// resolves the derived WIT with the directory (`resolved`): only a file of `deps/` that is the
+/// bundled file line for line, or an encoded file of `deps/` that agrees with the bundled
+/// package. A copy decoded so comes with the files it was decoded from, which hold only the parts of the package they use; but for the kernel's package
+/// where the macro brings it itself, for a state, a resource or the context, `kernel`: a copy of
+/// it decoded so is then an error asking to remove it.
 pub(crate) fn bundled_copies(parsed: &Parsed, kernel: bool) -> syn::Result<Copies> {
     let Some(dir) = parsed.dir() else {
         return Ok(Copies::new());
@@ -689,94 +677,57 @@ pub(crate) fn bundled_copies(parsed: &Parsed, kernel: bool) -> syn::Result<Copie
         .chain([GUEST])
         .filter_map(|source| source.lines().find_map(declared))
         .collect();
-    let deps = dir.path().join("deps");
-    // Each consumed package named as a bundled one, with a file it was read from: none when it was
-    // decoded from an encoded file.
-    let named: Vec<(&PackageName, Option<&Path>)> = consumed
+    // Each consumed package named as a bundled one, and whether it was read from a file: not when
+    // it was decoded from an encoded file.
+    let named: Vec<(&PackageName, bool)> = consumed
         .package_names
         .iter()
         .filter(|(name, _)| bundled.contains(&name.to_string().as_str()))
         .map(|(name, &package)| {
-            let file = sources
+            let read = sources
                 .package_paths(package)
-                .and_then(|mut files| files.next());
-            (name, file)
+                .and_then(|mut files| files.next())
+                .is_some();
+            (name, read)
         })
         .collect();
-    let decoded = if named.iter().any(|(_, file)| file.is_none()) {
-        merged(parsed, &deps)?
+    let decoded = if named.iter().any(|(_, read)| !read) {
+        decoded(&dir.path().join("deps"))?
     } else {
         BTreeMap::new()
     };
-    let duplicate = |name: &PackageName, place: &Path| {
-        error(format!(
-            "WIT package {name} in {} is already provided by the standard contracts bundled with Tembra; remove the duplicate",
-            place.display()
-        ))
-    };
     let mut copies = Copies::new();
-    for (name, file) in named {
-        let Some(file) = file else {
-            let files = decoded.get(name).cloned().unwrap_or_default();
-            if kernel && name.namespace != "wasi" {
-                let files: Vec<String> = files
-                    .iter()
-                    .map(|file| file.display().to_string())
-                    .collect();
-                return Err(error(format!(
-                    "{}: this copy of {name}, the kernel's package, is encoded; remove it, since the macro brings the kernel's package",
-                    files.join(", ")
-                )));
-            }
-            copies.insert(name.clone(), files);
-            continue;
-        };
-        if let Some(place) = file.parent().filter(|place| *place != deps.as_path()) {
-            return Err(duplicate(name, place));
-        }
-        let source = std::fs::read_to_string(file).ok();
-        if source.as_deref().is_some_and(tembra_contracts::bundled) {
-            copies.insert(name.clone(), Vec::new());
-            continue;
-        }
-        // The file's own package, as wit-parser reads the line declaring it, whatever else that
-        // line holds, a comment included.
-        let own = source
-            .as_deref()
-            .and_then(|source| UnresolvedPackageGroup::parse(file, source).ok())
-            .map(|parse| parse.main.name);
-        if own.is_some_and(|own| own != *name) {
-            return Err(duplicate(name, file));
-        }
-        let what = if name.namespace == "wasi" {
-            "a WASI package Tembra serves"
+    for (name, read) in named {
+        let files = if read {
+            Vec::new()
         } else {
-            "the kernel's package"
+            decoded.get(name).cloned().unwrap_or_default()
         };
-        return Err(error(format!(
-            "{}: this copy of {name}, {what}, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version",
-            file.display()
-        )));
+        if !read && kernel && name.namespace != "wasi" {
+            let files: Vec<String> = files
+                .iter()
+                .map(|file| file.display().to_string())
+                .collect();
+            return Err(error(format!(
+                "{}: this copy of {name}, the kernel's package, is encoded; remove it, since the macro brings the kernel's package",
+                files.join(", ")
+            )));
+        }
+        copies.insert(name.clone(), files);
     }
     Ok(copies)
 }
 
-/// Check the encoded WIT packages of `deps/` as `Contract::from_dir` checks them: each `.wat` file,
-/// and each `.wit` or `.wasm` file that starts with the wasm magic `\0asm`, is merged, in the order
-/// of the file names, into the bundled packages. The merge refuses a package that disagrees with
-/// the bundled one of its name, and the error is `from_dir`'s, naming the file. Each package the
-/// files hold comes with the files that hold it.
-fn merged(parsed: &Parsed, deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec<PathBuf>>> {
+/// The packages the encoded files of `deps/` hold, each with the files that hold it: each `.wat`
+/// file, and each `.wit` or `.wasm` file that starts with the wasm magic `\0asm`, decoded apart.
+/// tembra-contracts checks them against the bundled packages.
+fn decoded(deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec<PathBuf>>> {
     let failed = |path: &Path, cause: &dyn std::fmt::Display| {
         error(format!(
             "failed to parse WIT package {}: {cause:#}",
             path.display()
         ))
     };
-    let mut standard = parsed.bundled()?.0.clone();
-    standard
-        .push_group(parsed.guest()?.clone())
-        .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
     let mut files = std::fs::read_dir(deps)
         .and_then(|entries| {
             entries
@@ -793,8 +744,6 @@ fn merged(parsed: &Parsed, deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec
         }
         let bytes = std::fs::read(&file).map_err(|cause| failed(&file, &cause))?;
         if extension == Some("wat") || bytes.starts_with(b"\0asm") {
-            // `Resolve::push_file` decodes the file and merges what it holds; decoded apart first,
-            // its packages are known.
             let mut packages = Resolve::default();
             packages
                 .push_file(&file)
@@ -802,9 +751,6 @@ fn merged(parsed: &Parsed, deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec
             for name in packages.package_names.keys() {
                 decoded.entry(name.clone()).or_default().push(file.clone());
             }
-            standard
-                .merge(packages)
-                .map_err(|cause| failed(&file, &cause))?;
         }
     }
     Ok(decoded)
@@ -851,16 +797,10 @@ pub(crate) fn absolute(dir: &str) -> syn::Result<PathBuf> {
     Ok(PathBuf::from(manifest).join(dir))
 }
 
-/// The callback of one hook, read from the consumed packages: its name, which compositions its
-/// shape admits, and how the bindings spell its input and result.
+/// The callback of one hook, read from the consumed packages: its name, and how the bindings spell
+/// its input and result. Which compositions its shape admits is tembra-contracts' `check_roles`.
 pub(crate) struct Callback {
     pub name: String,
-    /// The callback returns nothing.
-    pub series: bool,
-    /// The callback returns its input type.
-    pub waterfall: bool,
-    /// The callback returns an option.
-    pub bail: bool,
     pub input: Spelled,
     pub result: Option<Spelled>,
     /// How the import takes the input, as the bindings bind it: `run` lends it so.
@@ -1045,15 +985,6 @@ impl Parsed {
             })
             .as_ref()
             .map_err(Clone::clone)
-    }
-
-    /// The consumed packages, owned, for a reader that adds to them: a copy of the directory's,
-    /// parsed now if nothing asked for them yet, or none without a directory.
-    pub(crate) fn consumed(&self) -> syn::Result<Resolve> {
-        match &self.dir {
-            Some(dir) => dir.packages().cloned(),
-            None => Ok(Resolve::default()),
-        }
     }
 }
 
@@ -1421,14 +1352,16 @@ pub(crate) enum Kind {
         /// What the type holds anywhere that is no data, if anything: a resource handle, a stream,
         /// a future or an error context.
         carries: Option<&'static str>,
-        /// What the type holds anywhere that the runtime refuses in a signature though it is data,
-        /// if anything: an option of an option, a map or a list of a fixed length.
-        unsupported: Option<&'static str>,
-        /// Whether the type is an option, through aliases, which an `Option` around it nests.
-        option: bool,
+        /// What the runtime refuses of the type in a signature, if anything, as `unsupported`
+        /// says it.
+        unsupported: Option<String>,
         /// What the type holds anywhere that the bindings give no `serde` implementation, if
         /// anything: a flags, which they generate without the derives a state asks for.
         unwritable: Option<&'static str>,
+        /// The records, variants and enums the type is or holds anywhere, of its package or of
+        /// another, by full name, `ns:name/interface@version/type`: those whose bindings a state
+        /// holding the type needs serde's derives on.
+        serialized: Vec<String>,
     },
 }
 
@@ -1530,8 +1463,8 @@ pub(crate) fn defined<'a>(
                         },
                         carries: crate::keyed::no_data(resolve, ty),
                         unsupported: unsupported(resolve, ty),
-                        option: optional(resolve, ty),
                         unwritable: unwritable(resolve, ty),
+                        serialized: serialized(resolve, ty),
                     },
                 };
                 let definition = Definition {
@@ -1676,6 +1609,28 @@ pub(crate) fn anywhere<T>(
     walk(resolve, ty, &test, &mut BTreeSet::new())
 }
 
+/// The records, variants and enums a WIT type is or holds anywhere, through aliases, each by the
+/// full name of its definition, `ns:name/interface@version/type`, as the bindings' option
+/// `additional_type_attributes` selects it.
+fn serialized(resolve: &Resolve, ty: wit_parser::Type) -> Vec<String> {
+    let found = std::cell::RefCell::new(BTreeSet::new());
+    anywhere(resolve, ty, |ty| {
+        if let wit_parser::Type::Id(id) = ty
+            && let definition = &resolve.types[id]
+            && matches!(
+                definition.kind,
+                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
+            )
+            && let wit_parser::TypeOwner::Interface(owner) = definition.owner
+            && let (Some(identity), Some(name)) = (resolve.id_of(owner), &definition.name)
+        {
+            found.borrow_mut().insert(format!("{identity}/{name}"));
+        }
+        None::<()>
+    });
+    found.into_inner().into_iter().collect()
+}
+
 /// What a WIT type of a consumed package holds anywhere that its bindings give no `serde`
 /// implementation, if anything, as `unwritable_itself` finds it in each type.
 fn unwritable(resolve: &Resolve, ty: wit_parser::Type) -> Option<&'static str> {
@@ -1698,26 +1653,13 @@ fn unwritable_itself(resolve: &Resolve, ty: wit_parser::Type) -> Option<&'static
     }
 }
 
-/// What a WIT type holds anywhere that the runtime refuses in a signature though it is data, if
-/// anything, as tembra-contracts' `supported` refuses it: an option of an option, which only a
-/// tagged codec would tell from a missing value, and a map or a list of a fixed length, which need
-/// a value adapter of their own. What is no data, which `supported` refuses too, is
-/// `keyed::no_data`'s to find. An option a Rust type spells around an option is `wit_type`'s,
-/// `Option<Option<T>>`, or the consumed-type check's, `Option<catalog::Opt>` for an option `opt`.
-pub(crate) fn unsupported(resolve: &Resolve, ty: wit_parser::Type) -> Option<&'static str> {
-    anywhere(resolve, ty, |ty| {
-        let wit_parser::Type::Id(id) = ty else {
-            return None;
-        };
-        match &resolve.types[id].kind {
-            TypeDefKind::Option(inner) if optional(resolve, *inner) => {
-                Some("an option of an option")
-            }
-            TypeDefKind::Map(..) => Some("a map"),
-            TypeDefKind::FixedLengthList(..) => Some("a list of a fixed length"),
-            _ => None,
-        }
-    })
+/// What the runtime refuses of a WIT type in a signature, if anything, as tembra-contracts'
+/// `check_value_type` says it: an option of an option, a map or a list of a fixed length, and what
+/// is no data, which `keyed::no_data` finds first, for errors of its own.
+pub(crate) fn unsupported(resolve: &Resolve, ty: wit_parser::Type) -> Option<String> {
+    tembra_contracts::check_value_type(resolve, ty)
+        .err()
+        .map(|error| error.0)
 }
 
 /// Where a WIT type holds owned resource handles, as the bindings name the resources: a handle
@@ -1741,337 +1683,6 @@ fn handles(resolve: &Resolve, ty: wit_parser::Type) -> Option<Handles> {
         }
         _ => None,
     }
-}
-
-/// What the bindings make of the WIT they read, for what the macro asks them to add to the types
-/// they generate.
-#[derive(Default)]
-pub(crate) struct Bindings {
-    /// The records and variants of the world's interfaces, which the bindings generate, that cannot
-    /// derive `serde`'s traits: those holding a consumed package's flags type, a resource handle, a
-    /// stream or a future, directly or through other types, which the bindings give no `serde`
-    /// implementation. They are named as the `additional_derives_ignore` option of `wit-bindgen`
-    /// compares them, by `ignored_name`.
-    pub unserializable: Vec<String>,
-    /// The records, variants and enums of the world's interfaces, which the bindings generate,
-    /// that can derive `serde`'s traits but share their name, as `ignored_name` gives it, with one
-    /// of `unserializable`, so the ignore option leaves them without the derives as well. They are
-    /// named by their full names, as in `types`, for the selectors that give the derives back.
-    pub namesakes: BTreeSet<String>,
-    /// How the bindings generate each record, variant and enum of an interface, by the type's full
-    /// name as the selectors of `additional_type_attributes` write it,
-    /// `ns:name/interface@version/type`.
-    pub types: BTreeMap<String, Generated>,
-}
-
-/// How `wit-bindgen` 0.63 generates a record, a variant or an enum, as `wit-bindgen-core` records
-/// it to choose what it derives and implements: whether the type holds a string or a list, whether
-/// it holds a resource handle, and whether a function of a world returns it as the error of its
-/// result; and, for the derives the macro carries onto the type, whether every value of it holds a
-/// resource handle, whether it holds what the bindings give no `serde` implementation, whether the
-/// bindings derive serde's traits on it, and the parts of its fields that decide a derive of the
-/// standard library.
-#[derive(Clone, Default)]
-pub(crate) struct Generated {
-    pub list: bool,
-    pub resource: bool,
-    pub error: bool,
-    /// No value of the type is without a resource handle: a record with a field that is a handle,
-    /// a tuple holding one or such a type. A handle in an option or a list may be absent, and a
-    /// variant may take a case without one; `Default`, which makes a value from nothing, cannot.
-    pub needs_handle: bool,
-    /// The type holds, anywhere, a value the bindings give no `serde` implementation, as
-    /// `holds_unserializable` tells: besides a resource handle, a type of the module can hold a
-    /// consumed package's flags type, alone or in a consumed type.
-    pub unserializable: bool,
-    /// In an Orb without a state, where the bindings derive serde's traits on no type, the type
-    /// holds, anywhere, a type of a consumed package, which then has no `serde` implementation
-    /// either, or a resource handle; with a state, unset.
-    pub consumed: bool,
-    /// The bindings derive serde's traits on the type: in an Orb with a state, unless the ignore
-    /// option leaves the type out for what it holds; a type left out for its name alone, one of
-    /// `Bindings::namesakes`, gets them back through a selector and counts as serialized.
-    pub serialized: bool,
-    /// The parts of the type's fields, or of its cases' payloads, that decide what the generated
-    /// type can derive of the standard library's traits.
-    pub parts: Vec<Part>,
-}
-
-/// A part of a record's fields or a variant's payloads that decides what the generated type can
-/// derive, reached through the options, lists, results, tuples and aliases around it.
-#[derive(Clone)]
-pub(crate) struct Part {
-    pub held: Held,
-    /// The WIT name of the field or case holding the part.
-    pub member: String,
-    /// `Default` makes a value without the part: it sits in an option or a list, which `Default`
-    /// leaves empty, or in a case of a variant, whose `Default` is its `#[default]` case.
-    pub absent_in_default: bool,
-}
-
-/// What a part of a type is, as far as it decides a derive of the standard library: a resource
-/// handle implements none of those traits, a string or a list is not `Copy`, an `f32` or an `f64`
-/// implements no `Eq`, `Ord` or `Hash`, a result no `Default`, and a named type what its bindings,
-/// or the macro, give it; the other primitives implement every one of those traits.
-#[derive(Clone)]
-pub(crate) enum Held {
-    /// An owned resource handle.
-    Handle,
-    /// A string or a list.
-    List,
-    /// An `f32` or an `f64`, by its name.
-    Float(&'static str),
-    /// A `result`.
-    Result,
-    /// A record, a variant, an enum or a flags of the Orb's own package, by its WIT name: its
-    /// generated type, or the author's flags struct, implements what the macro knows of it.
-    Own(String),
-    /// A record, a variant, an enum or a flags of a consumed package: the name the bindings give it,
-    /// its kind with an article, for the errors, the interface defining it, and whether it holds a
-    /// string or a list, which no impl makes `Copy`. What else its bindings do not give it,
-    /// `PartialEq` for a record, `Default` for each, the author may implement for it by hand,
-    /// anywhere in the crate; one holding a resource handle is refused before any derive is read.
-    Consumed {
-        name: String,
-        kind: &'static str,
-        interface: String,
-        list: bool,
-    },
-}
-
-/// Read the WIT the bindings read, for what they make of its types, where a state, `serde`, makes
-/// them derive serde's traits on the types that can carry them: the consumed packages `parsed`
-/// holds, which makes this their last reader, the bundled packages the inline WIT nests, the
-/// kernel's when `guest` and the WASI packages `wasi` (`wasi::packages`), each as `parsed` holds
-/// it parsed, and the module's own WIT, `wit`, which the inline WIT starts with. A WIT the bindings
-/// would refuse yields nothing, and the bindings report it.
-pub(crate) fn bindings(
-    parsed: &Parsed,
-    wit: &str,
-    guest: bool,
-    wasi: &[PackageId],
-    serde: bool,
-) -> Bindings {
-    let mut nested = Vec::new();
-    if guest {
-        let Ok(parse) = parsed.guest() else {
-            return Bindings::default();
-        };
-        nested.push(parse.clone());
-    }
-    if !wasi.is_empty() {
-        let Ok((_, sources)) = parsed.bundled() else {
-            return Bindings::default();
-        };
-        nested.extend(
-            sources
-                .iter()
-                .filter(|(id, ..)| wasi.contains(id))
-                .map(|(.., parse)| parse.clone()),
-        );
-    }
-    let Ok(mut resolve) = parsed.consumed() else {
-        return Bindings::default();
-    };
-    // The nested packages resolve after the consumed ones, as the bindings resolve the inline WIT,
-    // each after the packages it builds on.
-    for parse in nested {
-        if resolve.push_group(parse).is_err() {
-            return Bindings::default();
-        }
-    }
-    #[cfg(test)]
-    let before = resolve.packages.len();
-    let Ok(own) = resolve.push_str("orb.wit", wit) else {
-        return Bindings::default();
-    };
-    // The text parsed here holds no bundled WASI package, which the expansion parsed once and the
-    // loop above pushed parsed; a test build counts it as a second parse of them if it does.
-    #[cfg(test)]
-    if resolve
-        .packages
-        .iter()
-        .skip(before)
-        .any(|(_, package)| package.name.namespace == "wasi")
-    {
-        crate::wasi::BUNDLED_PARSES.set(crate::wasi::BUNDLED_PARSES.get() + 1);
-    }
-    // The bindings generate the types of every interface the world imports or exports, and the
-    // derives reach those alone.
-    let generated: BTreeSet<wit_parser::InterfaceId> = resolve.packages[own]
-        .worlds
-        .values()
-        .flat_map(|world| {
-            let world = &resolve.worlds[*world];
-            world.imports.values().chain(world.exports.values())
-        })
-        .filter_map(|item| match item {
-            wit_parser::WorldItem::Interface { id, .. } => Some(*id),
-            _ => None,
-        })
-        .collect();
-    let in_world = |owner: wit_parser::TypeOwner| matches!(owner, wit_parser::TypeOwner::Interface(owner) if generated.contains(&owner));
-    let unserializable: BTreeSet<String> = resolve
-        .types
-        .iter()
-        .filter(|(_, definition)| {
-            matches!(
-                definition.kind,
-                TypeDefKind::Record(_) | TypeDefKind::Variant(_)
-            ) && in_world(definition.owner)
-        })
-        .filter(|(id, _)| holds_unserializable(&resolve, wit_parser::Type::Id(*id), own, false))
-        .filter_map(|(_, definition)| definition.name.as_deref())
-        .map(ignored_name)
-        .collect();
-    // Every record, variant and enum an interface defines, by its full name. `holds` reports owned
-    // handles, streams and futures where the bindings count any resource, but a type of the module
-    // holds no borrowed handle, bare resource or error context, which no Rust type the macro
-    // translates spells, so for such a type the two agree.
-    let full_name = |id: wit_parser::TypeId| {
-        let definition = &resolve.types[id];
-        let wit_parser::TypeOwner::Interface(owner) = definition.owner else {
-            return None;
-        };
-        Some(format!(
-            "{}/{}",
-            resolve.id_of(owner)?,
-            definition.name.as_ref()?
-        ))
-    };
-    // In an Orb with a state, the ignore option also leaves out of the derives the types that only
-    // share a name with one in `unserializable`.
-    let namesakes: BTreeSet<String> = resolve
-        .types
-        .iter()
-        .filter(|(_, definition)| {
-            serde
-                && matches!(
-                    definition.kind,
-                    TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
-                )
-                && in_world(definition.owner)
-                && definition
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| unserializable.contains(&ignored_name(name)))
-        })
-        .filter(|(id, _)| !holds_unserializable(&resolve, wit_parser::Type::Id(*id), own, false))
-        .filter_map(|(id, _)| full_name(id))
-        .collect();
-    let mut types: BTreeMap<String, Generated> = resolve
-        .types
-        .iter()
-        .filter(|(_, definition)| {
-            matches!(
-                definition.kind,
-                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
-            )
-        })
-        .filter_map(|(id, definition)| {
-            let name = full_name(id)?;
-            let (list, resource) = holds(&resolve, wit_parser::Type::Id(id));
-            // The ignore option leaves the type out of serde's derives by its `ignored_name`, where
-            // a namesake takes them back through a selector.
-            let ignored = definition
-                .name
-                .as_deref()
-                .is_some_and(|name| unserializable.contains(&ignored_name(name)));
-            let serialized = serde && (namesakes.contains(&name) || !ignored);
-            let unserializable = |stateless: bool| {
-                holds_unserializable(&resolve, wit_parser::Type::Id(id), own, stateless)
-            };
-            let generated = Generated {
-                list,
-                resource,
-                error: false,
-                needs_handle: needs_handle(&resolve, wit_parser::Type::Id(id)),
-                unserializable: unserializable(false),
-                consumed: !serde && unserializable(true),
-                serialized,
-                parts: parts(&resolve, id, own),
-            };
-            Some((name, generated))
-        })
-        .collect();
-    // The bindings mark the error of the result of every function of every world, through the
-    // aliases `use` leaves, and implement `Display` and `Error` for it.
-    for (_, world) in resolve.worlds.iter() {
-        for item in world.imports.values().chain(world.exports.values()) {
-            let functions: Vec<&wit_parser::Function> = match item {
-                wit_parser::WorldItem::Function(function) => vec![function],
-                wit_parser::WorldItem::Interface { id, .. } => {
-                    resolve.interfaces[*id].functions.values().collect()
-                }
-                wit_parser::WorldItem::Type { .. } => Vec::new(),
-            };
-            for function in functions {
-                let Some(wit_parser::Type::Id(result)) = function.result else {
-                    continue;
-                };
-                let TypeDefKind::Result(result) = &resolve.types[result].kind else {
-                    continue;
-                };
-                let Some(wit_parser::Type::Id(mut error)) = result.err else {
-                    continue;
-                };
-                while let TypeDefKind::Type(wit_parser::Type::Id(aliased)) =
-                    resolve.types[error].kind
-                {
-                    error = aliased;
-                }
-                if let Some(generated) = full_name(error).and_then(|name| types.get_mut(&name)) {
-                    generated.error = true;
-                }
-            }
-        }
-    }
-    Bindings {
-        unserializable: unserializable.into_iter().collect(),
-        namesakes,
-        types,
-    }
-}
-
-/// The name by which the `additional_derives_ignore` option of `wit-bindgen` compares a type of
-/// the given WIT name: the kebab-case form of the Rust name the bindings give it.
-pub(crate) fn ignored_name(name: &str) -> String {
-    name.to_upper_camel_case().to_kebab_case()
-}
-
-/// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: what
-/// is no data, as `keyed::no_data_itself` finds it, a resource handle, a stream, a future or an
-/// error context, and what `unwritable_itself` finds, an array longer than `serde`'s or a flags
-/// type, but a flags type of `own`, the Orb's package, whose flags types are the author's structs;
-/// and, `stateless`, in an Orb without a state, where the bindings derive serde's traits on no
-/// type, a record, a variant or an enum of another package too.
-fn holds_unserializable(
-    resolve: &Resolve,
-    ty: wit_parser::Type,
-    own: wit_parser::PackageId,
-    stateless: bool,
-) -> bool {
-    let foreign = |id: wit_parser::TypeId| match resolve.types[id].owner {
-        wit_parser::TypeOwner::Interface(owner) => resolve.interfaces[owner].package != Some(own),
-        _ => true,
-    };
-    anywhere(resolve, ty, |ty| {
-        if let wit_parser::Type::Id(id) = ty {
-            match &resolve.types[id].kind {
-                TypeDefKind::Flags(_) if !foreign(id) => return None,
-                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
-                    if stateless && foreign(id) =>
-                {
-                    return Some(());
-                }
-                _ => {}
-            }
-        }
-        crate::keyed::no_data_itself(resolve, ty)
-            .or_else(|| unwritable_itself(resolve, ty))
-            .map(|_| ())
-    })
-    .is_some()
 }
 
 /// The callback of every hook: the single function of its interface in the consumed packages.
@@ -2108,11 +1719,6 @@ pub(crate) fn callbacks<'a>(
                 hook.clone(),
                 Callback {
                     name: function.name.clone(),
-                    series: function.result.is_none(),
-                    waterfall: function
-                        .result
-                        .is_some_and(|result| same_type(resolve, result, param.ty)),
-                    bail: function.result.is_some_and(|ty| optional(resolve, ty)),
                     input: spell(param.ty)?,
                     result: function.result.map(spell).transpose()?,
                     passed: passed(resolve, param.ty),
@@ -2130,52 +1736,6 @@ fn dealias(resolve: &Resolve, mut ty: wit_parser::Type) -> wit_parser::Type {
         ty = inner;
     }
     ty
-}
-
-/// Whether two WIT types are one, through aliases: a record, a variant, an enum, a flags type or
-/// a resource is itself, and a list, an option, a result, a tuple or a handle, named or not, is
-/// the same shape over the same types. The kernel holds a waterfall callback's input and result
-/// to the same rule.
-fn same_type(resolve: &Resolve, left: wit_parser::Type, right: wit_parser::Type) -> bool {
-    let (left, right) = (dealias(resolve, left), dealias(resolve, right));
-    let (wit_parser::Type::Id(left), wit_parser::Type::Id(right)) = (left, right) else {
-        return left == right;
-    };
-    if left == right {
-        return true;
-    }
-    let (left, right) = (&resolve.types[left], &resolve.types[right]);
-    let same = |left: wit_parser::Type, right: wit_parser::Type| same_type(resolve, left, right);
-    let same_side =
-        |left: Option<wit_parser::Type>, right: Option<wit_parser::Type>| match (left, right) {
-            (Some(left), Some(right)) => same(left, right),
-            (None, None) => true,
-            _ => false,
-        };
-    match (&left.kind, &right.kind) {
-        (TypeDefKind::List(left), TypeDefKind::List(right))
-        | (TypeDefKind::Option(left), TypeDefKind::Option(right)) => same(*left, *right),
-        (TypeDefKind::Result(left), TypeDefKind::Result(right)) => {
-            same_side(left.ok, right.ok) && same_side(left.err, right.err)
-        }
-        (TypeDefKind::Tuple(left), TypeDefKind::Tuple(right)) => {
-            left.types.len() == right.types.len()
-                && left
-                    .types
-                    .iter()
-                    .zip(&right.types)
-                    .all(|(left, right)| same(*left, *right))
-        }
-        (
-            TypeDefKind::Handle(wit_parser::Handle::Own(left)),
-            TypeDefKind::Handle(wit_parser::Handle::Own(right)),
-        )
-        | (
-            TypeDefKind::Handle(wit_parser::Handle::Borrow(left)),
-            TypeDefKind::Handle(wit_parser::Handle::Borrow(right)),
-        ) => same(wit_parser::Type::Id(*left), wit_parser::Type::Id(*right)),
-        _ => false,
-    }
 }
 
 /// What `wit-bindgen` records of a type to choose how an import takes it: whether the type holds a
@@ -2207,148 +1767,6 @@ fn holds(resolve: &Resolve, ty: wit_parser::Type) -> (bool, bool) {
         | TypeDefKind::Stream(_) => (false, true),
         _ => (false, false),
     }
-}
-
-/// Whether every value of a WIT type holds an owned resource handle, which no `Default` makes: a
-/// handle itself, a record or a tuple with such a part, or a variant or a result whose every case
-/// has one; an option or a list may be empty, and a variant may take another case.
-fn needs_handle(resolve: &Resolve, ty: wit_parser::Type) -> bool {
-    let wit_parser::Type::Id(id) = ty else {
-        return false;
-    };
-    let needs = |ty: wit_parser::Type| needs_handle(resolve, ty);
-    match &resolve.types[id].kind {
-        TypeDefKind::Handle(wit_parser::Handle::Own(_)) => true,
-        TypeDefKind::Record(record) => record.fields.iter().any(|field| needs(field.ty)),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().any(needs),
-        TypeDefKind::Variant(variant) => {
-            variant.cases.iter().all(|case| case.ty.is_some_and(needs))
-        }
-        TypeDefKind::Result(result) => {
-            result.ok.is_some_and(needs) && result.err.is_some_and(needs)
-        }
-        TypeDefKind::FixedLengthList(inner, length) => *length > 0 && needs(*inner),
-        TypeDefKind::Type(inner) => needs(*inner),
-        _ => false,
-    }
-}
-
-/// The parts of a record's fields or a variant's payloads that decide what the generated type can
-/// derive (`Part`), each with the field or case holding it; an enum has none.
-fn parts(resolve: &Resolve, id: wit_parser::TypeId, own: wit_parser::PackageId) -> Vec<Part> {
-    let mut parts = Vec::new();
-    match &resolve.types[id].kind {
-        TypeDefKind::Record(record) => {
-            for field in &record.fields {
-                held(resolve, field.ty, own, &field.name, false, &mut parts);
-            }
-        }
-        TypeDefKind::Variant(variant) => {
-            for case in &variant.cases {
-                if let Some(ty) = case.ty {
-                    held(resolve, ty, own, &case.name, true, &mut parts);
-                }
-            }
-        }
-        _ => {}
-    }
-    parts
-}
-
-/// The parts the member `member` of a type holds in `ty`, into `parts`: a resource handle, a
-/// string, a list or a map and what it holds, an `f32` or an `f64`, a result and what its sides
-/// hold, and a named type of the Orb's package or of a consumed one, through the options, lists,
-/// maps, tuples, fixed-length lists and aliases around them; an option, a list or a map makes what
-/// it holds `absent` in `Default`, as the member may be already.
-fn held(
-    resolve: &Resolve,
-    ty: wit_parser::Type,
-    own: wit_parser::PackageId,
-    member: &str,
-    absent: bool,
-    parts: &mut Vec<Part>,
-) {
-    let part = |held: Held, absent: bool| Part {
-        held,
-        member: member.to_owned(),
-        absent_in_default: absent,
-    };
-    let id = match ty {
-        wit_parser::Type::String => {
-            parts.push(part(Held::List, absent));
-            return;
-        }
-        wit_parser::Type::F32 => {
-            parts.push(part(Held::Float("f32"), absent));
-            return;
-        }
-        wit_parser::Type::F64 => {
-            parts.push(part(Held::Float("f64"), absent));
-            return;
-        }
-        wit_parser::Type::Id(id) => id,
-        _ => return,
-    };
-    let definition = &resolve.types[id];
-    let kind = match &definition.kind {
-        TypeDefKind::Record(_) => "a record",
-        TypeDefKind::Variant(_) => "a variant",
-        TypeDefKind::Enum(_) => "an enum",
-        TypeDefKind::Flags(_) => "a flags",
-        TypeDefKind::Handle(_) => {
-            parts.push(part(Held::Handle, absent));
-            return;
-        }
-        TypeDefKind::Type(inner) | TypeDefKind::FixedLengthList(inner, _) => {
-            return held(resolve, *inner, own, member, absent, parts);
-        }
-        TypeDefKind::Option(inner) => return held(resolve, *inner, own, member, true, parts),
-        TypeDefKind::List(inner) => {
-            parts.push(part(Held::List, absent));
-            return held(resolve, *inner, own, member, true, parts);
-        }
-        TypeDefKind::Map(key, value) => {
-            parts.push(part(Held::List, absent));
-            held(resolve, *key, own, member, true, parts);
-            return held(resolve, *value, own, member, true, parts);
-        }
-        TypeDefKind::Tuple(tuple) => {
-            for ty in &tuple.types {
-                held(resolve, *ty, own, member, absent, parts);
-            }
-            return;
-        }
-        TypeDefKind::Result(result) => {
-            parts.push(part(Held::Result, absent));
-            for ty in result.ok.into_iter().chain(result.err) {
-                held(resolve, ty, own, member, absent, parts);
-            }
-            return;
-        }
-        TypeDefKind::Resource
-        | TypeDefKind::Future(_)
-        | TypeDefKind::Stream(_)
-        | TypeDefKind::Unknown => return,
-    };
-    let (Some(name), wit_parser::TypeOwner::Interface(owner)) =
-        (definition.name.as_deref(), definition.owner)
-    else {
-        return;
-    };
-    if resolve.interfaces[owner].package == Some(own) {
-        parts.push(part(Held::Own(name.to_owned()), absent));
-        return;
-    }
-    let (list, _) = holds(resolve, ty);
-    parts.push(part(
-        Held::Consumed {
-            name: crate::type_ident(name).to_string(),
-            kind,
-            interface: resolve.id_of(owner).unwrap_or_default(),
-            list,
-        },
-        absent,
-    ));
 }
 
 /// How an imported function takes a part of its parameter, as `wit-bindgen` binds it by default:
@@ -2396,20 +1814,6 @@ fn passed(resolve: &Resolve, ty: wit_parser::Type) -> Passed {
         }
         TypeDefKind::Map(..) => Passed::Named,
         _ => Passed::Owned,
-    }
-}
-
-/// Whether a WIT type is an option, through aliases.
-fn optional(resolve: &Resolve, mut ty: wit_parser::Type) -> bool {
-    loop {
-        let wit_parser::Type::Id(id) = ty else {
-            return false;
-        };
-        match &resolve.types[id].kind {
-            TypeDefKind::Option(_) => return true,
-            TypeDefKind::Type(inner) => ty = *inner,
-            _ => return false,
-        }
     }
 }
 
@@ -2527,7 +1931,6 @@ pub(crate) fn record(
         references: Vec::new(),
         kind: ShapeKind::Record(named),
         scope: 0,
-        carried: Default::default(),
         item: Item::Struct(item.clone()),
     })
 }
@@ -2574,7 +1977,7 @@ pub(crate) fn enumeration(
                 ));
                 cases.push((
                     variant.ident.clone(),
-                    Payload::Unnamed(fields.unnamed[0].ty.clone()),
+                    Payload::Unnamed(Box::new(fields.unnamed[0].ty.clone())),
                 ));
             }
             Fields::Named(fields) if !fields.named.is_empty() => {
@@ -2630,7 +2033,6 @@ pub(crate) fn enumeration(
         references: Vec::new(),
         kind,
         scope: 0,
-        carried: Default::default(),
         item: Item::Enum(item.clone()),
     })
 }
@@ -2753,21 +2155,6 @@ pub(crate) fn wit_type_with(
                         return Err(syn::Error::new(
                             ty.span(),
                             "`Option<()>` has no WIT equivalent, WIT has no empty value for an option to hold: use `bool`",
-                        ));
-                    }
-                    // What `unsupported` finds in a WIT type, as a Rust type spells it.
-                    let nested = match inner {
-                        Type::Path(path) => path
-                            .path
-                            .segments
-                            .last()
-                            .is_some_and(|segment| segment.ident == "Option"),
-                        _ => false,
-                    };
-                    if nested {
-                        return Err(syn::Error::new(
-                            ty.span(),
-                            "`Option<Option<T>>` is an option of an option, which the runtime refuses in a signature: use an enum of the module with a case for each",
                         ));
                     }
                     format!("option<{}>", wit_type(inner)?)

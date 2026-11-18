@@ -1,0 +1,35 @@
+[package]
+name = "tembra-orb-macro-compile-fail"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Compile-fail cases of the macro's errors: each case is a file under tests/ui and the error rustc prints for it"
+
+[dependencies]
+# What an Orb crate depends on, built for the host: the cases are Orb modules the compiler refuses.
+tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
+serde.workspace = true
+serde_json.workspace = true
+# The features of the native fixture's: `async` for an async method or an import by key, and
+# `bitflags` for a consumed flags type.
+wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+  "macros",
+  "realloc",
+  "async",
+  "bitflags",
+] }
+
+# As the native fixture: the native side links the runtime, with `hooks`, so the cases check the
+# code it writes, `orb()` and the clients, as well as the component's.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tembra = { path = "../../tembra", default-features = false, features = ["macros", "host", "hooks"] }
+
+[dev-dependencies]
+trybuild = "1"
+
+[package.metadata.cargo-machete]
+ignored = ["tembra", "serde", "serde_json", "wit-bindgen"]
+
+[lints]
+workspace = true

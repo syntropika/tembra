@@ -5,9 +5,9 @@ macro. The default uses `std::collections::HashMap`, `String` and `format!` with
 library's allocator and panic handler; `no-std` selects `#![no_std]`, the macro's explicit
 `no_std` option and the optional `dlmalloc` allocator. The interface and output remain identical.
 
-Its `walker` service relies on the derives of the types that enter the WIT, which the generated
-types replacing them take: a record, an enum and a variant derive `Default`, `PartialEq`, `Eq`,
-`Hash` or `Ord`, and the kernel-managed state `Position` starts from its derived `Default`. The
+Its `walker` service relies on the derives of the types that enter the WIT, which stay the
+author's types with the derives written on them: a record, an enum and a variant derive `Default`,
+`PartialEq`, `Eq`, `Hash` or `Ord`, and the kernel-managed state `Position` starts from its derived `Default`. The
 default build counts distinct moves in a `HashSet`, the `no-std` one in a `BTreeSet`.
 
 Its `chance` service imports `wasi:random/random` and `wasi:clocks/monotonic-clock` with the macro's
@@ -79,7 +79,7 @@ native host:
 
 - `keywords` selects the module `list`, whose names are keywords of WIT, which the WIT writes with
   its `%` escape: the world `%list`, whose contract is `contract/%list.wit`, the method `%record`
-  and the flag `%type` of the field `r#type`;
+  and the field `%type`, written `type_`;
 - `configured` selects the module `notebook`, whose items under `#[cfg(feature = "archive")]` the
   macro expands once per value of the feature: without `archive`, `Notes` clears its notes; with
   it, `Notes` archives them onto the shelf of `Shelf`, whose struct and block the feature adds,
@@ -123,9 +123,9 @@ shelf included; compares their WIT and typed metadata, loads each guest once wit
 chance's WASI imports, then checks that the kernel refuses an installation without them, and runs
 every service of both guests in one host: it greets, observes the walker's state, draws and waits
 through chance, reaches the provider's objects by key, takes the tallies back, moves a builder into
-`speller` inside a record, crosses the flags, passes the consumed records through `readings` and
-`library`, lends books to the keeper's shelves by key, and verifies physical Store and kernel
-cleanup. Explicit execution requires both fixture paths and fails if either is absent. The
+`speller` inside a record, crosses the permits' records, passes the consumed records through
+`readings` and `library`, lends books to the keeper's shelves by key, and verifies physical Store
+and kernel cleanup. Explicit execution requires both fixture paths and fails if either is absent. The
 macro-only facade dependency disables host features in both guest builds.
 
 The target is `wasm32-unknown-unknown`. Linking `std` here demonstrates support for ordinary Rust

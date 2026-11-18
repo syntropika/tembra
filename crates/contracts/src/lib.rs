@@ -54,12 +54,20 @@ pub use permissions::{
     system_capability,
 };
 pub use port::envelope;
+#[cfg(feature = "authoring")]
+pub use prepare::check_value_type;
 pub use references::ReferenceBinding;
-pub use resource_profile::ResourceSignature;
+pub use resource_profile::{ResourceSignature, SignaturePart, SignatureReason, SignatureRefusal};
 pub use roles::ServicePolicy;
 pub use selection::OrbProvider;
 #[doc(hidden)]
 pub use standard_sources::{WASI_SOURCES, bundled};
+/// The kernel's rules on what an Orb declares, which it checks when it installs one: re-exported
+/// for the `#[tembra::orb]` macro, which checks them at `cargo check`.
+#[cfg(feature = "authoring")]
+pub use tembra_core::{
+    RESERVED_MEMBERS, admits_linger, admits_principal, reserved_member, valid_version,
+};
 pub use validate::javascript_name;
 
 /// A diagnostic produced before an Orb enters the kernel.

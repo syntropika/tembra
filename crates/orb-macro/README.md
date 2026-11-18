@@ -117,10 +117,9 @@ starts with this explicit freestanding mode.
 | a `#[wit_resource]` struct or an imported `iface::Name` as a parameter      | an owned handle, `own<t>`, which the call takes from its caller; an imported interface's resource is `use`d from it                                                  |
 | a consumed interface's type named through its module, `greeting::Entry`     | `use` of that type from its interface, in the derived interface naming it: the consumed package's type, which the bindings and the author's code share               |
 | each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                          |
-| a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                           |
-| an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                                                                         |
+| a struct with named fields, when a service method uses it                   | a `record`; the struct stays the author's, converted to and from the bindings' type at the boundary                                                                  |
+| an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`; the enum stays the author's, converted to and from the bindings' type at the boundary                  |
 | a case with named fields, `Refused { reason: String }`, of such an enum     | a `record` of its own, `<enum>-<case>`, the case's payload; the enum stays the author's, converted to and from the bindings' type, and so does every type holding it |
-| a struct of `bool` fields with `#[flags]`, when a service method uses it    | a `flags`, a flag per field in kebab-case; the struct stays the author's, which the bindings take as it is                                                           |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                         |
 | free JSON, `serde_json::Value`, by that path                                | a `string` that holds its JSON text, written and read at the boundary; a type holding it stays the author's, converted to and from the bindings' type                |
 | a newtype, a tuple struct of one field, `struct Id(String)`                 | its field's type, `string`: the struct stays the author's, written as its field, read back through `From`, natively `TryFrom`; a type holding it stays the author's  |
@@ -130,7 +129,7 @@ starts with this explicit freestanding mode.
 | a struct with named fields and `#[state(service = Name, version = n)]`      | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it                                                  |
 | a struct with `#[resource(version = n)]` and a function marked `#[open]`    | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                                                                |
 | `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload                                                                                              |
-| `#[derive(..)]` on a struct or an enum that enters the WIT                  | nothing in the WIT: the generated type replacing it derives the same, besides what the bindings implement themselves                                                 |
+| `#[derive(..)]` on a struct or an enum that enters the WIT                  | nothing in the WIT: the type stays the author's, with its derives, attributes and impls as written                                                                   |
 | `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                                                                    |
 | an inline `mod`                                                             | nothing of its own: its items are read as the Orb's, grouped with what belongs to them                                                                               |
 | `///` comments and `/** */` blocks                                          | `///` comments in the WIT, one per line                                                                                                                              |
@@ -141,11 +140,25 @@ when a service method, a WIT resource's function or a hook's input uses it, dire
 fields of another type that enters; a state alone does not make a type enter. The other types of the
 module, and unit structs without the marker, remain ordinary Rust, whatever they hold: only a type
 that enters the WIT needs a WIT spelling for its fields and cases, so an array field or a case with
-two unnamed payloads is a compile error there and nowhere else. A state that stays out of the WIT, and
-every type of the module its fields reach that stays out too, get `serde`'s derives. A method that
-names a type the module does not declare, other than a consumed interface's type named through
-that interface's module, `greeting::Entry`, or free JSON, `serde_json::Value`, is a compile error, and so is a service with the name of
-the module, because WIT refuses a world and an interface of one name. So is a method named `then`,
+two unnamed payloads is a compile error there and nowhere else.
+
+Every type of the module stays the author's, with the derives, attributes and impls its author
+writes, whether it enters the WIT or not: the macro adds no derive to it, and carries none onto the
+bindings' types. A state's `Default` and `serde`'s traits, and the `serde` traits of every module
+type its fields reach, are the author's too (see [kernel-managed state](#kernel-managed-state)).
+
+A type that enters the WIT is declared inside the Orb module, written inline, and named as rustc
+names it there: by the module that declares it, a path through the Orb's modules, a `use` by name,
+or an alias that is only a path (see [organizing the module in
+sub-modules](#organizing-the-module-in-sub-modules)). The only other names are a consumed
+interface's type named through its module, `greeting::Entry`, or by a `use` of it, and free JSON,
+`serde_json::Value`. A glob import, a `crate::` path, an alias that is more than a path, a type
+declared outside the Orb module and a name the module neither declares nor imports are compile
+errors that say how to write the name. A contract that falls outside these rules is written in WIT
+by hand and implemented with `#[service("ns:pkg/iface@version")]` or
+`#[hook("ns:pkg/hook@version", composition = c)]`, or its crate uses `wit-bindgen` without the
+macro. A service with the name of
+the module is a compile error, because WIT refuses a world and an interface of one name. So is a method named `then`,
 `release`, `state`, `ready`, `status` or `opaque`: every reference to a service object has those
 members, and the kernel refuses such a method when it installs the Orb. The package and every
 identity an attribute names are WIT identities, `ns:name@version` and `ns:name/interface@version`:
@@ -155,11 +168,11 @@ of them a WIT keyword, and a semantic version.
 A name that enters the WIT is the kebab-case form of the Rust name, a raw identifier without its
 `r#`: `HTTPRequest` is `http-request` and `r#type` is `type`. A WIT keyword, such as `list`,
 `record` or `interface`, is written with WIT's `%` escape. The bindings name each item back from
-its WIT name, `HttpRequest`, `get` for a function `GET`, `move_` for `r#move`, and the bridges speak
-their names: a function or a resource keeps the author's name, and a record or an enum is
-re-exported under it. A field or a case cannot be renamed so, because the generated type replaces
-the author's: one the bindings would name otherwise, `userID` or a case `HTTP`, is a compile error
-giving the name to use, `user_id` or `Http`. Inside an interface, types and functions share one
+its WIT name, `HttpRequest`, `get` for a function `GET`, `move_` for `r#move`, `type_` for a field
+`r#type` and `Http` for a case `HTTP`, and the bridges speak their names: a function or a resource
+keeps the author's name, and a record or an enum stays the author's type, whose fields and cases
+keep their names, since the conversions between the two types name each side's own. Inside an
+interface, types and functions share one
 namespace in WIT, as do the methods and static functions of a resource: two items of one WIT name
 there, a record `Stats` and a function `stats`, are a compile error naming both.
 
@@ -192,10 +205,11 @@ the error's message (see [Using the Orb natively](#using-the-orb-natively)). A c
 such channel: it could refuse an argument before its method runs only by trapping, which would
 retire its revision for every caller until a reload. So a component reads a newtype through
 `From`, and a newtype that only a refusing `TryFrom` makes is native only: a component build of
-the module fails, with an error that names the newtype and says why. A tuple struct of a name
-another type of the Orb takes stays ordinary Rust, read by that name as before. A newtype holding a
-resource, a newtype beside a resource in one parameter or result, and a newtype in a derived hook's
-input are compile errors.
+the module fails, with an error that names the newtype and says why. A newtype is the one its
+name resolves to, as any contract type's, whatever another module declares of the name. A newtype
+holding a
+resource is a compile error; a newtype beside a resource in one parameter or result, and a newtype
+in a derived hook's input, cross as its field there too.
 
 ## Contributing to a hook
 
@@ -321,6 +335,7 @@ module has more than one, and a version (default 1) the kernel compares on reloa
 mod tally {
     /// The state of one counter object.
     #[state(service = Counter, version = 1)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Count {
         pub total: i64,
         pub steps: u32,
@@ -343,13 +358,13 @@ mod tally {
 
 The macro gives the state type two associated functions: `Count::read()` returns the state of the
 object running the current call, `Count::update(|count| ...)` changes it and stores it, returning
-the stored value. The initial value is the state's `Default`, which the macro implements field by
-field unless the author provides it: an `impl Default for Count` anywhere in the Orb module, or a
-derive of `Default` on the state, `#[derive(Default)]` or one implementing it under another name,
-`SmartDefault`, which stays on the author's struct when the state stays out of the WIT and goes to
-the generated type replacing it when the state enters the WIT, as every derive of a type that
-enters it does (see [Limits](#limits)). That is how a state starts from a value of the author's
-choosing:
+the stored value. The state's `Default` is its initial value, and `serde`'s `Serialize` and
+`Deserialize` are how the kernel keeps it, as JSON: the three are the author's, derived or
+implemented anywhere in the crate, and so are the `serde` traits of every type of the module the
+state's fields reach. The macro writes none of them, only an assertion that the state implements
+the three, on the state's name, where rustc reports the one missing. A derive stays on the author's
+struct whether the state enters the WIT or not (see [Limits](#limits)). A state starts from a value
+of the author's choosing when the author implements `Default` by hand instead of deriving it:
 
 ```rust
 impl Default for Count {
@@ -359,18 +374,12 @@ impl Default for Count {
 }
 ```
 
-The macro's `Default`, like a derived one, gives each field its type's `Default`, and follows a
-field's `#[cfg(..)]` written plainly: one under `#[cfg_attr(..)]` is a compile error on the field,
-since the macro writes the `Default` before the compiler evaluates the attribute, so derive or
-implement `Default` for such a state. For the same reason, a derive of `Default` under
-`#[cfg_attr(..)]` is a compile error on the attribute, since the macro's `Default` would be a
-second one where it applies: derive `Default` without the attribute, or implement it. A field
-whose type has none, an enum of the module for instance, is a compile error on that field:
-implement `Default` for the state, as above, or give the field's type one, by hand or by a
-derive, which for an enum marks the case it starts from:
+A derived `Default` gives each field its type's `Default`, so a field whose type has none, an enum
+of the module for instance, is a compile error: give the field's type one, by hand or by a derive,
+which for an enum marks the case it starts from, or implement the state's by hand:
 
 ```rust
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub enum Phase {
     #[default]
     Open,
@@ -649,9 +658,8 @@ The objects of a view carry data: an interface with a resource, or a function ta
 returning a resource handle, a stream or a future, is not imported by key, nor one with a function
 carrying data the runtime refuses in a signature, an option of an option, a map or a list of a
 fixed length. Nor is an interface with a function `handle`, `take-handle` or `from-handle`, which
-every object's bindings define for its handle, or with a parameter `self`, which names a method's
-object. A plain import of the
-same interface may stand next to the keyed one, re-exported under the interface's name. An
+every object's bindings define for its handle, an error on the import, or with a parameter `self`,
+which names a method's object. A plain import of the same interface may stand next to the keyed one, re-exported under the interface's name. An
 interface the module implements may be imported by key, and only so: a proxy serving the interface
 reaches the objects of other providers through the view, and a plain import of it is an error on
 the import, since a world that imports the interface itself and exports it is a hook, which
@@ -660,10 +668,11 @@ so the elaborated world imports the interface it exports, for the types alone, w
 build` and the kernel tell from a hook, an interface the world imports itself. A derived signature
 names such an interface's types through the implemented interface's module, `counter::Tally`, the
 copy of the export the derived interface takes; the view's `counter_ref::Tally` is the import's,
-which the view's methods take and return, and the macro refuses it in a derived signature. So does
-a view of a hook the module contributes to or declares beside the keyed import, an interface the
-world exports too: a derived signature names a contributed hook's types through the hook's module,
-`guard::Admission`, and none of a declared hook's. A type such an interface `use`s from an
+which the view's methods take and return, and the compiler reports it in a derived signature as a
+type other than the one the derived interface takes. So for a view of a hook the module
+contributes to or declares beside the keyed import, an interface the world exports too: a derived
+signature names a contributed hook's types through the hook's module, `guard::Admission`, and the
+macro refuses those of a declared hook. A type such an interface `use`s from an
 interface the world only imports has no copy of its own: the import, the export and the view all
 name that interface's type, so a derived signature names it through the view and through the
 interface's module alike, a declared hook's included. The
@@ -816,10 +825,11 @@ A consumed type implements what its bindings give it: a record or a variant `Clo
 whose type the bindings' is; `Copy` on one holding a consumed type that holds a string or a list is
 a compile error on the derive, naming the consumed type.
 
-A state holds a consumed type too, in its fields or in the types of the module they reach. In an Orb
-with a state the bindings give the consumed packages' records, variants and enums `serde`'s
-derives, so the kernel keeps the value as the JSON `serde` writes for the bindings' type, with the
-Rust names of its fields and cases. A state is a struct of the module: it holds a consumed type,
+A state holds a consumed type too, in its fields or in the types of the module they reach. The
+bindings give `serde`'s derives to the consumed records, variants and enums a state holds, and to
+those these hold, each selected by its full name, and to no other type, so the kernel keeps the
+value as the JSON `serde` writes for the bindings' type, with the Rust names of its fields and
+cases. A state is a struct of the module: it holds a consumed type,
 but is none.
 
 What a derived interface or a state does not take from a consumed interface is a compile error on
@@ -830,12 +840,9 @@ the type that names it:
   the interface's functions name, the error listing those;
 - a type that holds a resource handle, a stream or a future anywhere: a derived interface takes the
   consumed types that carry data only;
-- a type that holds an option of an option, a map or a list of a fixed length anywhere, and an
-  `Option` of a type that is an option, `Option<catalog::Opt>` for a `type opt = option<u32>`, all
-  of which the runtime refuses in a signature;
-- a resource of the interface, but an imported interface's handle taken as a parameter, alone or in
-  an option, a result, a list or a tuple ([taking a resource](#taking-a-resource)), and an object
-  of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
+- a type that holds an option of an option, a map or a list of a fixed length anywhere, which the
+  runtime refuses in a signature;
+- an object of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
 - a type of a hook the module declares from a consumed package, whose `run` speaks the import's
   types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook)), but
   one the hook `use`s from an interface the world only imports, which both name;
@@ -858,6 +865,15 @@ the type that names it:
   one, which the bindings generate without `serde`'s derives;
 - a type, a resource or a function of the module named like a consumed type in a derived interface
   that knows both, since an interface's types and functions share one namespace.
+
+A derived function whose signature the runtime refuses is a compile error on the parameter or the
+result that carries what it refuses, which names its type, the runtime's reason and the remedy, from
+the check of tembra-contracts that `cargo tembra build` runs on the component too: an `Option` of a
+consumed type that is an option, `Option<catalog::Opt>` for a `type opt = option<u32>`, which is an
+option of an option, and a resource the function cannot carry, an implemented interface's resource
+anywhere, or an imported interface's handle in its result, alone or in a type of the module; an
+imported interface's handle taken as a parameter, alone or in an option, a result, a list, a tuple
+or a type of the module, is carried ([taking a resource](#taking-a-resource)).
 
 The runtime fixture's `readings` service takes and returns the record of an imported interface, and
 its `library` service the records of an interface it implements; see
@@ -954,9 +970,10 @@ into the author's value, which the function then owns and drops, running `Drop`,
 it. An imported interface's handle crosses as the bindings' own type, the one the imported
 functions return; the derived interface knows its resource by the kebab-case form of the handle's
 Rust name, so a type or a resource of the module named like the handle is a compile error in an
-interface that also defines or uses it. A record or a variant holding a resource is the bindings'
-type, with the bindings' handle in the resource's place: a function taking one gets the handle,
-whose `into_inner` gives the value.
+interface that also defines or uses it. A record or a variant of the module holding a resource
+stays the author's type, holding the resource's struct: its conversions take the struct back from
+the bindings' handle, so a function taking one gets the value, and wrap it into the handle again
+on the way out.
 
 The runtime moves an owned resource only into the interface that defines it, or into an Orb that
 imports that interface, anywhere in an argument: a record or a variant of the module holds an
@@ -970,73 +987,6 @@ errors too; so is a derived function returning an imported interface's handle, i
 record or a variant of the module, or another service's resource, which the runtime returns only
 from the interface that defines it.
 
-## Flags
-
-A struct of `bool` fields marked `#[flags]` is a WIT `flags`: each field is a flag, in declaration
-order, named in kebab-case. Unlike a record, the struct is not replaced by the type the bindings
-generate, a bitflags type with constants where the struct has fields: `wit-bindgen`'s `with` option
-maps the WIT type onto the author's struct, so the bindings' functions, records, variants and
-containers take and return the struct itself, with no conversion.
-
-```rust
-/// What a holder may do with a document.
-#[flags]
-#[derive(Default, PartialEq)]
-pub struct Access { pub read: bool, pub write: bool, pub share: bool }
-
-/// The access granted to someone.
-pub struct Grant { pub who: String, pub access: Access }
-
-impl Permits {
-    /// The access with exactly the flags `access` lacks.
-    pub fn invert(access: Access) -> Access { /* ... */ }
-    /// The flags any of the grants sets.
-    pub fn merged(grants: Vec<Grant>) -> Access {
-        grants.iter().fold(Access::default(), |all, grant| all | grant.access)
-    }
-}
-```
-
-```wit
-interface permits {
-  /// What a holder may do with a document.
-  flags access {
-    read,
-    write,
-    share,
-  }
-  record grant {
-    who: string,
-    access: access,
-  }
-  invert: func(access: access) -> access;
-  merged: func(grants: list<grant>) -> access;
-}
-```
-
-The macro gives the struct what the bindings call on it, as `wit-bindgen` 0.63 lowers and lifts a
-flags: the functions `empty()`, `bits()` and `from_bits_retain(bits)`, hidden from the
-documentation, and `BitOr`, the union of two values, which the author's code may use too. These
-names are the bindings', so a function of one of them in an `impl` block of the struct, or the
-author's own `BitOr` of the struct with itself, `BitOr`, `BitOr<Self>` or `BitOr<T>` for a type
-parameter `T`, is a compile error, in any module of the Orb, naming the struct by its path or by a
-name a `use` brings in; a `BitOr` with another right-hand type, `BitOr<u32>`, does not overlap and
-stays. The macro also derives `Clone`, `Copy` and `Debug`, which
-a generated record or variant holding the struct needs of it, and, in an Orb with a state, serde's
-`Serialize` and `Deserialize`, so a state can hold the struct, directly or in a record; each unless
-the author derives or implements it. A state's JSON holds every field of the struct,
-`{"read": true, "write": false, "share": false}`, where the portable boundary spells a flags value
-as an object of its set flags in camelCase, `{"read": true}`, a flag left out being unset.
-
-A flags holds one to 32 flags, as the component model rules, and its struct takes no generic
-parameter; a flags struct of a sub-module is visible to the Orb module, as are the modules between
-them, since the bindings name it from there through each, as the next section says. A derived
-hook's input holds no flags: the bindings name a hook's types from its import module and from its
-export module, at two depths, and the macro maps a flags onto the author's struct through one path.
-The macro reads the struct before the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: the
-struct or a field under `#[cfg(..)]` and a derive under `#[cfg_attr(..)]` are compile errors. A
-struct marked `#[flags]` that no function uses stays ordinary Rust.
-
 ## Organizing the module in sub-modules
 
 The Orb module may hold sub-modules, written inline; the macro reads them as part of the Orb and
@@ -1048,6 +998,7 @@ mod ledger {
     pub mod pinned {
         /// The balance of one pinned ledger object, kept by the kernel.
         #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Balance { pub total: i64 }
 
         #[service(lifetime = host)]
@@ -1067,13 +1018,14 @@ to the one service of the Orb. A service's methods are the `pub fn` of the `impl
 module, and a marked function goes in the module of its struct. The bridges the macro generates for
 an item go in the item's module, so the author's types and functions resolve where they were
 written: a WIT resource's bridge, for a derived or an implemented interface, sits next to its struct
-and calls its `#[constructor]` whatever its visibility. What the Orb module itself reaches, a state
-and its fields, a root resource, a WIT resource, a state's `#[validate]` function and a root
+and calls its `#[constructor]` whatever its visibility. What the Orb module itself reaches, a state,
+a root resource, a WIT resource, the `#[inputs]` struct, a state's `#[validate]` function and a root
 resource's `#[open]` and `#[close]` functions, is visible to the Orb module: `pub` or `pub(crate)`
 at any depth, `pub(super)` one level down only. The macro names such an item through every module
 of its path, from the Orb module, and a WIT resource from its service's module, so each of those
 modules is visible there too: a WIT resource may sit below a private module that also holds its
-service. A `pub use` re-exporting the item past a module hidden there does not help. Natively, a
+service. A `pub use` re-exporting the item past a module hidden there does not help. The compiler
+reports an item or a module that is not visible, on the author's line. Natively, a
 WIT resource's `#[constructor]` and static functions are methods of its service's client, written
 in the resource's module: a resource with one sees that client, so its service and each module of
 the service's path are visible to the resource's module, at least `pub(crate)` where it sits
@@ -1085,10 +1037,23 @@ everywhere and leaves it to the compiler, which then reports the module or the s
 resource's module cannot see. A name that
 enters the WIT is one across the modules, because the package has one namespace: the services, the
 hooks, the resources and the types a method or a hook mentions; a state that stays out of the WIT
-may repeat its name module by module, as `Balance` does, and a module's own name wins when a method
-mentions it. The modules the macro re-exports in the Orb module, `context`, an imported interface, a
-hook declared from a consumed package, are reached from a sub-module through `super::`. See
+may repeat its name module by module, as `Balance` does. The modules the macro re-exports in the Orb
+module, `context`, an imported interface, a hook declared from a consumed package, are reached from
+a sub-module through `super::`. See
 [rust-orb-service-lifetime](../../examples/rust-orb-service-lifetime/README.md).
+
+A type that a signature, a hook's input or a field of a type entering the WIT names resolves as
+rustc resolves it inside the Orb module, whatever another module declares of the name: a type the
+writing module declares, a path through the Orb's modules, `self::model::Entry` or
+`super::model::Entry`, a name a `use` imports, with `as`, in a group or through a sub-module's
+`pub use`, and an alias that is only a path, `type Item = super::model::Entry;`. The WIT names the
+type by its own name, `entry` for `Item` after `use super::model::Entry as Item;`. A consumed
+interface's type resolves through its module, `greeting::Entry`, or through a `use` of it,
+`use super::greeting::Entry;`. The macro does not follow a glob import, `use super::model::*;`, a
+path from `crate::`, an alias that is more than a path, `type Entries = Vec<Entry>;`, or a type
+declared outside the Orb module: each is a compile error saying how to name the type instead. A
+name the module neither declares nor imports is an error too, naming the module that declares the
+type and the `use` to write, since the macro does not pick a type by its name alone.
 
 ## Using the Orb natively
 
@@ -1320,10 +1285,11 @@ A `#[wit_resource]` struct is natively a value the Orb issues as a capability of
 as `tembra::portable::Issuable` names it: the resource's constructor and static functions, and a
 function whose result holds the struct, alone or in an `Option`, a `Result`, a `Vec` or a tuple,
 issue what they return into the call's result, and each method reads its `self` from the call. A
-record or a variant holding the struct is component-only: the bindings replace it with a type
-holding their handle, which only a component creates, so where the runtime is linked the module's
-`orb()` answers an error naming it, as for all the native side does not cover yet, see the end of
-this section. A tuple carries the resource beside its data in both builds:
+record or a variant holding the struct is component-only: a component's bridge wraps the resource
+into the bindings' handle, while the native boundary carries a resource only beside the data, never
+inside the JSON of a record, so where the runtime is linked the module's `orb()` answers an error
+naming the field, as for all the native side does not cover yet, see the end of this section. A
+tuple carries the resource beside its data in both builds:
 
 ```rust,ignore
 impl Texts {
@@ -1473,6 +1439,111 @@ with the code `unsupported` and the reason `native`, naming the item, so only a 
 the Orb fails. Cargo enables the facade's `host` for an Orb crate whenever another crate of the
 build does, so a compile error there would also fail builds that never install the Orb, such as
 `cargo check --workspace`. A component build of the same module is unaffected.
+
+## Moving an existing Orb to these rules
+
+An Orb written before the macro left its types to their author needs these changes. Most show as a
+compile error on the author's line; three do not, and the text marks them: a consumed type a state
+does not hold loses `serde`'s traits, an enum's `Debug` prints another text, and turning a
+`#[flags]` struct into a record changes the contract, which shows at installation.
+
+A state derives `Default` and `serde`'s traits. The macro used to write them; it now asserts them
+on the state's name (see [kernel-managed state](#kernel-managed-state)):
+
+```rust
+// Before: the macro added the derives.
+#[state]
+pub struct Count { pub total: i64 }
+
+// After: the author's.
+#[state]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct Count { pub total: i64 }
+```
+
+A module type a state reaches derives `serde`'s traits too, on every struct, enum and variant its
+fields hold. A field whose type has no `Default`, an enum for instance, needs one of its own:
+
+```rust
+// Before: only the state was marked.
+pub enum Phase { Open, Closed }
+
+// After: the type the state reaches, with the case it starts from.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub enum Phase {
+    #[default]
+    Open,
+    Closed,
+}
+```
+
+A `#[flags]` struct becomes a record: the macro has no WIT `flags` of its own, and a struct of
+`bool` fields is a record. The struct has no bit operations, so code that combined flags sets
+the fields. The flags of a consumed package keep
+working, as the bindings' types:
+
+```rust
+// Before.
+#[flags]
+pub struct Pen { pub filled: bool, pub dashed: bool }
+
+// After.
+#[derive(Clone, Copy, Default)]
+pub struct Pen { pub filled: bool, pub dashed: bool }
+```
+
+A contract type is named by a path or a `use`, not through a glob or `crate::`. The error gives
+the line to write:
+
+```rust
+// Before.
+use super::model::*;
+pub fn first() -> Entry { /* ... */ }
+pub fn all() -> crate::books::model::Entry { /* ... */ }
+
+// After.
+use super::model::Entry;
+pub fn first() -> Entry { /* ... */ }
+pub fn all() -> super::model::Entry { /* ... */ }
+```
+
+An alias that is more than a path, `type Entries = Vec<Entry>;`, is written out where it is used,
+and a type declared outside the Orb module is moved into it, or the contract is written in WIT
+(see [what the macro reads](#what-the-macro-reads)).
+
+A module type that entered the WIT stays the author's, so it has what its author derives, and not
+what the bindings' type had. Add the derives it needs, `Clone`, `Copy`, `Debug` and `PartialEq`
+among them, and an import the replaced type used to hide, `std::fmt` for a hand-written `Display`
+for instance. Where it holds a consumed type, which has `Clone`, `Copy` and `Debug` only, a
+derive of another trait on the author's type needs the author's impl on the consumed one (see
+[the types of a consumed interface](#the-types-of-a-consumed-interface)). An enum's `Debug` prints
+what the author derives, `North` where the bindings' type printed `Heading::North`. That is no
+compile error: a test, a log line or a message that compared the text changes.
+
+The bindings give `serde`'s traits only to the consumed types a state holds, directly or through
+the types of their package, and no longer to every consumed type. Code that serialized a consumed
+type the state does not hold, a record an imported interface returns, with `serde_json` for
+instance, no longer compiles: hold the type in a state, or convert it into a type of the module
+that derives `serde`'s traits. The error is rustc's, on the line that needs the trait.
+
+Turning a `#[flags]` struct into a record changes the WIT, `flags pen` into `record pen`, and the
+JSON a portable caller reads and writes, from an object of the flags set to an object holding
+every field, `true` or `false`. A compile succeeds, so nothing in `cargo check` shows it: an Orb
+that imports the interface was built against the old WIT and no longer pairs with the provider at
+installation, which compares the interface's contract. Raise the version of the providing package
+and rebuild the Orbs that import it together.
+
+Tests: the state's derives, `a_states_default_and_serde_derives_are_the_authors` and the
+compile-fail cases `state_without_default` and `state_reaches_a_type_without_serde`; the `#[flags]`
+struct as a record, `a_struct_of_bool_fields_is_a_record` and `flags_on_a_record`; names of contract
+types, `a_contract_type_the_macro_does_not_follow_is_refused_with_how_to_name_it`,
+`contract_type_through_a_glob` and `contract_type_through_crate`; the derives the author's type
+keeps, `a_type_that_enters_the_wit_keeps_its_derives` and
+`a_hand_impl_for_a_type_of_the_module_is_the_authors`; the consumed types given `serde`,
+`a_state_holds_the_consumed_types_serde_writes` and
+`a_state_holding_no_consumed_type_asks_the_bindings_for_no_derive`. The text an enum's `Debug`
+prints and the pairing of an importer after the change to a record show at runtime and at
+installation, and no test asserts them.
 
 ## Moving a hand-written service to the macro
 
@@ -1683,32 +1754,30 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    remove a copy of the kernel's package an encoded package holds, since it brings that package
    itself. With a WASI import, the WASI packages it needs are nested the same way, from the
    sources `tembra-contracts` bundles.
-   With a state, also `serde` derives on the generated types, except the records and
-   variants holding a consumed package's flags type or a resource handle, which have no `serde`
-   implementation to derive. `wit-bindgen` leaves those out by their bare names, so a type
-   sharing the name of one, in another interface or package, takes the derives by its full name
-   in `additional_type_attributes`. With derives on the types that enter the WIT, also `additional_type_attributes` and
-   `additional_member_attributes`, which hand them to the generated types with the helper
-   attributes they read. With a `#[flags]` struct, also `with`, which maps each flags type onto
-   the author's struct;
-5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
-   generated types with the same names, public fields and derives, so the author's functions and
-   the generated traits share one type, and each derive of such a type is imported again under no
-   name, `use EnumIter as _;`, where the type was written, so the imports it names stay used;
+   With a state holding a consumed type, also `serde` derives on the bindings of the consumed
+   records, variants and enums the state holds, directly or through the types of the module, and
+   of those they hold, each by its full name in `additional_type_attributes`, and on no other
+   type;
+5. for each record, enum and variant of the module, `From` in both directions between the
+   author's type and the bindings', written in the type's module, where its private fields are
+   visible: a record field by field, an enum and a variant case by case, a case with named fields
+   into the record of the case, each part through `Into`, the identity for a scalar, a string or a
+   consumed package's type and the generated `From` for a type of the module, inside lists,
+   options, results and tuples too, a resource of the module wrapped into its handle type or taken
+   back from it. The bindings name a field or a case from its WIT name, `type_` for `r#type`, so
+   each side keeps its own names;
    `pub use exports::...::guard;` for each contributed hook and each
    implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
-6. the author's items, unchanged, but for each `#[flags]` struct that enters the WIT the derives
-   it lacks, `Clone`, `Copy`, `Debug` and, with a state, serde's, and the functions its bindings
-   call on it, `empty`, `bits`, `from_bits_retain` and `BitOr`;
+6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    but that of a service its `#[create]` builds, by forwarding to the author's functions, hook
    callbacks and the kernel's `state-init` and
    `resources-init` callbacks included, with a trapping callback for each declared hook, and
    `export!` under `#[cfg(target_arch = "wasm32")]`, so that a native build defines none of the
    component's export symbols; the resource trait of each `#[wit_resource]` struct on the struct
-   itself, its constructor and methods forwarded and the handles wrapped, or taken back, at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
-8. with a state, `Default`, field by field unless the author provides it, and the `read`/`update`
-   functions on each state type, over a hidden module that maps the kernel's JSON to the type with
+   itself, its constructor and methods forwarded and each type of the module converted, each handle wrapped, or taken back, at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the author's types it reaches and the import side of the bindings too, whose copy of each type is another Rust type of the same WIT definition;
+8. with a state, an assertion that it implements `Default`, `Serialize` and `DeserializeOwned`,
+   on the state's name, and the `read`/`update` functions on each state type, over a hidden module that maps the kernel's JSON to the type with
    `serde_json` and holds back a value whose JSON would not read back as the type, and reaches the
    kernel through the bindings' import in a component build, inside `tembra::__guest!`, and through
    the state each method's object declared natively, inside `tembra::__host!`; and the kernel's
@@ -1754,7 +1823,7 @@ the version whose rules the macro follows, and the generated code reaches it the
   Orb's WIT by importing an interface, plainly or by key, implementing one or contributing to a
   hook, and passes the interface's data types on as they are. A view takes the name of the
   interface imported by key, so two interfaces of one name are not both imported by key.
-- A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list, of the module's own types. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
+- A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a newtype, a scalar, a string or a list, of the module's own types, and a newtype, alone or held, converts to each side of the hook's bindings, the export's and the import's copy of the record its field holds. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`, unless the service's
   `#[create]` builds its objects, natively; the methods of a `#[wit_resource]` struct take
   `&self`, and none takes `&mut self`. Besides a service's state, a resource's fields, the root's
@@ -1765,20 +1834,17 @@ the version whose rules the macro follows, and the generated code reaches it the
   arguments besides the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary, a consumed type's
-  included. The macro derives `Serialize` and `Deserialize` on a state that stays out of the WIT,
-  and on every type of the module its fields reach that stays out too, unless the author already
-  does, before the compiler evaluates `#[cfg_attr(..)]`: a derive of either under that attribute
-  is a compile error on it, since the type would implement the trait twice where it applies, so
-  derive it without the attribute, or leave it to the macro. Such a derive is `serde`'s when the
-  macro follows it to `serde`, and when it cannot follow it to a crate, through a glob import or
-  `super::`, as on a type that enters the WIT; another crate's, `rkyv::Serialize`, is that
-  crate's own. JSON holds no NaN or infinite float, so a state holding one cannot be stored, and
+  included. The state's `Default` and `serde`'s derives are the author's, on the state and on every
+  type of the module its fields reach: the macro asserts the three traits on the state's name, and
+  adds no derive. A derive under `#[cfg_attr(..)]` is the compiler's to evaluate, on a type outside
+  the WIT, and on one that enters it as long as no `#[cfg(..)]` hides in the `cfg_attr`, which is
+  refused (next rule).
+  JSON holds no NaN or infinite float, so a state holding one cannot be stored, and
   the JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles, so an integer beyond
   ±2^53 in a state loses precision there.
-- Types: records, enums, variants, flags and the scalar, string, list, option, result and tuple
-  types; 64-bit integers cross the boundary exactly. A flags is a `#[flags]` struct of one to 32
-  `bool` fields; its functions `empty`, `bits` and `from_bits_retain` and its `BitOr` are the
-  macro's, for its bindings, and a derived hook's input holds none. A consumed interface's data
+- Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
+  64-bit integers cross the boundary exactly. A struct of `bool` fields is a record; a `flags`
+  enters only as the type of a consumed interface. A consumed interface's data
   type, named through its module, crosses as the consumed package's own type, see
   [the types of a consumed interface](#the-types-of-a-consumed-interface). A `resource` is a
   `#[wit_resource]` struct or the handle of an imported interface. A derived function takes either
@@ -1788,92 +1854,38 @@ the version whose rules the macro follows, and the generated code reaches it the
   requires a dedicated interpreter value adapter"). No `stream` or `future`. `()` is nothing only
   as a function's result or a side of a `Result`, which WIT then leaves out: `Result<T, ()>` is
   `result<t>`, `Result<(), E>` is `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has
-  no equivalent, use `bool`. `Option<Option<T>>` is refused, an option of an option, which the
-  runtime refuses in a signature: use an enum of the module with a case for each.
+  no equivalent, use `bool`. A function carrying `Option<Option<T>>`, an option of an option, is
+  refused on the parameter or the result that holds it, itself or in a type of the module, as the
+  runtime refuses it in a signature: write an enum of the module with a case for each in its place,
+  as the error says.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it. A state is a
   struct of the module, which holds a consumed package's records as they are but is none of them.
-- A type that enters the WIT is replaced by the type the bindings generate, which takes the
-  author's `#[derive(..)]`s and the helper attributes they read: the single-name attributes on the
-  type, its fields and its cases, such as `#[default]` or `#[strum(..)]`, but none of Rust's own
-  attributes, such as `#[allow(..)]` or `#[repr(..)]`. A derive of what the bindings implement
-  themselves is left to them: `Debug` for every type; `Clone` for a record or a variant that holds
-  no resource handle, and `Copy` when it holds no string or list either; `Clone`, `Copy`,
-  `PartialEq`, `Eq`, `PartialOrd` and `Ord` for an enum; `Display` and `Error` for the error of a
-  function's result; and `serde`'s derives in an Orb with a state. A derive of another crate named
-  after one of those traits, or implementing one under another name, `Educe` or `Derivative` with
-  the trait in `#[educe(..)]` or `#[derivative(..)]`, would implement it twice, and a derive that
-  the type's contents rule out could not apply, which the macro decides trait by trait from the
-  fields: `Clone`, `Copy`, a comparison, `Hash`, `Serialize` or `Deserialize` on a type holding a
-  resource handle, `Serialize` or `Deserialize` on one holding a consumed package's flags type,
-  alone or in a consumed type, or, in an Orb without a state, where the bindings derive serde's
-  traits on no type, any type of a consumed package, `Default` on a record no value of which is
-  without one, a handle in a field, in a tuple or in such a record, `Copy` on one holding a string
-  or a list, `Eq`, `Ord` or `Hash` on one holding an `f32` or an `f64`, and `Default` on a record
-  holding a `Result`. A handle, a string or a list held through a type of the module or a consumed
-  type counts the same, unless the macro sees the trait implemented for that type: by the bindings,
-  by its own derives, by an `impl` of the Orb's modules, by the macro for a state's `Default` or a
-  flags struct's derives. A trait such a type lacks otherwise, `PartialEq` on a record holding a
-  `Spot` that derives none, or holding a consumed record, which its bindings give `Debug`, `Clone`
-  and `Copy` only, as [the types of a consumed interface](#the-types-of-a-consumed-interface)
-  says, is left to the author, who may implement it for the type by hand anywhere in the crate,
-  outside the Orb module or through a `crate::` path, where the macro does not read; a missing one
-  is the compiler's error inside the bindings. Both refusals are compile errors on the derive, the
-  first naming the helper attributes no other derive of the type reads,
-  which go with it, `#[error(..)]` for `thiserror::Error` on a function's error, or the entry of
-  `#[educe(..)]` to remove, the second naming what the type holds. A handle in an option or a list
-  leaves `Default` a value without it, as does any type held there, and a variant takes its unit
-  `#[default]` case. A derive implementing one of those traits under another name follows the same
-  rules, but for a member carrying the helper attribute the macro knows the derive reads,
-  `#[default(..)]` of `SmartDefault` or `#[educe(..)]` of `Educe`, which may give the member its
-  own value or leave it out: what that member holds, a handle included, is the derive's.
-- The bindings read a derive's path in their own module, so the macro names each derive from its
-  crate, `::strum::EnumIter` for `EnumIter` after `use strum::EnumIter;`, following the `use` and
-  `extern crate` declarations of the type's module, `self::`, `super::`, the Orb's sub-modules and
-  the glob imports from them, `use super::*;` in a sub-module; a derive of the standard library is
-  named from `core`. A single name the module does not import by name, other than a derive of the
-  standard library, which only a crate's glob import could bring, or a path leaving the Orb module
-  through `super::`, is a compile error saying what to write instead. `serde`'s derives are the
-  exception where the bindings derive them, in an Orb with a state: a `Serialize` or `Deserialize`
-  the macro cannot follow to a crate, through such a glob, through `super::` or through a re-export
-  of this crate, `crate::prelude::Serialize`, is left to the bindings as `serde`'s own is, and
-  refused before its path on a type whose contents rule it out. Another crate's derive of either
-  name, `rkyv::Serialize`, is that crate's own and carried as any other, so a derive of serde's
-  that another crate re-exports is written `serde::Serialize`, or through `crate::`.
-- The bindings' module reads the helper attributes too, as written, so one it would not know is a
-  compile error on the attribute: one no derive the generated type takes reads, since a derive of
-  the standard library reads none but `#[default]` and a derive the bindings implement is theirs,
-  as `Debug` is after `use derive_more::*;`; an attribute macro the type's module imports,
-  `#[skip_serializing_none]`, which is no derive's helper, unless a derive the generated type takes
-  reads an attribute of that name, since a helper attribute resolves in the macro namespace, where
-  a module or a type the module imports, `use core::default;` under `#[default]`, shadows nothing;
-  and arguments naming what the type's
-  module declares or imports, or a path from `self::` or `super::`, which a path from `crate::`,
-  `#[default(crate::walk::PAGE)]`, or from a crate names from every module. A type of the module
-  that enters the WIT is the exception: the bindings' module declares the generated type replacing
-  it under the same name, where the type's interface defines or `use`s it, so `#[default(Mode::Slow)]`
-  on a field holding the module's `Mode` reads there as written.
-- What the replacement would drop without a word is refused on a type that enters the WIT: an
-  explicit discriminant, which a WIT enum has no room for, a `#[serde(..)]` attribute, which would
-  change a state's JSON, and a helper attribute on the payload of a case, which the bindings have
-  no place for.
-- An enum with a case with named fields, `Refused { reason: String }`, is not replaced, nor is any
-  type holding it, directly or through other types of the module. The case enters the WIT as a
-  record of its own, `<enum>-<case>`, `outcome-refused`, which the bindings give the case as a tuple
-  payload, so the author's type stays as written, attributes and derives included, and the macro
-  converts it to and from the bindings' type at the boundary, `From` in both directions in the
-  type's module, inside lists, options, results and tuples too. Such a type derives `serde`'s traits
-  where a state reaches it, unless the author does. The bindings name its fields and cases from their
-  WIT names, which the conversions use on their side, so the author's names are free. It holds no
-  resource, and a derived hook's input reaches none of them: both are compile errors, as is another
-  type or a function of the interface whose WIT name is the record's.
-- The macro reads a type that enters the WIT, a flags struct included, before the compiler
-  evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`. The type, a field, a case or a case's payload under
-  `#[cfg(..)]`, which the WIT would hold in every configuration, is a compile error, and so is a
-  `#[cfg_attr(..)]` wrapping a derive, a helper attribute or a `#[cfg(..)]`, which would come and
-  go beside what the macro writes, on a flags struct or a type the generated type replaces; a type
-  the macro converts keeps its attributes. One wrapping only Rust's own attributes other than
-  `derive` and `cfg`, such as `#[cfg_attr(test, allow(dead_code))]`, `doc` or `deprecated`, changes
-  nothing the macro writes.
+- A record, an enum or a variant that enters the WIT stays the author's type, with its derives,
+  its attributes, `#[serde(..)]` and an explicit discriminant included, and the impls the Orb's
+  modules write for it, `Display` on a function's error among them, as written: the bindings' type
+  is internal to the generated code, and the macro carries nothing onto it. The macro converts the
+  author's type to and from the bindings' at the boundary, `From` in both directions written in
+  the type's module, where its private fields are visible, inside lists, options, results and
+  tuples too; a call converts each value once. The bindings name its fields and cases from their
+  WIT names, which the conversions use on their side, so the author's names are free, `r#type` and
+  a case `HTTP` included; a field or a case whose kebab-case form is no WIT identifier is a compile
+  error naming it. A case with named fields, `Refused { reason: String }`, enters the WIT as a
+  record of its own, `<enum>-<case>`, `outcome-refused`, which the bindings give the case as a
+  tuple payload and the conversions fill field by field; another type or a function of the
+  interface whose WIT name is the record's is a compile error. Where a state reaches such a type,
+  its `serde` derives are the author's, as on the state. A resource it holds is wrapped into the
+  bindings' handle type and taken back from it. A derived hook's input may reach it: the bindings
+  hold a hook's types twice, in its export and in its import, and the author's type converts to and
+  from each. A trait the author's type needs of what it holds, `PartialEq` on a record holding a
+  consumed record, which its bindings give `Debug`, `Clone` and `Copy` only, as
+  [the types of a consumed interface](#the-types-of-a-consumed-interface) says, is the compiler's
+  error on the author's derive.
+- The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
+  `#[cfg_attr(..)]`. The type, a field, a newtype's field, a case or a case's payload under
+  `#[cfg(..)]`, written plainly or under `#[cfg_attr(..)]`, beside any other attribute there,
+  which the WIT would hold in every configuration, is a compile
+  error; the type keeps its other attributes, any other `#[cfg_attr(..)]` included, which the
+  compiler evaluates on the author's type.
 - The macro writes the code serving a struct marked `#[state]`, `#[resource]` or `#[wit_resource]`,
   and the code calling the `pub fn` of a WIT resource and a function marked `#[constructor]`,
   `#[validate]`, `#[open]` or `#[close]`, before the compiler evaluates `#[cfg(..)]`, and that code

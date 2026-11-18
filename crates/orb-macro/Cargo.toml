@@ -25,6 +25,8 @@ wit-parser = "=0.261.0"
 
 [dev-dependencies]
 wit-component = "=0.261.0"
+# The tests read the source text an error falls on.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [lints]
 workspace = true

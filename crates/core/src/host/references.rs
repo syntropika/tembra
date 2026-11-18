@@ -60,9 +60,7 @@ impl Host {
         let code_version = inner.version;
         let lifetime = service.lifetime;
         let linger_ms = service.linger_ms;
-        if service.lifetime == Lifetime::Host
-            && (address.key != ["main"] || address.principal != "host")
-        {
+        if !admits_address(service.lifetime, &address) {
             return Err(Error::invalid(
                 Reason::HostAddress,
                 "host-lifetime objects use key main and the host principal",

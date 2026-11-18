@@ -22,6 +22,7 @@ native-only-newtype = ["dep:tembra"]
 # `executor-wasm/tests/orb_macro_runtime.rs` builds each std and `no-std`, and calls it, then runs
 # its native tests with `native` or `native-sdk`.
 keywords = ["dep:tembra"]
+authored = ["dep:tembra"]
 configured = ["dep:tembra"]
 renamed = ["dep:sdk"]
 flagged = ["dep:tembra"]

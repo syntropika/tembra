@@ -3,7 +3,8 @@
 //! what is refused where.
 use super::Options;
 use super::tests::{
-    expanded_with as expanded, literal, refused_with as refused, resolved_with, tokens, wit,
+    expanded_with as expanded, literal, refused_on, refused_with as refused, resolved_with, tokens,
+    wit,
 };
 use std::path::{Path, PathBuf};
 use syn::ItemMod;
@@ -116,7 +117,8 @@ const SHOPPER: &str = "mod shopper {
 /// A derived signature names an imported interface's types through the interface's module,
 /// alone, in containers, as a resource's constructor and method take them and in the fields and
 /// cases of the module's types: the derived interface `use`s each, under the kebab-case name of
-/// its Rust name, and the bridges pass the author's values as they are, the bindings' own types.
+/// its Rust name, and the bridges pass the author's values as they are, the bindings' own types,
+/// through the identity `Into` inside a type of the module, which converts around them.
 #[test]
 fn a_derived_signature_names_an_imported_interfaces_types() {
     let dir = consumed("shopper", SHOP);
@@ -139,20 +141,53 @@ fn a_derived_signature_names_an_imported_interfaces_types() {
     for expected in [
         "fn price (item : catalog :: Item) -> u32 { Shopping :: price (item) }",
         "fn cheapest (items : catalog :: Items , status : Option < catalog :: Status >) -> Option < catalog :: Item > { Shopping :: cheapest (items , status) }",
-        "fn choose (picks : (catalog :: Pick , u32) , odd : catalog :: AB) -> Result < Choice , String > { Shopping :: choose (picks , odd) }",
+        "fn choose (picks : (catalog :: Pick , u32) , odd : catalog :: AB) -> Result < exports :: example :: shopper :: shopping :: Choice , String > { match Shopping :: choose (picks , odd) { :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err (:: core :: convert :: Into :: into (item)) , } }",
         "fn new (first : catalog :: Item) -> Self { Till :: new (first) }",
         "fn ring (& self , item : catalog :: Label) -> catalog :: Status { Till :: ring (self , item) }",
-        "pub use exports :: example :: shopper :: shopping :: { Basket , Choice } ;",
+        "impl :: core :: convert :: From < Basket > for exports :: example :: shopper :: shopping :: Basket { fn from (value : Basket) -> Self { Self { items : value . items . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , size : :: core :: convert :: Into :: into (value . size) , marks : :: core :: convert :: Into :: into (value . marks) } } }",
+        "impl :: core :: convert :: From < Choice > for exports :: example :: shopper :: shopping :: Choice { fn from (value : Choice) -> Self { match value { Choice :: Picked (item) => Self :: Picked (:: core :: convert :: Into :: into (item)) , Choice :: Nothing => Self :: Nothing , } } }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
+/// A consumed interface's type resolves through a `use` of it as through its module: in the Orb
+/// module and in a sub-module, renamed with `as`, in a group and through an alias that is only a
+/// path. The derived interface `use`s each by its WIT name, whatever name the module writes.
+#[test]
+fn a_consumed_type_resolves_through_a_use_of_it() {
+    let dir = consumed("used", SHOP);
+    let module = expanded(
+        shopping(&dir),
+        "mod shopper {
+            use catalog::Item;
+            pub mod till {
+                use super::catalog::{Size as Measure, Status};
+                pub type Tag = super::catalog::Label;
+                #[service]
+                pub struct Till;
+                impl Till {
+                    pub fn price(item: super::Item) -> u32 { item.price }
+                    pub fn fit(size: Measure, status: Option<Status>) -> Tag { todo!() }
+                }
+            }
+        }",
+    );
+    let text = resolved(&module, &dir);
+    for expected in [
+        "interface till {\n  use example:shop/catalog@1.0.0.{item, size, status, label};\n",
+        "  price: func(item: item) -> u32;\n",
+        "  fit: func(size: size, status: option<status>) -> label;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
     }
 }
 
 /// A record or a variant of the module holds the handle of an imported interface's resource where
 /// only parameters reach it, of a service's functions and of a resource's constructor and methods
 /// alike, as the runtime moves such a handle anywhere into an argument: the interface defining the
-/// type `use`s the resource, and the bridge passes the bindings' type as it is, with the bindings'
-/// handle in the resource's place.
+/// type `use`s the resource, and the bridge converts the author's type from the bindings', which
+/// holds the bindings' handle in the resource's place, as the author's field does.
 #[test]
 fn a_parameter_record_holds_an_imported_interfaces_handle() {
     let dir = consumed("job", TEXTS);
@@ -196,11 +231,11 @@ fn a_parameter_record_holds_an_imported_interfaces_handle() {
     }
     let generated = tokens(&module);
     for expected in [
-        "fn spell_job (job : Job) -> u32 { Speller :: spell_job (job) }",
-        "fn run (tasks : Vec < Task > , last : Option < Job >) -> u32 { Speller :: run (tasks , last) }",
-        "fn new (job : Job) -> Self { Draft :: new (job) }",
-        "fn add (& self , job : Job) -> u32 { Draft :: add (self , job) }",
-        "pub use exports :: example :: speller :: speller :: { Job , Task } ;",
+        "fn spell_job (job : exports :: example :: speller :: speller :: Job) -> u32 { Speller :: spell_job (:: core :: convert :: Into :: into (job)) }",
+        "fn run (tasks : Vec < exports :: example :: speller :: speller :: Task > , last : Option < exports :: example :: speller :: speller :: Job >) -> u32 { Speller :: run (tasks . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , last . map (| item | :: core :: convert :: Into :: into (item))) }",
+        "fn new (job : exports :: example :: speller :: speller :: Job) -> Self { Draft :: new (:: core :: convert :: Into :: into (job)) }",
+        "fn add (& self , job : exports :: example :: speller :: speller :: Job) -> u32 { Draft :: add (self , :: core :: convert :: Into :: into (job)) }",
+        "impl :: core :: convert :: From < exports :: example :: speller :: speller :: Job > for Job { fn from (value : exports :: example :: speller :: speller :: Job) -> Self { Self { builder : :: core :: convert :: Into :: into (value . builder) , word : :: core :: convert :: Into :: into (value . word) } } }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -325,8 +360,8 @@ fn a_path_resolves_in_the_module_that_writes_it_before_the_consumed_interfaces()
         assert!(!text.contains("{entry, banner}"), "{name}: {text}");
         let generated = tokens(&module);
         for expected in [
-            "pub mod greeting { pub use super :: super :: exports :: example :: archivist :: front :: { Banner } ; }",
-            "fn headline () -> greeting :: Banner { Front :: headline () }",
+            "pub mod greeting { pub struct Banner { pub text : String } impl :: core :: convert :: From < Banner > for super :: super :: exports :: example :: archivist :: front :: Banner",
+            "fn headline () -> super :: exports :: example :: archivist :: front :: Banner { :: core :: convert :: Into :: into (Front :: headline ()) }",
             "fn keep (entry : super :: greeting :: Entry) -> u32 { Front :: keep (entry) }",
             "fn latest (entries : Vec < greeting :: Entry >) -> Option < greeting :: Entry > { Archive :: latest (entries) }",
         ] {
@@ -401,9 +436,9 @@ fn a_derived_signature_names_a_keyed_imports_types_through_its_view() {
     );
 }
 
-/// A view's module re-exports only the types the interface's functions name: a type of the
-/// interface reached only through a field of one of them is no type of the view, the error listing
-/// those that are, and a type of the interface named like the view's resource is the view's object.
+/// A view's module re-exports only the types the interface's functions name; a type of the
+/// interface reached only through a field of one of them is no type of the view, which rustc reports
+/// on the path, and a type of the interface named like the view's resource is the view's object.
 #[test]
 fn a_derived_signature_names_only_the_types_a_view_uses() {
     let dir = consumed(
@@ -439,14 +474,6 @@ interface counter {
         resolved(&module, &dir).contains("  total: func(tally: tally) -> u32;\n"),
         "{}",
         wit(&module)
-    );
-    let error = refused(
-        keyed(),
-        &routing("pub fn total(count: counter_ref::Count) -> u32 { 0 }"),
-    );
-    assert!(
-        error.contains("`Routing::total` takes `Count`, which names no type of the view `counter_ref`: the view of the interface example:counters/counter@1.0.0, which this module imports by key, uses only the types the interface's functions name, `Tally`"),
-        "{error}"
     );
     let error = refused(
         keyed(),
@@ -539,21 +566,12 @@ fn a_derived_signature_names_an_implemented_interfaces_and_a_hooks_types() {
     };
     let error = refused("pub fn take(cursor: book::Cursor) -> u32 { 0 }");
     assert!(
-        error.contains("`Report::take` takes `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"),
+        error.contains("`Report::take` takes `book::Cursor`, which the runtime refuses in a signature: a foreign owned argument requires its defining Orb import; a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"),
         "{error}"
     );
     let error = refused("pub fn give() -> Option<book::Cursor> { None }");
     assert!(
-        error.contains("`Report::give` returns `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0: the runtime returns a resource only from the interface that defines it"),
-        "{error}"
-    );
-    // The world imports a contributed hook itself, so the bindings' import module of the hook
-    // names the import's copy of its types, which the derived interface does not take.
-    let error = refused(
-        "pub fn judged(admission: self::example::ledger::guard::Admission) -> bool { admission.blocked }",
-    );
-    assert!(
-        error.contains("`Report::judged` takes `Admission`, a record of the hook example:ledger/guard@1.0.0, which this module contributes to, through the bindings' module of its import: a derived interface takes the types of a hook from its export, as `guard::Admission` names them; `self::example::ledger::guard::Admission` is the import's"),
+        error.contains("`Report::give` returns `Option<book::Cursor>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none"),
         "{error}"
     );
 }
@@ -655,15 +673,15 @@ interface catalog {
     for (functions, message) in [
         (
             "pub fn update(pending: catalog::Pending) -> u32 { 0 }",
-            "`Shopping::update` takes `Pending`, a record of the imported interface example:shop/catalog@1.0.0 that holds an option of an option, which the runtime refuses in a signature",
+            "`Shopping::update` takes `Pending`, a record of the imported interface example:shop/catalog@1.0.0, which the runtime refuses in a signature: nested options require a tagged option codec",
         ),
         (
             "pub fn index() -> Option<catalog::Index> { None }",
-            "`Shopping::index` returns `Index`, a record of the imported interface example:shop/catalog@1.0.0 that holds a map, which the runtime refuses in a signature",
+            "`Shopping::index` returns `Index`, a record of the imported interface example:shop/catalog@1.0.0, which the runtime refuses in a signature: map requires a dedicated interpreter value adapter",
         ),
         (
             "pub fn corners(corners: Vec<catalog::Corners>) -> u32 { 0 }",
-            "`Shopping::corners` takes `Corners`, a type of the imported interface example:shop/catalog@1.0.0 that holds a list of a fixed length, which the runtime refuses in a signature",
+            "`Shopping::corners` takes `Corners`, a type of the imported interface example:shop/catalog@1.0.0, which the runtime refuses in a signature: fixed-length list requires a dedicated interpreter value adapter",
         ),
     ] {
         let error = refused(shopping(&dir), &shopper(functions));
@@ -726,38 +744,37 @@ interface counter {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    let nested = "an option of an option, which the runtime refuses in a signature; use an enum of the module with a case for each";
-    for (items, functions, message) in [
+    for (items, functions, function, on) in [
         (
             "",
             "pub fn find() -> Option<catalog::Opt> { None }",
-            format!(
-                "`Shopping::find` returns `Opt`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Opt` is an option itself: {nested}"
-            ),
+            "`Shopping::find` returns",
+            "Option<catalog::Opt>",
         ),
         (
             "",
             "pub fn find(again: Vec<Option<catalog::Again>>) -> u32 { 0 }",
-            format!(
-                "`Shopping::find` takes `Again`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Again` is an option itself: {nested}"
-            ),
+            "`Shopping::find` takes",
+            "Vec<Option<catalog::Again>>",
         ),
         (
             "",
             "pub fn find() -> Option<counter_ref::Maybe> { None }",
-            format!(
-                "`Shopping::find` returns `Maybe`, a type of the interface example:shop/counter@1.0.0, which this module imports by key, in an `Option`, and `Maybe` is an option itself: {nested}"
-            ),
+            "`Shopping::find` returns",
+            "Option<counter_ref::Maybe>",
         ),
         (
             "pub struct Found { pub at: Option<catalog::Opt> }",
             "pub fn last() -> Found { todo!() }",
-            format!(
-                "`Found` holds `Opt`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Opt` is an option itself: {nested}"
-            ),
+            "`Shopping::last` returns",
+            "Found",
         ),
     ] {
-        let error = refused(options(), &shopper(items, functions));
+        let (error, at) = refused_on(options(), &shopper(items, functions));
+        assert_eq!(at, on, "{functions}\n{error}");
+        let message = format!(
+            "{function} `{on}`, which the runtime refuses in a signature: nested options require a tagged option codec; use an enum of the module with a case for each in place of the option of an option"
+        );
         assert!(error.contains(&message), "{functions}\n{error}");
     }
 }
@@ -809,7 +826,8 @@ fn a_declared_hooks_types_stay_out_of_a_derived_signature() {
 /// A hook the module contributes to or declares is exported by the world, as an implemented
 /// interface is, so the view of its keyed import names the import's copy of the hook's types,
 /// which a derived interface, exported, does not take: a derived signature names a contributed
-/// hook's types through the hook's module, the export's copy, and none of a declared hook's.
+/// hook's types through the hook's module, the export's copy, rustc reporting the view's on the
+/// signature, and none of a declared hook's.
 #[test]
 fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
     let dir = consumed("hooked-views", LEDGER);
@@ -829,14 +847,6 @@ fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
     ] {
         assert!(generated.contains(reexport), "{reexport}\n{generated}");
     }
-    let error = refused(
-        keyed("example:ledger/guard@1.0.0"),
-        &keeper("pub fn judged(admission: guard_ref::Admission) -> bool { admission.blocked }"),
-    );
-    assert!(
-        error.contains("`Report::judged` takes `Admission`, a record of the interface example:ledger/guard@1.0.0, which this module imports by key and contributes to: a derived interface takes the types of a hook from its export, as `guard::Admission` names them; `guard_ref::Admission` is the import's"),
-        "{error}"
-    );
     // A declaration beside the view of its hook: the Orb module re-exports the hook's import.
     let gatekeeper = |admit: &str| {
         format!(
@@ -889,7 +899,8 @@ interface gate {
 /// in the hook's export: the bindings alias the hook's import and export, and the view of its
 /// keyed import, to the type of that import, so the bindings' module of the hook's import and the
 /// view name the very type a derived interface takes, and a derived signature names it through
-/// either. A type the hook defines itself has two copies, and the import's is refused.
+/// either. A type the hook defines itself has two copies, and rustc reports the import's on the
+/// signature.
 #[test]
 fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
     let dir = consumed("shared-types", SHARED);
@@ -923,16 +934,6 @@ fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    let error = refused(
-        keyed("example:ledger/guard@1.0.0"),
-        &keeper(
-            "pub fn judged(verdict: self::example::ledger::guard::Verdict) -> bool { verdict.blocked }",
-        ),
-    );
-    assert!(
-        error.contains("`Report::judged` takes `Verdict`, a record of the hook example:ledger/guard@1.0.0, which this module contributes to, through the bindings' module of its import: a derived interface takes the types of a hook from its export, as `guard::Verdict` names them; `self::example::ledger::guard::Verdict` is the import's"),
-        "{error}"
-    );
     // The view of a hook the module declares names the type the hook's import and export alias.
     let module = expanded(
         keyed("example:ledger/gate@1.0.0"),
@@ -1093,256 +1094,6 @@ fn one_interface_in_two_roles_is_refused() {
     }
 }
 
-/// The Orb module re-exports a module for each consumed interface beside its own items, and a
-/// module takes its name in the type namespace: an item of the Orb module there under the same
-/// name, raw or not, a module, a type, an `extern crate` or what a `use` imports with `self`, is an
-/// error on it naming both, beside the `context` option too. A plain `use` may import a function,
-/// which takes its name in the value namespace, and an item under `#[cfg(..)]` is gone where its
-/// configuration is off: the compiler judges those, so they expand, as does a function of that
-/// name and each module without the item.
-#[test]
-fn an_item_named_like_a_reexported_module_is_refused() {
-    let dir = consumed("own-names", LEDGER);
-    let orb = |context: bool, imports: &[&str], items: &str| {
-        let module = format!(
-            "mod keeping {{
-                #[service]
-                pub struct Report;
-                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
-                {items}
-            }}"
-        );
-        let options = Options {
-            context,
-            ..options("example:keeping@1.0.0", Some(&dir), imports)
-        };
-        (options, module)
-    };
-    let book = ["example:ledger/book@1.0.0"];
-    let imported = "the module it re-exports for the imported interface example:ledger/book@1.0.0";
-    let contribution = "#[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
-        pub fn admit(input: guard::Admission) -> guard::Admission { input }";
-    // The option, the imports, the items besides the one named like a re-export, that one, and
-    // the error on it.
-    for (context, imports, items, item, message) in [
-        (
-            true,
-            &[][..],
-            "",
-            "mod context {}",
-            "`context` is the name of the Orb module's own module and of the module it re-exports for the kernel's interface tembra:guest/context@1.0.0, which the `context` option imports; rename its own module".to_owned(),
-        ),
-        (
-            false,
-            &book[..],
-            "",
-            "mod book {}",
-            format!("`book` is the name of the Orb module's own module and of {imported}; rename its own module"),
-        ),
-        (
-            false,
-            &book[..],
-            "",
-            "mod r#book {}",
-            format!("`r#book` is the name of the Orb module's own module and of {imported}; rename its own module"),
-        ),
-        (
-            false,
-            &book[..],
-            "",
-            "use crate::util::book::{self, Entry};",
-            format!("`book` is the name of the Orb module's own import and of {imported}; rename its own import"),
-        ),
-        (
-            false,
-            &book[..],
-            "",
-            "extern crate book;",
-            format!("`book` is the name of the Orb module's own `extern crate` and of {imported}; rename its own `extern crate`"),
-        ),
-        (
-            false,
-            &[][..],
-            contribution,
-            "pub struct guard;",
-            "`guard` is the name of the Orb module's own struct and of the module it re-exports for the hook example:ledger/guard@1.0.0, which this module contributes to; rename its own struct".to_owned(),
-        ),
-    ] {
-        let (options, module) = orb(context, imports, &format!("{items}\n{item}"));
-        let error = refused(options, &module);
-        assert!(error.contains(&message), "{item}\n{error}");
-        let (options, module) = orb(context, imports, items);
-        expanded(options, &module);
-    }
-    for item in [
-        "use crate::util::book;",
-        "#[cfg(test)] mod book {}",
-        "pub fn book() -> u32 { 0 }",
-    ] {
-        let (options, module) = orb(false, &book, item);
-        expanded(options, &module);
-    }
-}
-
-/// The bindings declare in the Orb module `exports`, the module of the interfaces the world
-/// exports, and a module for each namespace of the interfaces it imports: `example` for an
-/// imported example:ledger/book@1.0.0 or a hook of that package, the Orb's own for a view or a
-/// hook it derives, `wasi` for a WASI interface, and `tembra` for the kernel's, which a state or the
-/// `context` option imports. An item of the Orb module under one of those names would be defined
-/// twice, and is an error on it naming both. A namespace the world imports nothing from has no
-/// module, that of an interface the module implements, which the world exports only, or of the
-/// Orb's own package without a view or a derived hook, so an item of its name expands, as does each
-/// module without the item.
-#[test]
-fn an_item_named_like_a_bindings_module_is_refused() {
-    let dir = consumed("bindings-names", LEDGER);
-    let orb = |context: bool, imports: &[&str], keyed: &[&str], items: &str| {
-        let module = format!(
-            "mod keeping {{
-                #[service]
-                pub struct Report;
-                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
-                {items}
-            }}"
-        );
-        let options = Options {
-            context,
-            keyed: keyed.iter().map(|identity| literal(identity)).collect(),
-            ..options("other:keeping@1.0.0", Some(&dir), imports)
-        };
-        (options, module)
-    };
-    let namespace = |name: &str, kind: &str| {
-        format!(
-            "`{name}` is the name of the Orb module's own {kind} and of the bindings' module of the namespace `{}`, which holds the interfaces the world imports from it; rename its own {kind}",
-            name.trim_start_matches("r#")
-        )
-    };
-    let book = ["example:ledger/book@1.0.0"];
-    let contribution = "#[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
-        pub fn admit(input: guard::Admission) -> guard::Admission { input }";
-    let declaration = "#[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
-        pub struct Gate;";
-    let derived = "#[hook(composition = waterfall, input = Admission)]
-        pub struct Gate;
-        pub struct Admission { pub value: i32 }";
-    let state = "#[state] pub struct Balance { pub total: i64 }";
-    // The option, the imports, the keyed imports, the items besides the one named like a module of
-    // the bindings, that one, and the error on it.
-    for (context, imports, keyed, items, item, message) in [
-        (
-            false,
-            &[][..],
-            &[][..],
-            "",
-            "pub mod exports { pub fn csv() -> u32 { 0 } }",
-            "`exports` is the name of the Orb module's own module and of the bindings' module of the interfaces the world exports; rename its own module".to_owned(),
-        ),
-        (
-            false,
-            &book[..],
-            &[][..],
-            "",
-            "pub mod example {}",
-            namespace("example", "module"),
-        ),
-        (
-            false,
-            &[][..],
-            &[][..],
-            contribution,
-            "pub struct example;",
-            namespace("example", "struct"),
-        ),
-        (
-            false,
-            &[][..],
-            &[][..],
-            declaration,
-            "extern crate example;",
-            namespace("example", "`extern crate`"),
-        ),
-        (
-            false,
-            &["wasi:random/random@0.3.0"][..],
-            &[][..],
-            "",
-            "mod r#wasi {}",
-            namespace("r#wasi", "module"),
-        ),
-        (
-            false,
-            &[][..],
-            &["example:ledger/guard@1.0.0"][..],
-            "",
-            "pub enum other {}",
-            namespace("other", "enum"),
-        ),
-        (
-            false,
-            &[][..],
-            &[][..],
-            derived,
-            "pub trait other {}",
-            namespace("other", "trait"),
-        ),
-        (
-            true,
-            &[][..],
-            &[][..],
-            "",
-            "pub type tembra = u32;",
-            namespace("tembra", "type alias"),
-        ),
-        (
-            false,
-            &[][..],
-            &[][..],
-            state,
-            "use crate::util::tembra::{self};",
-            namespace("tembra", "import"),
-        ),
-    ] {
-        let (options, module) = orb(context, imports, keyed, &format!("{items}\n{item}"));
-        let error = refused(options, &module);
-        assert!(error.contains(&message), "{item}\n{error}");
-        let (options, module) = orb(context, imports, keyed, items);
-        expanded(options, &module);
-    }
-    let implemented = "#[service(\"example:ledger/book@1.0.0\")]
-        pub struct Keeper;
-        impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
-        #[wit_resource(service = Keeper)]
-        pub struct Cursor;
-        impl Cursor {
-            #[constructor]
-            pub fn new() -> Self { Cursor }
-        }
-        pub mod example {}";
-    for (imports, items) in [
-        (
-            &[][..],
-            "pub mod example {} pub mod other {} pub mod wasi {} pub mod tembra {}",
-        ),
-        (&[][..], implemented),
-        (
-            &book[..],
-            "use crate::util::exports; use crate::util::example;",
-        ),
-        (
-            &book[..],
-            "pub fn exports() -> u32 { 0 } pub fn example() -> u32 { 0 }",
-        ),
-        (
-            &book[..],
-            "#[cfg(test)] mod exports {} #[cfg(test)] mod example {}",
-        ),
-    ] {
-        let (options, module) = orb(false, imports, &[], items);
-        expanded(options, &module);
-    }
-}
-
 /// The `context` option imports the kernel's interface tembra:guest/context, which the Orb module
 /// re-exports as `context`: a service implementing that interface, a hook contributing to it and a
 /// hook declaring it would each re-export a second module under that name, and each is refused at
@@ -1460,14 +1211,14 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
             "`Shopping::hold` takes `Slot`, a record of the imported interface example:shop/catalog@1.0.0 that holds a resource handle: a derived interface names the consumed types that carry data only",
         ),
         (
-            "pub fn bag(bag: Bag) -> u32 { 0 } pub fn pack() -> Bag { todo!() }",
+            "pub fn take(bag: Bag) -> u32 { 0 } pub fn pack() -> Bag { todo!() }",
             "pub struct Bag { pub cart: catalog::Cart }",
-            "`Shopping::pack` returns `Bag`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
+            "`Shopping::pack` returns `Bag`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn next() -> Vec<Choice> { todo!() }",
             "pub enum Choice { Cart(catalog::Cart), Nothing }",
-            "`Shopping::next` returns `Choice`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
+            "`Shopping::next` returns `Vec<Choice>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn open() -> Tally { Tally }",
@@ -1475,12 +1226,12 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
             #[wit_resource(service = Shopping)]
             pub struct Tally;
             impl Tally { pub fn drain(&self) -> Bag { todo!() } }",
-            "`Tally::drain` returns `Bag`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
+            "`Tally::drain` returns `Bag`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn last() -> Option<Receipt> { None }",
             "pub struct Bag { pub cart: catalog::Cart } pub struct Receipt { pub bag: Bag }",
-            "`Shopping::last` returns `Receipt`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
+            "`Shopping::last` returns `Option<Receipt>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn order() { Ordered::run(Order { item: todo!() }) }",
@@ -1504,6 +1255,15 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
         let error = refused(shopping(&dir), &service(functions, items));
         assert!(error.contains(message), "{functions}\n{error}");
     }
+    // A resource of another interface in a result falls on the result as written.
+    let (_, at) = refused_on(
+        shopping(&dir),
+        &service(
+            "pub fn last() -> Option<Receipt> { None }",
+            "pub struct Bag { pub cart: catalog::Cart } pub struct Receipt { pub bag: Bag }",
+        ),
+    );
+    assert_eq!(at, "Option<Receipt>");
     let error = refused(
         options(
             "example:clock@1.0.0",
@@ -1616,9 +1376,64 @@ fn a_wasi_type_a_consumed_interface_uses_is_refused_as_a_wasi_type() {
     }
 }
 
+/// The bindings derive serde's traits on a consumed type a state reaches in any form the state's
+/// fields write it: through a record of the module, a tuple struct of several fields, an alias
+/// that is more than a path, an array, or a newtype whose name another of the Orb takes, which
+/// the macro does not read through as a newtype; each gives `item` and the `status` it holds a
+/// selector.
+#[test]
+fn a_state_gives_serde_to_a_consumed_type_in_any_form() {
+    let dir = consumed("forms", SHOP);
+    for (types, field) in [
+        (
+            "pub struct Holder { pub item: catalog::Item }",
+            "pub held: Holder",
+        ),
+        (
+            "pub struct Pair(pub Option<catalog::Item>, pub u32);",
+            "pub pair: Pair",
+        ),
+        ("pub type Items = Vec<catalog::Item>;", "pub items: Items"),
+        (
+            "pub mod model { use super::catalog; pub type Items = Vec<catalog::Item>; }",
+            "pub items: model::Items",
+        ),
+        (
+            "pub mod model { use super::catalog; pub type Items = Vec<catalog::Item>; } use model::Items;",
+            "pub items: Items",
+        ),
+        ("", "pub items: [catalog::Item; 2]"),
+        (
+            "pub struct Wrap(pub catalog::Item); pub mod other { pub struct Wrap(pub u32); }",
+            "pub wrap: Wrap",
+        ),
+    ] {
+        let module = format!(
+            "mod shopper {{
+                {types}
+                #[state]
+                pub struct Kept {{ {field} }}
+                #[service]
+                pub struct Shopping;
+                impl Shopping {{ pub fn count() -> u32 {{ 0 }} }}
+            }}"
+        );
+        let generated = tokens(&expanded(shopping(&dir), &module));
+        let expected = concat!(
+            "additional_type_attributes : { ",
+            "\"example:shop/catalog@1.0.0/item\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
+            "\"example:shop/kinds@1.0.0/status\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
+        );
+        assert!(generated.contains(expected), "{field}\n{generated}");
+    }
+}
+
 /// A state holds a consumed type whose bindings `serde` writes, in its fields or in the module
-/// types they reach, whether it stays out of the WIT, with serde's derives the macro adds, or
-/// enters it; a resource, a type holding a resource handle and a consumed flags are refused.
+/// types they reach, whether it stays out of the WIT, with the author's serde derives, or enters
+/// it; a resource, a type holding a resource handle and a consumed flags are refused. The bindings
+/// derive serde's traits on the consumed types the state holds and on those these hold, `status`
+/// of another interface, each by its full name, and on no other: not on `pick` or `a-b`, which
+/// only a signature names.
 #[test]
 fn a_state_holds_the_consumed_types_serde_writes() {
     let dir = consumed("state", SHOP);
@@ -1639,13 +1454,27 @@ fn a_state_holds_the_consumed_types_serde_writes() {
         )
     };
     let fields = "pub last: Option<catalog::Item>, pub all: Vec<catalog::Item>, pub size: Option<catalog::Size>";
-    let out = expanded(shopping(&dir), &module(fields, ""));
+    let out = expanded(
+        shopping(&dir),
+        &module(
+            fields,
+            "pub fn choose(pick: catalog::Pick) -> catalog::AB { todo!() }",
+        ),
+    );
     let generated = tokens(&out);
     for expected in [
-        "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Kept { pub last : Option < catalog :: Item > , pub all : Vec < catalog :: Item > , pub size : Option < catalog :: Size > }",
-        "additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]",
+        "pub struct Kept { pub last : Option < catalog :: Item > , pub all : Vec < catalog :: Item > , pub size : Option < catalog :: Size > }",
+        concat!(
+            "additional_type_attributes : { ",
+            "\"example:shop/catalog@1.0.0/item\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
+            "\"example:shop/catalog@1.0.0/size\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
+            "\"example:shop/kinds@1.0.0/status\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
+        ),
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    for unexpected in ["additional_derives", "/pick\"", "/a-b\""] {
+        assert!(!generated.contains(unexpected), "{unexpected}\n{generated}");
     }
     assert!(!wit(&out).contains("record kept"), "{}", wit(&out));
     let entered = expanded(
@@ -1698,12 +1527,11 @@ interface lending {
 }
 ";
 
-/// The bindings leave a type out of a state's serde derives by its bare name, as they compare the
-/// names of `additional_derives_ignore`: a consumed record `serde` writes loses them to a record of
-/// the module of the same name that holds a resource handle, and a record of the module to such a
-/// consumed record. The macro gives each its derives back by its full name, the module's with the
-/// author's, so a state holds it. The ignore list names only the types the bindings generate:
-/// `loan`, in an interface the Orb does not import, is not on it.
+/// The bindings derive serde's traits on a consumed type a state holds by its full name, so a
+/// consumed record `serde` writes takes them beside a record of the module of the same name that
+/// holds a resource handle, and a consumed record named like the module's `slot` gives that one
+/// nothing: the record of the module is the author's, which the state holds as it is, with its own
+/// derives.
 #[test]
 fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
     let dir = consumed("namesake", CATALOG);
@@ -1728,13 +1556,10 @@ fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
     );
     let generated = tokens(&module);
     for expected in [
-        "additional_derives_ignore : [\"entry\" , \"slot\"] ,",
-        concat!(
-            "additional_type_attributes : { ",
-            "\"example:shopper/shopping@1.0.0/slot\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize , :: core :: hash :: Hash)]] , ",
-            "\"example:shop/catalog@1.0.0/entry\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
-        ),
+        "additional_type_attributes : { \"example:shop/catalog@1.0.0/entry\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
+        "# [derive (serde :: Serialize , Hash)] pub struct Slot { pub shelf : u32 }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
+    assert!(!generated.contains("additional_derives"), "{generated}");
 }
