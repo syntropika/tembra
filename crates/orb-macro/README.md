@@ -393,7 +393,9 @@ the running revision keeps serving, as the [state example](../../examples/rust-o
 shows for an update. A function named `validate` without the marker is ordinary Rust. Every state
 answers a reload, with a rule or without: the new instance first reads the value it inherits as its
 own state type, so a value of another shape, a field added or renamed under the same `version`,
-fails the reload instead of the first `read`.
+fails the reload instead of the first `read`. Another `version` fails the reload as well while an
+object holds the state, since the macro declares no migration of the value: the running revision
+keeps serving the object, and the objects created after a reload start at the new version.
 
 The kernel keeps the state as JSON, which has no room for a NaN or an infinite float: `serde_json`
 writes one as `null`, which reads back as no float, so a stored value holding one would fail every
@@ -1631,7 +1633,9 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    `contract/deps/`: the files `cargo tembra build` writes, rewritten only when their content
    changes, so a crate used natively has the contract a compiled consumer reads, and a
    dependency's is never written. The Orb modules of an integration test, a bench, a binary or an
-   example built as one are not the library's and write nothing. Writing it, the macro removes
+   example built as one are not the library's and write nothing. An example built as a library,
+   with `crate-type = ["lib"]`, still writes into the crate's `contract/`: the macro does not tell
+   it from the library today. Writing the contract, the macro removes
    any other `.wit` of `contract/` whose package, name and version, is the module's, as the
    contract of a former name of its world, so each Orb module of a crate needs a package of its
    own: two modules of one package remove each other's contract, silently, and `contract/` keeps

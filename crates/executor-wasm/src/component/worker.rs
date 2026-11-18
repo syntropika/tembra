@@ -2562,12 +2562,16 @@ async fn invoke(
         };
         Ok::<_, wasmtime::Error>(value)
     });
-    let value = tokio::time::timeout(
-        std::time::Duration::from_millis(engine.limits.timeout_ms),
-        call,
-    )
-    .await
-    .map_err(|_| wasmtime::Error::msg("component call timed out"))???;
+    let timeout = std::time::Duration::from_millis(engine.limits.timeout_ms);
+    let started = tokio::time::Instant::now();
+    // A result after the deadline is a timeout too. The timer can run late on a busy machine,
+    // and `timeout` still returns a result that is ready by then. A dependency's later deadline
+    // makes such results: a stream import's producer times out, its stream ends, and the
+    // importer answers.
+    let value = match tokio::time::timeout(timeout, call).await {
+        Ok(value) if started.elapsed() <= timeout => value,
+        _ => return Err(wasmtime::Error::msg("component call timed out")),
+    }??;
     let value = match value {
         Ok(value) => value,
         Err(error) => return Ok(Err(error)),
@@ -2707,12 +2711,14 @@ async fn release_dropped(dropped: &Dropped, (events, scope): &(Sender<Event>, u6
 
 /// Serve one incoming HTTP request as a staged call of the standard handler.
 ///
-/// The same rules as [`invoke`] apply: one `run_concurrent` under the call timeout, authority
-/// bound to the call's task group, the caller's cancellation ending its bodies, and completion
-/// only after physical settlement. The difference is the result: the response head is
-/// published on the call's own channel as soon as the guest returned it, while this Store keeps
-/// driving the guest's body producer. The call completes only when its task group has finished
-/// and the response body was delivered to its end, dropped by the application, or aborted.
+/// Most rules of [`invoke`] apply: one `run_concurrent` under the call timeout, authority bound
+/// to the call's task group, the caller's cancellation ending its bodies, and completion only
+/// after physical settlement. The timeout is the timer alone: a request that settles before a
+/// late timer runs completes, even past its deadline, where [`invoke`] fails such a result.
+/// The result differs too: the response head is published on the call's own channel as soon as
+/// the guest returned it, while this Store keeps driving the guest's body producer. The call
+/// completes only when its task group has finished and the response body was delivered to its
+/// end, dropped by the application, or aborted.
 async fn ingress(
     engine: &Engine,
     store: &mut Store<State>,

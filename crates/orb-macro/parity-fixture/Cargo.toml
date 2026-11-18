@@ -1,0 +1,31 @@
+[package]
+name = "tembra-orb-parity-fixture"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "An Orb crate built natively and as a component, whose two builds must answer alike"
+
+# Read by `#[tembra::orb]` for `orb()`. The test packages the component under the same name and API
+# version, so both builds name their services alike.
+[package.metadata.tembra]
+name = "parity"
+api-version = 1
+
+[dependencies]
+# What an Orb crate depends on: the facade's authoring entry point, without the host runtime.
+tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
+# The code the macro generates for the ledger's state names them.
+serde.workspace = true
+serde_json.workspace = true
+
+# The test installing the native build links the runtime, not the facade, so the crate turns on the
+# facade's `host` itself on native targets: there the module has `orb()`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tembra = { path = "../../tembra", default-features = false, features = ["macros", "host"] }
+
+[package.metadata.cargo-machete]
+ignored = ["serde", "serde_json"]
+
+[lints]
+workspace = true
