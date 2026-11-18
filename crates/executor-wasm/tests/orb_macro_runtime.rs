@@ -2236,8 +2236,8 @@ fn a_root_resource_opens_and_closes_both_ways() {
 /// build, std and freestanding: the module `holder` of the `flagged` feature implements
 /// `example:rights/rights@1.0.0`, whose `access` the bindings generate without `wit-bindgen`'s
 /// `bitflags` feature, and a derived service takes and returns the same type. A value crosses as
-/// an object of its set flags. The module's native build fails today, so its native test runs
-/// from the native fixture's `tests/flags.rs`, ignored until then.
+/// an object of its set flags. The module's native test runs from the native fixture's
+/// `tests/flags.rs`.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
 fn a_consumed_flags_crosses_a_component_with_the_facade_alone() {

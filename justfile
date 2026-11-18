@@ -257,8 +257,7 @@ test-orb-both-ways:
     # Natively, the runtime fixture's default module `guest`, std and `no-std`, with the facade's
     # `host` through the fixture's `native` feature. `just test-orb-macro` builds `guest` only as a
     # component. It builds natively, std, and tests each module that a feature selects in place of
-    # `guest`, but `flagged`, whose native build fails today: see the native fixture's
-    # `tests/flags.rs`.
+    # `guest`, but `flagged`, whose native test the native fixture's `tests/flags.rs` runs.
     for features in native native,no-std; do
         step "crates/orb-macro/runtime-fixture natively, with $features" cargo build --locked --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --features "$features" --target-dir "$target"
     done
