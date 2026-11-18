@@ -52,6 +52,7 @@ A change keeps each invariant below. Each one names the tests that guard it, and
   - Known exception: an example built with `crate-type = ["lib"]` writes `contract/` too, since the macro does not tell it from the library. The macro's guide names it as a limit.
 - Native and compiled Orbs answer the same codes and values for the same calls.
   - `the_native_build_and_the_component_answer_alike` in `crates/executor-wasm/tests/orb_macro_parity.rs` (`just test-orb-parity`). A new case is a scenario: a module or a function of `crates/orb-macro/parity-fixture`, and a row of its list.
+  - Known to break it: a compiled Orb served through `InterpreterPort` (`crates/executor-wasm/src/port.rs`), as on mobile and Node, answers `unavailable/wasm_executor` where a native host answers `invalid/result` for a result that is not finite. So do arguments of an exported resource method that do not match the WIT (`crates/executor-wasm/src/bindings/resources/arguments.rs`), where a native host answers `invalid/arguments`, and a host refusal that a source guest rethrows from an asynchronous call, which a native Orb answers with the refusal's own code. #11 fixes them.
 - `Host` releases on close every callback it keeps, so that a callback holding the host does not keep it alive.
   - `closing_the_host_releases_its_observer` in `crates/tembra/tests/call_context.rs` (`cargo test --locked -p tembra`).
 - Every option that the macro's guide, `crates/orb-macro/README.md`, documents has a test that builds it, both ways where the guide promises both.

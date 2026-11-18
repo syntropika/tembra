@@ -2117,9 +2117,10 @@ fn hooks_a_component_declares_compose_their_contributions() {
 /// the `versioned` feature keeps its state at version 1, and its next revision, built with
 /// `revised`, at version 2. The versions are compared on reload. Changing the version of a living
 /// object's state needs a migration of its value, which the macro does not declare: the reload is
-/// refused with `invalid/state_version`, as a native host refuses it, and the running revision keeps serving the object. Once
-/// the object is released the reload goes through, and a new object starts from the next
-/// revision's state at its version; going back to version 1 is then refused the same way.
+/// refused with `invalid/state_version`, as a native host refuses it, and the running revision
+/// keeps serving the object. Once the object is released the reload goes through, and a new
+/// object starts from the next revision's state at its version; going back to version 1 is then
+/// refused the same way.
 /// Natively, each revision keeps its state at its version, across a reload of its own code: one
 /// build of the crate holds one revision, so a native host cannot reload one into the other.
 #[test]

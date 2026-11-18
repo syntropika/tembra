@@ -2722,8 +2722,8 @@ async fn release_dropped(dropped: &Dropped, (events, scope): &(Sender<Event>, u6
 /// physical settlement, and a call that settles after its deadline is a timeout, even before a
 /// late timer runs. The result differs: the response head is published on the call's own
 /// channel as soon as the guest returned it, while this Store keeps driving the guest's body
-/// producer. The call completes only when its task group has finished and the response body was delivered to its
-/// end, dropped by the application, or aborted.
+/// producer. The call completes only when its task group has finished and the response body was
+/// delivered to its end, dropped by the application, or aborted.
 async fn ingress(
     engine: &Engine,
     store: &mut Store<State>,
