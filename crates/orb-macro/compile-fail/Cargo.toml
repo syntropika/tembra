@@ -1,0 +1,23 @@
+[package]
+name = "tembra-orb-macro-compile-fail"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Compile-fail cases of the macro's errors: each case is a file under tests/ui and the error rustc prints for it"
+
+[dependencies]
+# What an Orb crate depends on, built for the host: the cases are Orb modules the compiler refuses.
+tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
+serde.workspace = true
+serde_json.workspace = true
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+
+[dev-dependencies]
+trybuild = "1"
+
+[package.metadata.cargo-machete]
+ignored = ["tembra", "serde", "serde_json", "wit-bindgen"]
+
+[lints]
+workspace = true
