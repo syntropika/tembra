@@ -2130,6 +2130,48 @@ fn a_derived_function_takes_a_resource_of_its_interface() {
     }
 }
 
+/// A resource named through a `use` that renames it, or through an alias, is the resource it
+/// names: a function taking it in a tuple takes it back from its handle, and one returning it
+/// wraps it into its handle, as with the struct's own name.
+#[test]
+fn a_resource_named_through_a_use_or_an_alias_crosses_as_its_handle() {
+    let module = expanded(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) }
+                pub fn seated(pair: (Seat, u32)) -> u32 { pair.1 }
+                pub fn seat(n: u32) -> Seat { Session::new(n) }
+                pub fn chaired(chair: Option<Chair>) -> Chair { todo!() }
+            }
+            use self::Session as Seat;
+            pub type Chair = Session;
+            impl Sessions {",
+        ),
+    );
+    let text = resolved(&module);
+    for expected in [
+        "  seated: func(pair: tuple<session, u32>) -> u32;\n",
+        "  seat: func(n: u32) -> session;\n",
+        "  chaired: func(chair: option<session>) -> session;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let handle = "exports :: example :: desk :: sessions :: Session";
+    let generated = tokens(&module);
+    for expected in [
+        format!(
+            "fn seated (pair : ({handle} , u32 ,)) -> u32 {{ Sessions :: seated ({{ let (item0 , item1 ,) = pair ; (item0 . into_inner () , item1 ,) }}) }}"
+        ),
+        format!("fn seat (n : u32) -> {handle} {{ {handle} :: new (Sessions :: seat (n)) }}"),
+        format!(
+            "fn chaired (chair : Option < {handle} >) -> {handle} {{ {handle} :: new (Sessions :: chaired (chair . map (| item | item . into_inner ()))) }}"
+        ),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+}
+
 /// The runtime moves an owned resource only into the interface that defines it, and carries no
 /// borrowed argument between Orbs: a derived function taking a resource of another service's
 /// interface, a resource of an implemented interface or a borrowed resource is refused, and so is

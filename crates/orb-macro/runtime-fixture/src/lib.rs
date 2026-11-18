@@ -460,6 +460,9 @@ mod guest {
         Refused { reason: String },
     }
 
+    /// The tally under another name, which the tallies' functions take and return as the tally.
+    use self::Tally as Counted;
+
     #[service]
     pub struct Tallies;
 
@@ -505,6 +508,17 @@ mod guest {
                 Opening::Opened { tally, .. } => Some(tally.total.get()),
                 Opening::Refused { .. } => None,
             }
+        }
+
+        /// Take a tally, named through a `use` that renames it, beside a step: its total plus the
+        /// step.
+        pub fn close_with(pair: (Counted, u32)) -> u32 {
+            pair.0.total.get() + pair.1
+        }
+
+        /// Start a tally, named through a `use` that renames it.
+        pub fn restart(at: u32) -> Counted {
+            Tally::new(at)
         }
 
         /// How many tallies were destroyed.

@@ -947,6 +947,16 @@ fn tally(pool: &mut LocalPool, host: &Host, engine: &Engine, name: &str) {
     assert_eq!(call(pool, "settle", payload), json!(7), "{name}");
     assert_eq!(engine.resources(), 0, "{name}");
     assert_eq!(dropped(pool), json!(7), "{name}");
+
+    // A tally named through a `use` that renames it crosses as the tally: wrapped into its handle
+    // when returned, and taken back from it in a tuple beside a step.
+    let restarted = issue(pool, "restart", 4);
+    assert_eq!(engine.resources(), 1, "{name}");
+    let mut payload = Payload::data(json!([[0, 3]]));
+    payload.attach_argument(restarted).unwrap();
+    assert_eq!(call(pool, "close-with", payload), json!(7), "{name}");
+    assert_eq!(engine.resources(), 0, "{name}");
+    assert_eq!(dropped(pool), json!(8), "{name}");
     let refused = call(pool, "open", Payload::data(json!([2000])));
     assert_eq!(
         refused,

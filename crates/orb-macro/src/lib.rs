@@ -3831,10 +3831,11 @@ impl Handles {
 }
 
 /// Where an author's type, written in the module `scope`, holds a resource of the module, read by
-/// the names `wit_type` reads: `Option`, `Vec`, `Result` and tuples around a type whose last
-/// segment is the name of a resource's struct, which `resources` maps to the bindings' handle
-/// type. A name a consumed interface's module reaches, `counter::Tally`, is that interface's,
-/// whatever its last segment.
+/// the names `wit_type` reads: `Option`, `Vec`, `Result` and tuples around a type that names a
+/// resource's struct, which `resources` maps to the bindings' handle type, however the author
+/// names it, through a `use` that renames it or an alias included, as `with_handles` resolves it. A
+/// name a consumed interface's module reaches, `counter::Tally`, is that interface's, whatever its
+/// last segment.
 fn handles_of(
     ty: &Type,
     scope: usize,
@@ -3843,6 +3844,12 @@ fn handles_of(
 ) -> Option<Handles> {
     if modules.named(ty, scope).is_some() {
         return None;
+    }
+    // A type of the module, by the name it resolves to, whatever the author's spelling of it.
+    if let Some((named, _)) = modules.module_type(ty, scope)
+        && let Some(handle) = resources.get(&named.to_string())
+    {
+        return Some(Handles::Resource(handle.clone()));
     }
     match ty {
         Type::Path(path) => {
