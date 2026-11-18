@@ -154,28 +154,65 @@ fn err(value: tembra::Result<Value>) -> String {
 ///
 /// A port the OS picked and this test released could be picked again, by the implicit binds and
 /// connects of the tests running beside it, before the guest binds it. So the port comes from
-/// below the ephemeral range, which the OS never picks: only an explicit bind can take it. Each
-/// call moves on to the next port, from a start that differs between processes.
+/// outside the ephemeral range, which the OS never picks: only an explicit bind can take it. Each
+/// call moves on to the next port, from a start that differs between processes. A host whose
+/// range leaves no unprivileged port outside it gets a port the OS picked, which this test
+/// releases: such a host keeps that rare race.
 fn free_port() -> u16 {
-    // Below the default ephemeral ranges: 32768 on Linux, 49152 on macOS and Windows.
-    const FIRST: u16 = 20_000;
-    const PORTS: u16 = 12_700;
     static NEXT: AtomicU16 = AtomicU16::new(0);
-    if let Ok(range) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") {
-        let low: u16 = range.split_whitespace().next().unwrap().parse().unwrap();
-        assert!(
-            FIRST + PORTS <= low,
-            "the ephemeral range starts at {low}, inside the ports this test names"
-        );
-    }
-    let start = std::process::id() % 127 * 100;
+    let read = |file: &str| -> Option<Vec<u16>> {
+        let text = std::fs::read_to_string(format!("/proc/sys/net/ipv4/{file}")).ok()?;
+        Some(
+            text.split_whitespace()
+                .map(|number| number.parse().unwrap())
+                .collect(),
+        )
+    };
+    let unprivileged = read("ip_unprivileged_port_start").map_or(1024, |numbers| numbers[0]);
+    // Without the file, Linux's default start, 32768: macOS's and Windows' ranges start higher.
+    let ephemeral =
+        read("ip_local_port_range").map_or((32768, 65535), |numbers| (numbers[0], numbers[1]));
+    let Some(ports) = named_ports(unprivileged, ephemeral) else {
+        return TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+    };
+    let count = ports.end - ports.start;
+    let start = std::process::id() % count.div_ceil(100) * 100;
     loop {
         let next = start + u32::from(NEXT.fetch_add(1, Ordering::Relaxed));
-        let port = FIRST + (next % u32::from(PORTS)) as u16;
+        let port = (ports.start + next % count) as u16;
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
     }
+}
+
+/// The ports a test may name: from the first unprivileged port up to the start of the ephemeral
+/// range, else above its end; none when the range leaves neither.
+fn named_ports(unprivileged: u16, (low, high): (u16, u16)) -> Option<std::ops::Range<u32>> {
+    let first = u32::from(unprivileged);
+    if u32::from(low) > first {
+        Some(first..u32::from(low))
+    } else if high < u16::MAX {
+        Some(first.max(u32::from(high) + 1)..u32::from(u16::MAX) + 1)
+    } else {
+        None
+    }
+}
+
+#[test]
+fn the_named_ports_lie_outside_the_ephemeral_range() {
+    // Linux's default range: the ports below its start.
+    assert_eq!(named_ports(1024, (32768, 60999)), Some(1024..32768));
+    // A range that ends at 65535 with room below it.
+    assert_eq!(named_ports(1024, (49152, 65535)), Some(1024..49152));
+    // A range that starts at the first unprivileged port: the ports above its end.
+    assert_eq!(named_ports(1024, (1024, 60999)), Some(61000..65536));
+    // A range that covers every unprivileged port: the OS picks the port.
+    assert_eq!(named_ports(1024, (1024, 65535)), None);
 }
 
 /// TCP idle drop, UDP with a granted and a denied peer, listen/accept of real clients, and name
