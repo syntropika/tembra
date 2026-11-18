@@ -291,6 +291,15 @@ fn a_new_crate_builds_as_a_component_and_natively() {
         "the contract of the native build"
     );
     cargo(&krate, &["build", "--features", "host"]);
+    // A native host is another crate: it reaches the module `new` wrote by its path, and builds
+    // the Orb the module's `orb()` names. An integration test of the crate is such a host.
+    std::fs::create_dir_all(krate.join("tests")).unwrap();
+    std::fs::write(
+        krate.join("tests/host.rs"),
+        "#[test]\nfn the_module_builds_its_orb() {\n    greeter_orb::greeter_orb::orb().unwrap();\n}\n",
+    )
+    .unwrap();
+    cargo(&krate, &["test", "--features", "host", "--test", "host"]);
     assert_pinned(&krate);
     let locked = registry_packages(&krate.join("Cargo.lock"));
     assert!(
