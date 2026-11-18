@@ -116,7 +116,7 @@ pub mod parity {
         }
 
         /// What the book went through. The state's `Default` starts it from its own.
-        #[derive(Default)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Marks {
             pub audited: bool,
             pub disputed: bool,
@@ -331,6 +331,7 @@ pub mod parity {
         }
 
         /// A colour.
+        #[derive(Debug)]
         pub enum Colour {
             Red,
             Green,

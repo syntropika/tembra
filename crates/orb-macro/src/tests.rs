@@ -1405,7 +1405,8 @@ fn a_name_that_is_a_wit_keyword_is_escaped() {
 
 /// A name the bindings spell otherwise than the author is bridged with the bindings' spelling: a
 /// function `GET` is `get` and `r#move` is `move_`, a resource `HTTPSession` is `HttpSession`,
-/// and a record `HTTPRequest` is re-exported from `HttpRequest` under the author's name.
+/// and a record `HTTPRequest` stays the author's, converted to and from the bindings'
+/// `HttpRequest` where a bridge passes it.
 #[test]
 fn a_name_the_bindings_spell_otherwise_is_bridged() {
     let module = expanded(
@@ -1441,12 +1442,15 @@ fn a_name_the_bindings_spell_otherwise_is_bridged() {
     let generated = tokens(&module);
     let interface = "exports :: example :: web :: http_server";
     for expected in [
-        format!("pub use {interface} :: {{ HttpRequest as HTTPRequest }} ;"),
+        format!("impl :: core :: convert :: From < HTTPRequest > for {interface} :: HttpRequest"),
+        format!("impl :: core :: convert :: From < {interface} :: HttpRequest > for HTTPRequest"),
         "type HttpSession = HTTPSession ;".into(),
         "fn get (r#type : u32) -> u32 { HTTPServer :: GET (r#type) }".into(),
-        "fn move_ (path : String) -> HTTPRequest { HTTPServer :: r#move (path) }".into(),
         format!(
-            "fn start (request : HTTPRequest) -> Option < {interface} :: HttpSession > {{ HTTPServer :: start (request) . map (| item | {interface} :: HttpSession :: new (item)) }}"
+            "fn move_ (path : String) -> {interface} :: HttpRequest {{ :: core :: convert :: Into :: into (HTTPServer :: r#move (path)) }}"
+        ),
+        format!(
+            "fn start (request : {interface} :: HttpRequest) -> Option < {interface} :: HttpSession > {{ HTTPServer :: start (:: core :: convert :: Into :: into (request)) . map (| item | {interface} :: HttpSession :: new (item)) }}"
         ),
         format!("impl {interface} :: GuestHttpSession for HTTPSession"),
         "fn url (& self ,) -> String { HTTPSession :: URL (self ,) }".into(),
@@ -1454,13 +1458,15 @@ fn a_name_the_bindings_spell_otherwise_is_bridged() {
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
+    assert!(!generated.contains("pub use exports"), "{generated}");
 }
 
-/// The generated type replaces the author's, but the bindings name its fields and cases from
-/// their WIT names: a field or a case they would name otherwise is refused, with the name to use;
-/// a type that stays out of the WIT keeps its names.
+/// The author's type keeps the names of its fields and cases, which the bindings spell otherwise,
+/// from their WIT names: the conversions name each side's spelling, `userID` and `user_id`,
+/// `r#type` and `type_`, `HTTP` and `Http`. A member without a WIT name is refused, and a type
+/// that stays out of the WIT keeps any name.
 #[test]
-fn a_field_or_a_case_the_bindings_name_otherwise_is_refused() {
+fn a_field_or_a_case_the_bindings_name_otherwise_keeps_its_name() {
     let module = |types: &str| {
         format!(
             "mod web {{
@@ -1471,37 +1477,65 @@ fn a_field_or_a_case_the_bindings_name_otherwise_is_refused() {
             }}"
         )
     };
-    for (types, message) in [
+    let bindings = "exports :: example :: web :: server";
+    let into = ":: core :: convert :: Into :: into";
+    for (types, wit_text, outward, inward) in [
         (
             "pub struct Request { pub userID: u32 }",
-            "the field `Request::userID` enters the WIT as `user-id`, which the generated type replacing `Request` names `user_id`: name the field `user_id`",
+            "  record request {\n    user-id: u32,\n  }\n",
+            format!("Self {{ user_id : {into} (value . userID) }}"),
+            format!("Self {{ userID : {into} (value . user_id) }}"),
         ),
         (
             "pub struct Request { pub r#type: u32 }",
-            "the field `Request::r#type` enters the WIT as `type`, which the generated type replacing `Request` names `type_`: name the field `type_`",
+            "  record request {\n    %type: u32,\n  }\n",
+            format!("Self {{ type_ : {into} (value . r#type) }}"),
+            format!("Self {{ r#type : {into} (value . type_) }}"),
         ),
         (
             "pub enum Request { HTTP, Https }",
-            "the case `Request::HTTP` enters the WIT as `http`, which the generated type replacing `Request` names `Http`: name the case `Http`",
-        ),
-        (
-            "pub struct Request { pub café: u32 }",
-            "the field `Request::café` has no WIT name: its kebab-case form `café` holds a character other than ASCII letters, digits and `-`",
+            "  enum request {\n    http,\n    https,\n  }\n",
+            "match value { Request :: HTTP => Self :: Http , Request :: Https => Self :: Https , }"
+                .to_owned(),
+            format!(
+                "match value {{ {bindings} :: Request :: Http => Self :: HTTP , {bindings} :: Request :: Https => Self :: Https , }}"
+            ),
         ),
     ] {
-        let error = refused("example:web@1.0.0", &module(types));
-        assert!(error.contains(message), "{types}: {error}");
+        let module = expanded("example:web@1.0.0", &module(types));
+        let text = resolved(&module);
+        assert!(text.contains(wit_text), "{types}: {wit_text}\n{text}");
+        let generated = tokens(&module);
+        for expected in [
+            format!(
+                "impl :: core :: convert :: From < Request > for {bindings} :: Request {{ fn from (value : Request) -> Self {{ {outward} }} }}"
+            ),
+            format!(
+                "impl :: core :: convert :: From < {bindings} :: Request > for Request {{ fn from (value : {bindings} :: Request) -> Self {{ {inward} }} }}"
+            ),
+            format!("fn get () -> {bindings} :: Request {{ {into} (Server :: get ()) }}"),
+        ] {
+            assert!(
+                generated.contains(&expected),
+                "{types}: {expected}\n{generated}"
+            );
+        }
+        assert!(
+            !generated.contains("pub use exports"),
+            "{types}: {generated}"
+        );
     }
-    let module = expanded(
+    let error = refused(
         "example:web@1.0.0",
-        &module(
-            "pub struct Request { pub type_: u32, pub kind: Kind }\npub enum Kind { Http, Https }\npub struct Kept { pub userID: u32 }",
-        ),
+        &module("pub struct Request { pub café: u32 }"),
     );
     assert!(
-        resolved(&module).contains("  record request {\n    %type: u32,\n    kind: kind,\n  }\n"),
-        "{}",
-        wit(&module)
+        error.contains("the field `Request::café` has no WIT name: its kebab-case form `café` holds a character other than ASCII letters, digits and `-`"),
+        "{error}"
+    );
+    let module = expanded(
+        "example:web@1.0.0",
+        &module("pub struct Request { pub type_: u32 }\npub struct Kept { pub userID: u32 }"),
     );
     assert!(tokens(&module).contains("pub struct Kept { pub userID : u32 }"));
 }
@@ -1739,8 +1773,8 @@ const FRONT: &str = "mod wb {
 }";
 
 /// A type is defined in the interface of the earliest service that mentions it, through its
-/// functions, its resources' functions or other types, and re-exported from there; a later service
-/// mentioning it `use`s it. A resource stays with its own service: another one handing it out is
+/// functions, its resources' functions or other types, and converted to and from the bindings'
+/// type there; a later service mentioning it `use`s it. A resource stays with its own service: another one handing it out is
 /// refused, as `a_resource_is_returned_only_from_its_own_interface` shows.
 #[test]
 fn a_type_is_defined_by_the_earliest_service_that_mentions_it() {
@@ -1756,7 +1790,8 @@ fn a_type_is_defined_by_the_earliest_service_that_mentions_it() {
         "package example:wb@1.0.0;\n\ninterface front {\n  /// Counts over the texts.\n  record stats {\n    words: u32,\n  }\n  summary: func() -> stats;\n}\n\ninterface texts {\n  use front.{stats};\n  resource builder {\n    text: func() -> u32;\n  }\n  counts: func() -> stats;\n}\n\nworld wb {\n  export front;\n  export texts;\n}\n"
     );
     assert!(
-        tokens(&module).contains("pub use exports :: example :: wb :: front :: { Stats } ;"),
+        tokens(&module)
+            .contains("impl :: core :: convert :: From < Stats > for exports :: example :: wb :: front :: Stats"),
         "{}",
         tokens(&module)
     );
@@ -2358,11 +2393,13 @@ fn a_struct_of_bool_fields_is_a_record() {
     for unexpected in ["with :", "from_bits_retain", "BitOr"] {
         assert!(!generated.contains(unexpected), "{unexpected}\n{generated}");
     }
-    assert!(
-        generated
-            .contains("pub use exports :: example :: office :: permits :: { Access , Grant } ;"),
-        "{generated}"
-    );
+    for expected in [
+        "impl :: core :: convert :: From < Access > for exports :: example :: office :: permits :: Access",
+        "impl :: core :: convert :: From < Grant > for exports :: example :: office :: permits :: Grant { fn from (value : Grant) -> Self { Self { who : :: core :: convert :: Into :: into (value . who) , access : :: core :: convert :: Into :: into (value . access) } } }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    assert!(!generated.contains("pub use exports"), "{generated}");
 }
 
 /// What else the Orb module names in a sub-module, a state, a root resource and its marked
@@ -2603,10 +2640,11 @@ fn a_resource_sees_the_client_of_a_service_its_parent_holds() {
 /// An impl names the type as a contract type's name resolves, through the glob imports from the
 /// Orb's modules too: through a module a glob import brings in, `rights::Access` after
 /// `use super::*;`, a glob import of the type's module, whatever namesake a third module declares,
-/// or an alias of the type, `pub type Access = super::rights::Access;`. The impl is seen as the
-/// type's where a derive of a type holding it needs its trait, so one under `#[cfg(..)]` is
-/// refused. A `crate::` path, written on the impl or reached through a `use`, is not placed in the
-/// Orb: its impl is left to the compiler, as is one of a namesake outside the Orb.
+/// or an alias of the type, `pub type Access = super::rights::Access;`. The type stays the
+/// author's, so the impl is the author's own, under `#[cfg(..)]` too: the macro writes nothing
+/// that needs its trait, and a derive of a type holding it that does is the compiler's to check.
+/// A `crate::` path, written on the impl or reached through a `use`, is not placed in the Orb,
+/// nor is a namesake outside the Orb: those impls are the compiler's as well.
 #[test]
 fn an_impl_names_the_type_through_a_glob_or_an_alias() {
     let office = |ops: &str, legacy: &str| {
@@ -2630,8 +2668,6 @@ fn an_impl_names_the_type_through_a_glob_or_an_alias() {
     let equal =
         "#[cfg(test)] impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
     let through = "#[cfg(test)] impl PartialEq for rights::Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
-    let needed =
-        "while the code it writes needs `Access` to implement `PartialEq` in every configuration";
     for (ops, legacy) in [
         (format!("use super::*; {through}"), ""),
         (
@@ -2642,19 +2678,21 @@ fn an_impl_names_the_type_through_a_glob_or_an_alias() {
             format!("use super::rights::*; {equal}"),
             "pub mod legacy { pub struct Access(pub u32); }",
         ),
+        (format!("use crate::office::rights::Access; {equal}"), ""),
+        (format!("use crate::office::rights; {through}"), ""),
+        (
+            "#[cfg(test)] impl PartialEq for crate::elsewhere::Access { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
+            "",
+        ),
     ] {
-        let error = refused("example:office@1.0.0", &office(&ops, legacy));
-        assert!(error.contains(needed), "{ops}\n{error}");
+        let generated = tokens(&expanded("example:office@1.0.0", &office(&ops, legacy)));
+        assert!(
+            generated.contains("# [cfg (test)] impl PartialEq for"),
+            "{ops}\n{generated}"
+        );
     }
-    for ops in [
-        format!("use crate::office::rights::Access; {equal}"),
-        format!("use crate::office::rights; {through}"),
-        "#[cfg(test)] impl PartialEq for crate::elsewhere::Access { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
-    ] {
-        expanded("example:office@1.0.0", &office(&ops, ""));
-    }
-    // A type holding a resource handle has the `Clone` a type holding it derives when the macro
-    // sees it implemented, through such a `use` too.
+    // A type holding a resource handle is the author's too, with the `Clone` a type holding it
+    // derives implemented by hand, through such a `use` as well.
     expanded(
         "example:walk@1.0.0",
         "mod walk {
@@ -2679,8 +2717,8 @@ fn an_impl_names_the_type_through_a_glob_or_an_alias() {
 /// `Token` of `a` enters the WIT, `b` declares a tuple struct `Token`, and an impl in `c` is
 /// `a`'s only where its name leads there. An alias of `b`'s `Token` or a `use` through `crate::`
 /// names no type of `a`, though `a`'s is the only candidate of the name, while a renaming alias
-/// of `a`'s names it: an impl under `#[cfg(..)]` of `a`'s `Token`, whose trait a derive of a type
-/// holding it needs, is refused, and one of another type is left alone.
+/// of `a`'s names it. Either way the impl is the author's, kept as written, under `#[cfg(..)]`
+/// too: `a`'s `Token` stays the author's type, whose derive of `Grant` the compiler checks.
 #[test]
 fn an_impls_type_resolves_as_a_contract_types_name() {
     let desk = |c: &str| {
@@ -2708,29 +2746,30 @@ fn an_impls_type_resolves_as_a_contract_types_name() {
             "#[cfg(test)] impl PartialEq for {ty} {{ fn eq(&self, other: &Self) -> bool {{ todo!() }} }}"
         )
     };
-    for c in [
-        format!("pub type Token = super::b::Token; {}", equal("Token")),
-        format!("use crate::desk::b::Token; {}", equal("Token")),
-    ] {
-        expanded("example:desk@1.0.0", &desk(&c));
-    }
-    let error = refused(
-        "example:desk@1.0.0",
-        &desk(&format!("type Item = super::a::Token; {}", equal("Item"))),
-    );
-    assert!(
-        error.contains(
-            "while the code it writes needs `Token` to implement `PartialEq` in every configuration"
+    for (c, written) in [
+        (
+            format!("pub type Token = super::b::Token; {}", equal("Token")),
+            "# [cfg (test)] impl PartialEq for Token",
         ),
-        "{error}"
-    );
+        (
+            format!("use crate::desk::b::Token; {}", equal("Token")),
+            "# [cfg (test)] impl PartialEq for Token",
+        ),
+        (
+            format!("type Item = super::a::Token; {}", equal("Item")),
+            "# [cfg (test)] impl PartialEq for Item",
+        ),
+    ] {
+        let generated = tokens(&expanded("example:desk@1.0.0", &desk(&c)));
+        assert!(generated.contains(written), "{c}\n{generated}");
+    }
 }
 
 /// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
 /// `#[cfg_attr(..)]`: a field, a case or a case's payload under `#[cfg(..)]`, which the WIT would
-/// hold in every configuration, is refused, on a record, an enum or a variant, and so is a
-/// `#[cfg_attr(..)]` wrapping a derive, a helper or a `#[cfg(..)]`. Kept out of the WIT, the same
-/// type is the author's, as written.
+/// hold in every configuration, is refused, on a record, an enum or a variant; a `#[cfg_attr(..)]`
+/// on the type or on a member is the compiler's to evaluate, on the author's type. Kept out of the
+/// WIT, the same type is the author's, as written.
 #[test]
 fn what_the_macro_cannot_evaluate_is_refused() {
     let module = |types: &str, returned: &str| {
@@ -2759,16 +2798,20 @@ fn what_the_macro_cannot_evaluate_is_refused() {
             "Holder",
             "`#[cfg(..)]` on the payload of `Holder::Person`: `Holder` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the payload in every configuration",
         ),
-        (
-            "pub struct Grant { #[cfg_attr(feature = \"audit\", allow(unused), cfg_attr(test, serde(skip)))] pub who: String }",
-            "Grant",
-            "`Grant` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`",
-        ),
     ] {
         let error = refused("example:office@1.0.0", &module(types, returned));
         assert!(error.contains(message), "{types}: {error}");
         expanded("example:office@1.0.0", &module(types, "u32"));
     }
+    let conditional = "#[cfg_attr(feature = \"audit\", allow(unused), cfg_attr(test, serde(skip)))] pub who: String";
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &module(&format!("pub struct Grant {{ {conditional} }}"), "Grant"),
+    ));
+    assert!(
+        generated.contains("pub struct Grant { # [cfg_attr (feature = \"audit\" , allow (unused) , cfg_attr (test , serde (skip)))] pub who : String }"),
+        "{generated}"
+    );
 }
 
 /// A `#[cfg_attr(..)]` wrapping only Rust's own attributes that the generated type never takes,
@@ -2796,10 +2839,10 @@ fn a_cfg_attr_wrapping_only_what_the_generated_type_never_takes_expands() {
     }
 }
 
-/// The macro writes the WIT, and the generated type replacing a record, an enum or a variant that
-/// enters it, before the compiler evaluates `#[cfg(..)]`: the type would stay in the WIT and in the
-/// generated code in every configuration, the attribute doing nothing, so a `#[cfg(..)]` on a type
-/// that enters the WIT is refused. The same type without the attribute enters the WIT, and kept out
+/// The macro writes the WIT, and the conversions of a record, an enum or a variant that enters it,
+/// before the compiler evaluates `#[cfg(..)]`: the type would stay in the WIT and in the generated
+/// code in every configuration, the attribute doing nothing, so a `#[cfg(..)]` on a type that
+/// enters the WIT is refused. The same type without the attribute enters the WIT, and kept out
 /// of the WIT, the type is the author's, as written, `#[cfg(..)]` included.
 #[test]
 fn a_type_entering_the_wit_under_cfg_is_refused() {
@@ -2839,7 +2882,7 @@ fn a_type_entering_the_wit_under_cfg_is_refused() {
         let conditional = format!("#[cfg(feature = \"audit\")] {item}");
         let error = refused("example:office@1.0.0", &module(&conditional, name));
         let message = format!(
-            "`#[cfg(..)]` on the {kind} `{name}`: `{name}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} and the generated type would replace `{name}` in every configuration; remove the attribute, or keep `{name}` out of the WIT"
+            "`#[cfg(..)]` on the {kind} `{name}`: `{name}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} and the macro would convert `{name}` to and from the bindings' type in every configuration; remove the attribute, or keep `{name}` out of the WIT"
         );
         assert!(error.contains(&message), "{item}: {error}");
         let text = resolved(&expanded("example:office@1.0.0", &module(item, name)));
@@ -3604,7 +3647,7 @@ fn the_types_a_state_out_of_the_wit_reaches_stay_as_written() {
         format!("{derived} pub struct Balance"),
         format!("{derived} pub enum Phase"),
         "# [derive (serde :: Serialize , serde :: Deserialize)] pub struct Note".into(),
-        "pub use exports :: example :: ledger :: pinned :: { Shown } ;".into(),
+        format!("{derived} pub struct Shown"),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
@@ -3659,11 +3702,11 @@ fn only_a_type_that_enters_the_wit_needs_a_wit_spelling() {
     }
 }
 
-/// A type that enters the WIT is replaced by the generated one, which has no room for an explicit
-/// discriminant and cannot carry `#[serde(..)]`: both are refused there, on the item, its fields
-/// or its variants, and kept on a type that stays out of the WIT, which the macro leaves as written.
+/// A type that enters the WIT stays the author's, with what a generated type in its place would
+/// have dropped: an explicit discriminant, which the conversions never read, and `#[serde(..)]` on
+/// the item, its fields or its variants, a state's included, which serde reads on the author's type.
 #[test]
-fn what_a_replaced_type_would_drop_is_refused() {
+fn what_a_generated_type_would_drop_stays_the_authors() {
     let module = |types: &str, returned: &str| {
         format!(
             "mod ledger {{
@@ -3674,37 +3717,38 @@ fn what_a_replaced_type_would_drop_is_refused() {
             }}"
         )
     };
-    let priority = "pub enum Priority { Low = 10, High = 90 }";
-    let error = refused("example:ledger@1.0.0", &module(priority, "Priority"));
-    assert!(
-        error.contains("`Priority::Low = 10`: `Priority` enters the WIT, whose enums have no explicit discriminants"),
-        "{error}"
-    );
-    expanded("example:ledger@1.0.0", &module(priority, "u32"));
-    for (types, returned) in [
+    for (types, returned, kept) in [
+        (
+            "pub enum Priority { Low = 10, High = 90 }",
+            "Priority",
+            "pub enum Priority { Low = 10 , High = 90 } impl :: core :: convert :: From < Priority > for exports :: example :: ledger :: desk :: Priority { fn from (value : Priority) -> Self { match value { Priority :: Low => Self :: Low , Priority :: High => Self :: High , } } }",
+        ),
         (
             "#[serde(rename_all = \"camelCase\")] pub struct Entry { pub total_amount: i64 }",
             "Entry",
+            "# [serde (rename_all = \"camelCase\")] pub struct Entry { pub total_amount : i64 }",
         ),
         (
             "pub struct Entry { #[serde(rename = \"t\")] pub total: i64 }",
             "Entry",
+            "pub struct Entry { # [serde (rename = \"t\")] pub total : i64 }",
         ),
         (
             "pub enum Kind { #[serde(rename = \"p\")] Plain, Weighted(u32) }",
             "Vec<Kind>",
+            "pub enum Kind { # [serde (rename = \"p\")] Plain , Weighted (u32) }",
         ),
         (
             "#[state] #[serde(deny_unknown_fields)] pub struct Entry { pub total: i64 }",
             "Entry",
+            "# [serde (deny_unknown_fields)] pub struct Entry { pub total : i64 }",
         ),
     ] {
-        let error = refused("example:ledger@1.0.0", &module(types, returned));
-        assert!(
-            error.contains("enters the WIT and the generated type replaces it, which cannot carry `#[serde(..)]`"),
-            "{types}: {error}"
-        );
-        expanded("example:ledger@1.0.0", &module(types, "u32"));
+        let generated = tokens(&expanded("example:ledger@1.0.0", &module(types, returned)));
+        assert!(generated.contains(kept), "{types}: {kept}\n{generated}");
+        let out = tokens(&expanded("example:ledger@1.0.0", &module(types, "u32")));
+        let (kept, _) = kept.split_once(" impl ").unwrap_or((kept, ""));
+        assert!(out.contains(kept), "{types}: {kept}\n{out}");
     }
 }
 
@@ -3732,12 +3776,12 @@ const REVIEW: &str = "mod review {
 }";
 
 /// A case with named fields enters the WIT as a record of its own, `<enum>-<case>`, the case's
-/// payload. The bindings give such a case a tuple payload, so the enum stays the author's, as
-/// written, and so does every type holding it: nothing re-exports a generated type in their place,
-/// and the macro converts each between the author's type and the bindings' with `From` in both
-/// directions, in the type's module, a case with named fields field by field into the record. A
-/// bridge spells such a type as the bindings' and converts it where it is, inside lists, options and
-/// results too; any other type crosses as it is.
+/// payload. The bindings give such a case a tuple payload; the enum stays the author's, as written,
+/// like every type of the module, and the macro converts each between the author's type and the
+/// bindings' with `From` in both directions, in the type's module, a case with named fields field
+/// by field into the record, an enum case by case. A bridge spells each type of the module as the
+/// bindings' and converts it where it is, inside lists, options and results too; a string or a
+/// scalar crosses as it is.
 #[test]
 fn an_enum_case_with_named_fields_gets_a_record_as_its_payload() {
     let module = expanded("example:review@1.0.0", REVIEW);
@@ -3780,10 +3824,16 @@ world review {
     let bindings = "exports :: example :: review :: reviews";
     let into = ":: core :: convert :: Into :: into";
     for expected in [
-        // The author's types stay, as written; the plain enum is replaced.
+        // The author's types stay, as written.
         "# [doc = \" What a reviewer decided.\"] # [derive (Debug , Clone , PartialEq)] pub enum Outcome { Accepted , # [doc = \" Why, and how badly.\"] Refused { reason : String , severity : u32 } , Deferred (u32) , }".to_owned(),
         "# [doc = \" A decision with its reviewer.\"] pub struct Decision { pub reviewer : String , outcome : Outcome }".to_owned(),
-        format!("pub use {bindings} :: {{ Vote }} ;"),
+        // The conversions of the plain enum, case by case.
+        format!(
+            "impl :: core :: convert :: From < Vote > for {bindings} :: Vote {{ fn from (value : Vote) -> Self {{ match value {{ Vote :: Yes => Self :: Yes , Vote :: No => Self :: No , }} }} }}"
+        ),
+        format!(
+            "impl :: core :: convert :: From < {bindings} :: Vote > for Vote {{ fn from (value : {bindings} :: Vote) -> Self {{ match value {{ {bindings} :: Vote :: Yes => Self :: Yes , {bindings} :: Vote :: No => Self :: No , }} }} }}"
+        ),
         // The conversions of the enum: the named case field by field into the record.
         format!(
             "impl :: core :: convert :: From < Outcome > for {bindings} :: Outcome {{ fn from (value : Outcome) -> Self {{ match value {{ Outcome :: Accepted => Self :: Accepted , Outcome :: Refused {{ reason , severity }} => Self :: Refused ({bindings} :: OutcomeRefused {{ reason : {into} (reason) , severity : {into} (severity) }}) , Outcome :: Deferred (item) => Self :: Deferred ({into} (item)) , }} }} }}"
@@ -3799,7 +3849,7 @@ world review {
             "impl :: core :: convert :: From < {bindings} :: Decision > for Decision {{ fn from (value : {bindings} :: Decision) -> Self {{ Self {{ reviewer : {into} (value . reviewer) , outcome : {into} (value . outcome) }} }} }}"
         ),
         // The bridges spell the bindings' types and convert where the author's types are.
-        format!("fn decide (reviewer : String , vote : Vote) -> {bindings} :: Decision {{ {into} (Reviews :: decide (reviewer , vote)) }}"),
+        format!("fn decide (reviewer : String , vote : {bindings} :: Vote) -> {bindings} :: Decision {{ {into} (Reviews :: decide (reviewer , {into} (vote))) }}"),
         format!(
             "fn outcomes (decisions : Vec < {bindings} :: Decision >) -> Vec < {bindings} :: Outcome > {{ Reviews :: outcomes (decisions . into_iter () . map (| item | {into} (item)) . collect ()) . into_iter () . map (| item | {into} (item)) . collect () }}"
         ),
@@ -3809,12 +3859,10 @@ world review {
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
-    for unexpected in ["{ Outcome", "Outcome }", "{ Decision", "Decision }"] {
-        assert!(
-            !generated.contains(&format!("pub use {bindings} :: {unexpected}")),
-            "{unexpected}\n{generated}"
-        );
-    }
+    assert!(
+        !generated.contains(&format!("pub use {bindings}")),
+        "{generated}"
+    );
     assert!(
         !generated.contains("additional_type_attributes"),
         "{generated}"
@@ -4041,461 +4089,34 @@ const WALK: &str = "mod walk {
     }
 }";
 
-/// The `additional_type_attributes` option the module hands the bindings, if any.
-fn type_attributes(module: &ItemMod) -> Option<String> {
-    let generated = tokens(module);
-    let start = generated.find("additional_type_attributes")?;
-    let end = generated[start..].find("} ,")? + start + 3;
-    Some(generated[start..end].to_owned())
-}
-
-/// A type that enters the WIT is replaced by the generated type, which takes the author's derives,
-/// written in any spelling, less the traits the bindings implement themselves for its kind:
-/// `Debug` for every type, `Clone` and `Copy` for a record or a variant holding no string or list,
-/// `Clone` alone for one holding a string, and the comparisons for an enum. The derives of the
-/// standard library are named by their paths in `core`, a type deriving nothing is left out, and
-/// `#[default]` goes to its case.
+/// A type that enters the WIT stays the author's, with its derives as written, in any spelling: the
+/// bindings' type, internal to the generated code, takes none of them, so the module hands the
+/// bindings no type or member attribute, and the author's `#[default]` stays on its case.
 #[test]
 fn a_type_that_enters_the_wit_keeps_its_derives() {
     let module = expanded("example:walk@1.0.0", WALK);
-    assert_eq!(
-        type_attributes(&module).as_deref(),
-        Some(concat!(
-            "additional_type_attributes : { ",
-            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash , :: core :: default :: Default)]] , ",
-            "\"example:walk/walker@1.0.0/note\" : [# [derive (:: core :: hash :: Hash)]] , ",
-            "\"example:walk/walker@1.0.0/heading\" : [# [derive (:: core :: hash :: Hash , :: core :: default :: Default)]] , ",
-            "\"example:walk/walker@1.0.0/move\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,",
-        )),
-        "{}",
-        tokens(&module)
-    );
-    assert!(
-        tokens(&module).contains(
-            "additional_member_attributes : { \"example:walk/walker@1.0.0/heading.north\" : [# [default]] } ,"
-        ),
-        "{}",
-        tokens(&module)
-    );
-    // An unversioned package names its types without a version; a module deriving only what
-    // the bindings implement hands them nothing.
-    let unversioned = expanded("example:walk", WALK);
-    assert!(
-        type_attributes(&unversioned)
-            .is_some_and(|option| option.contains("\"example:walk/walker/point\"")),
-        "{}",
-        tokens(&unversioned)
-    );
-    let bare = expanded(
-        "example:walk@1.0.0",
-        "mod walk {
-            #[derive(Debug, Clone, Copy)]
-            pub struct Point { pub x: i32, pub y: i32 }
-            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-            pub enum Heading { North, East }
-            #[service]
-            pub struct Walker;
-            impl Walker { pub fn walk(heading: Heading) -> Point { todo!() } }
-        }",
-    );
-    let generated = tokens(&bare);
-    assert!(
-        !generated.contains("additional_type_attributes"),
-        "{generated}"
-    );
-    assert!(
-        !generated.contains("additional_member_attributes"),
-        "{generated}"
-    );
-}
-
-/// The bindings name a derive from their own module, so the macro names it from its crate: it
-/// follows the `use` and `extern crate` declarations of the type's module, renames and groups
-/// included, `self::`, `super::` and the Orb's sub-modules; a first name nothing in the Orb
-/// declares is a crate's, and a path from `crate::` stays; the path as written is imported again
-/// in the type's module, which keeps the imports it names used. The helper attributes the derives
-/// read, single names that are none of Rust's own attributes, go with them, on the type and on its
-/// members; Rust's own attributes do not.
-#[test]
-fn a_derive_of_another_crate_is_named_from_its_crate() {
-    let module = expanded(
-        "example:walk@1.0.0",
-        "mod walk {
-            use strum::EnumIter;
-            use derive_more as more;
-            use ::strum::{self as s, IntoStaticStr as Static};
-            extern crate serde as wire;
-            use markers::Marked;
-            use educe;
-            use ordering::Hash;
-            pub mod derives {
-                pub use strum::Display;
-            }
-            /// Where a walker faces.
-            #[derive(EnumIter, more::Constructor, s::AsRefStr, Static, self::derives::Display)]
-            #[derive(crate::extra::Thing, wire::Serialize, educe::Educe, Hash)]
-            #[strum(serialize_all = \"kebab-case\")]
-            #[allow(dead_code)]
-            pub enum Heading {
-                #[strum(serialize = \"up\")]
-                #[allow(dead_code)]
-                North,
-                East,
-            }
-            pub mod shapes {
-                #[derive(super::Marked, PartialEq)]
-                pub struct Point { #[marked(skip)] #[allow(dead_code)] pub x: i32, pub y: i32 }
-            }
-            #[service]
-            pub struct Walker;
-            impl Walker { pub fn walk(heading: Heading) -> shapes::Point { todo!() } }
-        }",
-    );
-    assert_eq!(
-        type_attributes(&module).as_deref(),
-        Some(concat!(
-            "additional_type_attributes : { ",
-            "\"example:walk/walker@1.0.0/heading\" : [# [derive (:: strum :: EnumIter , :: derive_more :: Constructor , :: strum :: AsRefStr , :: strum :: IntoStaticStr , :: strum :: Display , crate :: extra :: Thing , :: serde :: Serialize , :: educe :: Educe , :: ordering :: Hash)] # [strum (serialize_all = \"kebab-case\")]] , ",
-            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: markers :: Marked , :: core :: cmp :: PartialEq)]] } ,",
-        )),
-        "{}",
-        tokens(&module)
-    );
-    assert!(
-        tokens(&module).contains(concat!(
-            "additional_member_attributes : { ",
-            "\"example:walk/walker@1.0.0/heading.north\" : [# [strum (serialize = \"up\")]] , ",
-            "\"example:walk/walker@1.0.0/point.x\" : [# [marked (skip)]] } ,"
-        )),
-        "{}",
-        tokens(&module)
-    );
-    // Each path is imported again, as written, in the module of its type, so the imports it goes
-    // through stay used once the generated type replaces the author's.
     let generated = tokens(&module);
     for expected in [
-        "# [allow (unused_imports)] use EnumIter as _ ; # [allow (unused_imports)] use more :: Constructor as _ ;",
-        "{ Point } ; # [allow (unused_imports)] use super :: Marked as _ ; # [allow (unused_imports)] use PartialEq as _ ;",
+        "# [doc = \" A point on a grid.\"] # [derive (Debug , Clone , Copy , PartialEq , Eq , Hash , core :: default :: Default)] pub struct Point { pub x : i32 , pub y : i32 }",
+        "# [doc = \" A note left on the way.\"] # [derive (Clone , :: std :: hash :: Hash , std :: fmt :: Debug)] pub struct Note { pub text : String , pub at : Point }",
+        "# [doc = \" Where a walker faces.\"] # [derive (Debug , Clone , Copy , PartialEq , Eq , PartialOrd , Ord , Hash , Default)] pub enum Heading { # [default] North , East }",
+        "# [doc = \" One move of a walk.\"] # [derive (Clone , PartialEq , Eq , Hash)] pub enum Move { Step (Heading) , Jump (Point) , Rest }",
+        "# [doc = \" The notes of a walk; it derives nothing.\"] pub struct Trace { pub notes : Vec < Note > }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
-}
-
-/// A state makes the bindings derive serde's traits on every generated type that can carry them:
-/// the author's serde derives are left to them there, and handed to them in an Orb without a
-/// state, where the bindings derive none. A type holding a resource handle carries them from
-/// neither side.
-#[test]
-fn serde_derives_go_where_the_bindings_derive_none() {
-    let module = |state: &str| {
-        format!(
-            "mod walk {{
-                use serde::{{Deserialize, Serialize}};
-                {state}
-                #[derive(Serialize, serde::Deserialize, Hash)]
-                pub struct Point {{ pub x: i32, pub y: i32 }}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn walk() -> Point {{ todo!() }} }}
-            }}"
-        )
-    };
-    let stateful = expanded(
-        "example:walk@1.0.0",
-        &module("#[state] pub struct Count { pub steps: u32 }"),
-    );
-    assert_eq!(
-        type_attributes(&stateful).as_deref(),
-        Some(
-            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: core :: hash :: Hash)]] } ,"
-        ),
-        "{}",
-        tokens(&stateful)
-    );
-    let stateless = expanded("example:walk@1.0.0", &module(""));
-    assert_eq!(
-        type_attributes(&stateless).as_deref(),
-        Some(
-            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize , :: core :: hash :: Hash)]] } ,"
-        ),
-        "{}",
-        tokens(&stateless)
-    );
-    // A record holding a resource handle has no serde implementation from the bindings, which
-    // leave it out of their derives, and takes none from the author's derive either: the handle
-    // type implements no serde trait, so the derive is refused.
-    let error = refused(
-        "example:walk@1.0.0",
-        "mod walk {
-            #[state]
-            pub struct Count { pub steps: u32 }
-            #[wit_resource]
-            pub struct Pen { pub ink: u32 }
-            impl Pen { pub fn ink(&self) -> u32 { self.ink } }
-            #[derive(serde::Serialize)]
-            pub struct Lease { pub pen: Pen }
-            #[service]
-            pub struct Walker;
-            impl Walker { pub fn lend() -> Lease { todo!() } }
-        }",
-    );
-    assert!(
-        error.contains(
-            "`serde::Serialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Serialize`, so the generated type replacing it cannot derive `Serialize`; remove the derive, or keep `Lease` out of the WIT"
-        ),
-        "{error}"
-    );
-}
-
-/// `Default` makes a value without a handle where the type has one: a record holding handles in
-/// options and lists only, and a variant whose `#[default]` case holds none, carry it. Serde's
-/// derives on a type holding a handle anywhere are refused in an Orb with a state as well, where
-/// the bindings leave such a type out of their derives and the author's derive would stand alone.
-#[test]
-fn a_default_without_a_handle_is_carried_onto_a_type_holding_one() {
-    let module = |types: &str, state: &str| {
-        format!(
-            "mod walk {{
-                {state}
-                #[wit_resource]
-                pub struct Pen {{ pub ink: u32 }}
-                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
-                {types}
-                #[service]
-                pub struct Walker;
-                impl Walker {{
-                    pub fn walk() -> Page {{ todo!() }}
-                    pub fn lend() -> Pen {{ todo!() }}
-                }}
-            }}"
-        )
-    };
-    let carried = expanded(
-        "example:walk@1.0.0",
-        &module(
-            "#[derive(Default)]
-             pub struct Page { pub next: Option<Pen>, pub all: Vec<Pen>, pub held: Held }
-             #[derive(Default)]
-             pub enum Held { Pen(Pen), #[default] Nothing }",
-            "",
-        ),
-    );
-    assert_eq!(
-        type_attributes(&carried).as_deref(),
-        Some(concat!(
-            "additional_type_attributes : { ",
-            "\"example:walk/walker@1.0.0/page\" : [# [derive (:: core :: default :: Default)]] , ",
-            "\"example:walk/walker@1.0.0/held\" : [# [derive (:: core :: default :: Default)]] } ,",
-        )),
-        "{}",
-        tokens(&carried)
-    );
-    assert!(
-        tokens(&carried).contains(
-            "additional_member_attributes : { \"example:walk/walker@1.0.0/held.nothing\" : [# [default]] } ,"
-        ),
-        "{}",
-        tokens(&carried)
-    );
-    let error = refused(
-        "example:walk@1.0.0",
-        &module(
-            "#[derive(serde::Serialize, serde::Deserialize)] pub struct Page { pub pen: Pen }",
-            "#[state] pub struct Count { pub steps: u32 }",
-        ),
-    );
-    assert!(
-        error.contains(
-            "`serde::Serialize` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `Serialize`"
-        ),
-        "{error}"
-    );
-}
-
-/// A name a module imports by glob from another module of the Orb, `use super::*;` in a
-/// sub-module or `use derives::*;` at the root, is followed into that module's `use` lines and
-/// through its own globs, as the standard derives are left to the prelude. A glob of a module the
-/// macro does not read, a crate's, may bring any name: one nothing else binds stays refused.
-#[test]
-fn a_glob_import_from_a_module_of_the_orb_is_followed() {
-    let module = expanded(
-        "example:walk@1.0.0",
-        "mod walk {
-            use strum::EnumIter;
-            use self::derives::*;
-            pub mod derives {
-                pub use strum::Display;
-            }
-            pub mod shapes {
-                use super::*;
-                #[derive(EnumIter, Display, Hash)]
-                pub enum Heading { North, East }
-                pub mod deeper {
-                    use super::*;
-                    #[derive(Display)]
-                    pub struct Point { pub x: i32 }
-                }
-            }
-            #[service]
-            pub struct Walker;
-            impl Walker {
-                pub fn walk(heading: shapes::Heading) -> shapes::deeper::Point { todo!() }
-            }
-        }",
-    );
-    assert_eq!(
-        type_attributes(&module).as_deref(),
-        Some(concat!(
-            "additional_type_attributes : { ",
-            "\"example:walk/walker@1.0.0/heading\" : [# [derive (:: strum :: EnumIter , :: strum :: Display , :: core :: hash :: Hash)]] , ",
-            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: strum :: Display)]] } ,",
-        )),
-        "{}",
-        tokens(&module)
-    );
-    let error = refused(
-        "example:walk@1.0.0",
-        "mod walk {
-            use strum::*;
-            pub mod shapes {
-                use super::*;
-                #[derive(EnumIter)]
-                pub enum Heading { North, East }
-            }
-            #[service]
-            pub struct Walker;
-            impl Walker { pub fn walk(heading: shapes::Heading) { todo!() } }
-        }",
-    );
-    assert!(
-        error.contains("this module imports no `EnumIter` by name, unless a glob import brings it"),
-        "{error}"
-    );
-}
-
-/// serde's derives are `Serialize` and `Deserialize`, which a module names by any path: where the
-/// bindings derive them, the author's is left to them under a path the macro cannot follow to a
-/// crate as well, `super::Serialize` from the Orb module, `crate::prelude::Serialize` or a name a
-/// crate's glob may bring, as on a path from `serde`. Where the bindings derive none, such a path
-/// is carried when it names the derive from the bindings' module and refused as any other when it
-/// does not. Another crate's derive of either name, `rkyv::Serialize`, is that crate's, carried
-/// with a state too, renamed or not, with the helper attribute it reads.
-#[test]
-fn a_serde_derive_the_bindings_cover_is_theirs_under_any_path() {
-    let module = |imports: &str, state: &str| {
-        format!(
-            "mod walk {{
-                {imports}
-                {state}
-                #[derive(Serialize, Deserialize, Hash)]
-                pub struct Point {{ pub x: i32, pub y: i32 }}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn walk() -> Point {{ todo!() }} }}
-            }}"
-        )
-    };
-    let state = "#[state] pub struct Count { pub steps: u32 }";
-    let hash_only = "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: core :: hash :: Hash)]] } ,";
-    for imports in [
-        "use super::{Deserialize, Serialize};",
-        "use crate::prelude::{Deserialize, Serialize};",
-        "use serde::*;",
+    for unexpected in [
+        "additional_type_attributes",
+        "additional_member_attributes",
+        "pub use exports",
     ] {
-        let stateful = expanded("example:walk@1.0.0", &module(imports, state));
-        assert_eq!(
-            type_attributes(&stateful).as_deref(),
-            Some(hash_only),
-            "{imports}: {}",
-            tokens(&stateful)
-        );
+        assert!(!generated.contains(unexpected), "{unexpected}\n{generated}");
     }
-    let stateless = expanded(
-        "example:walk@1.0.0",
-        &module("use crate::prelude::{Deserialize, Serialize};", ""),
-    );
-    assert_eq!(
-        type_attributes(&stateless).as_deref(),
-        Some(
-            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (crate :: prelude :: Serialize , crate :: prelude :: Deserialize , :: core :: hash :: Hash)]] } ,"
-        ),
-        "{}",
-        tokens(&stateless)
-    );
-    let rkyv = expanded(
-        "example:walk@1.0.0",
-        &format!(
-            "mod walk {{
-                use rkyv::Serialize as Rk;
-                {state}
-                #[derive(rkyv::Archive, Rk, rkyv::Deserialize, Hash)]
-                #[rkyv(compare(PartialEq))]
-                pub struct Point {{ pub x: i32, pub y: i32 }}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn walk() -> Point {{ todo!() }} }}
-            }}"
-        ),
-    );
-    assert_eq!(
-        type_attributes(&rkyv).as_deref(),
-        Some(
-            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: rkyv :: Archive , :: rkyv :: Serialize , :: rkyv :: Deserialize , :: core :: hash :: Hash)] # [rkyv (compare (PartialEq))]] } ,"
-        ),
-        "{}",
-        tokens(&rkyv)
-    );
-    for (imports, message) in [
-        (
-            "use super::{Deserialize, Serialize};",
-            "`Serialize` on `Point` leaves the Orb module, where the macro cannot follow it",
-        ),
-        (
-            "use serde::*;",
-            "this module imports no `Serialize` by name, unless a glob import brings it",
-        ),
-    ] {
-        let error = refused("example:walk@1.0.0", &module(imports, ""));
-        assert!(error.contains(message), "{imports}: {error}");
-    }
-    // A sub-module reaches the Orb module's `use serde::..` through `use super::*;`, which the
-    // macro follows to `serde`: the derive is the bindings' with a state and carried without.
-    let nested = |state: &str| {
-        format!(
-            "mod walk {{
-                use serde::{{Deserialize, Serialize}};
-                {state}
-                pub mod shapes {{
-                    use super::*;
-                    #[derive(Serialize, Deserialize, Hash)]
-                    pub struct Point {{ pub x: i32, pub y: i32 }}
-                }}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn walk() -> shapes::Point {{ todo!() }} }}
-            }}"
-        )
-    };
-    let stateful = expanded("example:walk@1.0.0", &nested(state));
-    assert_eq!(
-        type_attributes(&stateful).as_deref(),
-        Some(hash_only),
-        "{}",
-        tokens(&stateful)
-    );
-    let stateless = expanded("example:walk@1.0.0", &nested(""));
-    assert_eq!(
-        type_attributes(&stateless).as_deref(),
-        Some(
-            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize , :: core :: hash :: Hash)]] } ,"
-        ),
-        "{}",
-        tokens(&stateless)
-    );
 }
 
 /// The types a derived hook reaches are defined in its interface, which the world imports and
-/// exports: the bindings generate each twice, and both take the author's derives.
+/// exports: the bindings generate each twice, and the author's type, with its derives as written,
+/// converts to and from both.
 #[test]
 fn a_derived_hook_input_keeps_its_derives() {
     let module = expanded(
@@ -4505,423 +4126,28 @@ fn a_derived_hook_input_keeps_its_derives() {
             "    /// One admission.\n    #[derive(Debug, Clone, PartialEq, Eq, Hash)]",
         ),
     );
-    assert_eq!(
-        type_attributes(&module).as_deref(),
-        Some(
-            "additional_type_attributes : { \"example:gate/guard@1.0.0/admission\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,"
-        ),
-        "{}",
-        tokens(&module)
-    );
-}
-
-/// What the generated type cannot take is refused on the author's item: a derive of another crate
-/// implementing a trait the bindings implement, with the helper attributes no other derive of the
-/// type reads, which go with it, a derive of the standard library the type's contents rule out,
-/// `Default` included on a record whose every value holds a resource handle, serde's derives on a
-/// type holding one anywhere, under a path the bindings would take over in an Orb with a state
-/// too, a derive the macro cannot name from the bindings' module, a helper attribute on a case's
-/// payload, and a `#[cfg_attr(..)]` wrapping a derive or a helper, which would come and go. Kept
-/// out of the WIT, the same type is the author's, as written.
-#[test]
-fn what_the_generated_type_cannot_take_is_refused() {
-    let module = |types: &str, returned: &str| {
-        format!(
-            "mod walk {{
-                use strum::*;
-                #[wit_resource]
-                pub struct Pen {{ pub ink: u32 }}
-                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
-                {types}
-                #[service]
-                pub struct Walker;
-                impl Walker {{
-                    pub fn walk() -> {returned} {{ todo!() }}
-                    pub fn lend() -> Pen {{ todo!() }}
-                }}
-            }}"
-        )
-    };
-    for (types, returned, message) in [
-        (
-            "#[derive(derive_more::Debug)] pub struct Point { pub x: i32 }",
-            "Point",
-            "`derive_more::Debug` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
-        ),
-        (
-            "use derive_more::Debug; #[derive(Debug)] pub struct Point { pub x: i32 }",
-            "Point",
-            "`Debug` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already",
-        ),
-        (
-            "#[derive(educe::Clone)] pub struct Point { pub x: i32 }",
-            "Point",
-            "implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
-        ),
-        (
-            "#[derive(educe::Educe)] #[educe(Hash, Debug(name(Spot)))] pub struct Point { pub x: i32 }",
-            "Point",
-            "`educe::Educe` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type; remove `Debug` from `#[educe(..)]`, or keep `Point` out of the WIT",
-        ),
-        (
-            "#[derive(derivative::Derivative)] #[derivative(Clone(bound = \"\"))] pub struct Point { pub x: i32 }",
-            "Point",
-            "`derivative::Derivative` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle; remove `Clone` from `#[derivative(..)]`, or keep `Point` out of the WIT",
-        ),
-        (
-            "#[derive(more::Ord)] pub enum Heading { North, East }",
-            "Heading",
-            "implements `Ord` already, as the bindings derive it for every enum",
-        ),
-        (
-            "#[derive(derive_more::Display)] pub enum Fault { Lost, Stuck }",
-            "Result<u32, Fault>",
-            "implements `Display` already, as the bindings implement it for the error of a function's result",
-        ),
-        (
-            "#[derive(thiserror::Error)] pub struct Fault { pub code: u32 }",
-            "Result<(), Fault>",
-            "implements `Error` already, as the bindings implement it for the error of a function's result; remove the derive, or keep `Fault` out of the WIT",
-        ),
-        (
-            "#[derive(Hash, thiserror::Error)]
-             pub enum Fault { #[error(\"lost\")] Lost, #[error(\"stuck\")] Stuck }",
-            "Result<u32, Fault>",
-            "`thiserror::Error` on `Fault`: `Fault` enters the WIT and the generated type replacing it implements `Error` already, as the bindings implement it for the error of a function's result; remove the derive and the attributes it reads, `#[error(..)]`, or keep `Fault` out of the WIT",
-        ),
-        (
-            "#[derive(Clone)] pub struct Lease { pub pen: Pen }",
-            "Lease",
-            "`Clone` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Clone`",
-        ),
-        (
-            "#[derive(PartialEq)] pub enum Held { Pen(Pen), Nothing }",
-            "Held",
-            "`PartialEq` on `Held`: `Held` enters the WIT and holds a resource handle, which implements no `PartialEq`",
-        ),
-        (
-            "#[derive(Copy)] pub struct Note { pub text: String }",
-            "Note",
-            "`Copy` on `Note`: `Note` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`",
-        ),
-        (
-            "#[derive(Default)] pub struct Page { pub next: Pen }",
-            "Page",
-            "`Default` on `Page`: `Page` enters the WIT and every value of it holds a resource handle, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Page` out of the WIT",
-        ),
-        (
-            "#[derive(Default)] pub struct Page { pub pair: (Pen, u32) }",
-            "Page",
-            "`Default` on `Page`: `Page` enters the WIT and every value of it holds a resource handle",
-        ),
-        (
-            "pub struct Slot { pub pen: Pen } #[derive(Default)] pub struct Page { pub slot: Slot }",
-            "Page",
-            "`Default` on `Page`: `Page` enters the WIT and every value of it holds a resource handle",
-        ),
-        (
-            "#[derive(serde::Deserialize)] pub enum Held { Pen(Pen), Nothing }",
-            "Held",
-            "`serde::Deserialize` on `Held`: `Held` enters the WIT and holds a resource handle, which implements no `Deserialize`, so the generated type replacing it cannot derive `Deserialize`; remove the derive, or keep `Held` out of the WIT",
-        ),
-        (
-            "#[derive(serde::Serialize)] pub struct Page { pub next: Option<Pen> }",
-            "Page",
-            "`serde::Serialize` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `Serialize`",
-        ),
-        (
-            "#[state] pub struct Count { pub steps: u32 } #[derive(Serialize)] pub struct Lease { pub pen: Pen }",
-            "Lease",
-            "`Serialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Serialize`",
-        ),
-        (
-            "#[state] pub struct Count { pub steps: u32 } use super::Deserialize; #[derive(Deserialize)] pub struct Lease { pub pen: Pen }",
-            "Lease",
-            "`Deserialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Deserialize`",
-        ),
-        (
-            "#[derive(PartialEq, Eq)] pub struct Point { pub x: f64 }",
-            "Point",
-            "`Eq` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove the derive, or keep `Point` out of the WIT",
-        ),
-        (
-            "#[derive(Hash)] pub struct Point { pub x: Option<f32> }",
-            "Point",
-            "`Hash` on `Point`: `Point` enters the WIT and holds an `f32`, which implements no `Hash`",
-        ),
-        (
-            "#[derive(PartialOrd, Ord)] pub enum Move { Jump((u32, f64)), Rest }",
-            "Move",
-            "`Ord` on `Move`: `Move` enters the WIT and holds an `f64`, which implements no `Ord`",
-        ),
-        (
-            "#[derive(Default)] pub struct Page { pub checked: Result<u32, String> }",
-            "Page",
-            "`Default` on `Page`: `Page` enters the WIT and holds a `Result`, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Page` out of the WIT",
-        ),
-        (
-            "pub struct Slot { pub pen: Pen } #[derive(PartialEq)] pub struct Page { pub slot: Slot }",
-            "Page",
-            "`PartialEq` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `PartialEq`",
-        ),
-        (
-            "pub struct Note { pub text: String } #[derive(Copy)] pub struct Page { pub note: Note }",
-            "Page",
-            "`Copy` on `Page`: `Page` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`",
-        ),
-        (
-            "#[derive(educe::Educe)] #[educe(Clone)] pub struct Lease { pub pen: Pen }",
-            "Lease",
-            "`educe::Educe` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Clone`, so the generated type replacing it cannot derive `Clone`; remove `Clone` from `#[educe(..)]`, or keep `Lease` out of the WIT",
-        ),
-        (
-            "#[derive(educe::Educe)] #[educe(Copy)] pub struct Note { pub text: String }",
-            "Note",
-            "`educe::Educe` on `Note`: `Note` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`; remove `Copy` from `#[educe(..)]`",
-        ),
-        (
-            "#[derive(educe::Educe)] #[educe(Eq)] pub struct Point { pub x: f64 }",
-            "Point",
-            "`educe::Educe` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove `Eq` from `#[educe(..)]`, or keep `Point` out of the WIT",
-        ),
-        (
-            "#[derive(educe::Educe, smart_default::SmartDefault)] #[educe(Eq)] pub struct Point { #[default(1.5)] pub x: f64 }",
-            "Point",
-            "`educe::Educe` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove `Eq` from `#[educe(..)]`, or keep `Point` out of the WIT",
-        ),
-        (
-            "#[derive(smart_default::SmartDefault)] pub struct Lease { pub pen: Pen }",
-            "Lease",
-            "`smart_default::SmartDefault` on `Lease`: `Lease` enters the WIT and every value of it holds a resource handle, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Lease` out of the WIT",
-        ),
-        (
-            "#[derive(EnumIter)] pub enum Heading { North, East }",
-            "Heading",
-            "`EnumIter` on `Heading`: `Heading` enters the WIT and the generated type replacing it is declared in the bindings' module, which `EnumIter` does not reach: this module imports no `EnumIter` by name, unless a glob import brings it; import it with `use`, or name it from its crate, such as `::name::EnumIter`",
-        ),
-        (
-            "#[derive(super::Marked)] pub struct Point { pub x: i32 }",
-            "Point",
-            "`super::Marked` on `Point` leaves the Orb module, where the macro cannot follow it",
-        ),
-        (
-            "#[derive(Default)] pub enum Move { Step(#[default] u32), Rest }",
-            "Move",
-            "`Move` enters the WIT and the generated type replaces it, which takes the attributes of its cases but not of their payloads: move this one to the case `Step`",
-        ),
-        (
-            "#[cfg_attr(test, derive(Hash))] pub struct Point { pub x: i32 }",
-            "Point",
-            "`Point` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`",
-        ),
-        (
-            "pub enum Heading { #[cfg_attr(test, default)] North, East }",
-            "Heading",
-            "never under `#[cfg_attr(..)]`",
-        ),
+    let generated = tokens(&module);
+    for expected in [
+        "# [doc = \" One admission.\"] # [derive (Debug , Clone , PartialEq , Eq , Hash)] pub struct Admission { pub value : i32 , pub blocked : bool }",
+        "impl :: core :: convert :: From < Admission > for exports :: example :: gate :: guard :: Admission",
+        "impl :: core :: convert :: From < Admission > for self :: example :: gate :: guard :: Admission",
     ] {
-        let error = refused("example:walk@1.0.0", &module(types, returned));
-        assert!(error.contains(message), "{types}: {error}");
-        expanded("example:walk@1.0.0", &module(types, "u32"));
+        assert!(generated.contains(expected), "{expected}\n{generated}");
     }
-    // A derive implementing, through its helper, only traits the bindings leave to it is carried.
-    let generated = tokens(&expanded(
-        "example:walk@1.0.0",
-        &module(
-            "#[derive(educe::Educe)] #[educe(Hash)] pub struct Point { pub x: i32 }",
-            "Point",
-        ),
-    ));
     assert!(
-        generated.contains("[# [derive (:: educe :: Educe)] # [educe (Hash)]]"),
+        !generated.contains("additional_type_attributes"),
         "{generated}"
-    );
-    // A member carrying the helper attribute a derive is known to read is the derive's, which may
-    // give it its own value or leave it out: `#[default(..)]` of `SmartDefault` on a handle,
-    // `#[educe(..)]` of `Educe` on an `f64`.
-    for (types, returned, expected) in [
-        (
-            "#[derive(smart_default::SmartDefault)] pub struct Lease { #[default(crate::walk::pen())] pub pen: Pen }",
-            "Lease",
-            "\"example:walk/walker@1.0.0/lease\" : [# [derive (:: smart_default :: SmartDefault)]] } , additional_member_attributes : { \"example:walk/walker@1.0.0/lease.pen\" : [# [default (crate :: walk :: pen ())]] } ,",
-        ),
-        (
-            "#[derive(educe::Educe)] #[educe(Hash)] pub struct Point { #[educe(Hash(ignore))] pub x: f64 }",
-            "Point",
-            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: educe :: Educe)] # [educe (Hash)]] } , additional_member_attributes : { \"example:walk/walker@1.0.0/point.x\" : [# [educe (Hash (ignore))]] } ,",
-        ),
-    ] {
-        let generated = tokens(&expanded("example:walk@1.0.0", &module(types, returned)));
-        assert!(generated.contains(expected), "{types}: {generated}");
-    }
-}
-
-const BOOK_KINDS_WIT: &str = "package example:ledger@1.0.0;
-interface book {
-  record entry { label: string, amount: s64 }
-  enum side { credit, debit }
-  flags marks { urgent, checked }
-  add: func(entry: entry, side: side, marks: marks) -> u32;
-}
-";
-
-/// A derive of the standard library is decided trait by trait from the type's fields, as the
-/// bindings would decide it inside their module: a handle, a string or a list held through a
-/// consumed type or a type of the module rules out what it rules out in a field, unless the macro
-/// sees the trait implemented for that type, by the bindings, by its derives or by hand; a trait
-/// such a type lacks otherwise is left to the author, who may implement it by hand where the macro
-/// does not read; and a trait every field has is carried, as is `Default` over options, lists and
-/// the cases of a variant, which `Default` leaves empty. A derive implementing a trait under
-/// another name follows the same rule, but for a member whose helper attributes it reads, which it
-/// may give its own value.
-#[test]
-fn a_standard_derive_is_decided_from_the_fields() {
-    let dir = consumed("notes", BOOK_KINDS_WIT);
-    let importing = || Options {
-        imports: vec![literal("example:ledger/book@1.0.0")],
-        ..options("example:notes@1.0.0", Some(&dir))
-    };
-    let module = |types: &str, returned: &str| {
-        format!(
-            "mod notes {{
-                pub struct Access {{ pub read: bool }}
-                impl PartialEq for Access {{
-                    fn eq(&self, other: &Self) -> bool {{ self.read == other.read }}
-                }}
-                pub enum Heading {{ North, East }}
-                pub struct Spot {{ pub x: i32 }}
-                {types}
-                #[service]
-                pub struct Shelf;
-                impl Shelf {{ pub fn last() -> {returned} {{ todo!() }} }}
-            }}"
-        )
-    };
-    for (types, message) in [
-        (
-            "#[derive(Clone, Copy)] pub struct Note { pub entry: book::Entry }",
-            "`Copy` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which holds a string or a list, so the generated type replacing it cannot derive `Copy`; remove the derive, or keep `Note` out of the WIT",
-        ),
-        (
-            "#[derive(Clone, Copy)] pub struct Note { pub entries: Option<(book::Entry, u32)> }",
-            "`Copy` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which holds a string or a list",
-        ),
-    ] {
-        let error = refused_with(importing(), &module(types, "Note"));
-        assert!(error.contains(message), "{types}: {error}");
-        expanded_with(importing(), &module(types, "u32"));
-    }
-    for (types, carried) in [
-        // A record of integers and strings carries its comparisons and `Hash`.
-        (
-            "#[derive(PartialEq, Eq, Hash)] pub struct Note { pub text: String, pub count: u32, pub tags: Vec<String> }",
-            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash",
-        ),
-        (
-            "#[derive(PartialEq, PartialOrd)] pub struct Note { pub heading: Heading, pub x: f32 }",
-            ":: core :: cmp :: PartialEq , :: core :: cmp :: PartialOrd",
-        ),
-        (
-            "#[derive(PartialEq, Eq, PartialOrd, Ord)] pub struct Note { pub side: book::Side }",
-            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: cmp :: PartialOrd , :: core :: cmp :: Ord",
-        ),
-        (
-            "#[derive(PartialEq, Eq, Hash)] pub struct Note { pub marks: book::Marks }",
-            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash",
-        ),
-        (
-            "#[derive(Default)] pub struct Note { pub entry: Option<book::Entry>, pub spots: Vec<Spot> }",
-            ":: core :: default :: Default",
-        ),
-        (
-            "#[derive(Default)] pub enum Note { Entry(book::Entry), Spot(Spot), #[default] Blank }",
-            ":: core :: default :: Default",
-        ),
-        (
-            "#[derive(PartialEq)] pub struct Note { pub access: Access }",
-            ":: core :: cmp :: PartialEq",
-        ),
-        (
-            "#[derive(smart_default::SmartDefault)] pub struct Note { #[default(Ok(1))] pub checked: Result<u32, String> }",
-            ":: smart_default :: SmartDefault",
-        ),
-        // A trait the author implements by hand applies to the generated type replacing the type,
-        // and a state has the `Default` the macro writes for it.
-        (
-            "impl Default for Spot { fn default() -> Self { Spot { x: 1 } } } #[derive(Default)] pub struct Note { pub at: Spot }",
-            ":: core :: default :: Default",
-        ),
-        (
-            "#[state] pub struct Position { pub x: i32 } #[derive(Default)] pub struct Note { pub position: Position }",
-            ":: core :: default :: Default",
-        ),
-        // A trait a type held in a field lacks may come from a hand impl the macro does not see:
-        // one written through `crate::`, one on a consumed type, or one outside the Orb module.
-        (
-            "impl PartialEq for crate::notes::Spot { fn eq(&self, other: &Self) -> bool { self.x == other.x } } #[derive(PartialEq)] pub struct Note { pub at: Spot }",
-            ":: core :: cmp :: PartialEq",
-        ),
-        (
-            "impl PartialEq for book::Entry { fn eq(&self, other: &Self) -> bool { self.label == other.label } } #[derive(Clone, PartialEq)] pub struct Note { pub entry: book::Entry, pub qty: u32 }",
-            ":: core :: cmp :: PartialEq",
-        ),
-        (
-            "#[derive(PartialEq)] pub struct Note { pub at: Spot }",
-            ":: core :: cmp :: PartialEq",
-        ),
-        (
-            "#[derive(Hash)] pub struct Note { pub side: book::Side }",
-            ":: core :: hash :: Hash",
-        ),
-    ] {
-        let module = expanded_with(importing(), &module(types, "Note"));
-        let expected = format!("\"example:notes/shelf@1.0.0/note\" : [# [derive ({carried})]");
-        assert!(
-            type_attributes(&module).is_some_and(|attributes| attributes.contains(&expected)),
-            "{types}: {}",
-            tokens(&module)
-        );
-    }
-    // A type of the module carries what its own derives give it, and so does one holding it.
-    let module = expanded_with(
-        importing(),
-        &module(
-            "#[derive(PartialEq, Eq, Hash)] pub struct Point { pub at: Spot }",
-            "Point",
-        )
-        .replace(
-            "pub struct Spot { pub x: i32 }",
-            "#[derive(PartialEq, Eq, Hash)] pub struct Spot { pub x: i32 }",
-        ),
-    );
-    assert_eq!(
-        type_attributes(&module).as_deref(),
-        Some(concat!(
-            "additional_type_attributes : { ",
-            "\"example:notes/shelf@1.0.0/spot\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] , ",
-            "\"example:notes/shelf@1.0.0/point\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,",
-        )),
-        "{}",
-        tokens(&module)
     );
 }
 
 /// The bindings implement `Debug` for every type they generate, `Clone` and `Copy` as far as its
 /// contents allow, the comparisons for an enum, and `Display` and `Error` for the error of a
-/// function's result, and they derive `serde`'s traits on it in an Orb with a state. An impl of
-/// one of those traits that the Orb's modules write for such a type, under `#[cfg(..)]` too, would
-/// implement it twice, so it is refused, saying what implements it already; so is an
-/// impl of the trait with `Self`, the type itself, placed from the impl's module, or a type
-/// parameter as its type argument, `PartialEq<Self>`, which the derived `PartialEq` is. The same
-/// module without it expands, and so do an impl of a trait the bindings do not implement for that
-/// type, one of the trait with another right-hand type, `PartialEq<u8>` or another module's
-/// namesake, which coexists with the derived one, an impl whose trait the
-/// macro cannot follow to a crate, one of a trait of the Orb's own that takes a prelude's or
-/// `serde`'s name, `pub trait Clone`, declared in the module or brought in by a glob import from
-/// another module of the Orb, and one for a type the macro places only by its name, one a glob
-/// import from outside the Orb brings into another module, which may be another type's.
+/// function's result, and they derive `serde`'s traits on it in an Orb with a state; but a record,
+/// an enum or a variant of the module stays the author's, so an impl the Orb's modules write for
+/// it, of any of those traits, in any module, under `#[cfg(..)]` too, is the author's own, which
+/// nothing implements twice: the error of a function's result may implement `Display` by hand.
 #[test]
-fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
+fn a_hand_impl_for_a_type_of_the_module_is_the_authors() {
     let module = |items: &str| {
         format!(
             "mod walk {{
@@ -4947,71 +4173,31 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
     let fmt = "fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { todo!() }";
     let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
     let state = "#[state] pub struct Count { pub steps: u32 }";
-    for (source, message) in [
-        (
-            module(&format!("impl fmt::Display for Fault {{ {fmt} }}")),
-            "`impl fmt::Display for Fault`: `Fault` enters the WIT and the generated type replacing it implements `Display` already, as the bindings implement it for the error of a function's result; remove the impl, or keep `Fault` out of the WIT",
-        ),
-        (
-            module("impl std::error::Error for Fault {}"),
-            "`impl std::error::Error for Fault`: `Fault` enters the WIT and the generated type replacing it implements `Error` already, as the bindings implement it for the error of a function's result",
-        ),
-        (
-            module(&format!(
-                "use core::fmt::Debug; impl Debug for Point {{ {fmt} }}"
-            )),
-            "`impl Debug for Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
-        ),
-        (
-            module("impl Clone for Point { fn clone(&self) -> Self { todo!() } }"),
-            "`impl Clone for Point`: `Point` enters the WIT and the generated type replacing it implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
-        ),
-        (
-            module(
-                "impl PartialEq<Heading> for Heading { fn eq(&self, other: &Heading) -> bool { todo!() } }",
-            ),
-            "`impl PartialEq<Heading> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
-        ),
-        (
-            module(
-                "pub mod ops { use super::Point; impl core::fmt::Debug for Point { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } } }",
-            ),
-            "`impl core::fmt::Debug for Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
-        ),
-        (
-            module(
-                "#[cfg(test)]
-                mod tests {
-                    use super::*;
-                    impl PartialEq for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }
-                }",
-            ),
-            "`impl PartialEq for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
-        ),
-        (
-            module(
-                "impl PartialEq<Self> for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }",
-            ),
-            "`impl PartialEq<Self> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
-        ),
-        (
-            module(
-                "impl<T> PartialEq<T> for Heading { fn eq(&self, other: &T) -> bool { todo!() } }",
-            ),
-            "`impl PartialEq<T> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
-        ),
-        (
-            module(&format!(
-                "{state} impl serde::Serialize for Point {{ {serialize} }}"
-            )),
-            "`impl serde::Serialize for Point`: `Point` enters the WIT and the generated type replacing it implements `Serialize` already, as the bindings derive it for a type that enters the WIT of an Orb with a state; remove the impl, or keep `Point` out of the WIT",
-        ),
+    let display = format!("impl fmt::Display for Fault {{ {fmt} }}");
+    let generated = tokens(&expanded("example:walk@1.0.0", &module(&display)));
+    let bindings = "exports :: example :: walk :: walker";
+    for expected in [
+        "impl fmt :: Display for Fault { fn fmt (& self , f : & mut fmt :: Formatter < '_ >) -> fmt :: Result { todo ! () } }".to_owned(),
+        format!("fn walk (access : {bindings} :: Access , heading : {bindings} :: Heading) -> Result < {bindings} :: Point , {bindings} :: Fault >"),
     ] {
-        let error = refused("example:walk@1.0.0", &source);
-        assert!(error.contains(message), "{source}: {error}");
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
     for items in [
         String::new(),
+        display,
+        "impl std::error::Error for Fault {}".to_owned(),
+        format!("use core::fmt::Debug; impl Debug for Point {{ {fmt} }}"),
+        "impl Clone for Point { fn clone(&self) -> Self { todo!() } }".to_owned(),
+        "impl PartialEq<Heading> for Heading { fn eq(&self, other: &Heading) -> bool { todo!() } }".to_owned(),
+        "pub mod ops { use super::Point; impl core::fmt::Debug for Point { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } } }".to_owned(),
+        "#[cfg(test)]
+        mod tests {
+            use super::*;
+            impl PartialEq for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }
+        }".to_owned(),
+        "impl PartialEq<Self> for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
+        "impl<T> PartialEq<T> for Heading { fn eq(&self, other: &T) -> bool { todo!() } }".to_owned(),
+        format!("{state} impl serde::Serialize for Point {{ {serialize} }}"),
         format!("impl fmt::Display for Point {{ {fmt} }}"),
         "impl PartialEq for Point { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
         "impl core::cmp::PartialEq<u8> for Heading { fn eq(&self, other: &u8) -> bool { todo!() } }".to_owned(),
@@ -5034,122 +4220,6 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
     ] {
         expanded("example:walk@1.0.0", &module(&items));
     }
-}
-
-/// The macro reads the trait impls of the Orb's modules before the compiler evaluates
-/// `#[cfg(..)]`, and leaves to them what the code it writes needs: a trait a type's derive needs
-/// of a type it holds. An impl under `#[cfg(..)]`, written
-/// plainly or under `#[cfg_attr(..)]`, or in a module under one, such as `#[cfg(test)] mod tests`,
-/// gives the trait in some configurations only, so it is refused, unless other impls, or a derive
-/// under `#[cfg_attr(..)]`, cover the others, as a `#[cfg(not(..))]` impl beside a `#[cfg(..)]` one
-/// does. The same impls without the attribute expand, and so does an impl under `#[cfg(..)]` of a
-/// trait the generated code does not need, a test's own `PartialEq`.
-#[test]
-fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
-    let office = |items: &str| {
-        format!(
-            "mod office {{
-                pub struct Access {{ pub read: bool, pub write: bool }}
-                pub struct Grant {{ pub access: Access, pub level: u32 }}
-                pub struct Note {{ pub text: String }}
-                {items}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn invert(grant: Grant, note: Note) -> Access {{ todo!() }} }}
-            }}"
-        )
-    };
-    let walk = |items: &str| {
-        format!(
-            "mod walk {{
-                #[wit_resource]
-                pub struct Pen {{ pub ink: u32 }}
-                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
-                pub struct Slot {{ pub pen: Pen }}
-                #[derive(PartialEq)]
-                pub struct Page {{ pub slot: Slot }}
-                {items}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn turn() -> Page {{ todo!() }} }}
-            }}"
-        )
-    };
-    let compared = |items: &str| {
-        office(items).replace("pub struct Grant", "#[derive(PartialEq)] pub struct Grant")
-    };
-    let equal = "impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
-    let compare = "impl PartialEq for Slot { fn eq(&self, other: &Self) -> bool { todo!() } }";
-    for (build, hand, place, owner, name) in [
-        (
-            &compared as &dyn Fn(&str) -> String,
-            equal,
-            "`impl PartialEq for Access`",
-            "Access",
-            "PartialEq",
-        ),
-        (
-            &walk,
-            compare,
-            "`impl PartialEq for Slot`",
-            "Slot",
-            "PartialEq",
-        ),
-    ] {
-        for (condition, written) in CONDITIONS {
-            let error = refused(
-                "example:office@1.0.0",
-                &build(&format!("{condition} {hand}")),
-            );
-            let message = format!(
-                "{written} on {place}: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `{owner}` to implement `{name}` in every configuration; remove the attribute, or implement `{name}` for the configurations it turns off too, under `#[cfg(not(..))]`"
-            );
-            assert!(error.contains(&message), "{condition} {hand}: {error}");
-        }
-        expanded("example:office@1.0.0", &build(hand));
-        for (condition, opposite) in [
-            (
-                "#[cfg(feature = \"audit\")]",
-                "#[cfg(not(feature = \"audit\"))]",
-            ),
-            (
-                "#[cfg_attr(test, cfg(feature = \"audit\"))]",
-                "#[cfg_attr(test, cfg(not(feature = \"audit\")))]",
-            ),
-            (
-                "#[cfg(all(unix, feature = \"audit\"))]",
-                "#[cfg(any(not(unix), not(feature = \"audit\")))]",
-            ),
-        ] {
-            expanded(
-                "example:office@1.0.0",
-                &build(&format!("{condition} {hand} {opposite} {hand}")),
-            );
-        }
-    }
-    let error = refused(
-        "example:office@1.0.0",
-        &compared(&format!(
-            "#[cfg(test)] mod tests {{ use super::Access; {equal} }}"
-        )),
-    );
-    assert!(
-        error.contains("`#[cfg(..)]` on the module `tests` holding `impl PartialEq for Access`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Access` to implement `PartialEq` in every configuration"),
-        "{error}"
-    );
-    // What the generated code does not need stays the author's, under `#[cfg(..)]`.
-    expanded(
-        "example:office@1.0.0",
-        &office(
-            "#[cfg(test)]
-            mod tests {
-                use super::*;
-                impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }
-                impl PartialEq for Note { fn eq(&self, other: &Self) -> bool { todo!() } }
-                impl Default for Note { fn default() -> Self { todo!() } }
-            }",
-        ),
-    );
 }
 
 /// Two modules of one name, which `#[cfg(..)]`s select, are two modules: the macro reads the
@@ -5194,434 +4264,12 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
     }
 }
 
-/// The values written for a configuration name that takes one at a time, `target_endian =
-/// "little"` and `target_endian = "big"`, may be all it takes, so the macro cannot be sure a
-/// configuration sets none of them: impls split across them give the trait, as a `#[cfg(x)]` one
-/// beside a `#[cfg(not(x))]` one does. One value alone leaves the others out, the features and the
-/// target features a configuration sets are any of them, together or none, and an impl that needs
-/// another option too leaves out the configurations without it, so those are refused.
-#[test]
-fn impls_split_across_the_values_of_one_name_give_the_trait() {
-    let walk = |items: &str| {
-        format!(
-            "mod walk {{
-                #[wit_resource]
-                pub struct Pen {{ pub ink: u32 }}
-                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
-                pub struct Slot {{ pub pen: Pen }}
-                #[derive(PartialEq)]
-                pub struct Page {{ pub slot: Slot }}
-                {items}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn turn() -> Page {{ todo!() }} }}
-            }}"
-        )
-    };
-    let hand = "impl PartialEq for Slot { fn eq(&self, other: &Self) -> bool { todo!() } }";
-    for split in [
-        "#[cfg(target_endian = \"little\")] {hand} #[cfg(target_endian = \"big\")] {hand}",
-        "#[cfg(target_pointer_width = \"32\")] {hand} #[cfg(target_pointer_width = \"64\")] {hand}",
-        "#[cfg(any(target_endian = \"little\", feature = \"audit\"))] {hand}
-         #[cfg(all(target_endian = \"big\", not(feature = \"audit\")))] {hand}",
-    ] {
-        expanded("example:walk@1.0.0", &walk(&split.replace("{hand}", hand)));
-    }
-    for split in [
-        "#[cfg(target_endian = \"little\")] {hand}",
-        "#[cfg(all(target_pointer_width = \"32\", feature = \"audit\"))] {hand}
-         #[cfg(target_pointer_width = \"64\")] {hand}",
-        "#[cfg(feature = \"audit\")] {hand} #[cfg(feature = \"seeded\")] {hand}",
-        "#[cfg(target_feature = \"simd128\")] {hand} #[cfg(target_feature = \"atomics\")] {hand}",
-    ] {
-        let error = refused("example:walk@1.0.0", &walk(&split.replace("{hand}", hand)));
-        assert!(
-            error.contains("`#[cfg(..)]` on `impl PartialEq for Slot`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Slot` to implement `PartialEq` in every configuration"),
-            "{split}: {error}"
-        );
-    }
-}
-
-/// The bindings' module reads the helper attributes the generated type takes, so one it would not
-/// know there is refused on the author's type: one whose arguments name what the type's module
-/// declares or imports, which a path from `crate::` names from anywhere; an attribute macro the
-/// module imports, which no derive reads; and one no derive the generated type takes reads, as
-/// when a glob import's `Debug` is read as the standard library's, which the bindings implement.
-/// Kept out of the WIT, the same type is the author's, as written.
-#[test]
-fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
-    let module = |types: &str, returned: &str| {
-        format!(
-            "mod walk {{
-                {types}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
-            }}"
-        )
-    };
-    let carried = expanded(
-        "example:walk@1.0.0",
-        &module(
-            "const PAGE: u32 = 20;
-             #[derive(smart_default::SmartDefault)]
-             pub struct Page { #[default(crate::walk::PAGE)] pub size: u32 }",
-            "Page",
-        ),
-    );
-    assert!(
-        tokens(&carried).contains(
-            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.size\" : [# [default (crate :: walk :: PAGE)]] } ,"
-        ),
-        "{}",
-        tokens(&carried)
-    );
-    // A type of the module that enters the WIT is declared in the bindings' module too, under the
-    // same name, where the owner's interface defines or uses it: an attribute naming it reads there.
-    let carried = expanded(
-        "example:walk@1.0.0",
-        &module(
-            "pub enum Mode { Fast, Slow }
-             #[derive(smart_default::SmartDefault)]
-             pub struct Page { #[default(Mode::Slow)] pub mode: Mode, pub size: u32 }",
-            "Page",
-        ),
-    );
-    assert!(
-        tokens(&carried).contains(
-            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.mode\" : [# [default (Mode :: Slow)]] } ,"
-        ),
-        "{}",
-        tokens(&carried)
-    );
-    // So is one another interface defines and the owner's interface `use`s for a function or a
-    // type of its own, which the bindings' module declares as an alias.
-    let carried = expanded(
-        "example:walk@1.0.0",
-        "mod walk {
-            pub enum Mode { Fast, Slow }
-            #[service]
-            pub struct Settings;
-            impl Settings { pub fn current() -> Mode { todo!() } }
-            #[derive(smart_default::SmartDefault)]
-            pub struct Page { #[default(Mode::Slow as u32)] pub level: u32 }
-            #[service]
-            pub struct Walker;
-            impl Walker {
-                pub fn speed(mode: Mode) -> u32 { 0 }
-                pub fn walk(page: Page) -> u32 { 0 }
-            }
-        }",
-    );
-    assert!(
-        tokens(&carried).contains(
-            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.level\" : [# [default (Mode :: Slow as u32)]] } ,"
-        ),
-        "{}",
-        tokens(&carried)
-    );
-    // A derive's helper attribute resolves in the macro namespace, so an item of its name the
-    // module imports, a module here, shadows nothing: the derive that reads it by name takes it.
-    let carried = expanded(
-        "example:walk@1.0.0",
-        &module(
-            "use core::default;
-             #[derive(Default)]
-             pub enum Mode { #[default] Fast, Slow }",
-            "Mode",
-        ),
-    );
-    assert!(
-        tokens(&carried).contains(
-            "additional_member_attributes : { \"example:walk/walker@1.0.0/mode.fast\" : [# [default]] } ,"
-        ),
-        "{}",
-        tokens(&carried)
-    );
-    for (types, message) in [
-        (
-            "const PAGE: u32 = 20;
-             #[derive(smart_default::SmartDefault)]
-             pub struct Page { #[default(PAGE)] pub size: u32 }",
-            "`#[default(..)]` on `Page` names `PAGE` from this module: `Page` enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach `PAGE`; name it from `crate::` or from its crate, `::name::..`, or keep `Page` out of the WIT",
-        ),
-        (
-            "use crate::limits::PAGE;
-             #[derive(smart_default::SmartDefault)]
-             pub struct Page { #[default(PAGE)] pub size: u32 }",
-            "`#[default(..)]` on `Page` names `PAGE` from this module",
-        ),
-        (
-            "use serde_with::skip_serializing_none;
-             #[skip_serializing_none]
-             #[derive(serde::Serialize)]
-             pub struct Page { pub size: Option<u32> }",
-            "`#[skip_serializing_none]` on `Page`: `Page` enters the WIT and the generated type replacing it takes its derives and the helper attributes they read, which come with the derives, while this module imports `skip_serializing_none`, an attribute macro, which the generated type cannot take; remove it, or keep `Page` out of the WIT",
-        ),
-        (
-            "use derive_more::*;
-             #[derive(Debug)]
-             pub struct Page { #[debug(skip)] pub size: u32 }",
-            "`#[debug(..)]` on `Page`: `Page` enters the WIT and the generated type replacing it takes no derive that reads this attribute: a derive of the standard library reads none but `#[default]`, for `Default`, and a derive of what the bindings implement themselves is left to them; remove the attribute, or keep `Page` out of the WIT",
-        ),
-    ] {
-        let error = refused("example:walk@1.0.0", &module(types, "Page"));
-        assert!(error.contains(message), "{types}: {error}");
-        expanded("example:walk@1.0.0", &module(types, "u32"));
-    }
-}
-
-/// A known derive reads some of its helper attributes as code, in the bindings' module: a string
-/// it parses as code, derivative's `value` or smart_default's `_code`, or the names thiserror's
-/// string captures, `{PAGE}`, and, under a glob import the macro cannot follow, `use super::*;` in
-/// the Orb module, the tokens of smart_default's `#[default(..)]` and the format arguments of
-/// thiserror's `#[error(..)]` and derive_more's `#[display(..)]`, which the glob may bring a name
-/// to. A name there that the bindings' module does not reach is refused, with the `crate::`
-/// advice; the `crate::` form expands, and so do a field of the type, a name of the prelude, a
-/// primitive type and a lowercase name before `::`, which may be a crate's. Elsewhere a word may be
-/// the derive's own syntax, as `ignore` in `#[from(ignore)]`, which stays as written.
-#[test]
-fn a_helper_attribute_naming_what_a_glob_or_a_string_brings_is_refused() {
-    let module = |items: &str, returned: &str| {
-        format!(
-            "mod walk {{
-                use super::*;
-                {items}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
-            }}"
-        )
-    };
-    let limit = |attribute: &str| {
-        format!("#[derive(thiserror::Error)] {attribute} pub struct Limit {{ pub limit: u32 }}")
-    };
-    let display = |attribute: &str| {
-        format!("#[derive(derive_more::Display)] {attribute} pub struct Limit {{ pub limit: u32 }}")
-    };
-    let page = |attribute: &str| {
-        format!(
-            "#[derive(smart_default::SmartDefault)] pub struct Page {{ {attribute} pub size: u32 }}"
-        )
-    };
-    let derivative = |value: &str| {
-        format!(
-            "#[derive(derivative::Derivative)]
-            #[derivative(Default)]
-            pub struct Page {{ #[derivative(Default(value = \"{value}\"))] pub size: u32 }}"
-        )
-    };
-    let advice = "enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach";
-    for (refused_items, returned, shown, name, expanding) in [
-        (
-            limit("#[error(\"limit {} of {}\", limit, PAGE)]"),
-            "Limit",
-            "#[error(..)]",
-            "PAGE",
-            vec![
-                limit("#[error(\"limit {} of {}\", limit, crate::PAGE)]"),
-                limit("#[error(\"limit {} of {:?}\", limit, None::<u32>)]"),
-            ],
-        ),
-        (
-            limit("#[error(\"limit {limit} of {PAGE}\")]"),
-            "Limit",
-            "#[error(..)]",
-            "PAGE",
-            vec![
-                limit("#[error(\"limit {limit} of {}\", crate::PAGE)]"),
-                limit("#[error(\"limit {limit:?} of {{PAGE}}\")]"),
-            ],
-        ),
-        (
-            format!(
-                "const PAGE: u32 = 20; {}",
-                limit("#[error(\"limit {limit} of {PAGE}\")]")
-            ),
-            "Limit",
-            "#[error(..)]",
-            "PAGE",
-            vec![format!(
-                "const PAGE: u32 = 20; {}",
-                limit("#[error(\"limit {limit} of {}\", crate::walk::PAGE)]")
-            )],
-        ),
-        (
-            display("#[display(\"{} of {}\", limit, PAGE)]"),
-            "Limit",
-            "#[display(..)]",
-            "PAGE",
-            vec![
-                display("#[display(\"{} of {}\", limit, crate::PAGE)]"),
-                display("#[display(\"{} of {}\", limit, u32::MAX)]"),
-            ],
-        ),
-        (
-            page("#[default(PAGE)]"),
-            "Page",
-            "#[default(..)]",
-            "PAGE",
-            vec![
-                page("#[default(crate::PAGE)]"),
-                page("#[default(Some(20).unwrap_or_default())]"),
-                page("#[default(limits::PAGE)]"),
-            ],
-        ),
-        (
-            page("#[default(Limits::PAGE)]"),
-            "Page",
-            "#[default(..)]",
-            "Limits::PAGE",
-            vec![page("#[default(crate::Limits::PAGE)]")],
-        ),
-        (
-            derivative("PAGE"),
-            "Page",
-            "#[derivative(..)]",
-            "PAGE",
-            vec![
-                derivative("crate::PAGE"),
-                derivative("u32::MAX"),
-                derivative("Default::default()"),
-            ],
-        ),
-        (
-            format!("const PAGE: u32 = 20; {}", derivative("PAGE")),
-            "Page",
-            "#[derivative(..)]",
-            "PAGE",
-            vec![format!(
-                "const PAGE: u32 = 20; {}",
-                derivative("crate::walk::PAGE")
-            )],
-        ),
-        (
-            page("#[default(_code = \"PAGE * 2\")]"),
-            "Page",
-            "#[default(..)]",
-            "PAGE",
-            vec![page("#[default(_code = \"crate::PAGE * 2\")]")],
-        ),
-        (
-            format!(
-                "const PAGE: u32 = 20; {}",
-                page("#[default(_code = \"PAGE * 2\")]")
-            ),
-            "Page",
-            "#[default(..)]",
-            "PAGE",
-            vec![format!(
-                "const PAGE: u32 = 20; {}",
-                page("#[default(_code = \"crate::walk::PAGE * 2\")]")
-            )],
-        ),
-    ] {
-        let error = refused("example:walk@1.0.0", &module(&refused_items, returned));
-        let owner = returned;
-        let message = format!(
-            "`{shown}` on `{owner}` names `{name}` from this module: `{owner}` {advice} `{name}`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
-        );
-        assert!(error.contains(&message), "{refused_items}: {error}");
-        for items in expanding {
-            expanded("example:walk@1.0.0", &module(&items, returned));
-        }
-    }
-    // A word of the derive's own syntax names nothing, under the same glob.
-    expanded(
-        "example:walk@1.0.0",
-        &module(
-            "#[derive(derive_more::From)]
-            pub enum Value { Int(i32), #[from(ignore)] Other(i32) }",
-            "Value",
-        ),
-    );
-}
-
-/// Under a glob import the macro cannot follow, what a known derive reads as code names from the
-/// glob only the names that start a path from its scope. A format argument's `name =`, which the
-/// string captures as `{max}`, a struct literal's field, a name the code binds itself, in a
-/// closure's parameters or in the pattern of a `let`, a `for` or a match arm, and an attribute or
-/// a macro's arguments, which are their own syntax, are no such path, so each expands, as does
-/// code declaring an item, whose names the macro does not follow; a path beside them is refused as
-/// before.
-#[test]
-fn a_helper_argument_naming_no_path_from_its_scope_expands_under_a_glob() {
-    let module = |items: &str, returned: &str| {
-        format!(
-            "mod walk {{
-                use super::*;
-                {items}
-                #[service]
-                pub struct Walker;
-                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
-            }}"
-        )
-    };
-    let limit = |attribute: &str| {
-        format!("#[derive(thiserror::Error)] {attribute} pub struct Limit {{ pub limit: u32 }}")
-    };
-    let page = |attribute: &str| {
-        format!(
-            "#[derive(smart_default::SmartDefault)] pub struct Page {{ {attribute} pub size: u32 }}"
-        )
-    };
-    let limits = |attribute: &str| {
-        format!(
-            "pub struct Limits {{ pub max: u32 }}
-            #[derive(smart_default::SmartDefault)]
-            pub struct Page {{ {attribute} pub limits: Limits }}"
-        )
-    };
-    let advice = "enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach";
-    for (refused_items, returned, shown, expanding) in [
-        (
-            limit("#[error(\"limit {limit} of {max}\", max = PAGE)]"),
-            "Limit",
-            "#[error(..)]",
-            vec![
-                limit("#[error(\"limit {limit} (at most {max})\", max = u32::MAX)]"),
-                limit("#[error(\"limit {limit} of {max}\", max = crate::PAGE)]"),
-            ],
-        ),
-        (
-            page("#[default((|n: u32| n + PAGE)(1))]"),
-            "Page",
-            "#[default(..)]",
-            vec![
-                page("#[default((|n: u32| n + 1)(1))]"),
-                page("#[default({ let n = 2; n * 2 })]"),
-                page("#[default({ let mut sum = 0; for n in 1..3 { sum += n; } sum })]"),
-                page("#[default(match Some(2) { Some(n) if n > 1 => n, _ => 0 })]"),
-                page("#[default({ #[allow(unused_mut)] let mut n = 2; n })]"),
-                page("#[default(stringify!(PAGE).len() as u32)]"),
-                page("#[default({ const N: u32 = 2; N })]"),
-            ],
-        ),
-        (
-            limits("#[default(Limits { max: PAGE })]"),
-            "Page",
-            "#[default(..)]",
-            vec![limits("#[default(Limits { max: 10 })]")],
-        ),
-    ] {
-        let error = refused("example:walk@1.0.0", &module(&refused_items, returned));
-        let owner = returned;
-        let message = format!(
-            "`{shown}` on `{owner}` names `PAGE` from this module: `{owner}` {advice} `PAGE`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
-        );
-        assert!(error.contains(&message), "{refused_items}: {error}");
-        for items in expanding {
-            expanded("example:walk@1.0.0", &module(&items, returned));
-        }
-    }
-}
-
 /// A state's `Default`, its initial value, and serde's traits, which keep it as JSON, are the
 /// author's: the macro writes no `Default` and no serde derive, only an assertion that the state
 /// implements the three traits, on the state's name, where rustc reports a missing one. A state
-/// that enters the WIT is the generated type, which takes the author's derive of `Default`, under
-/// another name too, `SmartDefault` or `Derivative` with `#[derivative(Default)]`. An impl the
-/// author writes under `#[cfg(..)]` is the compiler's to evaluate, so the macro refuses none.
+/// that enters the WIT stays the author's struct, with its derive of `Default`, under another name
+/// too, `SmartDefault` or `Derivative` with `#[derivative(Default)]`. An impl the author writes
+/// under `#[cfg(..)]` is the compiler's to evaluate, so the macro refuses none.
 #[test]
 fn a_states_default_and_serde_derives_are_the_authors() {
     let state = |attributes: &str, extra: &str, returned: &str| {
@@ -5671,29 +4319,24 @@ fn a_states_default_and_serde_derives_are_the_authors() {
             assert!(!generated.contains(written), "{extra}\n{generated}");
         }
     }
-    // A state that enters the WIT is the generated type, which takes the author's derive.
-    for derive in [
-        "Default",
-        "core::default::Default",
-        "::std::default::Default",
-    ] {
-        let entered = tokens(&expanded(
-            "example:ledger@1.0.0",
-            &state(&format!("#[derive({derive})]"), "", "Balance"),
-        ));
-        assert!(
-            entered.contains("additional_type_attributes : { \"example:ledger/pinned@1.0.0/balance\" : [# [derive (:: core :: default :: Default)]] } ,"),
-            "{entered}"
-        );
-    }
-    for (attributes, carried) in [
+    // A state that enters the WIT stays the author's struct, with its derive as written.
+    for (attributes, kept_as) in [
+        ("#[derive(Default)]", "# [derive (Default)]"),
+        (
+            "#[derive(core::default::Default)]",
+            "# [derive (core :: default :: Default)]",
+        ),
+        (
+            "#[derive(::std::default::Default)]",
+            "# [derive (:: std :: default :: Default)]",
+        ),
         (
             "#[derive(smart_default::SmartDefault)]",
-            "[# [derive (:: smart_default :: SmartDefault)]]",
+            "# [derive (smart_default :: SmartDefault)]",
         ),
         (
             "#[derive(derivative::Derivative)] #[derivative(Default(bound = \"\"))]",
-            "[# [derive (:: derivative :: Derivative)] # [derivative (Default (bound = \"\"))]]",
+            "# [derive (derivative :: Derivative)] # [derivative (Default (bound = \"\"))]",
         ),
     ] {
         let entered = tokens(&expanded(
@@ -5702,10 +4345,14 @@ fn a_states_default_and_serde_derives_are_the_authors() {
         ));
         assert!(
             entered.contains(&format!(
-                "additional_type_attributes : {{ \"example:ledger/pinned@1.0.0/balance\" : {carried} }} ,"
+                "{kept_as} pub struct Balance {{ pub total : i64 }}"
             )),
             "{entered}"
         );
+        assert!(entered.contains(&asserted("Balance")), "{entered}");
+        for unexpected in [written, "additional_type_attributes", "pub use exports"] {
+            assert!(!entered.contains(unexpected), "{unexpected}\n{entered}");
+        }
     }
     // Each of two states of one name is asserted through its own path.
     let generated = tokens(&expanded("example:ledger@1.0.0", LEDGER));
@@ -5731,7 +4378,7 @@ const GATE: &str = "mod gate {
 /// A hook declared from `input = Type` is an interface of the package, derived from the struct:
 /// its types are defined there and borrowed by the services, the world imports and exports it,
 /// the manifest declares it, and `run` speaks the module's own types through generated
-/// conversions to the import side of the bindings.
+/// conversions to the import side of the bindings, as the services' bridges do to the export side.
 #[test]
 fn a_declared_hook_is_derived_from_its_input() {
     let module = expanded("example:gate@1.0.0", GATE);
@@ -5747,21 +4394,26 @@ fn a_declared_hook_is_derived_from_its_input() {
     );
     let generated = tokens(&module);
     for expected in [
-        "pub use exports :: example :: gate :: guard :: { Admission } ;",
+        "pub struct Admission { pub value : i32 , pub blocked : bool }",
         "pub fn run (input : Admission) -> Admission",
         "let input : self :: example :: gate :: guard :: Admission = :: core :: convert :: Into :: into (input) ;",
         "let answer = self :: example :: gate :: guard :: apply (input) ;",
-        "impl :: core :: convert :: From < exports :: example :: gate :: guard :: Admission > for self :: example :: gate :: guard :: Admission",
-        "impl :: core :: convert :: From < self :: example :: gate :: guard :: Admission > for exports :: example :: gate :: guard :: Admission",
+        "impl :: core :: convert :: From < Admission > for exports :: example :: gate :: guard :: Admission",
+        "impl :: core :: convert :: From < exports :: example :: gate :: guard :: Admission > for Admission",
+        "impl :: core :: convert :: From < Admission > for self :: example :: gate :: guard :: Admission",
+        "impl :: core :: convert :: From < self :: example :: gate :: guard :: Admission > for Admission",
         "Self { value : :: core :: convert :: Into :: into (value . value) , blocked : :: core :: convert :: Into :: into (value . blocked) }",
-        "fn apply (_input : Admission) -> Admission",
+        "fn apply (_input : exports :: example :: gate :: guard :: Admission) -> exports :: example :: gate :: guard :: Admission",
+        "fn admit (value : i32) -> exports :: example :: gate :: admissions :: Admission { :: core :: convert :: Into :: into (Admissions :: admit (value)) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
-    assert!(
-        !generated.contains("pub use self :: example :: gate :: guard ;"),
-        "{generated}"
-    );
+    for unexpected in [
+        "pub use self :: example :: gate :: guard ;",
+        "pub use exports :: example :: gate :: guard :: {",
+    ] {
+        assert!(!generated.contains(unexpected), "{unexpected}\n{generated}");
+    }
 }
 
 /// A derived hook's input resolves as a signature's name does: through a renaming `use`, a
@@ -5893,7 +4545,8 @@ fn a_derived_hook_follows_its_composition() {
 }
 
 /// A scalar input needs no record and no conversion; a list crosses to the import by reference;
-/// the shapes a hook reaches, through lists, options and variants, get conversions each.
+/// the shapes a hook reaches, through lists, options and variants, get conversions each, to and
+/// from each side of the bindings.
 #[test]
 fn a_derived_hook_converts_what_its_input_reaches() {
     let scalar = expanded(
@@ -5955,12 +4608,15 @@ fn a_derived_hook_converts_what_its_input_reaches() {
     );
     let generated = tokens(&nested);
     for expected in [
-        "From < exports :: example :: gate :: guard :: Tag > for self :: example :: gate :: guard :: Tag",
-        "From < exports :: example :: gate :: guard :: Note > for self :: example :: gate :: guard :: Note",
+        "From < Tag > for exports :: example :: gate :: guard :: Tag",
+        "From < Tag > for self :: example :: gate :: guard :: Tag",
+        "From < self :: example :: gate :: guard :: Note > for Note",
         "value . tags . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect ()",
         "value . note . map (| item | :: core :: convert :: Into :: into (item))",
         "Kind :: Weighted (item) => Self :: Weighted (:: core :: convert :: Into :: into (item))",
+        "self :: example :: gate :: guard :: Kind :: Weighted (item) => Self :: Weighted (:: core :: convert :: Into :: into (item))",
         "Tag :: Hot => Self :: Hot",
+        "self :: example :: gate :: guard :: Tag :: Hot => Self :: Hot",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -6292,9 +4948,9 @@ const LEDGER: &str = "mod ledger {
 }";
 
 /// A sub-module groups a service with its state: the state needs no `service = Name`, two states
-/// of two modules may share a name when they stay out of the WIT, the generated types are
-/// re-exported where the author declared them, and the bridges are generated in the service's
-/// module, naming the Orb module through `super::`.
+/// of two modules may share a name when they stay out of the WIT, a type's conversions are
+/// generated where the author declared it, and the bridges in the service's module, naming the Orb
+/// module through `super::`.
 #[test]
 fn sub_modules_group_a_service_with_its_state() {
     let module = expanded("example:ledger@1.0.0", LEDGER);
@@ -6310,8 +4966,8 @@ fn sub_modules_group_a_service_with_its_state() {
     );
     let generated = tokens(&module);
     for expected in [
-        "pub use super :: exports :: example :: ledger :: pinned :: { Balance } ;",
-        "impl super :: exports :: example :: ledger :: pinned :: Guest for super :: __TembraExports { fn add (amount : i64) -> Balance { Pinned :: add (amount) } }",
+        "impl :: core :: convert :: From < Balance > for super :: exports :: example :: ledger :: pinned :: Balance",
+        "impl super :: exports :: example :: ledger :: pinned :: Guest for super :: __TembraExports { fn add (amount : i64) -> super :: exports :: example :: ledger :: pinned :: Balance { :: core :: convert :: Into :: into (Pinned :: add (amount)) } }",
         "impl super :: exports :: example :: ledger :: passing :: Guest for super :: __TembraExports { fn add (amount : i64) -> i64 { Passing :: add (amount) } }",
         "pub struct Balance { pub total : i64 }",
         "impl pinned :: Balance {",
@@ -6667,10 +5323,15 @@ fn books(uses: &str, signature: &str) -> String {
 /// module declares of the name: a `use` of the type, with `as`, in a group, through a sub-module's
 /// `pub use`, an alias that is only a path, and a path into the module. The WIT names the type by
 /// its own name, `entry` for `Item` after `use super::model::Entry as Item;`, and takes the type of
-/// the module the name leads to, not `other`'s `Entry`.
+/// the module the name leads to, not `other`'s `Entry`; the bridge spells the bindings' type of
+/// the same name, `Entry`, and converts the author's, whatever the author calls it.
 #[test]
 fn a_contract_types_name_resolves_as_rustc_resolves_it() {
     let entry = "  record entry {\n    id: u32,\n  }\n";
+    let bindings = "super :: exports :: example :: books :: library";
+    let bridge = format!(
+        "fn first (shelf : {bindings} :: Shelf) -> {bindings} :: Entry {{ :: core :: convert :: Into :: into (Library :: first (:: core :: convert :: Into :: into (shelf))) }}"
+    );
     for (uses, signature) in [
         (
             "use super::model::Entry;",
@@ -6697,7 +5358,8 @@ fn a_contract_types_name_resolves_as_rustc_resolves_it() {
             "pub fn first(shelf: Shelf) -> Entry { todo!() }",
         ),
     ] {
-        let text = resolved(&expanded("example:books@1.0.0", &books(uses, signature)));
+        let module = expanded("example:books@1.0.0", &books(uses, signature));
+        let text = resolved(&module);
         for expected in [
             entry,
             "  enum shelf {\n    top,\n    bottom,\n  }\n",
@@ -6706,6 +5368,8 @@ fn a_contract_types_name_resolves_as_rustc_resolves_it() {
             assert!(text.contains(expected), "{uses}\n{expected}\n{text}");
         }
         assert!(!text.contains("pages"), "{uses}\n{text}");
+        let generated = tokens(&module);
+        assert!(generated.contains(&bridge), "{uses}\n{bridge}\n{generated}");
     }
     // In a record's field as in a signature.
     let text = resolved(&expanded(
@@ -6980,57 +5644,6 @@ fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
         "{}",
         tokens(&stateless)
     );
-}
-
-/// The bindings give a consumed package's flags type no serde implementation, nor a consumed type
-/// holding one, and, in an Orb without a state, where they derive serde's traits on no type, no
-/// consumed type at all: serde's derives on a type of the module holding such a type are refused
-/// at the derive. With a state, one holding a consumed record serde writes leaves them to the
-/// bindings.
-#[test]
-fn a_serde_derive_on_a_type_holding_a_consumed_type_without_serde_is_refused() {
-    let dir = consumed("badge", ACCESS_WIT);
-    let imports = || Options {
-        imports: vec![literal("example:access/grants@1.0.0")],
-        ..options("example:keeper@1.0.0", Some(&dir))
-    };
-    let module = |state: &str, derive: &str, field: &str| {
-        format!(
-            "mod vault {{
-                {state}
-                {derive}
-                pub struct Badge {{ {field} }}
-                #[service]
-                pub struct Keeper;
-                impl Keeper {{ pub fn issue() -> Badge {{ todo!() }} }}
-            }}"
-        )
-    };
-    let state = "#[state] pub struct Count { pub total: u32 }";
-    let flags =
-        "a consumed package's flags type, which the bindings give no `serde` implementation";
-    let stateless = "a type of a consumed package, which the bindings give no `serde` implementation in an Orb without a state";
-    for (state, field, held) in [
-        (state, "pub permissions: grants::Permissions", Some(flags)),
-        (state, "pub grant: Option<grants::Grant>", Some(flags)),
-        (state, "pub plain: grants::Plain", None),
-        ("", "pub permissions: grants::Permissions", Some(stateless)),
-        ("", "pub plain: grants::Plain", Some(stateless)),
-        ("", "pub all: Vec<grants::Plain>", Some(stateless)),
-    ] {
-        let derived = module(state, "#[derive(serde::Serialize)]", field);
-        let Some(held) = held else {
-            let module = orb_with(imports(), &derived).unwrap_or_else(|error| panic!("{error}"));
-            assert_eq!(type_attributes(&module), None, "{}", tokens(&module));
-            continue;
-        };
-        let error = refused_with(imports(), &derived);
-        assert!(
-            error.contains(&format!("`serde::Serialize` on `Badge`: `Badge` enters the WIT and holds {held}, so the generated type replacing it cannot derive `Serialize`; remove the derive, or keep `Badge` out of the WIT")),
-            "{state} {field}: {error}"
-        );
-        orb_with(imports(), &module(state, "", field)).unwrap_or_else(|error| panic!("{error}"));
-    }
 }
 
 /// A freestanding (`no_std`) guest gets the runtime prelude once, inside its module, and a refused
@@ -8120,7 +6733,7 @@ fn the_native_side_refuses_a_resource_it_cannot_carry() {
         }
         pub struct Lease { pub session: Session, pub count: u32 }
         impl Sessions {",
-            "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the bindings replace it with their type, whose handle only a component creates: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`".to_owned(),
+            "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the native boundary carries a resource beside the data, as a handle, never inside the JSON of a record: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`".to_owned(),
         ),
     ] {
         let module = orb_with(options("example:desk@1.0.0", None), &DESK.replace(from, to))

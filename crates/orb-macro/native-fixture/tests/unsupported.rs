@@ -51,6 +51,6 @@ fn a_hook_declaration_fails_the_installation() {
 fn a_record_holding_a_resource_fails_the_installation() {
     assert_eq!(
         install(desk::orb),
-        "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the bindings replace it with their type, whose handle only a component creates: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`"
+        "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the native boundary carries a resource beside the data, as a handle, never inside the JSON of a record: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`"
     );
 }

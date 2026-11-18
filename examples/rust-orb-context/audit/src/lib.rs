@@ -6,7 +6,7 @@ extern crate alloc;
 
 #[tembra::orb(no_std, package = "example:audit@1.0.0", context)]
 mod audit {
-    use alloc::string::String;
+    use alloc::{string::String, vec::Vec};
 
     /// Who called, and which object answered.
     pub struct Caller {

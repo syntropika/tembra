@@ -178,14 +178,14 @@ pub mod calculator {
     }
 
     /// A point of the plotter's grid: 64-bit coordinates cross the boundary as exact numbers.
-    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct Point {
         pub x: i64,
         pub y: i64,
     }
 
     /// Where the pen moves.
-    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
     pub enum Heading {
         North,
         East,
@@ -203,7 +203,7 @@ pub mod calculator {
     }
 
     /// How a shape is drawn: a record of `bool` fields.
-    #[derive(PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     pub struct Pen {
         pub filled: bool,
         pub dashed_line: bool,
@@ -331,7 +331,7 @@ pub mod calculator {
     /// serde writes, the same in both, which is that of the runtime fixture's walker: `{"at": {"x":
     /// 0, "y": 0}, "facing": "North", "moves": 0}` to start with.
     #[state(service = Walker)]
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct Position {
         pub at: Point,
         pub facing: Heading,
@@ -1756,9 +1756,10 @@ pub mod checkpoint {
     }
 }
 
-/// Lends sessions in a record beside their count: a record holding a resource is the bindings'
-/// type, whose handle only a component creates, so the module's `orb()` answers an error naming
-/// the record's field, where a tuple would carry the resource natively too.
+/// Lends sessions in a record beside their count: a record holding a resource is the author's,
+/// whose resource a component's bridge wraps into the bindings' handle, while the native boundary
+/// carries a resource only beside the data, so the module's `orb()` answers an error naming the
+/// record's field, where a tuple would carry the resource natively too.
 #[tembra::orb(package = "example:desk@1.0.0")]
 pub mod desk {
     /// One session.
@@ -1794,7 +1795,7 @@ pub mod desk {
         /// Lend a session numbered `n`, counted once.
         pub fn lend(n: u32) -> Lease {
             Lease {
-                session: exports::example::desk::sessions::Session::new(Session::new(n)),
+                session: Session::new(n),
                 count: 1,
             }
         }

@@ -8,8 +8,9 @@
 //! is a resource of the Orb's root, opened by the kernel at activation and usable by every
 //! method and hook callback. Structs with named fields and enums become `record`s, `enum`s and
 //! `variant`s only when a service method, a WIT resource's function or a hook's input uses them,
-//! directly or through another type; a state alone does not. Such a type is replaced by the type
-//! the bindings generate, which takes the author's derives and the helper attributes they read.
+//! directly or through another type; a state alone does not. Such a type stays the author's, with
+//! its derives, attributes and impls as written: the macro converts it to and from the type the
+//! bindings generate at the boundary, with `From` in both directions written in the type's module.
 //! The rest of the module stays ordinary Rust: a state that stays out of the WIT, and the module
 //! types its fields reach, get serde's derives.
 //!
@@ -2455,12 +2456,10 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &consumed_modules,
         &mut unreached,
     )?;
-    // An enum with a case with named fields stays the author's, converted to and from the
-    // bindings' type at the boundary, and so does every type holding one, free JSON or a newtype;
-    // any other type that enters the WIT is replaced by the generated type, which takes what it
-    // can of the author's attributes and drops the rest, refused. Either way, what the macro
-    // cannot evaluate in the type is refused first.
-    let converted = converted(&shapes, &consumed_modules);
+    // Every record, variant and enum stays the author's, converted to and from the bindings' type
+    // at the boundary, so `converted` holds each of them and the replacement by the generated
+    // type, below, runs for none; what the macro cannot evaluate in the type is refused first.
+    let converted = converted(&shapes);
     for shape in &mut shapes {
         if converted.contains_key(&shape.ident.to_string()) {
             unconditional(&shape.item, Written::Converted)?;
@@ -2536,6 +2535,11 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     let mut implemented_elsewhere: BTreeMap<String, Elsewhere> = BTreeMap::new();
     let mut hand_impls: BTreeMap<String, Vec<(usize, syn::ItemImpl)>> = BTreeMap::new();
     for shape in &shapes {
+        // A type the macro converts stays the author's: its impls are its own, which the bindings'
+        // type, internal to the generated code, never shares.
+        if converted.contains_key(&shape.ident.to_string()) {
+            continue;
+        }
         let hands = impls::implemented_by_hand(
             &mut tree,
             &modules,
@@ -2793,9 +2797,9 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     })
 }
 
-/// The component side of the module: the bindings from the inline WIT, the author's types
-/// replaced by the generated ones, the bridges to the author's functions, each in the module of
-/// the item it serves, the sections `cargo tembra build` reads and the optional freestanding
+/// The component side of the module: the bindings from the inline WIT, the conversions between
+/// the author's types and the bindings', the bridges to the author's functions, each in the module
+/// of the item it serves, the sections `cargo tembra build` reads and the optional freestanding
 /// runtime prelude. The sub-modules are rendered here, so the native side's items that go in one,
 /// `nested` by scope, are placed in it on the way. The re-export of an import module the native
 /// side writes in its place, one `served` names, is a component build's alone.
@@ -2843,38 +2847,10 @@ fn component(
     let name = rest.split_once('@').map_or(rest, |(name, _)| name);
     let ns_ident = rust_ident(namespace);
     let name_ident = package_module(name);
-    // The generated types carry the author's names and public fields, so the author's functions
-    // and the generated traits speak about one type: each is re-exported in the module that
-    // declared it, from the interface `placement` defines it in, under the author's name where
-    // the bindings name it otherwise, `HttpRequest as HTTPRequest`. A type the macro converts is
-    // the author's own.
+    // Every record, variant and enum is the author's own, which the bindings never replace: the
+    // module re-exports no type of the bindings, and converts each at the boundary, below.
     let hook_shapes = wit::hook_shapes(shapes, declared, consumed_modules);
     let interface_module = |ident: &Ident| rust_ident(&wit::kebab(ident));
-    let mut grouped: Vec<((Ident, usize), Vec<proc_macro2::TokenStream>)> = Vec::new();
-    for shape in shapes
-        .iter()
-        .filter(|shape| !converted.contains_key(&shape.ident.to_string()))
-    {
-        let interface = interface_module(&placement[&shape.ident.to_string()]);
-        let key = (interface, shape.scope);
-        let ident = &shape.ident;
-        let generated = type_ident(&wit::kebab(ident));
-        let imported = if generated == *ident {
-            quote! { #ident }
-        } else {
-            quote! { #generated as #ident }
-        };
-        match grouped.iter_mut().find(|(known, _)| *known == key) {
-            Some((_, imports)) => imports.push(imported),
-            None => grouped.push((key, vec![imported])),
-        }
-    }
-    for ((interface, scope), imports) in &grouped {
-        let root = supers(modules[*scope].len());
-        tree.at(*scope).generated.push(quote! {
-            pub use #root exports::#ns_ident::#name_ident::#interface::{#(#imports),*};
-        });
-    }
     // The generated types name each derive from its crate, so the author's item was the only one
     // to name it through the imports of its module: each derive's path, as written, is imported
     // again there, under no name, and those imports stay used.
@@ -3190,8 +3166,8 @@ fn component(
             .generated
             .push(quote! { extern crate alloc as __tembra_alloc; });
     }
-    // The hooks: the export the contract requires and `run`, in the declaring module; the
-    // conversions between the two sides of the derived hooks' types, once, in the Orb module.
+    // The hooks: the export the contract requires and `run`, in the declaring module; a derived
+    // hook's types convert between the author's and each side of the bindings in their modules.
     for declaration in declared {
         let depth = modules[declaration.scope].len();
         let code = declaration_code(
@@ -3205,14 +3181,6 @@ fn component(
         )?;
         tree.at(declaration.scope).generated.push(code);
     }
-    let conversions = defining.as_ref().map(|path| {
-        conversions(
-            shapes,
-            (&hook_shapes, converted),
-            &export_module(0, path),
-            &import_module(0, path),
-        )
-    });
     let state_code = state_code(states, modules, &facade);
     let resource_code = resource_code(resources, modules, &facade);
     // The native side's items of each sub-module, after the component's, with the services they
@@ -3392,7 +3360,6 @@ fn component(
         #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
         struct __TembraExports;
         #newtype_trait
-        #conversions
         #state_code
         #resource_code
         // The exports are symbols, which two Orb crates linked into one native binary would
@@ -4106,9 +4073,10 @@ fn handles_of(
 }
 
 /// The author's type, written in the module `scope`, as the bindings spell it in `module`: each
-/// resource of the module is the handle type there, free JSON a string, a newtype the bindings'
-/// type of its field, everything else keeps the author's spelling, a name a consumed interface's
-/// module reaches included.
+/// resource of the module is the handle type there, and each type of `resources` the bindings'
+/// type it names, however the author names it, through a `use` that renames it or an alias
+/// included; free JSON is a string, a newtype the bindings' type of its field, everything else
+/// keeps the author's spelling, a name a consumed interface's module reaches included.
 fn with_handles(
     ty: &Type,
     scope: usize,
@@ -4127,6 +4095,12 @@ fn with_handles(
     if modules.newtype(ty, scope).is_some() {
         let newtype = modules.newtype_trait(scope);
         return quote! { <#ty as #newtype>::Bindings };
+    }
+    // A type of the module, by the name it resolves to, whatever the author's spelling of it.
+    if let Some((named, _)) = modules.module_type(ty, scope)
+        && let Some(handle) = resources.get(&named.to_string())
+    {
+        return quote! { #module::#handle };
     }
     match ty {
         Type::Path(path) => {
@@ -7424,69 +7398,6 @@ fn holds_list(
     }
 }
 
-/// `From` in both directions between the two sides of the bindings for each type a derived hook
-/// reaches, `hook_shapes`, but those the macro converts, `converted`, which stay the author's:
-/// the export side, which the module's functions use, and the import side, which the typed entry
-/// to the plan uses. The two are distinct Rust types of one WIT definition.
-fn conversions(
-    shapes: &[Shape],
-    (hook_shapes, converted): (&BTreeSet<String>, &BTreeMap<String, Ident>),
-    export: &proc_macro2::TokenStream,
-    import: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    let impls = shapes
-        .iter()
-        .filter(|shape| {
-            let name = shape.ident.to_string();
-            hook_shapes.contains(&name) && !converted.contains_key(&name)
-        })
-        .map(|shape| {
-            // The bindings' name of the type, on both sides. Both are the bindings', between which
-            // only the module's types convert: a type holding free JSON, a newtype or a case with
-            // named fields is one the macro converts.
-            let ident = type_ident(&wit::kebab(&shape.ident));
-            let body = |from: &proc_macro2::TokenStream| match &shape.kind {
-                ShapeKind::Record(fields) => {
-                    let fields = fields.iter().map(|(field, ty)| {
-                        let value = convert(ty, quote! { value.#field }, Towards::Bindings, None);
-                        quote! { #field: #value }
-                    });
-                    quote! { Self { #(#fields),* } }
-                }
-                ShapeKind::Enum(cases) => {
-                    let arms = cases
-                        .iter()
-                        .map(|case| quote! { #from::#ident::#case => Self::#case });
-                    quote! { match value { #(#arms,)* } }
-                }
-                ShapeKind::Variant(cases) => {
-                    let arms = cases.iter().map(|(case, payload)| match payload {
-                        Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item }, Towards::Bindings, None);
-                            quote! { #from::#ident::#case(item) => Self::#case(#item) }
-                        }
-                        Payload::None => quote! { #from::#ident::#case => Self::#case },
-                        Payload::Named(_) => {
-                            unreachable!("an enum with a case with named fields is converted")
-                        }
-                    });
-                    quote! { match value { #(#arms,)* } }
-                }
-            };
-            let to_import = body(export);
-            let to_export = body(import);
-            quote! {
-                impl ::core::convert::From<#export::#ident> for #import::#ident {
-                    fn from(value: #export::#ident) -> Self { #to_import }
-                }
-                impl ::core::convert::From<#import::#ident> for #export::#ident {
-                    fn from(value: #import::#ident) -> Self { #to_export }
-                }
-            }
-        });
-    quote! { #(#impls)* }
-}
-
 /// Which side of the bindings a conversion goes to, which free JSON needs: the author's
 /// `serde_json::Value` is the bindings' `String` of its text, written one way and read the other.
 #[derive(Clone, Copy)]
@@ -7670,65 +7581,18 @@ fn respell(
 }
 
 /// The types that enter the WIT and stay the author's, converted to and from the bindings' types
-/// at the boundary, by name, each with the bindings' name of its type: every enum with a case with
-/// named fields, whose case the bindings give a tuple payload, the record of the case, where the
-/// author writes the fields, every type holding free JSON, which the bindings hold as its text,
-/// every type holding a newtype `modules` reads, which the bindings hold as its field, and every
-/// type holding one of those, directly or through other types of the module, which the author
-/// builds from the author's type.
-fn converted(shapes: &[Shape], modules: &foreign::Modules) -> BTreeMap<String, Ident> {
-    let mut converted: BTreeSet<String> = shapes
-        .iter()
-        .filter(|shape| has_named_case(shape) || holds_json(shape) || holds_newtype(shape, modules))
-        .map(|shape| shape.ident.to_string())
-        .collect();
-    loop {
-        let known = converted.len();
-        for shape in shapes {
-            if shape
-                .references
-                .iter()
-                .any(|(reference, _)| converted.contains(&reference.to_string()))
-            {
-                converted.insert(shape.ident.to_string());
-            }
-        }
-        if converted.len() == known {
-            break;
-        }
-    }
+/// at the boundary, by name, each with the bindings' name of its type: every record, variant and
+/// enum of the module. The bindings' types are internal to the generated code, so the author's
+/// type keeps its fields' privacy, its names and its attributes as written, and the author's
+/// impls, which never clash with the bindings'.
+fn converted(shapes: &[Shape]) -> BTreeMap<String, Ident> {
     shapes
         .iter()
-        .filter(|shape| converted.contains(&shape.ident.to_string()))
         .map(|shape| {
             let generated = type_ident(&wit::kebab(&shape.ident));
             (shape.ident.to_string(), generated)
         })
         .collect()
-}
-
-/// Whether a shape is an enum with a case with named fields.
-fn has_named_case(shape: &Shape) -> bool {
-    matches!(&shape.kind, ShapeKind::Variant(cases)
-        if cases.iter().any(|(_, payload)| matches!(payload, Payload::Named(_))))
-}
-
-/// Whether a record's fields or a variant's payloads hold free JSON.
-fn holds_json(shape: &Shape) -> bool {
-    match &shape.kind {
-        ShapeKind::Record(fields) => fields.iter().any(|(_, ty)| wit::holds_free_json(ty)),
-        ShapeKind::Variant(cases) => cases
-            .iter()
-            .any(|(_, payload)| payload.types().into_iter().any(wit::holds_free_json)),
-        ShapeKind::Enum(_) => false,
-    }
-}
-
-/// Whether a record's fields or a variant's payloads name a newtype `modules` reads.
-fn holds_newtype(shape: &Shape, modules: &foreign::Modules) -> bool {
-    foreign::shape_types(shape)
-        .into_iter()
-        .any(|ty| modules.holds_newtype(ty, shape.scope))
 }
 
 /// Whether a type written in the module `scope` names a type the macro converts, free JSON or a
@@ -7803,8 +7667,8 @@ fn keep_converted(shapes: &[Shape], converted: &BTreeMap<String, Ident>, tree: &
 
 /// The conversions between each type the macro converts and the bindings' type: `From` in both
 /// directions, in the type's module, where its fields are visible. A record goes field by field,
-/// a variant case by case, a case with named fields into the bindings' tuple case around the
-/// record of the case; each part goes through `Into`, the identity for a scalar, a string, a
+/// an enum and a variant case by case, a case with named fields into the bindings' tuple case
+/// around the record of the case; each part goes through `Into`, the identity for a scalar, a string, a
 /// generated type and a consumed package's type, and the generated `From` for a type the macro
 /// converts, inside lists, options, results and tuples too, a newtype `consumed` reads through
 /// its trait, and an own resource of `resources`, by the author's name of the struct, through its
@@ -7911,8 +7775,19 @@ fn converted_conversions(
                         quote! { match value { #(#inward,)* } },
                     )
                 }
-                ShapeKind::Enum(_) => {
-                    unreachable!("an enum holds no type of the module")
+                ShapeKind::Enum(cases) => {
+                    let outward = cases.iter().map(|case| {
+                        let named = camel_ident(&wit::kebab(case));
+                        quote! { #ident::#case => Self::#named }
+                    });
+                    let inward = cases.iter().map(|case| {
+                        let named = camel_ident(&wit::kebab(case));
+                        quote! { #bindings::#generated::#named => Self::#case }
+                    });
+                    (
+                        quote! { match value { #(#outward,)* } },
+                        quote! { match value { #(#inward,)* } },
+                    )
                 }
             };
             tree.at(shape.scope).generated.push(quote! {

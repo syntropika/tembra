@@ -9,6 +9,7 @@
 mod filter {
     /// What this contributor observed: admissions seen, and how many it blocked.
     #[resource]
+    #[derive(Clone, Copy)]
     pub struct Counts {
         pub seen: u32,
         pub blocked: u32,

@@ -187,7 +187,7 @@ fn a_cancelled_call_keeps_the_state() {
     };
     assert_eq!(
         walk(&mut pool, &host, &main, "walk", vec![Move::Step(2)]),
-        Ok(stood)
+        Ok(stood.clone())
     );
     assert_eq!(
         walk(&mut pool, &host, &main, "stumble", vec![Move::Step(5)]),

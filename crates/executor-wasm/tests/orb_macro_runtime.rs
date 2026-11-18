@@ -460,7 +460,7 @@ fn walk(pool: &mut LocalPool, host: &Host, name: &str) {
     assert_eq!(call(pool, "at-start", json!([])), json!(true), "{name}");
     assert_eq!(
         call(pool, "describe", json!([])),
-        json!("Position { at: Point { x: 0, y: 0 }, facing: Heading::North, moves: 6 }"),
+        json!("Position { at: Point { x: 0, y: 0 }, facing: North, moves: 6 }"),
         "{name}"
     );
     assert_eq!(
@@ -1872,6 +1872,99 @@ fn names_that_are_wit_keywords_answer_both_ways() {
     }
     assert_eq!(engine.instances(), 0);
     module_natively("keywords");
+}
+
+/// The author's types, in a component build, std and freestanding, and natively: the module
+/// `requests` of the `authored` feature declares a record in a sub-module with a private field, a
+/// field `r#type` and a case `HTTP`, which the bindings spell `type_` and `Http`, and a function's
+/// error enum with a hand `impl Display`. Each stays the author's type, converted at the boundary:
+/// the private field crosses as `seen`, the field as `type`, the case as `http`, and the refusal's
+/// words come from the author's `Display`; so does the module's `orb()` in the fixture's native
+/// test.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn the_authors_types_answer_both_ways() {
+    let engine = Engine::new(Limits::default()).unwrap();
+    for features in ["authored", "authored,no-std"] {
+        let (module, orb) = module_orb(&engine, &module_component(features), "authored");
+        let (words, text) = (words(&module), module.text());
+        for expected in [
+            "recordrequest{path:string,%type:scheme,seen:u32,}",
+            "enumscheme{http,https,}",
+            "recordrefusal-too-long{length:u32,}",
+            "recordrefusal-stale{seen:u32,}",
+            "variantrefusal{empty,too-long(refusal-too-long),stale(refusal-stale),}",
+            "fresh:func(path:string)->request;",
+            "route:func(request:request)->result<request,refusal>;",
+            "explain:func(refusal:refusal)->string;",
+        ] {
+            assert!(words.contains(expected), "{features}: {expected}\n{text}");
+        }
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let reference = ready(&mut pool, &host, "authored::example:authored/router@1.0.0");
+        let mut route = |method: &'static str, arguments: Value| {
+            counting_call(&mut pool, &host, &reference, "alice", method, arguments)
+        };
+        assert_eq!(
+            route(
+                "route",
+                json!([{"path": "secure", "type": "http", "seen": 2}])
+            ),
+            json!({"tag": "ok", "val": {"path": "secure", "type": "https", "seen": 3}}),
+            "{features}"
+        );
+        assert_eq!(
+            route(
+                "route",
+                json!([{"path": "plain", "type": "http", "seen": 0}])
+            ),
+            json!({"tag": "ok", "val": {"path": "plain", "type": "http", "seen": 1}}),
+            "{features}"
+        );
+        assert_eq!(
+            route("route", json!([{"path": "", "type": "https", "seen": 0}])),
+            json!({"tag": "err", "val": {"tag": "empty"}}),
+            "{features}"
+        );
+        assert_eq!(
+            route(
+                "route",
+                json!([{"path": "much-too-long", "type": "https", "seen": 0}])
+            ),
+            json!({"tag": "err", "val": {"tag": "too-long", "val": {"length": 13}}}),
+            "{features}"
+        );
+        assert_eq!(
+            route(
+                "explain",
+                json!([{"tag": "too-long", "val": {"length": 13}}])
+            ),
+            json!("the path has 13 characters"),
+            "{features}"
+        );
+        assert_eq!(
+            route("explain", json!([{"tag": "empty"}])),
+            json!("the path is empty"),
+            "{features}"
+        );
+        assert_eq!(
+            route("fresh", json!(["new"])),
+            json!({"path": "new", "type": "http", "seen": 0}),
+            "{features}"
+        );
+        assert_eq!(
+            route("route", json!([{"path": "old", "type": "http", "seen": 3}])),
+            json!({"tag": "err", "val": {"tag": "stale", "val": {"seen": 3}}}),
+            "{features}"
+        );
+        reference.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("authored");
 }
 
 /// A native Orb contributing to the series hook `hook` of the Orb `provider`, at priority 0: it

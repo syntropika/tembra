@@ -3136,7 +3136,7 @@ fn member<'a>(
         Some(resource) => Err(refusal(Uncovered {
             ty: resource,
             reason: format!(
-                "a resource; a record or a variant holding a resource is component-only, since the bindings replace it with their type, whose handle only a component creates: to return the resource natively too, return it in a tuple beside the data, such as `-> ({}, String)`",
+                "a resource; a record or a variant holding a resource is component-only, since the native boundary carries a resource beside the data, as a handle, never inside the JSON of a record: to return the resource natively too, return it in a tuple beside the data, such as `-> ({}, String)`",
                 spelled(resource)
             ),
         })),
@@ -3145,12 +3145,11 @@ fn member<'a>(
 }
 
 /// The members of a record of `shape`, or of the record of one of its cases, `owner` for the
-/// errors: each in the Rust field the author names, when the type stays the author's, or the one
-/// the bindings name after its WIT name.
+/// errors: each in the Rust field the author names, keyed by the lowerCamelCase form of its WIT
+/// name.
 fn members<'a>(
     fields: &'a [(Ident, Type)],
     owner: &str,
-    authored: bool,
     shape: &Shape,
     analysis: &Analysis,
 ) -> Result<Vec<Member<'a>>, Refused> {
@@ -3159,11 +3158,7 @@ fn members<'a>(
         .map(|(field, ty)| {
             let name = wit::kebab(field);
             Ok(Member {
-                field: if authored {
-                    field.clone()
-                } else {
-                    rust_ident(&name)
-                },
+                field: field.clone(),
                 key: javascript_name(&name),
                 kind: member(
                     ty,
@@ -3215,20 +3210,17 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
 /// own module, where its members are visible: a record as an object of its fields, keyed by the
 /// lowerCamelCase form of their WIT names; an enum as the WIT name of its case; a variant as an
 /// object of its case's `tag` and payload, `val`, the record of a case with named fields as an
-/// object too. The members and cases are named as the bindings generate them, but those of a type
-/// the macro converts, which stay the author's. A member the codec does not cover is refused,
-/// naming it.
+/// object too. Every type stays the author's, so the members and cases are named as the author
+/// wrote them. A member the codec does not cover is refused, naming it.
 fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let facade = &analysis.options.facade();
     let ident = &shape.ident;
     let boundary = boundary(shape.scope, analysis);
-    let converted = analysis.converted.contains_key(&ident.to_string());
     let member = |ty, place: String| member(ty, &place, shape, analysis);
-    let members =
-        |fields, owner: String, authored| members(fields, &owner, authored, shape, analysis);
+    let members = |fields, owner: String| members(fields, &owner, shape, analysis);
     let (decode, encode) = match &shape.kind {
         ShapeKind::Record(fields) => {
-            let members = members(fields, ident.to_string(), converted)?;
+            let members = members(fields, ident.to_string())?;
             let bound = elements(members.len());
             let fields = members.iter().map(|member| &member.field);
             let decode = record_decode(
@@ -3246,34 +3238,29 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
         }
         ShapeKind::Enum(cases) => {
             let tags: Vec<String> = cases.iter().map(wit::kebab).collect();
-            enum_codec(&tags, facade)
+            enum_codec(cases, &tags, facade)
         }
         ShapeKind::Variant(cases) => {
             let mut reads = Vec::new();
             let mut writes = Vec::new();
             for (case, payload) in cases {
                 let tag = wit::kebab(case);
-                let named = if converted {
-                    case.clone()
-                } else {
-                    camel_ident(&tag)
-                };
+                let named = case;
                 match payload {
                     Payload::None => {
-                        let (read, written) = variant_case(&tag, &named, None, &boundary, facade);
+                        let (read, written) = variant_case(&tag, named, None, &boundary, facade);
                         reads.push(read);
                         writes.push(written);
                     }
                     Payload::Unnamed(ty) => {
                         let kind = member(ty, format!("the case `{ident}::{case}` carries"))?;
                         let (read, written) =
-                            variant_case(&tag, &named, Some(&kind), &boundary, facade);
+                            variant_case(&tag, named, Some(&kind), &boundary, facade);
                         reads.push(read);
                         writes.push(written);
                     }
-                    // Only in an enum the macro converts: the author's case, with its fields.
                     Payload::Named(fields) => {
-                        let members = members(fields, format!("{ident}::{case}"), true)?;
+                        let members = members(fields, format!("{ident}::{case}"))?;
                         let read = record_decode(
                             quote! { item },
                             quote! { Self::#named },
@@ -3329,11 +3316,10 @@ fn boundary_impl(
     }
 }
 
-/// The JSON of an enum whose cases' WIT names are `tags`, which the bindings name in
-/// UpperCamelCase: the WIT name of its case, read from `value` and written from `self`, the JSON of
-/// the facade named `facade`.
-fn enum_codec(tags: &[String], facade: &Ident) -> (TokenStream, TokenStream) {
-    let cases: Vec<Ident> = tags.iter().map(|tag| camel_ident(tag)).collect();
+/// The JSON of an enum whose Rust cases are `cases`, the author's for a type of the module and the
+/// bindings' UpperCamelCase for a consumed type, with their WIT names `tags`: the WIT name of its
+/// case, read from `value` and written from `self`, the JSON of the facade named `facade`.
+fn enum_codec(cases: &[Ident], tags: &[String], facade: &Ident) -> (TokenStream, TokenStream) {
     let decode = quote! {
         match value {
             ::#facade::serde_json::Value::String(case) => match case.as_str() {
@@ -3441,7 +3427,8 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes, facade: &Ident) -> Opt
                 .iter()
                 .map(|case| case.name.clone())
                 .collect();
-            enum_codec(&tags, facade)
+            let cases: Vec<Ident> = tags.iter().map(|tag| camel_ident(tag)).collect();
+            enum_codec(&cases, &tags, facade)
         }
         TypeDefKind::Variant(variant) => {
             let mut reads = Vec::new();

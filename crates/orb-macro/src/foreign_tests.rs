@@ -116,7 +116,8 @@ const SHOPPER: &str = "mod shopper {
 /// A derived signature names an imported interface's types through the interface's module,
 /// alone, in containers, as a resource's constructor and method take them and in the fields and
 /// cases of the module's types: the derived interface `use`s each, under the kebab-case name of
-/// its Rust name, and the bridges pass the author's values as they are, the bindings' own types.
+/// its Rust name, and the bridges pass the author's values as they are, the bindings' own types,
+/// through the identity `Into` inside a type of the module, which converts around them.
 #[test]
 fn a_derived_signature_names_an_imported_interfaces_types() {
     let dir = consumed("shopper", SHOP);
@@ -139,10 +140,11 @@ fn a_derived_signature_names_an_imported_interfaces_types() {
     for expected in [
         "fn price (item : catalog :: Item) -> u32 { Shopping :: price (item) }",
         "fn cheapest (items : catalog :: Items , status : Option < catalog :: Status >) -> Option < catalog :: Item > { Shopping :: cheapest (items , status) }",
-        "fn choose (picks : (catalog :: Pick , u32) , odd : catalog :: AB) -> Result < Choice , String > { Shopping :: choose (picks , odd) }",
+        "fn choose (picks : (catalog :: Pick , u32) , odd : catalog :: AB) -> Result < exports :: example :: shopper :: shopping :: Choice , String > { match Shopping :: choose (picks , odd) { :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err (:: core :: convert :: Into :: into (item)) , } }",
         "fn new (first : catalog :: Item) -> Self { Till :: new (first) }",
         "fn ring (& self , item : catalog :: Label) -> catalog :: Status { Till :: ring (self , item) }",
-        "pub use exports :: example :: shopper :: shopping :: { Basket , Choice } ;",
+        "impl :: core :: convert :: From < Basket > for exports :: example :: shopper :: shopping :: Basket { fn from (value : Basket) -> Self { Self { items : value . items . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , size : :: core :: convert :: Into :: into (value . size) , marks : :: core :: convert :: Into :: into (value . marks) } } }",
+        "impl :: core :: convert :: From < Choice > for exports :: example :: shopper :: shopping :: Choice { fn from (value : Choice) -> Self { match value { Choice :: Picked (item) => Self :: Picked (:: core :: convert :: Into :: into (item)) , Choice :: Nothing => Self :: Nothing , } } }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -183,8 +185,8 @@ fn a_consumed_type_resolves_through_a_use_of_it() {
 /// A record or a variant of the module holds the handle of an imported interface's resource where
 /// only parameters reach it, of a service's functions and of a resource's constructor and methods
 /// alike, as the runtime moves such a handle anywhere into an argument: the interface defining the
-/// type `use`s the resource, and the bridge passes the bindings' type as it is, with the bindings'
-/// handle in the resource's place.
+/// type `use`s the resource, and the bridge converts the author's type from the bindings', which
+/// holds the bindings' handle in the resource's place, as the author's field does.
 #[test]
 fn a_parameter_record_holds_an_imported_interfaces_handle() {
     let dir = consumed("job", TEXTS);
@@ -228,11 +230,11 @@ fn a_parameter_record_holds_an_imported_interfaces_handle() {
     }
     let generated = tokens(&module);
     for expected in [
-        "fn spell_job (job : Job) -> u32 { Speller :: spell_job (job) }",
-        "fn run (tasks : Vec < Task > , last : Option < Job >) -> u32 { Speller :: run (tasks , last) }",
-        "fn new (job : Job) -> Self { Draft :: new (job) }",
-        "fn add (& self , job : Job) -> u32 { Draft :: add (self , job) }",
-        "pub use exports :: example :: speller :: speller :: { Job , Task } ;",
+        "fn spell_job (job : exports :: example :: speller :: speller :: Job) -> u32 { Speller :: spell_job (:: core :: convert :: Into :: into (job)) }",
+        "fn run (tasks : Vec < exports :: example :: speller :: speller :: Task > , last : Option < exports :: example :: speller :: speller :: Job >) -> u32 { Speller :: run (tasks . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , last . map (| item | :: core :: convert :: Into :: into (item))) }",
+        "fn new (job : exports :: example :: speller :: speller :: Job) -> Self { Draft :: new (:: core :: convert :: Into :: into (job)) }",
+        "fn add (& self , job : exports :: example :: speller :: speller :: Job) -> u32 { Draft :: add (self , :: core :: convert :: Into :: into (job)) }",
+        "impl :: core :: convert :: From < exports :: example :: speller :: speller :: Job > for Job { fn from (value : exports :: example :: speller :: speller :: Job) -> Self { Self { builder : :: core :: convert :: Into :: into (value . builder) , word : :: core :: convert :: Into :: into (value . word) } } }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -357,8 +359,8 @@ fn a_path_resolves_in_the_module_that_writes_it_before_the_consumed_interfaces()
         assert!(!text.contains("{entry, banner}"), "{name}: {text}");
         let generated = tokens(&module);
         for expected in [
-            "pub mod greeting { pub use super :: super :: exports :: example :: archivist :: front :: { Banner } ; }",
-            "fn headline () -> greeting :: Banner { Front :: headline () }",
+            "pub mod greeting { pub struct Banner { pub text : String } impl :: core :: convert :: From < Banner > for super :: super :: exports :: example :: archivist :: front :: Banner",
+            "fn headline () -> super :: exports :: example :: archivist :: front :: Banner { :: core :: convert :: Into :: into (Front :: headline ()) }",
             "fn keep (entry : super :: greeting :: Entry) -> u32 { Front :: keep (entry) }",
             "fn latest (entries : Vec < greeting :: Entry >) -> Option < greeting :: Entry > { Archive :: latest (entries) }",
         ] {
@@ -1441,9 +1443,10 @@ interface lending {
 /// The bindings leave a type out of a state's serde derives by its bare name, as they compare the
 /// names of `additional_derives_ignore`: a consumed record `serde` writes loses them to a record of
 /// the module of the same name that holds a resource handle, and a record of the module to such a
-/// consumed record. The macro gives each its derives back by its full name, the module's with the
-/// author's, so a state holds it. The ignore list names only the types the bindings generate:
-/// `loan`, in an interface the Orb does not import, is not on it.
+/// consumed record. The macro gives each its derives back by its full name, so a state holds the
+/// consumed record; the record of the module is the author's, which the state holds as it is, with
+/// its own derives. The ignore list names only the types the bindings
+/// generate: `loan`, in an interface the Orb does not import, is not on it.
 #[test]
 fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
     let dir = consumed("namesake", CATALOG);
@@ -1471,9 +1474,10 @@ fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
         "additional_derives_ignore : [\"entry\" , \"slot\"] ,",
         concat!(
             "additional_type_attributes : { ",
-            "\"example:shopper/shopping@1.0.0/slot\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize , :: core :: hash :: Hash)]] , ",
+            "\"example:shopper/shopping@1.0.0/slot\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
             "\"example:shop/catalog@1.0.0/entry\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
         ),
+        "# [derive (serde :: Serialize , Hash)] pub struct Slot { pub shelf : u32 }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }

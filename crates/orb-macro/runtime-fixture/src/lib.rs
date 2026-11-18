@@ -5,6 +5,8 @@
 #![cfg_attr(all(target_arch = "wasm32", feature = "no-std"), no_std)]
 extern crate alloc;
 
+#[cfg(feature = "authored")]
+mod authored;
 #[cfg(feature = "configured")]
 mod configured;
 #[cfg(feature = "contributor")]
@@ -82,13 +84,15 @@ mod guest {
 
     /// A point on a grid.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub struct Point {
         pub x: i32,
         pub y: i32,
     }
 
     /// Where a walker faces; a fresh walker faces north.
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub enum Heading {
         #[default]
         North,
@@ -109,7 +113,7 @@ mod guest {
     /// Where a walker stands, kept by the kernel. Its derived `Default` is its initial value: at
     /// the origin, facing north, without a move.
     #[state(service = Walker)]
-    #[derive(Debug, Default, PartialEq)]
+    #[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct Position {
         pub at: Point,
         pub facing: Heading,
@@ -510,7 +514,7 @@ mod guest {
     }
 
     /// What a holder may do with a document: a record of `bool` fields.
-    #[derive(Default, PartialEq)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct Access {
         pub read: bool,
         pub write: bool,
