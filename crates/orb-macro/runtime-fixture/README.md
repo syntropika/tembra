@@ -70,6 +70,48 @@ which the macro keeps the author's. Each comes back through the newtype's `From`
 makes: a component build of the crate then fails, with an error that names the newtype, which the
 test checks.
 
+A component carries the WIT of one Orb module, so the crate's other Orb modules build components of
+their own: each feature below, without the default features, which add `guest`, selects one. The
+test builds each std and with `no-std`, into the fixtures' target directory, and calls it. It then
+runs the module's native tests, in the module's file: the crate built for the host with `native`,
+the facade's `host`, or `native-sdk` for `renamed`, whose tests install the module's `orb()` in a
+native host:
+
+- `keywords` selects the module `list`, whose names are keywords of WIT, which the WIT writes with
+  its `%` escape: the world `%list`, whose contract is `contract/%list.wit`, the method `%record`
+  and the flag `%type` of the field `r#type`;
+- `configured` selects the module `notebook`, whose items under `#[cfg(feature = "archive")]` the
+  macro expands once per value of the feature: without `archive`, `Notes` clears its notes; with
+  it, `Notes` archives them onto the shelf of `Shelf`, whose struct and block the feature adds,
+  and runs the hook that the sub-module `archiving` declares. The component, its WIT and its
+  contract are those of the build's features, and so is `orb()`, which refuses the hook natively;
+- `renamed` selects the module `tally`, whose crate names the facade `sdk`, with `crate = "sdk"`,
+  and has no `tembra`. Its method under `#[cfg(feature = "archive")]` makes the macro expand the
+  module once per value of the feature, each copy through `::sdk::orb`, and the component reaches
+  its state and the call's `context` through that name too, as `orb()` does natively;
+- `hooks` selects the module `gatehouse`, which declares a series hook and a bail hook from their
+  input, and the waterfall `guard` of the package in `admission/` by its identity. The test's native
+  contributions answer them; natively, `orb()` refuses the declarations;
+- `versioned` selects the module `counting`, whose state is at version 1; with `revised`, its next
+  revision, whose state is at version 2. The test reloads one component into the other; natively,
+  one build holds one revision, whose state keeps its version across a reload of the same code;
+- `lamps` selects the module `lamps`, whose root resource, at version 1, notes when it opens and
+  closes, in the host's log in a component and in a journal natively, where the `context` serves
+  only a call's methods; with `revised`, its next revision, whose resource is at version 2;
+- `flagged` selects the module `holder`, which implements the interface of the package in
+  `rights/`, whose `flags` the bindings generate without `wit-bindgen`'s `bitflags` feature. Its
+  native build fails today, so the native fixture's `tests/flags.rs` runs its native test, ignored
+  until then;
+- `system` selects the module `system`, which imports WASI's system clock, the clocks' types, the
+  CLI's environment and the insecure random source; natively, `orb()` refuses the imports;
+- `io` selects the module `io`, which imports the filesystem's preopened directories, the sockets'
+  types and the HTTP client: it reaches the filesystem's `types` by the bindings' path, since the
+  sockets' `types` is the one it imports, and the test grants a filesystem, a network destination
+  and an HTTP origin; natively, `orb()` refuses the imports;
+- `steady` selects the module `steady`, with a state, a root resource and the `context`, which
+  implements the interface of the state example's contract, whose `deps/` holds the kernel's
+  package.
+
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs`, one test on Cranelift and one on Pulley. Each test
 reads both contracts from the WIT the macro embedded in the components, as `cargo tembra build`

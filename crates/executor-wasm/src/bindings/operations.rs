@@ -360,15 +360,7 @@ impl Environment {
                         return Err(failure("timer requires an active callback"));
                     }
                 };
-                signal.check()?;
-                let wait = std::pin::pin!(futures_timer::Delay::new(
-                    std::time::Duration::from_millis(milliseconds.into())
-                ));
-                let cancelled = std::pin::pin!(signal.cancelled());
-                match futures::future::select(wait, cancelled).await {
-                    futures::future::Either::Left(_) => Ok(Value::Null),
-                    futures::future::Either::Right(_) => Err(failure("operation cancelled")),
-                }
+                wait(&signal, milliseconds).await
             }
             AsyncRequest::Unsupported => Err(failure("unsupported asynchronous host operation")),
         };
@@ -572,6 +564,26 @@ fn encode<T: serde::Serialize + ?Sized>(value: &T) -> Result<Value> {
     serde_json::to_value(value).map_err(failure)
 }
 
+/// Wait `milliseconds` under `signal`; a cancellation, before or during the wait, answers with
+/// its own error.
+async fn wait(signal: &Cancellation, milliseconds: u32) -> Result<Value> {
+    signal.check()?;
+    let wait = std::pin::pin!(futures_timer::Delay::new(std::time::Duration::from_millis(
+        milliseconds.into()
+    )));
+    let cancelled = std::pin::pin!(signal.cancelled());
+    match futures::future::select(wait, cancelled).await {
+        futures::future::Either::Left(_) => Ok(Value::Null),
+        // The cancellation itself, as `check` reports it before the wait. Whether this answer
+        // or the Store's revocation of the callback reaches the guest first depends on thread
+        // timing; either way the guest sees its call cancelled.
+        futures::future::Either::Right(_) => Err(signal
+            .check()
+            .err()
+            .unwrap_or_else(|| failure("operation cancelled"))),
+    }
+}
+
 /// Return the kernel's snapshot revision rather than inventing guest state identities.
 fn snapshot_value(value: Value, revision: u64, version: u32) -> Result<Value> {
     encode(&protocol::Snapshot {
@@ -603,6 +615,27 @@ fn snapshot_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wait cancelled while it runs answers with the cancellation, as one cancelled before it
+    /// starts does: the guest's call fails as cancelled, never as a failed timer.
+    #[test]
+    fn a_wait_cancelled_while_it_runs_answers_with_the_cancellation() {
+        let mut pool = futures::executor::LocalPool::new();
+        let host = tembra::Host::new(pool.spawner());
+        let error = pool
+            .run_until(host.root("alice", |context| {
+                async move {
+                    let signal = context.signal();
+                    let (waited, cancelled) =
+                        futures::join!(wait(&signal, 5_000), async { context.cancel() });
+                    cancelled?;
+                    Ok(waited.unwrap_err())
+                }
+                .boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(error.code, tembra::core::Code::Cancelled, "{error}");
+    }
 
     #[test]
     fn unchanged_snapshot_reads_omit_only_the_value() {

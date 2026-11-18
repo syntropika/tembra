@@ -9,9 +9,49 @@ concurrency:
   cancel-in-progress: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  quality:
+  # One job per part of `just ci`, side by side. A new part is a recipe in `ci` and one line in this
+  # matrix, `- { recipe: <name>, timeout: <minutes> }`. `just check-ci-parts`, which `just check` runs,
+  # fails when the two differ.
+  # A cold run must take less than two thirds of its job's timeout. It takes 4 minutes of setup, the
+  # recipe, and 1.5 minutes to save the cache.
+  part:
+    name: just ${{ matrix.recipe }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      # Every part reports, so one failure does not hide another.
+      fail-fast: false
+      matrix:
+        include:
+          # Measured on a cold cache: 15.5 minutes, 21 with the setup and the cache save.
+          - { recipe: check, timeout: 35 }
+          # Compiled Orbs written with `#[orb]`: the macro's output must compile and run.
+          # Measured after `check`: 10 minutes. Estimated alone, where it also builds what `check`
+          # built: 14 minutes, 20 with the setup and the cache save.
+          - { recipe: test-orb-examples, timeout: 35 }
+          # The macro's fixtures, each module built as a component, std and freestanding, and
+          # natively. A cold run took 3.6 minutes with 6 jobs on 32 cores, 16 minutes of CPU; the
+          # estimate allows for 4 vCPUs and for downloading the crates: 8.5 minutes, 14 with the
+          # setup and the cache save.
+          - { recipe: test-orb-macro, timeout: 21 }
+          # The `cargo tembra` commands on crates it scaffolds. Estimated on a cold cache: 4 minutes,
+          # 9.5 with the setup and the cache save. A cold run took 1.7 minutes with 6 jobs on 32
+          # cores; the estimate allows for 4 vCPUs and for downloading the crates.
+          - { recipe: test-cargo-tembra, timeout: 15 }
+          # One Orb built natively and as a component must answer alike. Estimated on a cold cache:
+          # 6 minutes, 11.5 with the setup and the cache save. A cold run took 2.7 minutes with 6
+          # jobs on 32 loaded cores; the estimate allows for 4 vCPUs.
+          - { recipe: test-orb-parity, timeout: 20 }
+          # Configurations only Cargo sets up, from crates/orb-macro/config-fixtures, and the
+          # facade's features. Estimated on a cold cache: 6 minutes, 11.5 with the setup and the
+          # cache save. A cold run took 2.5 minutes with 6 jobs on 32 cores; the estimate allows
+          # for 4 vCPUs and for downloading the crates.
+          - { recipe: test-configurations, timeout: 20 }
+          # Each Orb crate the way the other parts do not build it: the examples' and three fixtures'
+          # natively, and the native fixture checked for wasm32. Estimated on a cold cache: 5
+          # minutes, 10.5 with the setup and the cache save. Cold runs took 1.7 to 2.6 minutes with
+          # 6 jobs on 32 busy cores; the estimate allows for 4 vCPUs and for downloading the crates.
+          - { recipe: test-orb-both-ways, timeout: 20 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -24,17 +64,23 @@ jobs:
           bun-version: 1.4.3
       # Restore dependencies and pinned Cargo tools, then let Cargo validate every build.
       - run: rustup show active-toolchain
+      # Each part has a key of its own, since jobs that share a key race to save it, and restores what it
+      # built. Only `main` saves, and only after a pass. A run that failed or was cancelled during its
+      # setup used to save a small entry under the part's exact key. Later runs restored it as a full
+      # match, never saved over it, and rebuilt everything. Runs on `main` are not cancelled. Other refs
+      # restore the caches of `main` when their keys match. Saving on every ref also filled the
+      # repository's 10 GiB with copies of the same caches and evicted those of `main`. Each part adds
+      # one cache to `main`: check the total against that limit when you add a part.
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
-          key: ubuntu-24.04-${{ hashFiles('justfile', 'crates/executor-wasm/*/Cargo.toml', 'crates/executor-wasm/*/Cargo.lock') }}
-          cache-on-failure: "true"
+          key: ubuntu-24.04-${{ matrix.recipe }}-${{ hashFiles('justfile', 'crates/executor-wasm/*/Cargo.toml', 'crates/executor-wasm/*/Cargo.lock') }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo install just --version 1.21.0 --locked
       - run: just install-tools
       - run: just install
-      - run: just check
-      # Compiled Orbs written with `#[orb]`: the macro's output must compile and run.
-      - run: just test-orb-examples
-      - run: just test-orb-macro
+      - run: just ${{ matrix.recipe }}
+      # The checkout was clean, so a change is the part's: a modified file or a new file that Git does not ignore.
+      - run: just check-clean-tree
 
   # Build the pinned interpreter and compiled provider once, then run every isolated Orb suite.
   acceptance:
@@ -51,10 +97,12 @@ jobs:
         with:
           bun-version: 1.4.3
       - run: rustup show active-toolchain
+      # As for the parts: only `main` saves, and only after a pass. A run that failed or was cancelled
+      # during its setup would save a small entry that later runs restore as a full match.
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ubuntu-24.04-${{ hashFiles('justfile', 'crates/executor-wasm/*/Cargo.toml', 'crates/executor-wasm/*/Cargo.lock') }}
-          cache-on-failure: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             . -> target
             crates/executor-wasm/rust-provider -> ${{ runner.temp }}/provider
@@ -128,6 +176,8 @@ jobs:
           2>&1 | tee "$RUNNER_TEMP/acceptance.log"
       - name: Test portable mobile execution and foreign continuation delivery
         run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_keyed_router.wasm"
+      # The checkout was clean, so a change is the suites': a modified file or a new file that Git does not ignore.
+      - run: just check-clean-tree
       - name: Preserve acceptance timings and failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

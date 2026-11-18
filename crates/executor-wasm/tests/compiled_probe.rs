@@ -1,4 +1,6 @@
 //! Compiled-component settlement, quarantine and standard WASI grant conformance with a real probe.
+//!
+//! The deadline test needs no probe: its component is encoded from a small core module.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{
@@ -242,6 +244,69 @@ fn compiled_timeout_waits_for_blocking_wasi_work() {
     assert_eq!(engine.instances(), 0);
     blocked.release().unwrap();
     pool.run_until(host.close()).unwrap();
+}
+
+#[path = "support/components.rs"]
+mod components;
+
+/// One export that logs `late`, then answers at once.
+const LATE_WIT: &str = r#"package example:late@1.0.0;
+interface answers { answer: func() -> u32; }
+world late { import tembra:guest/context@1.0.0; export answers; }"#;
+
+/// Level 2 is `info`; the message lies at offset 16.
+const LATE_MODULE: &str = r#"(module
+  (import "tembra:guest/context@1.0.0" "log" (func $log (param i32 i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 16) "late")
+  (func (export "example:late/answers@1.0.0#answer") (result i32)
+    i32.const 2 i32.const 16 i32.const 4 call $log
+    i32.const 7))"#;
+
+/// A call that answers only after its deadline fails with its timeout and quarantines its Orb,
+/// even when its Store's thread runs the timer late. The host's log sink holds that thread past
+/// the deadline, as a busy machine can. The guest answers as soon as the log returns, before
+/// the timer has run.
+#[test]
+fn an_answer_after_the_deadline_is_a_timeout() {
+    let engine = Engine::new(Limits {
+        timeout_ms: 500,
+        ..Limits::default()
+    })
+    .unwrap()
+    .on_log(|record| {
+        if record.message == "late" {
+            std::thread::sleep(Duration::from_millis(1_000));
+        }
+    });
+    let artifact = components::encode(LATE_WIT, "late", LATE_MODULE, "late", &Default::default());
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![engine.load(&artifact, Install::default()).unwrap()])
+        .unwrap();
+    let late = Rc::new(
+        host.get(
+            "late::example:late/answers@1.0.0",
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(late.ready()).unwrap();
+    let answer = |pool: &mut LocalPool| {
+        let called = late.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move { called.call::<_, Value>(&context, "answer", json!([])).await }
+                .boxed_local()
+        }))
+    };
+    let error = answer(&mut pool).unwrap_err();
+    assert!(error.message.contains("timed out"), "{error}");
+    let refused = answer(&mut pool).unwrap_err();
+    assert_eq!(refused.reason, "wasm_executor_quarantined", "{refused}");
+    late.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
 }
 
 /// Compiled grants are the standard WASI preopen permissions, not the source Orb text API.

@@ -60,9 +60,9 @@ imports and exports a contribution at priority 0.
 
 `contract/` thus resolves on its own, in the layout `wit-parser` reads: another Orb consumes it
 with `wit = "../x/contract"`, and `Contract::from_dir` reads it, as `inspect --wit` does, skipping
-the bundled copies in `deps/`. One limit remains: an Orb that keeps state, owns resources or reads
-the context does not compile yet against a contract holding `deps/tembra-guest.wit`, because the
-macro adds the kernel's package to its bindings a second time.
+the bundled copies in `deps/`. An Orb that keeps state, owns resources or reads the context
+consumes a contract holding `deps/tembra-guest.wit` too: the macro reads the kernel's package from
+there and does not add it to its bindings a second time.
 
 The contract goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` directory inside the
 crate on its own, even with an inline WIT, and finding the package twice it panics with

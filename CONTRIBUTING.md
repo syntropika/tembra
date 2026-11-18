@@ -29,6 +29,39 @@ Give every production method a short doc sentence that states its purpose or gua
 // Keep ownership until the callback settles.
 ```
 
+## Invariants
+
+A change keeps each invariant below. Each one names the tests that guard it, and the recipe in parentheses runs them. A change that adds a case to an invariant adds a test for it. A case that is known to break an invariant is named under it, with the pull request that fixes it, which removes the line.
+
+- A build for wasm32 is a component, whatever the facade's features. A guest gets the facade's `host` feature when its `tembra` keeps the default features, or when another crate of the build enables it. Its component still answers each call as the guest built without `host` does.
+  - `a_wasm32_guest_with_the_host_feature_answers_as_a_component` in `crates/executor-wasm/tests/orb_macro_runtime.rs`, which builds `crates/orb-macro/host-feature-fixture` both ways (`just test-orb-macro`).
+  - `the_facade_checks_for_wasm32_with_macros` in `crates/orb-macro/tests/configurations.rs` (`just test-configurations`).
+  - Known to break it: a `no_std` guest built for wasm32 with `host` fails with E0152, a duplicate `panic_impl`. #8 fixes it.
+- A part that the native side does not support never fails a build, whatever runtime features the build enables. The module compiles, and its `orb()` names the part. Only a host that installs the Orb fails.
+  - `crates/orb-macro/native-fixture/tests/unsupported.rs` (`just test-native-fixture`).
+  - The native tests of the modules `gatehouse`, `system` and `io`, and of `notebook` with its `archive` feature, in `crates/orb-macro/runtime-fixture/src` (`just test-orb-macro`).
+  - `a_workspace_whose_application_enables_host_checks_beside_a_guest` in `crates/orb-macro/tests/configurations.rs`, on the mixed workspace `crates/orb-macro/config-fixtures/workspace` (`just test-configurations`).
+  - The native hosts in `crates/orb-macro/config-fixtures/native-hosts` (`just test-orb-both-ways`).
+  - Known to break it: a workspace whose guest contributes to a hook, beside an application that enables `host` without `hooks`, fails `cargo check --workspace` with E0599, since `Orb::contribute_portable` exists only with the runtime's `hooks`. #8 fixes it.
+- Generated code reaches the facade only by the name that `crate = ".."` gives it, and reaches the module's items by paths that the module can see.
+  - `examples/rust-orb-native/italian`, which builds as a component and natively (`just test-orb-examples`).
+  - `crates/orb-macro/native-fixture/tests/trail.rs` (`just test-native-fixture`).
+  - `a_renamed_facade_serves_the_copies_both_ways` in `crates/executor-wasm/tests/orb_macro_runtime.rs`, which builds the module `tally` of the runtime fixture both ways (`just test-orb-macro`).
+- Only the library of the primary package writes `contract/`. The Orb modules of tests, benches, binaries and examples write nothing.
+  - `the_other_targets_of_a_library_leave_its_contract_unchanged` in `crates/orb-macro/tests/configurations.rs`, on `crates/orb-macro/config-fixtures/library` (`just test-configurations`).
+  - Known exception: an example built with `crate-type = ["lib"]` writes `contract/` too, since the macro does not tell it from the library. The macro's guide names it as a limit.
+- Native and compiled Orbs answer the same codes and values for the same calls.
+  - `the_native_build_and_the_component_answer_alike` in `crates/executor-wasm/tests/orb_macro_parity.rs` (`just test-orb-parity`). A new case is a scenario: a module or a function of `crates/orb-macro/parity-fixture`, and a row of its list.
+  - Known to break it: arguments that the boundary refuses answer `invalid/arguments` natively, and a result that is not finite answers `invalid/result`, but a component answers `unavailable/wasm_executor` to both. The parity test marks both rows, and #10 fixes them, in its item 1.3.
+- `Host` releases on close every callback it keeps, so that a callback holding the host does not keep it alive.
+  - `closing_the_host_releases_its_observer` in `crates/tembra/tests/call_context.rs` (`cargo test --locked -p tembra`).
+- Every option that the macro's guide, `crates/orb-macro/README.md`, documents has a test that builds it, both ways where the guide promises both.
+  - The modules of `crates/orb-macro/runtime-fixture` (`just test-orb-macro`): the default one, `guest`, as a component only; each other one, under its feature, as a component, whose test calls it, and natively, where its native tests call it. The native build of `flagged` fails on `main`, so its native test runs from `crates/orb-macro/native-fixture/tests/flags.rs`, ignored until #10. `just test-orb-both-ways` builds `guest` natively.
+  - Each Orb crate of the examples and the fixtures, built the way the other recipes do not, and the native fixture, checked for wasm32 (`just test-orb-both-ways`).
+  - The `cargo tembra` commands, run on the crates they write (`just test-cargo-tembra`).
+- The full verification leaves the tree as it found it: no modified file, and no new file that `.gitignore` does not list.
+  - `just check-clean-tree` ends each job of CI. `just ci` compares the tree after its parts with the tree before them.
+
 ## Verification
 
-Run `just check` and browser acceptance after building WASM. Compare the same workloads when changing hot paths. Record the build profile, feature set and runtime. Keep performance reports outside the source tree.
+Run the checks of the area you change, and `just ci` for the full verification, as [DEVELOP.md](DEVELOP.md#checks) describes. `just ci` does not run `just test-wasm-acceptance`, the suite of the `acceptance` job of CI. Run it after building WASM, or run the browser tests alone with `bun run test:browser`. Compare the same workloads when changing hot paths. Record the build profile, feature set and runtime. Keep performance reports outside the source tree.

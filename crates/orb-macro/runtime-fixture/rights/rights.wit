@@ -1,0 +1,23 @@
+package example:rights@1.0.0;
+
+/// What holders of a document may do with it.
+interface rights {
+  /// What a holder may do.
+  flags access {
+    read,
+    write,
+    share,
+  }
+
+  /// The access granted to someone.
+  record grant {
+    who: string,
+    access: access,
+  }
+
+  /// The access with exactly the flags `access` lacks.
+  invert: func(access: access) -> access;
+
+  /// The flags any of the grants sets.
+  merged: func(grants: list<grant>) -> access;
+}
