@@ -355,6 +355,21 @@ fn scenarios() -> Vec<Scenario> {
         ),
         row(
             ErrorCodes,
+            "arguments of a resource's method that do not read as its parameters fail the call before the method runs",
+            vec![
+                Call("tallies", "[constructor]tally", json!([5])),
+                Method(0, "[method]tally.add", json!(["one"])),
+                Method(0, "[method]tally.add", json!([-1])),
+                Method(0, "[method]tally.add", json!([])),
+                Method(0, "[method]tally.add", json!([1, 2])),
+                Method(0, "[method]tally.add", json!(null)),
+                Method(0, "[method]tally.total", json!([1])),
+                Method(0, "[method]tally.total", json!([])),
+                Drop(0),
+            ],
+        ),
+        row(
+            ErrorCodes,
             "a result the boundary cannot carry fails the call after its method ran",
             vec![
                 Call("checks", "ratio", json!([1, 0])),
