@@ -400,3 +400,24 @@ test("a guest failure after the callback's deadline is a timeout too", async () 
   await expect(port.execute("{}", scope())).rejects.toThrow("closed or busy");
   await port.close();
 });
+
+test("a guest failure before the callback's deadline keeps its own error", async () => {
+  let calls = 0;
+  const port = new BrowserPort(
+    10000,
+    async () => {},
+    () => {},
+  );
+  port.guest = guest({
+    start: () => ({
+      outcome:
+        ++calls === 1
+          ? { ok: false, value: "the guest's own failure", interrupted: false }
+          : { ok: true, value: "42", interrupted: false },
+      effects: [],
+    }),
+  });
+  await expect(port.execute("{}", scope())).rejects.toThrow("the guest's own failure");
+  expect(await port.execute("{}", scope())).toBe("42");
+  await port.close();
+});
