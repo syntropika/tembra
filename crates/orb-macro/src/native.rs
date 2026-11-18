@@ -3447,10 +3447,12 @@ fn variant_case(
 /// its WIT as the codec writes the module's own types: a record as an object of its fields, keyed
 /// by the lowerCamelCase form of their WIT names; an enum as the WIT name of its case; a variant as
 /// an object of its case's `tag` and payload, `val`; a flags, which the bindings generate with
-/// `bitflags`, as an object of the flags set, each `true`, which reads a flag left out as unset.
-/// The members are named as the bindings generate them. None for a type holding what the codec
-/// does not cover, which a method that takes or returns it refuses. The JSON is that of the facade
-/// named `facade`.
+/// `bitflags`, as an object of the flags set, each `true`, which reads a flag left out as unset,
+/// through `bits()` and `from_bits_retain()` alone, which both the `bitflags` crate and
+/// `wit-bindgen`'s own `bitflags!` define, as the facade's `wit-bindgen` lacks its feature
+/// `bitflags`. The members are named as the bindings generate them. None for a type holding what
+/// the codec does not cover, which a method that takes or returns it refuses. The JSON is that of
+/// the facade named `facade`.
 fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes, facade: &Ident) -> Option<TokenStream> {
     let boundary = format_ident!("{BOUNDARY}");
     let boundary = quote! { #boundary };
@@ -3525,7 +3527,7 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes, facade: &Ident) -> Opt
             let decode = quote! {
                 match value {
                     ::#facade::serde_json::Value::Object(object) => {
-                        let mut flags = Self::empty();
+                        let mut flags = Self::from_bits_retain(0);
                         for (key, set) in object {
                             let flag = match key.as_str() {
                                 #(#keys => Self::#names,)*
@@ -3536,7 +3538,12 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes, facade: &Ident) -> Opt
                                 }
                             };
                             match set {
-                                ::#facade::serde_json::Value::Bool(set) => flags.set(flag, set),
+                                ::#facade::serde_json::Value::Bool(true) => {
+                                    flags = Self::from_bits_retain(flags.bits() | flag.bits());
+                                }
+                                ::#facade::serde_json::Value::Bool(false) => {
+                                    flags = Self::from_bits_retain(flags.bits() & !flag.bits());
+                                }
                                 _ => {
                                     return ::core::result::Result::Err(::std::format!(
                                         "expected the flag `{}` as a boolean",
@@ -3555,7 +3562,7 @@ fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes, facade: &Ident) -> Opt
             let encode = quote! {
                 let mut flags = ::#facade::serde_json::Map::new();
                 #(
-                    if self.contains(Self::#names) {
+                    if self.bits() & Self::#names.bits() == Self::#names.bits() {
                         flags.insert(
                             ::std::string::String::from(#keys),
                             ::#facade::serde_json::Value::Bool(true),

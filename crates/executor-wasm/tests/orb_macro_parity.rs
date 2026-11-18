@@ -130,6 +130,8 @@ struct Scenario {
 impl Scenario {
     /// Mark a difference the builds have today: where a step differs, the native build fails with
     /// the code and reason `native` and the component with `component`, for the reason `why`.
+    /// No scenario differs today; a difference found later marks its row with it.
+    #[allow(dead_code)]
     fn differs(
         self,
         native: (Code, &'static str),
@@ -237,7 +239,11 @@ fn scenarios() -> Vec<Scenario> {
                 State("ledger"),
                 Call("ledger", "open", json!([])),
                 State("ledger"),
-                Call("ledger", "deposit", json!(["rent", 9_007_199_254_740_993_u64])),
+                Call(
+                    "ledger",
+                    "deposit",
+                    json!(["rent", 9_007_199_254_740_993_u64]),
+                ),
                 Call("ledger", "deposit", json!(["food", 7])),
                 Call("ledger", "transfer", json!(["bob", 5])),
                 Call("ledger", "transfer", json!(["carol", 1_u64 << 60])),
@@ -346,11 +352,21 @@ fn scenarios() -> Vec<Scenario> {
                 Call("checks", "flipped", json!([{ "on": true, "dim": true }])),
                 Call("checks", "or-zero", json!([18_446_744_073_709_551_616_f64])),
             ],
-        )
-        .differs(
-            (Code::Invalid, "arguments"),
-            (Code::Unavailable, "wasm_executor"),
-            "fails on main: a component answers unavailable/wasm_executor where the native build answers invalid/arguments; fixed in #10",
+        ),
+        row(
+            ErrorCodes,
+            "arguments of a resource's method that do not read as its parameters fail the call before the method runs",
+            vec![
+                Call("tallies", "[constructor]tally", json!([5])),
+                Method(0, "[method]tally.add", json!(["one"])),
+                Method(0, "[method]tally.add", json!([-1])),
+                Method(0, "[method]tally.add", json!([])),
+                Method(0, "[method]tally.add", json!([1, 2])),
+                Method(0, "[method]tally.add", json!(null)),
+                Method(0, "[method]tally.total", json!([1])),
+                Method(0, "[method]tally.total", json!([])),
+                Drop(0),
+            ],
         ),
         row(
             ErrorCodes,
@@ -359,11 +375,6 @@ fn scenarios() -> Vec<Scenario> {
                 Call("checks", "ratio", json!([1, 0])),
                 Call("checks", "ratio", json!([0, 0])),
             ],
-        )
-        .differs(
-            (Code::Invalid, "result"),
-            (Code::Unavailable, "wasm_executor"),
-            "fails on main: a component answers unavailable/wasm_executor where the native build answers invalid/result; fixed in #10",
         ),
     ]
 }

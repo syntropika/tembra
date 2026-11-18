@@ -3869,8 +3869,22 @@ fn component(
             ::core::compile_error!(#message);
         }
     });
+    // A component holds one Orb: one `tembra:wit` section and one export of each of the kernel's
+    // interfaces. An expansion cannot see the crate's other modules, nor its dependencies, so each
+    // defines this symbol, which rustc refuses to define twice in one crate, on the second module,
+    // and the linker across crates, in the words of its name. The name sorts before every other
+    // symbol, the kernel's exports among them, so that rustc, which stops at the first symbol
+    // defined twice, reports this one.
+    let one_orb = quote_spanned! { analysis.ident.span() =>
+        #[cfg(target_arch = "wasm32")]
+        #[doc(hidden)]
+        #[unsafe(export_name = #ONE_ORB)]
+        static __TEMBRA_ONE_ORB: u8 = 0;
+    };
     Ok(quote! {
         #(#refusals)*
+
+        #one_orb
 
         #runtime_prelude
 
@@ -3969,6 +3983,12 @@ fn signature_ident(service: &Service) -> Ident {
         service.ident.to_string().to_shouty_snake_case()
     )
 }
+
+/// The symbol every Orb module defines in a build for wasm32, whose name is the error: rustc
+/// reports `symbol `..` is already defined` on the second Orb module of one crate, and the linker
+/// `duplicate symbol: ..` for an Orb crate whose dependency holds an Orb module too. It starts
+/// with a capital letter, which sorts before the kernel's exports and mangled names.
+const ONE_ORB: &str = "A component holds one Orb module, of this crate or of a dependency, and this build holds more than one: put each Orb module in a crate of its own, and what another crate uses of it in a crate without one";
 
 /// The members every reference to a service object has, which the kernel refuses as method names
 /// when it installs an Orb; `tembra-core` checks the same list.

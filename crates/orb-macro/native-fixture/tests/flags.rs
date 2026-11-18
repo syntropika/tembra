@@ -7,7 +7,6 @@ use std::{path::Path, process::Command};
 /// calls the implemented interface and the derived service: a build that runs no test fails too.
 /// The build goes to this crate's scratch directory.
 #[test]
-#[ignore = "fails on main: the native codec of a consumed flags calls contains and set, which wit-bindgen's own bitflags! lacks; fixed in #10"]
 fn a_consumed_flags_builds_natively_with_the_facade_alone() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime-fixture/Cargo.toml");
     let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("runtime-fixture");

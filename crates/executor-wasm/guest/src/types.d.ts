@@ -147,6 +147,8 @@ declare var __writeLog: ((level: string, message: string) => void) | undefined;
 declare var __tembraTakeEffects: () => { id: number; packet: string | Uint8Array }[];
 declare var __tembraCompleteEffect: (id: number, ok: boolean, value: string | Uint8Array) => void;
 declare var __tembraStopEffects: () => void;
+/** Name the host's refusal a callback fails with, when it is one; set by the effect bridge. */
+declare var __tembraNameRefusal: ((error: unknown) => void) | undefined;
 declare var __tembraPendingDispatch: unknown;
 declare var __tembraAbandon: (() => void) | undefined;
 declare var __tembraDescribe: () => string;

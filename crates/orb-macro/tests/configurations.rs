@@ -182,6 +182,64 @@ fn the_other_targets_of_a_library_leave_its_contract_unchanged() {
     }
 }
 
+/// A crate with two Orb modules builds natively, each module an Orb of its own, but a component
+/// holds one Orb: built as one, the crate fails on its second module, with an error that says why
+/// and how to split the crate, and not first on the kernel's interfaces both modules export.
+#[test]
+#[ignore = "runs cargo on a fixture: just test-configurations"]
+fn a_crate_with_two_orbs_builds_natively_and_fails_as_a_component() {
+    let manifest = fixture("two-orbs/Cargo.toml");
+    if let Err(errors) = cargo(&manifest, &["build", "--lib"]) {
+        panic!("{errors}");
+    }
+    let errors = cargo(&manifest, &COMPONENT).expect_err("a component of two Orbs builds");
+    assert!(
+        errors.contains(&format!("symbol `{ONE_ORB}` is already defined")),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("src/lib.rs:26:"),
+        "not on the second module\n{errors}"
+    );
+}
+
+/// An Orb crate whose dependency holds an Orb module too builds natively, but a component holds
+/// one Orb, its dependencies' included: built as one, the crate fails at the link, with the same
+/// words as a crate holding two.
+#[test]
+#[ignore = "runs cargo on a fixture: just test-configurations"]
+fn an_orb_crate_depending_on_another_builds_natively_and_fails_as_a_component() {
+    let manifest = fixture("orb-dependency/Cargo.toml");
+    let consumer = ["-p", "tembra-config-consumer"];
+    if let Err(errors) = cargo(&manifest, &[&["build", "--lib"][..], &consumer].concat()) {
+        panic!("{errors}");
+    }
+    let errors = cargo(&manifest, &[&COMPONENT[..], &consumer].concat())
+        .expect_err("a component of an Orb crate and its Orb dependency builds");
+    assert!(
+        errors.contains(&format!("duplicate symbol: {ONE_ORB}")),
+        "{errors}"
+    );
+}
+
+/// The arguments that build a crate's library as a component.
+const COMPONENT: [&str; 8] = [
+    "rustc",
+    "--lib",
+    "--target",
+    "wasm32-unknown-unknown",
+    "--crate-type",
+    "cdylib",
+    "--config",
+    "target.wasm32-unknown-unknown.linker = \"wasm-component-ld\"",
+];
+
+/// The symbol every Orb module defines for wasm32, whose name is the error of a build that holds
+/// two Orb modules.
+const ONE_ORB: &str = "A component holds one Orb module, of this crate or of a dependency, and \
+    this build holds more than one: put each Orb module in a crate of its own, and what another \
+    crate uses of it in a crate without one";
+
 /// The facade's manifest.
 const FACADE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tembra/Cargo.toml");
 

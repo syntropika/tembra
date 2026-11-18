@@ -257,14 +257,13 @@ test-orb-both-ways:
     # Natively, the runtime fixture's default module `guest`, std and `no-std`, with the facade's
     # `host` through the fixture's `native` feature. `just test-orb-macro` builds `guest` only as a
     # component. It builds natively, std, and tests each module that a feature selects in place of
-    # `guest`, but `flagged`, whose native build fails today: see the native fixture's
-    # `tests/flags.rs`.
+    # `guest`, but `flagged`, whose native test the native fixture's `tests/flags.rs` runs.
     for features in native native,no-std; do
         step "crates/orb-macro/runtime-fixture natively, with $features" cargo build --locked --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --features "$features" --target-dir "$target"
     done
-    # For wasm32, the native fixture, which its tests build natively. Checked, not built: two Orbs
-    # of one crate export one interface of the kernel, whose symbols the crate would define twice;
-    # see #10's item 1.2.
+    # For wasm32, the native fixture, which its tests build natively. Checked, not built: a
+    # component holds one Orb, so a build of a crate with several fails on the second, which
+    # `just test-configurations` asserts on `crates/orb-macro/config-fixtures/two-orbs`.
     step "crates/orb-macro/native-fixture checked for wasm32" cargo check --locked -p tembra-orb-native-fixture --target wasm32-unknown-unknown --target-dir "$target"
     if [ -n "$failed" ]; then
         printf 'These steps failed:\n%s' "$failed" >&2

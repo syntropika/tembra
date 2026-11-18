@@ -520,6 +520,74 @@ fn the_call_timeout_bounds_a_streamed_response() {
     }
 }
 
+/// A request body that holds the thread dropping it for a second, as a busy machine can.
+struct Held;
+
+impl http_body::Body for Held {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Infallible>>> {
+        std::task::Poll::Ready(None)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        thread::sleep(Duration::from_millis(1_000));
+    }
+}
+
+/// A call that ends only after its deadline fails with its timeout and quarantines its Orb, even
+/// when its Store's thread runs the timer late. `/late-error` refuses the request at once, and
+/// the call closes its body; the body holds that thread past the deadline as it is dropped, and
+/// the call ends as soon as the drop returns. The refusal itself reaches the caller before.
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
+fn an_answer_after_the_deadline_is_a_timeout() {
+    let Some(component) = fixture("TEMBRA_WASM_HTTP_HANDLER") else {
+        return;
+    };
+    let limits = Limits {
+        timeout_ms: 500,
+        ..Limits::default()
+    };
+    for engine in engines(limits) {
+        let mut served = install(
+            &engine,
+            &artifact(&component, "handler", 1),
+            Install::default(),
+        );
+        let held = http::Request::post("http://ingress.test/late-error")
+            .body(Held)
+            .unwrap();
+        let refused = served
+            .pool
+            .run_until(serve(&served.host, "alice", served.reference.clone(), held))
+            .err()
+            .unwrap();
+        assert_eq!(refused.reason, "wasi_http_handler", "{refused}");
+        served.pool.run_until(served.host.settled());
+        let (incoming, _sender) = request("/status");
+        let error = served
+            .pool
+            .run_until(serve(
+                &served.host,
+                "alice",
+                served.reference.clone(),
+                incoming,
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(error.reason, "wasm_executor_quarantined", "{error}");
+        assert!(error.message.contains("timed out"), "{error}");
+        close(served, &engine);
+    }
+}
+
 /// Reload routes new requests to the new revision while the old one finishes its stream; the
 /// old Store retires only after that call settled.
 #[test]

@@ -74,7 +74,7 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .world
         .clone()
         .unwrap_or_else(|| orb_name.to_kebab_case());
-    let target_dir = manifest_dir.join("target");
+    let target_dir = target_directory(&manifest_path)?;
     let profile = if release { "release" } else { "debug" };
     // What contract/ holds before the compilation, in which the macro writes it too.
     let contract_dir = manifest_dir.join("contract");
@@ -222,6 +222,33 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         Some(contract.prepared().model()),
     )?;
     Ok(())
+}
+
+/// The directory Cargo builds the package of `manifest_path` into: `target_directory` of
+/// `cargo metadata`, which follows `CARGO_TARGET_DIR`, `build.target-dir` and the workspace the
+/// package belongs to.
+fn target_directory(manifest_path: &Path) -> Result<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        target_directory: PathBuf,
+    }
+    let output = Command::new("cargo")
+        .args([
+            "metadata",
+            "--format-version=1",
+            "--no-deps",
+            "--manifest-path",
+        ])
+        .arg(manifest_path)
+        .stderr(Stdio::inherit())
+        .output()
+        .context("cannot run cargo")?;
+    if !output.status.success() {
+        bail!("cargo metadata failed for {}", manifest_path.display());
+    }
+    let metadata: Metadata = serde_json::from_slice(&output.stdout)
+        .context("reading the target directory from cargo metadata")?;
+    Ok(metadata.target_directory)
 }
 
 /// The component cargo built for the package whose canonical manifest is `package`: the `.wasm`

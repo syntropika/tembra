@@ -176,7 +176,7 @@ fn library(name: &str, package: &str) -> String {
 extern crate alloc;
 
 #[tembra::orb(package = "{package}", no_std)]
-mod {module} {{
+pub mod {module} {{
     use alloc::{{format, string::String}};
 
     /// The service: a unit struct marked #[service], with an impl block of public functions.

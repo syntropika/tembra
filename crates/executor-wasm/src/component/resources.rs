@@ -121,12 +121,12 @@ pub(crate) async fn destroy<T: Send + 'static>(
         let destroyed = store.run_concurrent(async move |accessor| {
             resource.resource_drop_concurrent(accessor).await
         });
-        tokio::time::timeout(
+        crate::worker::within(
             std::time::Duration::from_millis(engine.limits.timeout_ms),
             destroyed,
         )
         .await
-        .map_err(|_| wasmtime::Error::msg("resource destructor timed out"))???;
+        .ok_or_else(|| wasmtime::Error::msg("resource destructor timed out"))???;
     }
     Ok(())
 }

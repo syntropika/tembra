@@ -103,9 +103,8 @@ native host:
   closes, in the host's log in a component and in a journal natively, where the `context` serves
   only a call's methods; with `revised`, its next revision, whose resource is at version 2;
 - `flagged` selects the module `holder`, which implements the interface of the package in
-  `rights/`, whose `flags` the bindings generate without `wit-bindgen`'s `bitflags` feature. Its
-  native build fails today, so the native fixture's `tests/flags.rs` runs its native test, ignored
-  until then;
+  `rights/`, whose `flags` the bindings generate without `wit-bindgen`'s `bitflags` feature. The
+  native fixture's `tests/flags.rs` runs its native test;
 - `system` selects the module `system`, which imports WASI's system clock, the clocks' types, the
   CLI's environment and the insecure random source; natively, `orb()` refuses the imports;
 - `io` selects the module `io`, which imports the filesystem's preopened directories, the sockets'
