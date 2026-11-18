@@ -16,7 +16,7 @@ guest = ["dep:tembra"]
 no-std = ["dep:dlmalloc"]
 # Adds the module `refusing`, whose newtype only a refusing `TryFrom` makes: a component build of
 # the crate then fails, naming it, which `executor-wasm/tests/orb_macro_runtime.rs` checks.
-native-only-newtype = []
+native-only-newtype = ["dep:tembra"]
 # Each of these, built without the default features, selects another Orb module of the crate in
 # place of `guest`: a component carries the WIT of one Orb module, in its `tembra:wit` section.
 # `executor-wasm/tests/orb_macro_runtime.rs` builds each std and `no-std`, and calls it, then runs

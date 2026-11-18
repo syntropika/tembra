@@ -4,8 +4,8 @@
 use std::{path::Path, process::Command};
 
 /// The runtime fixture's `holder` builds natively with the facade alone, and its native test
-/// calls the implemented interface and the derived service. The build goes to this crate's
-/// scratch directory.
+/// calls the implemented interface and the derived service: a build that runs no test fails too.
+/// The build goes to this crate's scratch directory.
 #[test]
 #[ignore = "fails on main: the native codec of a consumed flags calls contains and set, which wit-bindgen's own bitflags! lacks; fixed in #10"]
 fn a_consumed_flags_builds_natively_with_the_facade_alone() {
@@ -20,10 +20,14 @@ fn a_consumed_flags_builds_natively_with_the_facade_alone() {
         .arg(&target)
         .output()
         .unwrap();
+    let report = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        "{report}\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !report.contains("running 0 tests"),
+        "no native test\n{report}"
     );
 }
