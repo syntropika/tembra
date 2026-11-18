@@ -4692,94 +4692,57 @@ fn parent(scope: usize, modules: &[Vec<Ident>]) -> Option<usize> {
     )
 }
 
-/// What the glob imports of a module make of a name it neither binds nor declares.
-enum Globbed {
-    /// A module of the Orb that a glob imports from binds or declares it: the name resolves there.
-    In(usize),
-    /// None does, and a glob imports from a module the macro does not read, which may bring it.
-    Outside,
-    /// None does, and every glob imports from a module of the Orb.
-    Nowhere,
-}
-
 /// Where the glob imports of the module `scope` bring `name` from: the first module of the Orb,
 /// through the module's globs and those of the modules they import from, that binds the name with
-/// `use` or declares an item of that name, a sub-module included. Each glob's own path is read
-/// without this step (`module_from`): a glob may import from a module another glob brings in, and
-/// following those in a circle would never end.
-fn through_globs(name: &Ident, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> Globbed {
-    let mut outside = false;
+/// `use` or declares an item of that name, a sub-module included; `None` when no module of the Orb
+/// does. Each glob's own path is read without this step (`glob_module`): a glob may import from a
+/// module another glob brings in, and following those in a circle would never end.
+fn through_globs(
+    name: &Ident,
+    scope: usize,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+) -> Option<usize> {
     let mut seen = BTreeSet::from([scope]);
     let mut pending = vec![scope];
     while let Some(scope) = pending.pop() {
         for glob in &uses[scope].globs {
-            let Prefix::Module(module) = module_from(glob, scope, uses, modules, false) else {
-                outside = true;
+            let Some(module) = glob_module(glob, scope, uses, modules) else {
                 continue;
             };
             let name = name.to_string();
             if uses[module].names.contains_key(&name) || uses[module].items.contains(&name) {
-                return Globbed::In(module);
+                return Some(module);
             }
             if seen.insert(module) {
                 pending.push(module);
             }
         }
     }
-    if outside {
-        Globbed::Outside
-    } else {
-        Globbed::Nowhere
-    }
+    None
 }
 
-/// Where the prefix of a path leads, a glob import's or a type path's (`module_from`).
-enum Prefix {
-    /// A module of the Orb, by scope.
-    Module(usize),
-    /// A path through `crate::` that a `use` of the Orb's modules binds a name of the prefix to:
-    /// the macro can neither place it in the Orb nor tell that it leaves the Orb module.
-    Crate,
-    /// A module the macro does not read: one of a crate, under a `crate::` the prefix writes
-    /// itself, or above the Orb module.
-    Outside,
-}
-
-/// Where `glob` leads (`glob_module`), a `crate::` a `use` leads to told apart from a module the
-/// macro does not read otherwise; a first name the module neither binds nor declares a sub-module
-/// of is followed through the module's glob imports only when `globs` is set.
-fn module_from(
-    glob: &Named,
-    scope: usize,
-    uses: &[Uses],
-    modules: &[Vec<Ident>],
-    globs: bool,
-) -> Prefix {
+/// The module of the Orb, by scope, that `glob`, a glob import of the module `scope`, imports
+/// from: through `self::`, `super::`, the sub-modules of the Orb and the `use`s binding a name of
+/// its path; `None` for a module the macro does not read, one of a crate, under `crate::` or above
+/// the Orb module.
+fn glob_module(glob: &Named, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> Option<usize> {
     if glob.global {
-        return Prefix::Outside;
+        return None;
     }
     let mut scope = scope;
     let mut segments = glob.segments.clone();
-    // Whether a `use` has replaced a name by the path it imports.
-    let mut imported = false;
     // Each step consumes a name or replaces one by what a declaration binds it to.
     for _ in 0..64 {
         let Some((first, rest)) = segments.split_first() else {
-            return Prefix::Module(scope);
+            return Some(scope);
         };
         let (first, rest) = (first.clone(), rest.to_vec());
         if first == "crate" {
-            return if imported {
-                Prefix::Crate
-            } else {
-                Prefix::Outside
-            };
+            return None;
         }
         if first == "super" {
-            let Some(above) = parent(scope, modules) else {
-                return Prefix::Outside;
-            };
-            scope = above;
+            scope = parent(scope, modules)?;
         }
         if first == "self" || first == "super" {
             segments = rest;
@@ -4788,31 +4751,19 @@ fn module_from(
         if let Some(bound) = uses[scope].names.get(&first.to_string()) {
             // `use name;` brings the crate `name` into scope.
             if bound.global || (bound.segments.len() == 1 && bound.segments[0] == first) {
-                return Prefix::Outside;
+                return None;
             }
             segments = bound.segments.clone();
             segments.extend(rest);
-            imported = true;
             continue;
         }
         let mut child = modules[scope].clone();
         child.push(first.clone());
-        if let Some(index) = modules.iter().position(|module| *module == child) {
-            scope = index;
-            segments = rest;
-            continue;
-        }
-        // A name the module neither binds nor declares a sub-module of: a glob import may bring
-        // the module in from another module of the Orb, where the name resolves next.
-        if !globs {
-            return Prefix::Outside;
-        }
-        let Globbed::In(module) = through_globs(&first, scope, uses, modules) else {
-            return Prefix::Outside;
-        };
-        scope = module;
+        let index = modules.iter().position(|module| *module == child)?;
+        scope = index;
+        segments = rest;
     }
-    Prefix::Outside
+    None
 }
 
 impl quote::ToTokens for Named {

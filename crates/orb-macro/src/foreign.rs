@@ -540,8 +540,7 @@ impl Modules {
             }
             if rest.is_empty() {
                 if !wit::BUILTIN.contains(&name.as_str())
-                    && let crate::Globbed::In(module) =
-                        crate::through_globs(&first, at, &self.uses, &self.paths)
+                    && let Some(module) = crate::through_globs(&first, at, &self.uses, &self.paths)
                 {
                     return Resolution::Refused(self.globbed(&first, at, module));
                 }
@@ -554,9 +553,7 @@ impl Modules {
                 segments = rest;
                 continue;
             }
-            if let crate::Globbed::In(module) =
-                crate::through_globs(&first, at, &self.uses, &self.paths)
-            {
+            if let Some(module) = crate::through_globs(&first, at, &self.uses, &self.paths) {
                 return Resolution::Refused(self.globbed(&first, at, module));
             }
             break;
