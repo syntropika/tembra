@@ -64,11 +64,17 @@ jobs:
           bun-version: 1.4.3
       # Restore dependencies and pinned Cargo tools, then let Cargo validate every build.
       - run: rustup show active-toolchain
-      # Jobs that share a key race to save it, so each part has a key of its own and restores what it built.
+      # Each part has a key of its own, since jobs that share a key race to save it, and restores what it
+      # built. Only `main` saves, and only after a pass. A run that failed or was cancelled during its
+      # setup used to save a small entry under the part's exact key. Later runs restored it as a full
+      # match, never saved over it, and rebuilt everything. Runs on `main` are not cancelled. Other refs
+      # restore the caches of `main` when their keys match. Saving on every ref also filled the
+      # repository's 10 GiB with copies of the same caches and evicted those of `main`. Each part adds
+      # one cache to `main`: check the total against that limit when you add a part.
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ubuntu-24.04-${{ matrix.recipe }}-${{ hashFiles('justfile', 'crates/executor-wasm/*/Cargo.toml', 'crates/executor-wasm/*/Cargo.lock') }}
-          cache-on-failure: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo install just --version 1.21.0 --locked
       - run: just install-tools
       - run: just install
@@ -91,10 +97,12 @@ jobs:
         with:
           bun-version: 1.4.3
       - run: rustup show active-toolchain
+      # As for the parts: only `main` saves, and only after a pass. A run that failed or was cancelled
+      # during its setup would save a small entry that later runs restore as a full match.
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ubuntu-24.04-${{ hashFiles('justfile', 'crates/executor-wasm/*/Cargo.toml', 'crates/executor-wasm/*/Cargo.lock') }}
-          cache-on-failure: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             . -> target
             crates/executor-wasm/rust-provider -> ${{ runner.temp }}/provider

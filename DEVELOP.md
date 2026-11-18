@@ -128,6 +128,8 @@ Repeat `--suite native|sdk|node|browser|example|package` to run a subset. CI run
 and outgoing-proxy fixtures through `--http-handler` and `--http-proxy`. Use `--suite native` to run the Rust tests with the same complete artifact set.
 
 CI restores Cargo dependencies and pinned tools separately from the verified interpreter build cache.
+Only runs on `main` save the Cargo caches, and only after a pass. Other runs restore them when their
+keys match.
 Every build and all acceptance suites still run on cache hits. Interpreter cache keys include its
 sources, private ABI and standard bindings, dependencies and pinned toolchains; the build rechecks
 the upstream source revision and WASI SDK archive checksum before packaging identical engine bytes.
