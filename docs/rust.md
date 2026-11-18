@@ -144,7 +144,10 @@ a source Orb and a compiled component in one host. Backend values are reexports 
 implementation types; the facade adds no serialization, wrapper runtime or dispatch step. To write
 a compiled orb in Rust without a WIT file, see
 [the Rust orb example](../examples/rust-orb-service/README.md): `#[orb]` derives the
-contract from a module and `cargo tembra build` packages the artifact. A service of such an orb
+contract from a module and `cargo tembra build` packages the artifact. The module's types stay the
+author's, with their own derives, and a state's `Default` and `serde` derives are the author's;
+[the macro guide](../crates/orb-macro/README.md#moving-an-existing-orb-to-these-rules) lists the
+steps for an Orb written before that. A service of such an orb
 can own kernel-managed state with `#[state]`, validated by the state's own rule; see
 [the Rust state example](../examples/rust-orb-state/README.md). Such an orb can also declare a hook
 for other orbs to contribute to; see

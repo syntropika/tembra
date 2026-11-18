@@ -242,9 +242,10 @@ cargo test --locked -p <crate> --all-features
 
 Then run the recipe of the area. Each area below names its crates and its recipe:
 
-- The macro: `tembra-orb-macro`, `tembra-orb-native-fixture` and `tembra-orb-macro-compile-fail`, whose cases (`crates/orb-macro/compile-fail/tests/ui`) check where rustc puts the macro's errors. Clippy and the tests of both take
-  about 80 seconds cold and 40 seconds warm on 16 cores. Run `just test-orb-macro`, which runs the
-  macro's guests as components. A change to what the macro generates also needs the recipe that
+- The macro: `tembra-orb-macro`, `tembra-orb-native-fixture` and `tembra-orb-macro-compile-fail`,
+  whose cases (`crates/orb-macro/compile-fail/tests/ui`) check where rustc puts the macro's errors.
+  Clippy and the tests of the three take about 80 seconds cold and 40 seconds warm on 16 cores.
+  Run `just test-orb-macro`, which runs the macro's guests as components. A change to what the macro generates also needs the recipe that
   builds it the way users do: `just test-orb-examples` for the examples,
   `just test-configurations` for the features and targets that only Cargo sets up,
   `just test-orb-parity` for the answers of native and compiled Orbs, and

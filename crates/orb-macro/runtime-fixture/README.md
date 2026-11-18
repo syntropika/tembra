@@ -5,9 +5,9 @@ macro. The default uses `std::collections::HashMap`, `String` and `format!` with
 library's allocator and panic handler; `no-std` selects `#![no_std]`, the macro's explicit
 `no_std` option and the optional `dlmalloc` allocator. The interface and output remain identical.
 
-Its `walker` service relies on the derives of the types that enter the WIT, which the generated
-types replacing them take: a record, an enum and a variant derive `Default`, `PartialEq`, `Eq`,
-`Hash` or `Ord`, and the kernel-managed state `Position` starts from its derived `Default`. The
+Its `walker` service relies on the derives of the types that enter the WIT, which stay the
+author's types with the derives written on them: a record, an enum and a variant derive `Default`,
+`PartialEq`, `Eq`, `Hash` or `Ord`, and the kernel-managed state `Position` starts from its derived `Default`. The
 default build counts distinct moves in a `HashSet`, the `no-std` one in a `BTreeSet`.
 
 Its `chance` service imports `wasi:random/random` and `wasi:clocks/monotonic-clock` with the macro's

@@ -140,12 +140,25 @@ when a service method, a WIT resource's function or a hook's input uses it, dire
 fields of another type that enters; a state alone does not make a type enter. The other types of the
 module, and unit structs without the marker, remain ordinary Rust, whatever they hold: only a type
 that enters the WIT needs a WIT spelling for its fields and cases, so an array field or a case with
-two unnamed payloads is a compile error there and nowhere else. A state that stays out of the WIT, and
-every type of the module its fields reach that stays out too, keeps the derives its author writes,
-`serde`'s included. A method that
-names a type the module does not declare, other than a consumed interface's type named through
-that interface's module, `greeting::Entry`, or free JSON, `serde_json::Value`, is a compile error, and so is a service with the name of
-the module, because WIT refuses a world and an interface of one name. So is a method named `then`,
+two unnamed payloads is a compile error there and nowhere else.
+
+Every type of the module stays the author's, with the derives, attributes and impls its author
+writes, whether it enters the WIT or not: the macro adds no derive to it, and carries none onto the
+bindings' types. A state's `Default` and `serde`'s traits, and the `serde` traits of every module
+type its fields reach, are the author's too (see [kernel-managed state](#kernel-managed-state)).
+
+A type that enters the WIT is declared inside the Orb module, written inline, and named as rustc
+names it there: by the module that declares it, a path through the Orb's modules, a `use` by name,
+or an alias that is only a path (see [organizing the module in
+sub-modules](#organizing-the-module-in-sub-modules)). The only other names are a consumed
+interface's type named through its module, `greeting::Entry`, or by a `use` of it, and free JSON,
+`serde_json::Value`. A glob import, a `crate::` path, an alias that is more than a path, a type
+declared outside the Orb module and a name the module neither declares nor imports are compile
+errors that say how to write the name. A contract that falls outside these rules is written in WIT
+by hand and implemented with `#[service("ns:pkg/iface@version")]` or
+`#[hook("ns:pkg/hook@version", composition = c)]`, or its crate uses `wit-bindgen` without the
+macro. A service with the name of
+the module is a compile error, because WIT refuses a world and an interface of one name. So is a method named `then`,
 `release`, `state`, `ready`, `status` or `opaque`: every reference to a service object has those
 members, and the kernel refuses such a method when it installs the Orb. The package and every
 identity an attribute names are WIT identities, `ns:name@version` and `ns:name/interface@version`:
@@ -1426,6 +1439,88 @@ the Orb fails. Cargo enables the facade's `host` for an Orb crate whenever anoth
 build does, so a compile error there would also fail builds that never install the Orb, such as
 `cargo check --workspace`. A component build of the same module is unaffected.
 
+## Moving an existing Orb to these rules
+
+An Orb written before the macro left its types to their author needs these changes. Each shows as
+a compile error on the author's line.
+
+A state derives `Default` and `serde`'s traits. The macro used to write them; it now asserts them
+on the state's name (see [kernel-managed state](#kernel-managed-state)):
+
+```rust
+// Before: the macro added the derives.
+#[state]
+pub struct Count { pub total: i64 }
+
+// After: the author's.
+#[state]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct Count { pub total: i64 }
+```
+
+A module type a state reaches derives `serde`'s traits too, on every struct, enum and variant its
+fields hold. A field whose type has no `Default`, an enum for instance, needs one of its own:
+
+```rust
+// Before: only the state was marked.
+pub enum Phase { Open, Closed }
+
+// After: the type the state reaches, with the case it starts from.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub enum Phase {
+    #[default]
+    Open,
+    Closed,
+}
+```
+
+A `#[flags]` struct becomes a record: the macro has no WIT `flags` of its own, and a struct of
+`bool` fields is a record. The struct has no bit operations, so code that combined flags sets
+the fields. The flags of a consumed package keep
+working, as the bindings' types:
+
+```rust
+// Before.
+#[flags]
+pub struct Pen { pub filled: bool, pub dashed: bool }
+
+// After.
+#[derive(Clone, Copy, Default)]
+pub struct Pen { pub filled: bool, pub dashed: bool }
+```
+
+A contract type is named by a path or a `use`, not through a glob or `crate::`. The error gives
+the line to write:
+
+```rust
+// Before.
+use super::model::*;
+pub fn first() -> Entry { /* ... */ }
+pub fn all() -> crate::books::model::Entry { /* ... */ }
+
+// After.
+use super::model::Entry;
+pub fn first() -> Entry { /* ... */ }
+pub fn all() -> super::model::Entry { /* ... */ }
+```
+
+An alias that is more than a path, `type Entries = Vec<Entry>;`, is written out where it is used,
+and a type declared outside the Orb module is moved into it, or the contract is written in WIT
+(see [what the macro reads](#what-the-macro-reads)).
+
+An impl of an Orb type written through `crate::`, `impl PartialEq for crate::books::model::Entry`,
+is no longer taken for the Orb type's own, since the macro places a name inside the Orb module
+only. The compiler still checks the impl; name the type as a contract type is named, through
+`super::model::Entry` or a `use`, where the macro should see it.
+
+A module type that entered the WIT stays the author's, so it has what its author derives, and not
+what the bindings' type had. Add the derives it needs, `Clone`, `Copy`, `Debug` and `PartialEq`
+among them, and an import the replaced type used to hide, `std::fmt` for a hand-written `Display`
+for instance. Where it holds a consumed type, which has `Clone`, `Copy` and `Debug` only, a
+derive of another trait on the author's type needs the author's impl on the consumed one (see
+[the types of a consumed interface](#the-types-of-a-consumed-interface)). An enum's `Debug` prints
+what the author derives, `North` where the bindings' type printed `Heading::North`.
+
 ## Moving a hand-written service to the macro
 
 A native service written by hand with the runtime's builder, `Service::new(name, factory)` and its
@@ -1716,8 +1811,10 @@ the version whose rules the macro follows, and the generated code reaches it the
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary, a consumed type's
   included. The state's `Default` and `serde`'s derives are the author's, on the state and on every
-  type of the module its fields reach, under `#[cfg(..)]` or `#[cfg_attr(..)]` too, which the
-  compiler evaluates: the macro asserts the three traits on the state's name, and adds no derive.
+  type of the module its fields reach: the macro asserts the three traits on the state's name, and
+  adds no derive. A derive under `#[cfg_attr(..)]` is the compiler's to evaluate, on a type outside
+  the WIT, and on one that enters it as long as no `#[cfg(..)]` hides in the `cfg_attr`, which is
+  refused (next rule).
   JSON holds no NaN or infinite float, so a state holding one cannot be stored, and
   the JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles, so an integer beyond
   ±2^53 in a state loses precision there.
@@ -1734,7 +1831,8 @@ the version whose rules the macro follows, and the generated code reaches it the
   as a function's result or a side of a `Result`, which WIT then leaves out: `Result<T, ()>` is
   `result<t>`, `Result<(), E>` is `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has
   no equivalent, use `bool`. A function carrying `Option<Option<T>>`, an option of an option, is
-  refused, as the runtime refuses it in a signature: use an enum of the module with a case for each.
+  refused on the function, as the runtime refuses it in a signature, with an error that says so and
+  names no remedy: write an enum of the module with a case for each in its place.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it. A state is a
   struct of the module, which holds a consumed package's records as they are but is none of them.
 - A record, an enum or a variant that enters the WIT stays the author's type, with its derives,
