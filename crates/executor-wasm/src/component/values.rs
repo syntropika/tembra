@@ -150,10 +150,37 @@ pub(super) fn lift(value: Val) -> Result<Value> {
 }
 
 /// Lift every nested resource through the same issuer-owned table as whole resource results.
+/// A value the guest hands the host, such as an import's argument, that the portable profile
+/// cannot carry is the executor's refusal.
 pub(super) fn lift_with(
     value: Val,
     resource: &mut impl FnMut(ResourceAny) -> Result<Value>,
 ) -> Result<Value> {
+    lifting(value, resource).map_err(|error| match error.code {
+        tembra::core::Code::Invalid => failure(error.message),
+        _ => error,
+    })
+}
+
+/// Lift a component's result as `lift` does. A result the portable profile cannot carry fails
+/// the call with `invalid/result`, as a native host's does.
+pub(super) fn lift_result(value: Val) -> Result<Value> {
+    lift_result_with(value, &mut |_| {
+        Err(failure("a data result cannot carry a resource"))
+    })
+}
+
+/// Lift a component's result as `lift_with` does, refusing what the portable profile cannot
+/// carry with `invalid/result`.
+pub(super) fn lift_result_with(
+    value: Val,
+    resource: &mut impl FnMut(ResourceAny) -> Result<Value>,
+) -> Result<Value> {
+    lifting(value, resource)
+}
+
+/// Lift one value; a float the portable profile cannot carry is refused with `invalid/result`.
+fn lifting(value: Val, resource: &mut impl FnMut(ResourceAny) -> Result<Value>) -> Result<Value> {
     Ok(match value {
         Val::Bool(value) => json!(value),
         Val::S8(value) => json!(value),
@@ -171,17 +198,17 @@ pub(super) fn lift_with(
         Val::List(values) | Val::Tuple(values) => Value::Array(
             values
                 .into_iter()
-                .map(|value| lift_with(value, resource))
+                .map(|value| lifting(value, resource))
                 .collect::<Result<_>>()?,
         ),
         Val::Record(fields) => Value::Object(
             fields
                 .into_iter()
-                .map(|(name, value)| Ok((javascript_name(&name), lift_with(value, resource)?)))
+                .map(|(name, value)| Ok((javascript_name(&name), lifting(value, resource)?)))
                 .collect::<Result<_>>()?,
         ),
         Val::Option(value) => value
-            .map(|value| lift_with(*value, resource))
+            .map(|value| lifting(*value, resource))
             .transpose()?
             .unwrap_or(Value::Null),
         Val::Variant(tag, value) => tagged(tag, value, resource)?,
@@ -213,7 +240,10 @@ fn wide<T: std::str::FromStr>(value: &Value) -> Option<T> {
 /// Refuse values JSON would silently change or replace with null.
 fn float(value: f64) -> Result<Value> {
     if !value.is_finite() || (value == 0.0 && value.is_sign_negative()) {
-        return Err(crate::unrepresentable_float());
+        return Err(tembra::Error::invalid(
+            tembra::core::Reason::Result,
+            "component float cannot be represented by the portable profile",
+        ));
     }
     Ok(json!(value))
 }
@@ -225,7 +255,7 @@ fn tagged(
     resource: &mut impl FnMut(ResourceAny) -> Result<Value>,
 ) -> Result<Value> {
     Ok(match value {
-        Some(value) => json!({"tag":tag,"val":lift_with(*value, resource)?}),
+        Some(value) => json!({"tag":tag,"val":lifting(*value, resource)?}),
         None => json!({"tag":tag}),
     })
 }

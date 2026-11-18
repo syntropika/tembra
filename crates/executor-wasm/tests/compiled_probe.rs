@@ -309,6 +309,79 @@ fn an_answer_after_the_deadline_is_a_timeout() {
     assert_eq!(engine.instances(), 0);
 }
 
+/// A component that passes an infinite float to its import, which the portable profile cannot
+/// carry, and the native provider of that import.
+const INFINITE_WIT: &str = r#"package example:infinite@1.0.0;
+interface sink { put: func(value: f64) -> u32; }
+interface answers { answer: func() -> u32; }
+world provider { export sink; }
+world consumer { import sink; export answers; }"#;
+
+const INFINITE_MODULE: &str = r#"(module
+  (import "example:infinite/sink@1.0.0" "put" (func $put (param f64) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "example:infinite/answers@1.0.0#answer") (result i32)
+    f64.const inf call $put))"#;
+
+/// A float the portable profile cannot carry in an import's argument is the executor's refusal,
+/// never a result's: the call fails as the component's trap, and nothing names `invalid/result`,
+/// which only a result answers.
+#[test]
+fn an_infinite_import_argument_is_not_a_result_refusal() {
+    let sink = "example:infinite/sink@1.0.0";
+    let contract = Contract::from_source("infinite.wit", INFINITE_WIT, Some("provider")).unwrap();
+    let signature = contract
+        .plan("sink", 1, &Default::default())
+        .unwrap()
+        .orb
+        .services
+        .remove(0)
+        .signature;
+    let provider = Orb::new("sink", 1).service(
+        tembra::Service::new(format!("sink::{sink}"), |_| Ok(()))
+            .signature(signature)
+            .method("put", |_, _, _: (f64,)| async { Ok(0_u32) }),
+    );
+    let engine = Engine::new(Limits::default()).unwrap();
+    let artifact = components::encode(
+        INFINITE_WIT,
+        "consumer",
+        INFINITE_MODULE,
+        "infinite",
+        &Default::default(),
+    );
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        provider,
+        engine
+            .load(&artifact, Install::default().requires(sink, "sink", 1))
+            .unwrap(),
+    ])
+    .unwrap();
+    let answers = Rc::new(
+        host.get(
+            "infinite::example:infinite/answers@1.0.0",
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(answers.ready()).unwrap();
+    let called = answers.clone();
+    let error = pool
+        .run_until(host.root("alice", move |context| {
+            async move { called.call::<_, Value>(&context, "answer", json!([])).await }
+                .boxed_local()
+        }))
+        .unwrap_err();
+    assert_eq!(error.code, tembra::Code::Unavailable, "{error}");
+    assert!(!error.to_string().contains("invalid/result"), "{error}");
+    answers.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
+
 /// A monotonic clock whose reading holds the Store's thread for a second, as a busy machine can.
 struct Holding;
 

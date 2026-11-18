@@ -47,6 +47,51 @@ pub(crate) async fn within<F: std::future::Future>(
     }
 }
 
+/// Why a callback failed, as its worker reports it. Only the worker's own code builds a variant
+/// other than `Text`, so no guest text can take a code the executor answers.
+#[derive(Debug)]
+pub(crate) enum Failed {
+    /// The executor's own text: the call answers `unavailable/wasm_executor`.
+    Text(String),
+    /// A refusal the worker made with the code a native host answers.
+    Coded(tembra::Error),
+    /// The host's refusal of a request of this declaration, which the worker returns unchanged:
+    /// the call answers that refusal, as a native declaration does.
+    Host(String),
+}
+
+impl Failed {
+    /// The failure of a value a lift refused: the refusal itself when its code is not the
+    /// executor's own, such as a result's `invalid/result`.
+    pub(crate) fn lifted(error: tembra::Error) -> Self {
+        if error.code == tembra::core::Code::Invalid {
+            Self::Coded(error)
+        } else {
+            Self::Text(error.to_string())
+        }
+    }
+
+    /// The text of this failure, for an embedding that carries text only.
+    pub(crate) fn text(self) -> String {
+        match self {
+            Self::Text(text) | Self::Host(text) => text,
+            Self::Coded(error) => error.to_string(),
+        }
+    }
+}
+
+impl From<String> for Failed {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for Failed {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+}
+
 pub(crate) enum Event {
     Host {
         packet: String,
@@ -60,7 +105,7 @@ pub(crate) enum Event {
         reply: oneshot::Sender<std::result::Result<String, String>>,
         pipe: Option<Arc<Mutex<Pipe>>>,
     },
-    Done(std::result::Result<String, String>),
+    Done(std::result::Result<String, Failed>),
     /// Incoming HTTP carrier events of a platform exchange (`crate::ingress::IngressPort`).
     Ingress(crate::ingress::IngressEvent),
     /// A guest's asynchronous import whose whole result is a `stream<u8>`: a compiled guest's
@@ -599,9 +644,9 @@ impl Session {
             events: &events,
             completed: false,
         };
-        // The host's refusals in this declaration. One the guest fails with, unchanged, keeps its
-        // code, as a native declaration's does: a changed state version is `invalid/state_version`.
-        let mut refused: Vec<tembra::Error> = Vec::new();
+        // The host's last refusal in this declaration. A worker that fails with it unchanged keeps
+        // its code, as a native declaration does, such as `invalid/state_version`.
+        let mut refused: Option<tembra::Error> = None;
         loop {
             match events.recv_blocking().map_err(failure)? {
                 // Carrier events exist only on platform ingress exchanges.
@@ -609,10 +654,7 @@ impl Session {
                 Event::Done(result) => {
                     self.0.io.scope().end_callback();
                     guard.completed = true;
-                    if let Err(text) = &result
-                        && let Some(error) =
-                            refused.into_iter().find(|error| error.to_string() == *text)
-                    {
+                    if let (Err(Failed::Host(_)), Some(error)) = (&result, refused) {
                         return Err(error);
                     }
                     return decode(result);
@@ -630,7 +672,7 @@ impl Session {
                         host(&packet, false)
                     };
                     if let Err(error) = &result {
-                        refused.push(error.clone());
+                        refused = Some(error.clone());
                     }
                     let _ = reply.send(encode(
                         result.map(|value| value.to_string()),
@@ -850,7 +892,7 @@ impl Session {
                     }
                     Ok(Event::Done(result)) => {
                         if let Err(error) = result {
-                            failed.get_or_insert_with(|| failure(error));
+                            failed.get_or_insert_with(|| failure(error.text()));
                         }
                         break;
                     }
@@ -1006,7 +1048,7 @@ fn publish_after_shutdown(
         // A command nobody awaits, such as a resource destruction or an environment release,
         // has no caller to receive its failure; report it rather than letting it pass silently.
         if events
-            .send_blocking(Event::Done(Err(error.clone())))
+            .send_blocking(Event::Done(Err(error.clone().into())))
             .is_err()
         {
             let _ = diagnostics.emit(
@@ -1030,20 +1072,12 @@ impl Drop for Count {
 }
 
 /// Parse guest output only after preserving boundary diagnostics.
-fn decode(result: std::result::Result<String, String>) -> Result<Value> {
-    serde_json::from_str(&result.map_err(refusal)?).map_err(failure)
-}
-
-/// The error of a callback that failed with `text`. A float result the portable profile cannot
-/// carry keeps the `invalid/result` its lift refused it with, as a native host answers it; any
-/// other text is the executor's failure.
-fn refusal(text: String) -> tembra::Error {
-    let unrepresentable = crate::unrepresentable_float();
-    if text == unrepresentable.to_string() {
-        unrepresentable
-    } else {
-        failure(text)
-    }
+fn decode(result: std::result::Result<String, Failed>) -> Result<Value> {
+    let text = result.map_err(|failed| match failed {
+        Failed::Coded(error) => error,
+        Failed::Text(text) | Failed::Host(text) => failure(text),
+    })?;
+    serde_json::from_str(&text).map_err(failure)
 }
 
 /// Close an event stream and drop its buffered reply senders so no request outlives its driver.
@@ -1149,7 +1183,7 @@ mod tests {
             "quarantine preceded physical completion"
         );
         assert!(
-            matches!(observed.recv().unwrap(), Ok(Event::Done(Err(error))) if error == "quarantined")
+            matches!(observed.recv().unwrap(), Ok(Event::Done(Err(Failed::Text(error)))) if error == "quarantined")
         );
         observer.join().unwrap();
     }

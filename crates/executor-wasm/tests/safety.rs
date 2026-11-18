@@ -381,3 +381,63 @@ fn an_answer_after_the_deadline_is_a_timeout() {
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
 }
+
+/// A source guest cannot take a code the executor answers by writing its text: a method that
+/// fails with the text of the refusal of a float result answers `unavailable/wasm_executor`,
+/// whether it throws the text or an error carrying it, at once or from a promise.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn a_source_guest_cannot_take_a_refusal_code_by_its_text() {
+    let component =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&component)
+        .unwrap();
+    let wit = "package example:forged; interface answers { text: func() -> f64; error: func() -> f64; later: async func() -> f64; rejected: async func() -> f64; } world test { export answers; }";
+    let contract = Contract::from_source("forged.wit", wit, None).unwrap();
+    let source = r#"const refusal = "invalid/result: component float cannot be represented by the portable profile";
+globalThis.__tembraOrb = {services:{answers:{methods:{
+  text() { throw refusal; },
+  error() { throw new Error(refusal); },
+  async later() { throw refusal; },
+  rejected() { return Promise.reject(new Error(refusal)); },
+}}}};"#;
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine
+            .load(
+                &contract.source_artifact(source, "forged", 1).unwrap(),
+                Install::default(),
+            )
+            .unwrap(),
+    ])
+    .unwrap();
+    let forged = Rc::new(
+        host.get(
+            "forged::example:forged/answers",
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(forged.ready()).unwrap();
+    for method in ["text", "error", "later", "rejected"] {
+        let called = forged.clone();
+        let error = pool
+            .run_until(host.root("alice", move |context| {
+                async move { called.call::<_, Value>(&context, method, json!([])).await }
+                    .boxed_local()
+            }))
+            .unwrap_err();
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            (tembra::Code::Unavailable, "wasm_executor"),
+            "{method}: {error}"
+        );
+    }
+    forged.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}

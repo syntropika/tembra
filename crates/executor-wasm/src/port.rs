@@ -374,7 +374,8 @@ impl PortEvents {
                 // End this callback's epoch before the embedding drains its pending requests.
                 self.scope.end_callback();
                 self.done.store(true, Ordering::Release);
-                let result = result.map_err(failure);
+                // A platform port carries the failure's text, not its code.
+                let result = result.map_err(|failed| failure(failed.text()));
                 Some(PortEvent::Complete(result))
             }
             Event::Ingress(event) => Some(PortEvent::Ingress(event)),

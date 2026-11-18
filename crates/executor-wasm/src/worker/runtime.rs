@@ -443,7 +443,7 @@ pub(super) async fn run(
                 match store.data_mut().begin_ingress(&packet, call)? {
                     Ok(named) => packet = named,
                     Err(refusal) => {
-                        let _ = command.events.send(Event::Done(Err(refusal))).await;
+                        let _ = command.events.send(Event::Done(Err(refusal.into()))).await;
                         continue;
                     }
                 }
@@ -512,7 +512,10 @@ pub(super) async fn run(
                 drop(store);
                 return Ok(vec![(command.events, error)]);
             }
-            let _ = command.events.send(Event::Done(result)).await;
+            let _ = command
+                .events
+                .send(Event::Done(result.map_err(super::Failed::Text)))
+                .await;
         }
         Ok::<_, wasmtime::Error>(Vec::new())
     }
