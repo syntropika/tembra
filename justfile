@@ -309,7 +309,7 @@ check-clean-tree:
         exit 1
     fi
 
-# Print the id of a Git tree that holds the working tree as it is: the tracked files with their changes, and the new files that .gitignore does not list.
+# Print the id of a Git tree that holds the working tree as it is: the tracked files with their changes, and the new files that .gitignore does not list, but no nested repository that HEAD does not record.
 _tree:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -318,7 +318,17 @@ _tree:
     trap 'rm -rf "$scratch"' EXIT
     export GIT_INDEX_FILE="$scratch/index"
     git read-tree HEAD
-    git add --all
+    # Git warns about each nested repository it adds, and the next step takes them out again.
+    git add --all 2> "$scratch/warnings" || { cat "$scratch/warnings" >&2; exit 1; }
+    # A nested repository, or a linked worktree, in a directory that .gitignore does not list is added
+    # as a gitlink at its current commit, which another process may move while the parts run. Leave out
+    # the gitlinks that HEAD does not have.
+    git ls-files --stage -z | while IFS= read -r -d '' entry; do
+        path="${entry#*$'\t'}"
+        if [ "${entry%% *}" = 160000 ] && [ "$(git ls-tree HEAD -- "$path" | cut -c1-6)" != 160000 ]; then
+            printf '%s\0' "$path"
+        fi
+    done | git update-index --force-remove -z --stdin
     git write-tree
 
 # Record the working tree before the parts of `ci` run.
