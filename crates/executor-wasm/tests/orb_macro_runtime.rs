@@ -1580,7 +1580,8 @@ fn a_component_build_refuses_a_newtype_only_try_from_makes() {
 /// `tembra` keeps the default features, or from another crate of the build; its component keeps the
 /// bindings' `context` all the same, and answers each call as the guest built without `host` does,
 /// where the native `context` would find no call to read and trap the revision. A `no_std` guest
-/// with `host` links as a component too, on the panic handler of the std the facade links. The
+/// with `host`, or with `contracts` alone, links as a component too, on the panic handler of the
+/// std the facade links. The
 /// host feature fixture is built both ways, std and without, into the fixtures' target directory,
 /// where `just test-orb-macro` built their components.
 #[test]
@@ -1598,6 +1599,7 @@ fn a_wasm32_guest_with_the_host_feature_answers_as_a_component() {
         &["--features", "host"],
         &["--features", "no-std"],
         &["--features", "no-std,host"],
+        &["--features", "no-std,contracts"],
     ]
     .map(|features| {
         let output = std::process::Command::new(env!("CARGO"))
@@ -1667,6 +1669,10 @@ fn a_wasm32_guest_with_the_host_feature_answers_as_a_component() {
     assert_eq!(answers[1], answers[0], "built with `host`");
     assert_eq!(answers[2], answers[0], "built without std");
     assert_eq!(answers[3], answers[0], "built without std, with `host`");
+    assert_eq!(
+        answers[4], answers[0],
+        "built without std, with `contracts`"
+    );
 }
 
 /// The fixtures' target directory, where `just test-orb-macro` built their components, and the

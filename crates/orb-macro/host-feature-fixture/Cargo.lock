@@ -383,6 +383,7 @@ dependencies = [
 name = "tembra"
 version = "0.2.2"
 dependencies = [
+ "tembra-contracts",
  "tembra-orb-macro",
  "tembra-runtime",
  "wit-bindgen",

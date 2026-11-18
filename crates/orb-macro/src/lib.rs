@@ -158,7 +158,7 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
 /// The runtime prelude of a `no_std` component: the allocator and a panic handler that traps, for
 /// the Wasm target. On the host the crate builds with std, so `cargo check` and rust-analyzer
 /// need no Wasm target. The panic handler goes through the facade, named `facade`, which drops it
-/// when the facade links std, with `host`: std's would then be a second.
+/// when the facade links std, with `host` or `contracts`: std's would then be a second.
 fn prelude(facade: &Ident) -> proc_macro2::TokenStream {
     quote! {
         #[cfg(target_arch = "wasm32")]

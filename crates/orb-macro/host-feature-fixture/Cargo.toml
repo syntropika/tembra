@@ -11,8 +11,10 @@ publish = false
 # from another crate of the build: a build for wasm32 is a component all the same, which
 # `executor-wasm/tests/orb_macro_runtime.rs` checks.
 host = ["tembra/host"]
-# The crate without std on wasm32, on the module's freestanding runtime: with `host`, the facade
-# links std, whose panic handler then serves in place of the module's.
+# The facade's `contracts`, which links std without `host`.
+contracts = ["tembra/contracts"]
+# The crate without std on wasm32, on the module's freestanding runtime: with `host` or
+# `contracts`, the facade links std, whose panic handler then serves in place of the module's.
 no-std = ["dep:dlmalloc"]
 
 [dependencies]
