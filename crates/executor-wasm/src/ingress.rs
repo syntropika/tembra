@@ -151,8 +151,12 @@ impl Exchange {
     /// End delivery before the body's end: drop the body, then close the request, so a guest
     /// that sees its request end already finds its response writer's reader gone.
     fn end(&self, delivery: Delivery) {
-        // Recorded under the slot's lock, so a concurrent `respond` sees the end.
-        let mut slot = self.response.lock().expect("ingress response");
+        // Recorded under the slot's lock, so a concurrent `respond` sees the end. A lock poisoned
+        // by a panic still guards the slot: a drop that ends delivery must not panic in turn.
+        let mut slot = self
+            .response
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let body = slot.take();
         let close = self.record(delivery);
         drop(slot);
@@ -378,17 +382,7 @@ impl Drop for ResponseBody {
     /// A body dropped before its end is a disconnect: the guest learns it through its
     /// transmission future and its request body, and its next write is dropped.
     fn drop(&mut self) {
-        let body = self
-            .exchange
-            .response
-            .lock()
-            .ok()
-            .and_then(|mut body| body.take());
-        let close = self.exchange.record(Delivery::Dropped);
-        drop(body);
-        if close {
-            self.exchange.close_request();
-        }
+        self.exchange.end(Delivery::Dropped);
     }
 }
 
@@ -732,5 +726,34 @@ mod tests {
             assert_eq!(*closed.lock().unwrap(), Some(false), "{name}");
             assert!(exchange.request_closed(), "{name}");
         }
+    }
+
+    /// A body dropped after a panic poisoned the slot's lock still ends delivery as a
+    /// disconnect, and its drop does not panic in turn.
+    #[test]
+    fn a_body_dropped_under_a_poisoned_lock_records_the_disconnect() {
+        let exchange = Exchange::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (head, published) = oneshot::channel();
+        IngressCall::publish(
+            &exchange,
+            head,
+            http::Response::new(Tracked(dropped.clone()).boxed_unsync()),
+        );
+        let body = futures::executor::block_on(published)
+            .unwrap()
+            .unwrap()
+            .into_body();
+        let poisoner = exchange.clone();
+        std::thread::spawn(move || {
+            let _slot = poisoner.response.lock().unwrap();
+            panic!("poison the slot");
+        })
+        .join()
+        .unwrap_err();
+        drop(body);
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(*exchange.delivery.borrow(), Some(Delivery::Dropped));
+        assert!(exchange.request_closed());
     }
 }
