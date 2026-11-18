@@ -2,11 +2,13 @@
 //! fixture's Orb builds both ways: `parity::orb(..)` natively, and the component that
 //! `just build-orb-parity` builds from the same crate, which `just test-orb-parity` and acceptance
 //! pass in `TEMBRA_WASM_ORB_PARITY`. The test installs each build in a host of its own, beside the
-//! same native provider of the dials the Orb imports, runs every scenario of `scenarios()` on both,
-//! each in a root of its own, and compares what each step answers: a call's value, or its error's
-//! code and reason, the claims the kernel holds, a state's JSON, or what the provider saw. Each
-//! build declares its services, which the steps name by their interface: a new scenario is a
-//! module of the fixture, or a function of one, and a row of the list.
+//! same native provider of the dials the Orb imports, and compares the services each build
+//! declares, by their identities. It runs every scenario of `scenarios()` on both, each in a root
+//! of its own, and compares what each step answers: a call's value, or its error's code and reason,
+//! the claims the kernel holds, a state's JSON, or what the provider's `hold` saw; and the address
+//! of each object of the provider the step's calls reached, its service, key and principal. The
+//! steps name a service by its interface: a new scenario is a module of the fixture, or a function
+//! of one, and a row of the list.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{
@@ -60,43 +62,58 @@ enum Step {
     Method(usize, &'static str, Value),
     /// Drop the handle the scenario kept at a position, which drops the resource: it answers `null`.
     Drop(usize),
-    /// Call a function of the `main` object of a service, and cancel the call once the provider saw
-    /// the call it made: the result, or the error.
+    /// Call a function of the `main` object of a service, and cancel the call once the provider's
+    /// `hold` started: the result, or the error.
     Cancel(&'static str, &'static str, Value),
     /// The claims the kernel holds beyond those it held when the scenario's root began.
     Claims,
     /// The JSON the kernel keeps for the state of the `main` object of a service.
     State(&'static str),
-    /// What the provider saw since the step that last asked, or since the host started.
+    /// What the provider's `hold` saw since the step that last asked, or since the host started.
     Seen,
 }
 
-/// What a step answered: the boundary's JSON, or an error.
+/// What a step answered, and the address of each object of the provider its calls reached, in
+/// order, with the provider's function each call ran.
 #[derive(Debug)]
-enum Answer {
+struct Answer {
+    outcome: Outcome,
+    reached: Vec<String>,
+}
+
+/// What a step's call or reading gave.
+#[derive(Debug)]
+enum Outcome {
+    /// The boundary's JSON.
     Value(Value),
+    /// An error.
     Error(tembra::Error),
+    /// What the step names and the build lacks: a handle it did not deliver, or a service it does
+    /// not declare. Only the report reads it, through `Debug`.
+    Missing(#[allow(dead_code)] String),
 }
 
 impl Answer {
-    /// Whether two builds answered alike: the same value, or errors of one code and reason. The
-    /// message of an error is the native codec's or the executor's own wording.
+    /// Whether two builds answered alike: the same objects reached, and the same value or errors of
+    /// one code and reason. The message of an error is the native codec's or the executor's own
+    /// wording. A build that lacks what the step names never agrees.
     fn agrees(&self, other: &Answer) -> bool {
-        match (self, other) {
-            (Answer::Value(one), Answer::Value(other)) => one == other,
-            (Answer::Error(one), Answer::Error(other)) => {
-                one.code == other.code && one.reason == other.reason
+        self.reached == other.reached
+            && match (&self.outcome, &other.outcome) {
+                (Outcome::Value(one), Outcome::Value(other)) => one == other,
+                (Outcome::Error(one), Outcome::Error(other)) => {
+                    one.code == other.code && one.reason == other.reason
+                }
+                _ => false,
             }
-            _ => false,
-        }
     }
 }
 
-impl From<tembra::Result<Value>> for Answer {
+impl From<tembra::Result<Value>> for Outcome {
     fn from(result: tembra::Result<Value>) -> Self {
         match result {
-            Ok(value) => Answer::Value(value),
-            Err(error) => Answer::Error(error),
+            Ok(value) => Outcome::Value(value),
+            Err(error) => Outcome::Error(error),
         }
     }
 }
@@ -140,17 +157,20 @@ struct Difference {
 }
 
 impl Difference {
-    /// Whether the two answers of a step differ as marked.
+    /// Whether the two answers of a step differ as marked: they reached the same objects, and
+    /// failed with the codes and reasons of the mark.
     fn explains(&self, native: &Answer, component: &Answer) -> bool {
-        failure(native) == Some(self.native) && failure(component) == Some(self.component)
+        native.reached == component.reached
+            && failure(native) == Some(self.native)
+            && failure(component) == Some(self.component)
     }
 }
 
 /// The code and reason of an answer that is an error.
 fn failure(answer: &Answer) -> Option<(Code, &str)> {
-    match answer {
-        Answer::Error(error) => Some((error.code, error.reason.as_str())),
-        Answer::Value(_) => None,
+    match &answer.outcome {
+        Outcome::Error(error) => Some((error.code, error.reason.as_str())),
+        Outcome::Value(_) | Outcome::Missing(_) => None,
     }
 }
 
@@ -348,8 +368,27 @@ fn scenarios() -> Vec<Scenario> {
     ]
 }
 
-/// What the provider saw, in order.
-type Seen = Rc<RefCell<Vec<String>>>;
+/// What the provider saw, in order, on the host's thread: the object each call reached, which every
+/// step reports, and when each call of `hold` started and why it ended, which `Step::Seen` reads.
+#[derive(Clone, Default)]
+struct Watch {
+    reached: Rc<RefCell<Vec<String>>>,
+    held: Rc<RefCell<Vec<String>>>,
+}
+
+impl Watch {
+    /// Note that a call of `function` reached the object running it, by the object's address.
+    fn reach(&self, function: &str, context: &Context) -> tembra::Result<()> {
+        let address = context.address()?;
+        self.reached.borrow_mut().push(format!(
+            "{function} on {} [{}] of {}",
+            address.service,
+            address.key.join("/"),
+            address.principal
+        ));
+        Ok(())
+    }
+}
 
 /// One dial of the provider: where it stands.
 struct Dial {
@@ -357,9 +396,10 @@ struct Dial {
 }
 
 /// The native provider of the dials, from the package the fixture consumes: each object is a dial
-/// of its own, the key `refused` is refused, and the dial of the key `closed` fails to open. Its
-/// `hold` answers once its call is cancelled, and tells `seen` when it starts and why it ended.
-fn dials(seen: Seen) -> Orb {
+/// of its own, the key `refused` is refused, and the dial of the key `closed` fails to open. Each
+/// call tells `watch` the object it reached, and `hold`, which answers once its call is cancelled,
+/// tells it too when it starts and why it ended.
+fn dials(watch: Watch) -> Orb {
     let wit = format!(
         "{}\nworld provider {{ export dial; }}\n",
         include_str!("../../orb-macro/parity-fixture/consumed/dials.wit")
@@ -371,6 +411,7 @@ fn dials(seen: Seen) -> Orb {
         .orb
         .services
         .remove(0);
+    let (turned, read) = (watch.clone(), watch.clone());
     Orb::new(DIALS, 1).service(
         Service::new(service.name, |declaration| {
             let key = declaration.address()?.key;
@@ -390,36 +431,56 @@ fn dials(seen: Seen) -> Orb {
             })
         })
         .signature(service.signature)
-        .method("turn", |dial, _, (by,): (u32,)| async move {
-            dial.position.set(dial.position.get() + u64::from(by));
-            Ok(dial.position.get())
+        .method("turn", move |dial, context: Context, (by,): (u32,)| {
+            let reached = turned.reach("turn", &context);
+            async move {
+                reached?;
+                dial.position.set(dial.position.get() + u64::from(by));
+                Ok(dial.position.get())
+            }
         })
-        .method("position", |dial, _, _: [Value; 0]| async move {
-            Ok(dial.position.get())
+        .method("position", move |dial, context: Context, _: [Value; 0]| {
+            let reached = read.reach("position", &context);
+            async move {
+                reached?;
+                Ok(dial.position.get())
+            }
         })
         .method("hold", move |dial, context: Context, _: [Value; 0]| {
-            let seen = seen.clone();
+            let reached = watch.reach("hold", &context);
+            let held = watch.held.clone();
             async move {
-                seen.borrow_mut().push("hold started".to_owned());
+                reached?;
+                held.borrow_mut().push("hold started".to_owned());
                 let signal = context.signal();
                 signal.cancelled().await;
                 let reason = signal.check().unwrap_err().reason;
-                seen.borrow_mut().push(format!("hold cancelled: {reason}"));
+                held.borrow_mut().push(format!("hold cancelled: {reason}"));
                 Ok(dial.position.get())
             }
         }),
     )
 }
 
-/// The interface a service implements, by its name: `dialing` for the service
-/// `parity::example:parity/dialing@1.0.0`.
-fn interface(service: &str) -> &str {
-    let (_, interface) = service
+/// The name of an interface, by its identity: `dialing` for `example:parity/dialing@1.0.0`.
+fn interface(identity: &str) -> &str {
+    let (_, interface) = identity
         .rsplit_once('/')
         .expect("a service is named after its interface");
     interface
         .split_once('@')
         .map_or(interface, |(name, _)| name)
+}
+
+/// The outcome of a call, keeping the handles of the resources its result holds, in order, after
+/// those kept before.
+fn kept(result: tembra::Result<Delivered>, handles: &mut Vec<Option<Owned>>) -> Outcome {
+    result
+        .map(|delivered| {
+            handles.extend(delivered.owned.into_iter().map(Some));
+            delivered.value
+        })
+        .into()
 }
 
 /// Wait until `ready` holds, polling again at once: a component's call runs on the thread of its
@@ -438,13 +499,13 @@ async fn until(ready: impl Fn() -> bool) {
 }
 
 /// A host running one build of the Orb beside the provider, with a reference to the `main` object
-/// of each service the build declares, of `alice`, by the service's interface, and what the
-/// provider saw.
+/// of each service the build declares, of `alice`, by the identity of the service's interface,
+/// `example:parity/dialing@1.0.0`, and what the provider saw.
 struct Build {
     name: &'static str,
     pool: LocalPool,
     host: Host,
-    seen: Seen,
+    watch: Watch,
     services: BTreeMap<String, Rc<Reference>>,
 }
 
@@ -453,103 +514,132 @@ impl Build {
     fn new(name: &'static str, orb: Orb) -> Self {
         let mut pool = LocalPool::new();
         let host = Host::new(pool.spawner());
-        let seen = Seen::default();
+        let watch = Watch::default();
         let declared: Vec<String> = orb
             .declaration()
             .services
             .iter()
             .map(|service| service.name.clone())
             .collect();
-        host.install(vec![dials(seen.clone()), orb]).unwrap();
+        host.install(vec![dials(watch.clone()), orb]).unwrap();
         let mut services = BTreeMap::new();
         for service in declared {
             let reference = Rc::new(host.get(&service, vec!["main".into()], "alice").unwrap());
             pool.run_until(reference.ready()).unwrap();
-            services.insert(interface(&service).to_owned(), reference);
+            // The name is `<orb>::<identity>`, and the test gives both builds one Orb name.
+            let identity = service
+                .split_once("::")
+                .map_or(service.as_str(), |(_, identity)| identity);
+            services.insert(identity.to_owned(), reference);
         }
         Self {
             name,
             pool,
             host,
-            seen,
+            watch,
             services,
         }
     }
 
-    /// Run the steps in order in one root of `alice`, and return what each answered.
+    /// Run the steps in order in one root of `alice`, and return what each answered. A step names
+    /// what the build may lack, a handle or a service: it then answers what is missing, and the
+    /// scenario goes on.
     fn run(&mut self, steps: Vec<Step>) -> Vec<Answer> {
         let kernel = self.host.kernel();
         let services = self.services.clone();
-        let seen = self.seen.clone();
+        let watch = self.watch.clone();
         self.pool
             .run_until(self.host.root("alice", move |context| {
                 async move {
-                    let service = |interface: &str| {
-                        services.get(interface).unwrap_or_else(|| {
-                            panic!("the Orb declares no service of the interface `{interface}`")
-                        })
+                    let service = |wanted: &str| {
+                        services
+                            .iter()
+                            .find(|(identity, _)| interface(identity) == wanted)
+                            .map(|(_, reference)| Rc::clone(reference))
+                            .ok_or_else(|| {
+                                Outcome::Missing(format!("no service of the interface `{wanted}`"))
+                            })
                     };
+                    let no_handle = |handle| Outcome::Missing(format!("no handle at {handle}"));
                     let claims = kernel.diagnostics().references;
                     let mut handles: Vec<Option<Owned>> = Vec::new();
                     let mut answers = Vec::new();
                     for step in steps {
-                        let delivered = match step {
-                            Step::Call(interface, function, arguments) => {
-                                service(interface)
-                                    .call_portable::<_, Delivered>(&context, function, arguments)
-                                    .await
-                            }
+                        let outcome = match step {
+                            Step::Call(wanted, function, arguments) => match service(wanted) {
+                                Ok(reference) => {
+                                    let result = reference
+                                        .call_portable::<_, Delivered>(
+                                            &context, function, arguments,
+                                        )
+                                        .await;
+                                    kept(result, &mut handles)
+                                }
+                                Err(missing) => missing,
+                            },
                             Step::Method(handle, function, arguments) => {
-                                handles[handle]
-                                    .as_ref()
-                                    .expect("the scenario holds the handle")
-                                    .call_portable::<_, Delivered>(&context, function, arguments)
-                                    .await
-                            }
-                            Step::Cancel(interface, function, arguments) => {
-                                let saw = seen.borrow().len();
-                                match service(interface)
-                                    .issue_portable::<_, Delivered>(&context, function, arguments)
-                                    .await
-                                {
-                                    Ok((issued, result)) => {
-                                        until(|| seen.borrow().len() > saw).await;
-                                        issued.cancel();
-                                        result.await
-                                    }
-                                    Err(error) => Err(error),
+                                let result = match handles.get(handle).and_then(Option::as_ref) {
+                                    Some(owned) => Some(
+                                        owned
+                                            .call_portable::<_, Delivered>(
+                                                &context, function, arguments,
+                                            )
+                                            .await,
+                                    ),
+                                    None => None,
+                                };
+                                match result {
+                                    Some(result) => kept(result, &mut handles),
+                                    None => no_handle(handle),
                                 }
                             }
                             Step::Drop(handle) => {
-                                handles[handle]
-                                    .take()
-                                    .expect("the scenario holds the handle");
-                                answers.push(Answer::Value(Value::Null));
-                                continue;
+                                match handles.get_mut(handle).and_then(Option::take) {
+                                    Some(owned) => {
+                                        drop(owned);
+                                        Outcome::Value(Value::Null)
+                                    }
+                                    None => no_handle(handle),
+                                }
                             }
+                            Step::Cancel(wanted, function, arguments) => match service(wanted) {
+                                Ok(reference) => {
+                                    let saw = watch.held.borrow().len();
+                                    let result = match reference
+                                        .issue_portable::<_, Delivered>(
+                                            &context, function, arguments,
+                                        )
+                                        .await
+                                    {
+                                        Ok((issued, result)) => {
+                                            until(|| watch.held.borrow().len() > saw).await;
+                                            issued.cancel();
+                                            result.await
+                                        }
+                                        Err(error) => Err(error),
+                                    };
+                                    kept(result, &mut handles)
+                                }
+                                Err(missing) => missing,
+                            },
                             Step::Claims => {
                                 let held = kernel.diagnostics().references as i64 - claims as i64;
-                                answers.push(Answer::Value(json!(held)));
-                                continue;
+                                Outcome::Value(json!(held))
                             }
-                            Step::State(interface) => {
-                                let state = service(interface)
+                            Step::State(wanted) => match service(wanted) {
+                                Ok(reference) => reference
                                     .state::<Value>()
                                     .and_then(|state| state.value())
-                                    .map(|value| (*value).clone());
-                                answers.push(state.into());
-                                continue;
-                            }
-                            Step::Seen => {
-                                answers.push(Answer::Value(json!(seen.take())));
-                                continue;
-                            }
+                                    .map(|value| (*value).clone())
+                                    .into(),
+                                Err(missing) => missing,
+                            },
+                            Step::Seen => Outcome::Value(json!(watch.held.take())),
                         };
-                        let value = delivered.map(|delivered| {
-                            handles.extend(delivered.owned.into_iter().map(Some));
-                            delivered.value
+                        answers.push(Answer {
+                            outcome,
+                            reached: watch.reached.take(),
                         });
-                        answers.push(value.into());
                     }
                     Ok(answers)
                 }
@@ -592,12 +682,14 @@ fn component() -> Vec<u8> {
         .unwrap()
 }
 
-/// The native build and the component of the parity fixture declare the same services and answer
-/// every scenario alike, each step with the same value, or an error of the same code and reason:
-/// the native side of the macro keeps the guarantees a component gives for imports and views,
-/// cancellation, states, WIT resources and failed calls. In a scenario marked with a difference
-/// the builds have today, a step may differ only as marked, and at least one must: the fix that
-/// makes them agree removes the mark.
+/// The native build and the component of the parity fixture declare the services of the same
+/// identities and answer every scenario alike: each step reaches the same objects of the provider,
+/// by service, key and principal, and answers the same value, or an error of the same code and
+/// reason. The native side of the macro keeps the guarantees a component gives for imports and
+/// views, cancellation, states, WIT resources and failed calls. In a scenario marked with a
+/// difference the builds have today, a step may differ only as marked, and at least one must: the
+/// fix that makes them agree removes the mark. Every difference is reported, a handle or a service
+/// one build lacks included, before the test fails.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_PARITY"]
 fn the_native_build_and_the_component_answer_alike() {
@@ -612,12 +704,15 @@ fn the_native_build_and_the_component_answer_alike() {
         .requires(DIAL, DIALS, 1)
         .requires(DIAL_VIEW, DIALS, 1);
     let mut compiled = Build::new("component", engine.load(&artifact, install).unwrap());
-    assert_eq!(
-        native.services.keys().collect::<Vec<_>>(),
-        compiled.services.keys().collect::<Vec<_>>(),
-        "the two builds declare different services"
-    );
     let mut failures = Vec::new();
+    let declared = |build: &Build| build.services.keys().cloned().collect::<Vec<_>>();
+    if declared(&native) != declared(&compiled) {
+        failures.push(format!(
+            "the builds declare different services\n  native {:?}\n  component {:?}",
+            declared(&native),
+            declared(&compiled)
+        ));
+    }
     for scenario in scenarios() {
         let natively = native.run(scenario.steps.clone());
         let as_component = compiled.run(scenario.steps.clone());

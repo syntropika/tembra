@@ -186,13 +186,11 @@ test-orb-macro:
     TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \
         cargo test --locked -p tembra-executor-wasm --test orb_macro_async --test orb_macro_runtime -- --ignored
 
-# Build the parity fixture's Orb as a component into one reusable target directory. Overflow checks
-# are on, as in the test profile of its native build, so an overflow panics in both builds.
+# Build the parity fixture's Orb as a component into one reusable target directory, with the overflow checks of its native tests.
 build-orb-parity target-dir:
     CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true cargo rustc --locked --release --target wasm32-unknown-unknown --crate-type cdylib --manifest-path crates/orb-macro/parity-fixture/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
 
-# Require the same answers from the parity fixture's Orb built natively and as a component, scenario
-# by scenario; acceptance uses the same fixture builder.
+# Require the same answers from the parity fixture's Orb built natively and as a component; acceptance uses the same builder.
 test-orb-parity:
     #!/usr/bin/env bash
     set -euo pipefail
