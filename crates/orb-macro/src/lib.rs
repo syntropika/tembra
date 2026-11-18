@@ -6015,23 +6015,6 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
     })
 }
 
-/// `tokens` with every token at `span`, so rustc reports an error about them there.
-fn respanned(tokens: proc_macro2::TokenStream, span: Span) -> proc_macro2::TokenStream {
-    tokens
-        .into_iter()
-        .map(|mut token| {
-            if let proc_macro2::TokenTree::Group(group) = &token {
-                let mut inner =
-                    proc_macro2::Group::new(group.delimiter(), respanned(group.stream(), span));
-                inner.set_span(span);
-                token = proc_macro2::TokenTree::Group(inner);
-            }
-            token.set_span(span);
-            token
-        })
-        .collect()
-}
-
 /// The Rust side of the states: the kernel's `state-init` callback answering one declaration per
 /// owning service, the accessors on each state type, and the JSON helpers they share, with the
 /// kernel's `read` and `update` of a component, and the native side's in their place where the
@@ -6125,10 +6108,12 @@ fn state_code(
         };
         // The state's `Default`, its initial value, and serde's traits, which keep it as JSON, are
         // the author's: a state without one fails here, with rustc's error on the state's name.
+        // The state is `Self`, so a path rustc refuses, through a private module, is reported
+        // once, on the impl.
         let span = state.ident.span();
-        let named = respanned(path.clone(), span);
         let assertion = quote_spanned! {span=>
-            const _: () = {
+            #[allow(dead_code)]
+            const __TEMBRA_STATE: () = {
                 fn state<T>()
                 where
                     T: ::core::default::Default
@@ -6136,12 +6121,12 @@ fn state_code(
                         + ::serde::de::DeserializeOwned,
                 {
                 }
-                let _ = state::<#named>;
+                let _ = state::<Self>;
             };
         };
         quote! {
-            #assertion
             impl #path {
+                #assertion
                 #[doc = #read_doc]
                 pub fn read() -> Self {
                     __tembra_state::read()

@@ -4397,7 +4397,8 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
 
 /// A state's `Default`, its initial value, and serde's traits, which keep it as JSON, are the
 /// author's: the macro writes no `Default` and no serde derive, only an assertion that the state
-/// implements the three traits, on the state's name, where rustc reports a missing one. A state
+/// implements the three traits, on the state's name, where rustc reports a missing one; it names
+/// the state as `Self` in the state's impl, so a path rustc refuses is reported once. A state
 /// that enters the WIT stays the author's struct, with its derive of `Default`, under another name
 /// too, `SmartDefault` or `Derivative` with `#[derivative(Default)]`. An impl the author writes
 /// under `#[cfg(..)]` is the compiler's to evaluate, so the macro refuses none.
@@ -4418,7 +4419,7 @@ fn a_states_default_and_serde_derives_are_the_authors() {
     };
     let asserted = |path: &str| {
         format!(
-            "const _ : () = {{ fn state < T > () where T : :: core :: default :: Default + :: serde :: Serialize + :: serde :: de :: DeserializeOwned , {{ }} let _ = state :: < {path} > ; }} ;"
+            "impl {path} {{ # [allow (dead_code)] const __TEMBRA_STATE : () = {{ fn state < T > () where T : :: core :: default :: Default + :: serde :: Serialize + :: serde :: de :: DeserializeOwned , {{ }} let _ = state :: < Self > ; }} ;"
         )
     };
     let written = "impl :: core :: default :: Default for";

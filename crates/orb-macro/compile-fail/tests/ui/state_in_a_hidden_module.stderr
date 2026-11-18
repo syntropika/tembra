@@ -12,15 +12,3 @@ note: the module `books` is defined here
   |
 4 |         mod books {
   |             ^^^^^
-
-error[E0603]: module `books` is private
- --> tests/ui/state_in_a_hidden_module.rs:7:24
-  |
-7 |             pub struct Balance {
-  |                        ^^^^^^^ private module
-  |
-note: the module `books` is defined here
- --> tests/ui/state_in_a_hidden_module.rs:4:13
-  |
-4 |         mod books {
-  |             ^^^^^
