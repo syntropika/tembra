@@ -658,9 +658,8 @@ The objects of a view carry data: an interface with a resource, or a function ta
 returning a resource handle, a stream or a future, is not imported by key, nor one with a function
 carrying data the runtime refuses in a signature, an option of an option, a map or a list of a
 fixed length. Nor is an interface with a function `handle`, `take-handle` or `from-handle`, which
-every object's bindings define for its handle, the compiler reporting the name defined twice, or
-with a parameter `self`, which names a method's object. A plain import of the
-same interface may stand next to the keyed one, re-exported under the interface's name. An
+every object's bindings define for its handle, an error on the import, or with a parameter `self`,
+which names a method's object. A plain import of the same interface may stand next to the keyed one, re-exported under the interface's name. An
 interface the module implements may be imported by key, and only so: a proxy serving the interface
 reaches the objects of other providers through the view, and a plain import of it is an error on
 the import, since a world that imports the interface itself and exports it is a hook, which

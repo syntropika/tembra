@@ -308,7 +308,24 @@ fn an_interface_without_a_view_is_refused() {
             "resource cursor; record tally { count: u32 } read: func() -> tally;",
             "has the resource `cursor`, and the objects of a view carry data, so an interface with a resource is not imported by key",
         ),
-        // A method takes its object as `self`, which WIT does not tell from `SELF`.
+        // The bindings of every object have their own methods for its handle, which rustc would
+        // report as defined twice on the whole attribute, naming neither the import nor the
+        // function; and a method takes its object as `self`, which WIT does not tell from `SELF`.
+        (
+            "handle-method",
+            "handle: func() -> u32;",
+            "`handle` would be the method `handle` of the objects a keyed import reaches, which their bindings define already for the object's handle",
+        ),
+        (
+            "take-handle",
+            "take-handle: func() -> u32;",
+            "`take-handle` would be the method `take_handle` of the objects a keyed import reaches",
+        ),
+        (
+            "from-handle",
+            "from-handle: func(handle: u32) -> u32;",
+            "`from-handle` would be the method `from_handle` of the objects a keyed import reaches",
+        ),
         (
             "self",
             "add: func(self: u32) -> u32;",

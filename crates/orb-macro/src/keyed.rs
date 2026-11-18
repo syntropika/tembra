@@ -20,6 +20,9 @@ use wit_parser::{FunctionKind, Resolve, Type, TypeDefKind, TypeOwner};
 /// The acquisition function of every view.
 const GET: &str = "get";
 
+/// The methods `wit-bindgen` gives every imported resource, the view's included, for its handle.
+const HANDLE_METHODS: [&str; 3] = ["handle", "take_handle", "from_handle"];
+
 /// How the attribute writes a keyed import, for the errors.
 const USAGE: &str = "an interface imported by key is written import(\"ns:name/interface@version\", keyed); import = \"ns:name/interface@version\" reaches the provider's main object";
 
@@ -158,6 +161,15 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
                 ));
             }
         };
+        // rustc would report the name defined twice on the whole attribute, naming neither the
+        // import nor the function.
+        let method = crate::rust_ident(&function.name).to_string();
+        if HANDLE_METHODS.contains(&method.as_str()) {
+            return Err(format!(
+                "{target} cannot be imported by key: `{}` would be the method `{method}` of the objects a keyed import reaches, which their bindings define already for the object's handle",
+                function.name
+            ));
+        }
         // A method takes its object as `self`, and WIT tells names apart by neither case nor
         // dashes: `SELF` is `self` too.
         if let Some(param) = function

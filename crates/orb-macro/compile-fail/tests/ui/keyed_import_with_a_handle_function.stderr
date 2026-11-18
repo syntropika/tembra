@@ -1,44 +1,5 @@
-error[E0592]: duplicate definitions with name `handle`
- --> tests/ui/keyed_import_with_a_handle_function.rs:1:1
+error: example:counters/handles@1.0.0 cannot be imported by key: `handle` would be the method `handle` of the objects a keyed import reaches, which their bindings define already for the object's handle
+ --> tests/ui/keyed_import_with_a_handle_function.rs:4:12
   |
-1 | / #[tembra::orb(
-2 | |     package = "example:router@1.0.0",
-3 | |     wit = "consumed/counters",
-4 | |     import("example:counters/handles@1.0.0", keyed)
-5 | | )]
-  | |  ^
-  | |  |
-  | |__duplicate definitions for `handle`
-  |    other definition for `handle`
-  |
-  = note: this error originates in the macro `::tembra::__wit_bindgen::generate` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0034]: multiple applicable items in scope
- --> tests/ui/keyed_import_with_a_handle_function.rs:1:1
-  |
-1 | / #[tembra::orb(
-2 | |     package = "example:router@1.0.0",
-3 | |     wit = "consumed/counters",
-4 | |     import("example:counters/handles@1.0.0", keyed)
-5 | | )]
-  | |__^ multiple `handle` found
-  |
-note: candidate #1 is defined in an impl for the type `Handles`
- --> tests/ui/keyed_import_with_a_handle_function.rs:1:1
-  |
-1 | / #[tembra::orb(
-2 | |     package = "example:router@1.0.0",
-3 | |     wit = "consumed/counters",
-4 | |     import("example:counters/handles@1.0.0", keyed)
-5 | | )]
-  | |__^
-note: candidate #2 is defined in an impl for the type `Handles`
- --> tests/ui/keyed_import_with_a_handle_function.rs:1:1
-  |
-1 | / #[tembra::orb(
-2 | |     package = "example:router@1.0.0",
-3 | |     wit = "consumed/counters",
-4 | |     import("example:counters/handles@1.0.0", keyed)
-5 | | )]
-  | |__^
-  = note: this error originates in the macro `::tembra::__wit_bindgen::generate` (in Nightly builds, run with -Z macro-backtrace for more info)
+4 |     import("example:counters/handles@1.0.0", keyed)
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
