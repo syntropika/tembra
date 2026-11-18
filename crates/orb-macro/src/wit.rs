@@ -1830,8 +1830,8 @@ pub(crate) enum Held {
     Float(&'static str),
     /// A `result`.
     Result,
-    /// A record, a variant, an enum or a flags of the Orb's own package, by its WIT name: its
-    /// generated type, or the author's flags struct, implements what the macro knows of it.
+    /// A record, a variant or an enum of the Orb's own package, by its WIT name: its generated
+    /// type implements what the macro knows of it.
     Own(String),
     /// A record, a variant, an enum or a flags of a consumed package: the name the bindings give it,
     /// its kind with an article, for the errors, the interface defining it, and whether it holds a
@@ -2049,8 +2049,7 @@ pub(crate) fn ignored_name(name: &str) -> String {
 /// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: what
 /// is no data, as `keyed::no_data_itself` finds it, a resource handle, a stream, a future or an
 /// error context, and what `unwritable_itself` finds, an array longer than `serde`'s or a flags
-/// type, but a flags type of `own`, the Orb's package, whose flags types are the author's structs;
-/// and, `stateless`, in an Orb without a state, where the bindings derive serde's traits on no
+/// type; and, `stateless`, in an Orb without a state, where the bindings derive serde's traits on no
 /// type, a record, a variant or an enum of another package too.
 fn holds_unserializable(
     resolve: &Resolve,
@@ -2065,7 +2064,6 @@ fn holds_unserializable(
     anywhere(resolve, ty, |ty| {
         if let wit_parser::Type::Id(id) = ty {
             match &resolve.types[id].kind {
-                TypeDefKind::Flags(_) if !foreign(id) => return None,
                 TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
                     if stateless && foreign(id) =>
                 {

@@ -120,7 +120,6 @@ starts with this explicit freestanding mode.
 | a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                           |
 | an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                                                                         |
 | a case with named fields, `Refused { reason: String }`, of such an enum     | a `record` of its own, `<enum>-<case>`, the case's payload; the enum stays the author's, converted to and from the bindings' type, and so does every type holding it |
-| a struct of `bool` fields with `#[flags]`, when a service method uses it    | a `flags`, a flag per field in kebab-case; the struct stays the author's, which the bindings take as it is                                                           |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                         |
 | free JSON, `serde_json::Value`, by that path                                | a `string` that holds its JSON text, written and read at the boundary; a type holding it stays the author's, converted to and from the bindings' type                |
 | a newtype, a tuple struct of one field, `struct Id(String)`                 | its field's type, `string`: the struct stays the author's, written as its field, read back through `From`, natively `TryFrom`; a type holding it stays the author's  |
@@ -970,73 +969,6 @@ errors too; so is a derived function returning an imported interface's handle, i
 record or a variant of the module, or another service's resource, which the runtime returns only
 from the interface that defines it.
 
-## Flags
-
-A struct of `bool` fields marked `#[flags]` is a WIT `flags`: each field is a flag, in declaration
-order, named in kebab-case. Unlike a record, the struct is not replaced by the type the bindings
-generate, a bitflags type with constants where the struct has fields: `wit-bindgen`'s `with` option
-maps the WIT type onto the author's struct, so the bindings' functions, records, variants and
-containers take and return the struct itself, with no conversion.
-
-```rust
-/// What a holder may do with a document.
-#[flags]
-#[derive(Default, PartialEq)]
-pub struct Access { pub read: bool, pub write: bool, pub share: bool }
-
-/// The access granted to someone.
-pub struct Grant { pub who: String, pub access: Access }
-
-impl Permits {
-    /// The access with exactly the flags `access` lacks.
-    pub fn invert(access: Access) -> Access { /* ... */ }
-    /// The flags any of the grants sets.
-    pub fn merged(grants: Vec<Grant>) -> Access {
-        grants.iter().fold(Access::default(), |all, grant| all | grant.access)
-    }
-}
-```
-
-```wit
-interface permits {
-  /// What a holder may do with a document.
-  flags access {
-    read,
-    write,
-    share,
-  }
-  record grant {
-    who: string,
-    access: access,
-  }
-  invert: func(access: access) -> access;
-  merged: func(grants: list<grant>) -> access;
-}
-```
-
-The macro gives the struct what the bindings call on it, as `wit-bindgen` 0.63 lowers and lifts a
-flags: the functions `empty()`, `bits()` and `from_bits_retain(bits)`, hidden from the
-documentation, and `BitOr`, the union of two values, which the author's code may use too. These
-names are the bindings', so a function of one of them in an `impl` block of the struct, or the
-author's own `BitOr` of the struct with itself, `BitOr`, `BitOr<Self>` or `BitOr<T>` for a type
-parameter `T`, is a compile error, in any module of the Orb, naming the struct by its path or by a
-name a `use` brings in; a `BitOr` with another right-hand type, `BitOr<u32>`, does not overlap and
-stays. The macro also derives `Clone`, `Copy` and `Debug`, which
-a generated record or variant holding the struct needs of it, and, in an Orb with a state, serde's
-`Serialize` and `Deserialize`, so a state can hold the struct, directly or in a record; each unless
-the author derives or implements it. A state's JSON holds every field of the struct,
-`{"read": true, "write": false, "share": false}`, where the portable boundary spells a flags value
-as an object of its set flags in camelCase, `{"read": true}`, a flag left out being unset.
-
-A flags holds one to 32 flags, as the component model rules, and its struct takes no generic
-parameter; a flags struct of a sub-module is visible to the Orb module, as are the modules between
-them, since the bindings name it from there through each, as the next section says. A derived
-hook's input holds no flags: the bindings name a hook's types from its import module and from its
-export module, at two depths, and the macro maps a flags onto the author's struct through one path.
-The macro reads the struct before the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: the
-struct or a field under `#[cfg(..)]` and a derive under `#[cfg_attr(..)]` are compile errors. A
-struct marked `#[flags]` that no function uses stays ordinary Rust.
-
 ## Organizing the module in sub-modules
 
 The Orb module may hold sub-modules, written inline; the macro reads them as part of the Orb and
@@ -1689,17 +1621,14 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    sharing the name of one, in another interface or package, takes the derives by its full name
    in `additional_type_attributes`. With derives on the types that enter the WIT, also `additional_type_attributes` and
    `additional_member_attributes`, which hand them to the generated types with the helper
-   attributes they read. With a `#[flags]` struct, also `with`, which maps each flags type onto
-   the author's struct;
+   attributes they read;
 5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
    generated types with the same names, public fields and derives, so the author's functions and
    the generated traits share one type, and each derive of such a type is imported again under no
    name, `use EnumIter as _;`, where the type was written, so the imports it names stay used;
    `pub use exports::...::guard;` for each contributed hook and each
    implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
-6. the author's items, unchanged, but for each `#[flags]` struct that enters the WIT the derives
-   it lacks, `Clone`, `Copy`, `Debug` and, with a state, serde's, and the functions its bindings
-   call on it, `empty`, `bits`, `from_bits_retain` and `BitOr`;
+6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    but that of a service its `#[create]` builds, by forwarding to the author's functions, hook
    callbacks and the kernel's `state-init` and
@@ -1775,10 +1704,9 @@ the version whose rules the macro follows, and the generated code reaches it the
   crate's own. JSON holds no NaN or infinite float, so a state holding one cannot be stored, and
   the JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles, so an integer beyond
   ±2^53 in a state loses precision there.
-- Types: records, enums, variants, flags and the scalar, string, list, option, result and tuple
-  types; 64-bit integers cross the boundary exactly. A flags is a `#[flags]` struct of one to 32
-  `bool` fields; its functions `empty`, `bits` and `from_bits_retain` and its `BitOr` are the
-  macro's, for its bindings, and a derived hook's input holds none. A consumed interface's data
+- Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
+  64-bit integers cross the boundary exactly. A struct of `bool` fields is a record; a `flags`
+  enters only as the type of a consumed interface. A consumed interface's data
   type, named through its module, crosses as the consumed package's own type, see
   [the types of a consumed interface](#the-types-of-a-consumed-interface). A `resource` is a
   `#[wit_resource]` struct or the handle of an imported interface. A derived function takes either
@@ -1811,8 +1739,7 @@ the version whose rules the macro follows, and the generated code reaches it the
   or a list, `Eq`, `Ord` or `Hash` on one holding an `f32` or an `f64`, and `Default` on a record
   holding a `Result`. A handle, a string or a list held through a type of the module or a consumed
   type counts the same, unless the macro sees the trait implemented for that type: by the bindings,
-  by its own derives, by an `impl` of the Orb's modules, by the macro for a state's `Default` or a
-  flags struct's derives. A trait such a type lacks otherwise, `PartialEq` on a record holding a
+  by its own derives, by an `impl` of the Orb's modules, by the macro for a state's `Default`. A trait such a type lacks otherwise, `PartialEq` on a record holding a
   `Spot` that derives none, or holding a consumed record, which its bindings give `Debug`, `Clone`
   and `Copy` only, as [the types of a consumed interface](#the-types-of-a-consumed-interface)
   says, is left to the author, who may implement it for the type by hand anywhere in the crate,
@@ -1868,11 +1795,11 @@ the version whose rules the macro follows, and the generated code reaches it the
   may reach it, as it may hold free JSON or a newtype: the bindings hold a hook's types twice, in
   its export and in its import, and the author's type converts to and from each. Another type or a
   function of the interface whose WIT name is the record's is a compile error.
-- The macro reads a type that enters the WIT, a flags struct included, before the compiler
+- The macro reads a type that enters the WIT before the compiler
   evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`. The type, a field, a case or a case's payload under
   `#[cfg(..)]`, which the WIT would hold in every configuration, is a compile error, and so is a
   `#[cfg_attr(..)]` wrapping a derive, a helper attribute or a `#[cfg(..)]`, which would come and
-  go beside what the macro writes, on a flags struct or a type the generated type replaces; a type
+  go beside what the macro writes, on a type the generated type replaces; a type
   the macro converts keeps its attributes. One wrapping only Rust's own attributes other than
   `derive` and `cfg`, such as `#[cfg_attr(test, allow(dead_code))]`, `doc` or `deprecated`, changes
   nothing the macro writes.

@@ -463,7 +463,8 @@ fn numbers_cross_as_the_contract_has_them() {
 
 /// A local caller passes and gets the module's own types: the record and the enum the bindings
 /// generate, the author's enum with a case with named fields and the record holding it, which the
-/// macro keeps, and the author's flags. A `Result` is a value, and so is an empty side of one.
+/// macro keeps, and a record of `bool` fields. A `Result` is a value, and so is an empty side of
+/// one.
 #[test]
 fn local_calls_move_the_module_types() {
     with_main(PLOTTER, |plotter, context| {
@@ -587,8 +588,7 @@ fn local_calls_move_the_module_types() {
 /// both ways: a record as an object of lowerCamelCase fields, 64-bit integers as exact numbers, an
 /// enum as the WIT name of its case, a variant and a `Result` as `{tag, val}`, without `val` for
 /// a case or a side that carries nothing, the record of a case with named fields as an object, an
-/// option as `null` or the value, and a flags as an object of the flags set, which reads a flag
-/// left out, or `false`, as unset.
+/// option as `null` or the value.
 #[test]
 fn portable_calls_write_what_the_contract_accepts() {
     with_main(PLOTTER, |plotter, context| {
@@ -652,13 +652,13 @@ fn portable_calls_write_what_the_contract_accepts() {
                     "redrawn",
                     json!([{
                         "shape": { "tag": "rect", "val": { "width": 1, "height": 2 } },
-                        "pen": { "filled": true }
+                        "pen": { "filled": true, "dashedLine": false }
                     }, 3])
                 )
                 .await?,
                 json!({
                     "shape": { "tag": "rect", "val": { "width": 3, "height": 6 } },
-                    "pen": { "dashedLine": true }
+                    "pen": { "filled": false, "dashedLine": true }
                 })
             );
             assert_eq!(
@@ -670,7 +670,7 @@ fn portable_calls_write_what_the_contract_accepts() {
                     }, 2])
                 )
                 .await?,
-                json!({ "shape": { "tag": "dot" }, "pen": { "filled": true } })
+                json!({ "shape": { "tag": "dot" }, "pen": { "filled": true, "dashedLine": false } })
             );
             assert_eq!(
                 call(
@@ -706,8 +706,7 @@ fn portable_calls_write_what_the_contract_accepts() {
 /// What the boundary's JSON does not spell fails the call as its arguments, before the method
 /// runs, and the contract refuses it too: a record with a field missing or one more, an enum case
 /// or a variant tag the WIT does not name, serde's spellings of them, a payload where the case
-/// carries none or none where it carries one, and a flag the WIT does not name or that is no
-/// boolean.
+/// carries none or none where it carries one.
 #[test]
 fn what_the_contract_refuses_fails_as_arguments() {
     with_main(PLOTTER, |plotter, context| {
@@ -771,18 +770,8 @@ fn what_the_contract_refuses_fails_as_arguments() {
                 ),
                 (
                     "redrawn",
-                    json!([{ "shape": { "tag": "dot" }, "pen": { "bold": true } }, 1]),
-                    "unknown flag `bold`",
-                ),
-                (
-                    "redrawn",
-                    json!([{ "shape": { "tag": "dot" }, "pen": { "dashed_line": true } }, 1]),
-                    "unknown flag `dashed_line`",
-                ),
-                (
-                    "redrawn",
-                    json!([{ "shape": { "tag": "dot" }, "pen": { "filled": 1 } }, 1]),
-                    "expected the flag `filled` as a boolean",
+                    json!([{ "shape": { "tag": "dot" }, "pen": { "filled": true, "dashed_line": true } }, 1]),
+                    "missing the field `dashedLine`",
                 ),
             ] {
                 assert!(

@@ -154,7 +154,7 @@ struct Guest {
 /// as for any compiled component, and requires four Orbs: the provider of the keyed import's view
 /// and of the plain import, the provider of the texts import, the keeper of the shelves the Orb
 /// reaches by key, and the keeper of the ledger it imports and never calls, whose interface has a
-/// resource and so a provider. The WIT holds the author's flags and `use`s the consumed packages'
+/// resource and so a provider. The WIT holds the author's records and `use`s the consumed packages'
 /// records as they define them: `readings` the tally of the imported interface, `library` and
 /// `lending` the book and the topic of the shelf the Orb implements, which its world imports only
 /// through the shelf view's `use`, `speller` the builder of the texts, in a record of the module.
@@ -217,7 +217,7 @@ fn guests() -> [Guest; 2] {
         assert_eq!(required, [BUILDERS, COUNTERS, LEDGER, SHELVES], "{name}");
         let words: String = wit.split_whitespace().collect();
         for expected in [
-            "flagsaccess{read,write,share,}",
+            "recordaccess{read:bool,write:bool,share:bool,}",
             "interfacereadings{useexample:counters/counter@1.0.0.{tally};",
             "interfacelibrary{useexample:shelves/shelf@1.0.0.{book,topic};",
             "interfacespeller{useexample:texts/texts@1.0.0.{builder};",
@@ -957,11 +957,10 @@ fn tally(pool: &mut LocalPool, host: &Host, engine: &Engine, name: &str) {
     tallies.release().unwrap();
 }
 
-/// Drive the permits of the Orb `name`. A flags value, the author's struct of `bool` fields,
-/// crosses the boundary both ways: as a parameter and a result, inside a record, a list and an
-/// option, and in a state the kernel keeps as JSON. It is an object of its set flags on the
-/// portable boundary, a flag left out unset; the state's JSON is serde's, every field of the
-/// struct.
+/// Drive the permits of the Orb `name`. A record of `bool` fields crosses the boundary both ways:
+/// as a parameter and a result, inside a record, a list and an option, and in a state the kernel
+/// keeps as JSON. It is an object of every field on the portable boundary, as serde writes it in
+/// the state.
 fn permit(pool: &mut LocalPool, host: &Host, name: &str) {
     let permits = Rc::new(
         host.get(
@@ -976,48 +975,44 @@ fn permit(pool: &mut LocalPool, host: &Host, name: &str) {
     let call = |pool: &mut LocalPool, method: &'static str, arguments: Value| {
         counting_call(pool, host, &permits, "alice", method, arguments)
     };
+    let access = |read: bool, write: bool, share: bool| json!({"read": read, "write": write, "share": share});
     assert_eq!(
         *state.value().unwrap(),
-        json!({"last": {"read": false, "write": false, "share": false}, "grants": 0}),
+        json!({"last": access(false, false, false), "grants": 0}),
         "{name}"
     );
     assert_eq!(
-        call(pool, "invert", json!([{"read": true, "share": true}])),
-        json!({"write": true}),
+        call(pool, "invert", json!([access(true, false, true)])),
+        access(false, true, false),
         "{name}"
     );
     assert_eq!(
-        call(pool, "invert", json!([{}])),
-        json!({"read": true, "write": true, "share": true}),
-        "{name}"
-    );
-    assert_eq!(
-        call(pool, "give", json!(["ada", {"write": true, "share": true}])),
-        json!({"who": "ada", "access": {"write": true, "share": true}}),
+        call(pool, "give", json!(["ada", access(false, true, true)])),
+        json!({"who": "ada", "access": access(false, true, true)}),
         "{name}"
     );
     assert_eq!(
         *state.value().unwrap(),
-        json!({"last": {"read": false, "write": true, "share": true}, "grants": 1}),
+        json!({"last": access(false, true, true), "grants": 1}),
         "{name}"
     );
     assert_eq!(
         call(pool, "kept", json!([])),
-        json!({"last": {"write": true, "share": true}, "grants": 1}),
+        json!({"last": access(false, true, true), "grants": 1}),
         "{name}"
     );
     let grants = json!([
-        {"who": "ada", "access": {"read": true}},
-        {"who": "bob", "access": {"share": true}},
+        {"who": "ada", "access": access(true, false, false)},
+        {"who": "bob", "access": access(false, false, true)},
     ]);
     assert_eq!(
         call(pool, "merged", json!([grants, null])),
-        json!({"read": true, "share": true}),
+        access(true, false, true),
         "{name}"
     );
     assert_eq!(
-        call(pool, "merged", json!([[], {"write": true}])),
-        json!({"write": true}),
+        call(pool, "merged", json!([[], access(false, true, false)])),
+        access(false, true, false),
         "{name}"
     );
     permits.release().unwrap();
@@ -1831,8 +1826,8 @@ fn ready(pool: &mut LocalPool, host: &Host, name: &str) -> Rc<Reference> {
 
 /// Names that are keywords of WIT, in a component build, std and freestanding, and natively: the
 /// module `list` of the `keywords` feature is the world `%list`, whose contract `cargo tembra
-/// build` writes to `contract/%list.wit`, its method `record` is `%record` and its flag `r#type`
-/// is `%type`. The component answers the method under its WIT name, and the flag crosses both
+/// build` writes to `contract/%list.wit`, its method `record` is `%record` and its field `type_`
+/// is `%type`. The component answers the method under its WIT name, and the field crosses both
 /// ways, `type` in the boundary's JSON; so does the module's `orb()` in the fixture's native test.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
@@ -1844,7 +1839,7 @@ fn names_that_are_wit_keywords_answer_both_ways() {
         let (words, text) = (words(&module), module.text());
         for expected in [
             "world%list{exportwords;}",
-            "flagsmarks{bold,%type,}",
+            "recordmarks{bold:bool,%type:bool,}",
             "%record:func(word:string,marks:marks)->marks;",
         ] {
             assert!(words.contains(expected), "{features}: {expected}\n{text}");
@@ -1857,16 +1852,20 @@ fn names_that_are_wit_keywords_answer_both_ways() {
             counting_call(&mut pool, &host, &reference, "alice", "record", arguments)
         };
         assert_eq!(
-            record(json!(["List", {"bold": true}])),
+            record(json!(["List", {"bold": true, "type": false}])),
             json!({"bold": true, "type": true}),
             "{features}"
         );
         assert_eq!(
-            record(json!(["list", {"type": true}])),
-            json!({"type": true}),
+            record(json!(["list", {"bold": false, "type": true}])),
+            json!({"bold": false, "type": true}),
             "{features}"
         );
-        assert_eq!(record(json!(["list", {}])), json!({}), "{features}");
+        assert_eq!(
+            record(json!(["list", {"bold": false, "type": false}])),
+            json!({"bold": false, "type": false}),
+            "{features}"
+        );
         reference.release().unwrap();
         pool.run_until(host.close()).unwrap();
         assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());

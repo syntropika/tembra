@@ -2284,9 +2284,8 @@ fn a_derived_function_takes_an_imported_handle() {
 
 const PERMITS: &str = "mod office {
     /// What a holder may do.
-    #[flags]
-    #[derive(Default, PartialEq, Clone)]
-    pub struct Access { pub read: bool, pub write: bool, pub r#type: bool }
+    #[derive(Default, PartialEq)]
+    pub struct Access { pub read: bool, pub write: bool, pub share: bool }
     pub struct Grant { pub who: String, pub access: Access }
     #[service]
     pub struct Permits;
@@ -2296,278 +2295,36 @@ const PERMITS: &str = "mod office {
     }
 }";
 
-/// A struct of `bool` fields marked `#[flags]` is a WIT `flags`, a flag per field in order, and
-/// stays the author's: the bindings take it through `with`, so nothing re-exports a generated type
-/// in its place, and the macro gives it what the bindings call on it, the derives a generated
-/// record holding it needs, and none the author wrote twice.
+/// A struct of `bool` fields is a record like any struct with named fields: the macro has no WIT
+/// `flags` of its own, so the bindings take no type through `with` and the author's struct gets no
+/// bit functions.
 #[test]
-fn a_flags_struct_is_a_wit_flags_the_author_keeps() {
+fn a_struct_of_bool_fields_is_a_record() {
     let module = expanded("example:office@1.0.0", PERMITS);
     let text = resolved(&module);
     for expected in [
-        "  /// What a holder may do.\n  flags access {\n    read,\n    write,\n    %type,\n  }\n",
+        "  /// What a holder may do.\n  record access {\n    read: bool,\n    write: bool,\n    share: bool,\n  }\n",
         "  record grant {\n    who: string,\n    access: access,\n  }\n",
         "  invert: func(access: access) -> access;\n",
         "  merged: func(grants: list<grant>, extra: option<access>) -> grant;\n",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
+    assert!(!text.contains("flags"), "{text}");
     let generated = tokens(&module);
-    for expected in [
-        "with : { \"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: Access } ,",
-        "pub use exports :: example :: office :: permits :: { Grant } ;",
-        "# [derive (Default , PartialEq , Clone)] # [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access",
-        "pub const fn empty () -> Self { Self { read : false , write : false , r#type : false } }",
-        "pub const fn bits (& self) -> u32 { (self . read as u32) | ((self . write as u32) << 1) | ((self . r#type as u32) << 2) }",
-        "pub const fn from_bits_retain (bits : u32) -> Self { Self { read : (bits & 1) != 0 , write : (bits & 2) != 0 , r#type : (bits & 4) != 0 } }",
-        "impl :: core :: ops :: BitOr for Access",
-        "Self { read : self . read | other . read , write : self . write | other . write , r#type : self . r#type | other . r#type }",
-        "fn invert (access : Access) -> Access { Permits :: invert (access) }",
-    ] {
-        assert!(generated.contains(expected), "{expected}\n{generated}");
+    for unexpected in ["with :", "from_bits_retain", "BitOr"] {
+        assert!(!generated.contains(unexpected), "{unexpected}\n{generated}");
     }
-    // A trait the author implements by hand is not derived again.
-    let module = expanded(
-        "example:office@1.0.0",
-        &PERMITS.replace(
-            "pub struct Grant",
-            "impl core::fmt::Debug for Access {
-                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { Ok(()) }
-            }
-            pub struct Grant",
-        ),
-    );
-    assert!(
-        tokens(&module).contains("# [derive (:: core :: marker :: Copy)] pub struct Access"),
-        "{}",
-        tokens(&module)
-    );
-    // Nor is a trait a derive implements under another name, as `#[educe(..)]` names it.
-    let module = expanded(
-        "example:office@1.0.0",
-        &PERMITS.replace(
-            "#[derive(Default, PartialEq, Clone)]",
-            "#[derive(Default, PartialEq, educe::Educe)] #[educe(Clone, Debug(name(Permit)))]",
-        ),
-    );
-    assert!(
-        tokens(&module).contains("# [derive (:: core :: marker :: Copy)] pub struct Access"),
-        "{}",
-        tokens(&module)
-    );
-}
-
-/// In an Orb with a state the flags derive serde's traits, and a record holding the module's own
-/// flags is no longer left out of the derives the state makes the bindings add: the flags are
-/// the author's struct, serde's now.
-#[test]
-fn a_flags_struct_is_serde_in_an_orb_with_a_state() {
-    let module = expanded(
-        "example:office@1.0.0",
-        &PERMITS.replace(
-            "pub struct Grant",
-            "#[state(service = Permits)]
-            pub struct Granted { pub last: Access, pub grants: u32 }
-            pub struct Grant",
-        ),
-    );
-    let generated = tokens(&module);
-    assert!(
-        generated.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug , :: serde :: Serialize , :: serde :: Deserialize)] pub struct Access"),
-        "{generated}"
-    );
     assert!(
         generated
-            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize] ,"),
-        "{generated}"
-    );
-    assert!(
-        !generated.contains("additional_derives_ignore"),
-        "{generated}"
-    );
-}
-
-/// A flags struct of a sub-module is named from its module, and must be visible to the Orb module;
-/// one no function uses stays ordinary Rust, without the functions the bindings call.
-#[test]
-fn a_flags_struct_of_a_sub_module_is_named_from_its_module() {
-    let module = expanded(
-        "example:office@1.0.0",
-        "mod office {
-            pub mod rights {
-                #[flags]
-                pub struct Access { pub read: bool }
-                #[flags]
-                pub struct Unused { pub seen: bool }
-                #[service]
-                pub struct Permits;
-                impl Permits { pub fn check(access: Access) -> bool { access.read } }
-            }
-        }",
-    );
-    let generated = tokens(&module);
-    assert!(
-        generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: rights :: Access"),
-        "{generated}"
-    );
-    assert!(
-        generated.contains("pub struct Unused { pub seen : bool }"),
-        "{generated}"
-    );
-    assert!(!generated.contains("for Unused"), "{generated}");
-    let error = refused(
-        "example:office@1.0.0",
-        "mod office {
-            pub mod rights {
-                #[flags]
-                struct Access { pub read: bool }
-                #[service]
-                pub struct Permits;
-                impl Permits { pub fn check() -> bool { true } }
-            }
-        }",
-    );
-    assert!(
-        error.contains("`Access` is a flags of a sub-module: make it visible to the Orb module"),
-        "{error}"
-    );
-    // An impl of the struct written in another module names it from there: a trait implemented by
-    // hand is not derived again, and a function of a name the bindings call is refused.
-    let office = |extra: &str| {
-        format!(
-            "mod office {{
-                pub mod rights {{
-                    #[flags]
-                    pub struct Access {{ pub read: bool }}
-                    #[service]
-                    pub struct Permits;
-                    impl Permits {{ pub fn check(access: Access) -> bool {{ access.read }} }}
-                }}
-                {extra}
-            }}"
-        )
-    };
-    let module = expanded(
-        "example:office@1.0.0",
-        &office("impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"),
-    );
-    assert!(
-        tokens(&module).contains(
-            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access"
-        ),
-        "{}",
-        tokens(&module)
-    );
-    let error = refused(
-        "example:office@1.0.0",
-        &office("impl rights::Access { pub fn empty() -> Self { Self { read: false } } }"),
-    );
-    assert!(
-        error.contains("`Access::empty` takes a name the macro gives a #[flags] struct"),
-        "{error}"
-    );
-    // A name a `use` brings into the module is the struct too, followed through the `use`, with
-    // or without another type of the Orb of that name.
-    let imported = |extra: &str| office(&format!("use rights::Access; {extra}"));
-    let module = expanded(
-        "example:office@1.0.0",
-        &imported("impl Clone for Access { fn clone(&self) -> Self { *self } }"),
-    );
-    assert!(
-        tokens(&module).contains(
-            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access"
-        ),
-        "{}",
-        tokens(&module)
-    );
-    let error = refused(
-        "example:office@1.0.0",
-        &imported("impl Access { pub fn empty() -> Self { Self { read: false } } }"),
-    );
-    assert!(
-        error.contains("`Access::empty` takes a name the macro gives a #[flags] struct"),
-        "{error}"
-    );
-    let module = expanded(
-        "example:office@1.0.0",
-        &imported(
-            "pub mod other { pub struct Access { pub level: u32 } }
-            impl Clone for Access { fn clone(&self) -> Self { *self } }",
-        ),
-    );
-    assert!(
-        tokens(&module).contains(
-            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool }"
-        ),
-        "{}",
-        tokens(&module)
-    );
-}
-
-/// The bindings name a flags struct through every module between it and the Orb module: `pub` and
-/// `pub(crate)` make the struct or a module visible to the Orb module at any depth, `pub(super)`
-/// one level down only, and a module the Orb module cannot see is refused, though a `pub use`
-/// re-exports the struct past it.
-#[test]
-fn a_flags_struct_is_named_through_every_module_above_it() {
-    let nested = |inner: &str, access: &str| {
-        format!(
-            "mod office {{
-                pub mod a {{
-                    {inner} mod b {{
-                        #[flags]
-                        {access} struct Access {{ pub read: bool }}
-                        #[service]
-                        pub struct Permits;
-                        impl Permits {{ pub fn check(access: Access) -> bool {{ access.read }} }}
-                    }}
-                }}
-            }}"
-        )
-    };
-    for (inner, access) in [("pub", "pub"), ("pub(super)", "pub(crate)")] {
-        let generated = tokens(&expanded("example:office@1.0.0", &nested(inner, access)));
-        assert!(
-            generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: a :: b :: Access"),
-            "{generated}"
-        );
-    }
-    let error = refused("example:office@1.0.0", &nested("pub", "pub(super)"));
-    assert!(
-        error.contains("`Access` is a flags of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, whose bindings name it"),
-        "{error}"
-    );
-    let reexported = |access: &str| {
-        format!(
-            "mod office {{
-                mod model {{
-                    {access} mod access {{
-                        #[flags]
-                        pub struct Access {{ pub read: bool }}
-                    }}
-                    pub use access::Access;
-                }}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn check(access: model::Access) -> bool {{ access.read }} }}
-            }}"
-        )
-    };
-    let error = refused("example:office@1.0.0", &reexported(""));
-    assert!(
-        error.contains("`Access` is a flags of a sub-module the Orb module cannot see: make the module `access` visible to the Orb module, `pub` or `pub(super)`, whose bindings name it"),
-        "{error}"
-    );
-    let generated = tokens(&expanded("example:office@1.0.0", &reexported("pub(super)")));
-    assert!(
-        generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: model :: access :: Access"),
+            .contains("pub use exports :: example :: office :: permits :: { Access , Grant } ;"),
         "{generated}"
     );
 }
 
 /// What else the Orb module names in a sub-module, a state and its fields, a root resource and its
 /// marked functions, and a WIT resource of a service of the Orb module, is visible to it through
-/// every module between them, as a flags struct is.
+/// every module between them.
 #[test]
 fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
     let module = |inner: &str, item: &str| {
@@ -2832,199 +2589,6 @@ fn a_resource_sees_the_client_of_a_service_its_parent_holds() {
     );
 }
 
-/// What WIT or the bindings rule out of a flags struct is refused on the item: a field that is no
-/// `bool`, no field or more than the component model's 32, a generic parameter, two fields of one
-/// WIT name, an option on the attribute, a function of a name the bindings call or the author's own
-/// `BitOr`, and a derived hook's input reaching the flags.
-#[test]
-fn what_a_flags_struct_cannot_be_is_refused() {
-    let module = |access: &str, extra: &str| {
-        format!(
-            "mod office {{
-                {access}
-                {extra}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn invert(access: Access) -> Access {{ access }} }}
-            }}"
-        )
-    };
-    let many = (0..33)
-        .map(|index| format!("pub f{index}: bool"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    for (access, extra, message) in [
-        (
-            "#[flags] pub struct Access { pub read: bool, pub level: u8 }".to_owned(),
-            "",
-            "the field `Access::level` is no `bool`: each field of a flags is a flag, a `bool`",
-        ),
-        (
-            "#[flags] pub struct Access {}".to_owned(),
-            "",
-            "`Access` has no field: a WIT flags holds at least one flag",
-        ),
-        (
-            format!("#[flags] pub struct Access {{ {many} }}"),
-            "",
-            "`Access` has 33 fields: a WIT flags holds at most 32 flags, as the component model rules",
-        ),
-        (
-            "#[flags] pub struct Access<T> { pub read: bool, pub marker: core::marker::PhantomData<T> }".to_owned(),
-            "",
-            "`Access` is a flags: it takes no generic parameter",
-        ),
-        (
-            "#[flags] pub struct Access { pub can_read: bool, pub canRead: bool }".to_owned(),
-            "",
-            "the fields `Access::can_read` and `Access::canRead` are both the flag `can-read`",
-        ),
-        (
-            "#[flags(bits = 8)] pub struct Access { pub read: bool }".to_owned(),
-            "",
-            "#[flags] takes no options",
-        ),
-        (
-            "#[flags] pub struct Access { pub read: bool }".to_owned(),
-            "impl Access { pub fn bits(&self) -> u8 { 0 } }",
-            "`Access::bits` takes a name the macro gives a #[flags] struct, whose bindings call `empty`, `bits`, `from_bits_retain` on it",
-        ),
-        (
-            "#[flags] pub struct Access { pub read: bool }".to_owned(),
-            "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-        (
-            "#[flags] pub struct Access { pub read: bool }".to_owned(),
-            "impl core::ops::BitOr<Self> for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-        (
-            "#[flags] pub struct Access { pub read: bool }".to_owned(),
-            "impl core::ops::BitOr<Access> for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-        (
-            "#[flags] pub struct Access { pub read: bool }".to_owned(),
-            "impl<T> core::ops::BitOr<T> for Access { type Output = Self; fn bitor(self, other: T) -> Self { self } }",
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-        (
-            "#[flags] pub struct Access { pub read: bool }".to_owned(),
-            "impl<T: Into<Access>> core::ops::BitOr<T> for Access { type Output = Self; fn bitor(self, other: T) -> Self { self } }",
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-        (
-            "#[flags] pub struct Access { pub read: bool }".to_owned(),
-            "#[hook(composition = series, input = Admission)]
-            pub struct Guard;
-            pub struct Admission { pub access: Access }",
-            "`Access` is a flags that a derived hook's input reaches",
-        ),
-    ] {
-        let error = refused("example:office@1.0.0", &module(&access, extra));
-        assert!(error.contains(message), "{access} {extra}: {error}");
-    }
-    // A `BitOr` with another right-hand type does not overlap the macro's `BitOr<Self>`.
-    let generated = tokens(&expanded(
-        "example:office@1.0.0",
-        &module(
-            "#[flags] pub struct Access { pub read: bool }",
-            "impl core::ops::BitOr<u32> for Access { type Output = Self; fn bitor(self, other: u32) -> Self { self } }",
-        ),
-    ));
-    assert!(
-        generated.contains("impl :: core :: ops :: BitOr for Access"),
-        "{generated}"
-    );
-}
-
-/// A tuple or unit struct of another module with a flags struct's name is another type: the impls
-/// written for it in its module are its own, not the flags struct's, which the macro completes and
-/// checks as if they were not there. An impl in a third module that names the flags struct through
-/// a `use` is the flags struct's, whatever namesake another module declares.
-#[test]
-fn a_namesake_of_a_flags_struct_in_another_module_keeps_its_impls() {
-    let module = |legacy: &str| {
-        format!(
-            "mod office {{
-                pub mod rights {{
-                    #[flags]
-                    pub struct Access {{ pub read: bool, pub write: bool }}
-                    #[service]
-                    pub struct Guard;
-                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
-                }}
-                pub mod legacy {{
-                    pub struct Access(pub u32);
-                    {legacy}
-                }}
-            }}"
-        )
-    };
-    // A `Clone` of the namesake leaves the flags struct's `Clone` to the macro.
-    let generated = tokens(&expanded(
-        "example:office@1.0.0",
-        &module("impl Clone for Access { fn clone(&self) -> Self { Access(self.0) } }"),
-    ));
-    assert!(
-        generated.contains(
-            "# [derive (:: core :: clone :: Clone , :: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
-        ),
-        "{generated}"
-    );
-    // A `BitOr` or a `bits` of the namesake is not the flags struct's.
-    for legacy in [
-        "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { Access(self.0 | other.0) } }",
-        "impl Access { pub fn bits(&self) -> u32 { self.0 } }",
-    ] {
-        expanded("example:office@1.0.0", &module(legacy));
-    }
-    // An impl reached through a `use` in a third module is the flags struct's, whatever namesake
-    // another module declares: the `use` is followed before any fallback on the name.
-    let module = |ops: &str| {
-        format!(
-            "mod office {{
-                pub mod rights {{
-                    #[flags]
-                    pub struct Access {{ pub read: bool, pub write: bool }}
-                    #[service]
-                    pub struct Guard;
-                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
-                }}
-                pub mod legacy {{ pub type Access = u32; }}
-                pub mod ops {{
-                    use super::rights::Access;
-                    {ops}
-                }}
-            }}"
-        )
-    };
-    let generated = tokens(&expanded(
-        "example:office@1.0.0",
-        &module("impl Clone for Access { fn clone(&self) -> Self { *self } }"),
-    ));
-    assert!(
-        generated.contains(
-            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
-        ),
-        "{generated}"
-    );
-    for (ops, message) in [
-        (
-            "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-        (
-            "impl Access { pub fn bits(&self) -> u32 { 0 } }",
-            "`Access::bits` takes a name the macro gives a #[flags] struct",
-        ),
-    ] {
-        let error = refused("example:office@1.0.0", &module(ops));
-        assert!(error.contains(message), "{ops}: {error}");
-    }
-}
-
 /// An impl names the type through a `use` the macro follows to a `crate::` path, binding the name
 /// or a module of its path, through a module a glob import brings in, `pinned::Balance` after
 /// `use super::*;`, or through an alias of the type's own name, `pub type Access =
@@ -3034,18 +2598,21 @@ fn a_namesake_of_a_flags_struct_in_another_module_keeps_its_impls() {
 /// declares under the name, and such an alias stands for the type it names, as a `use` does. A
 /// glob import from a module of the Orb is followed to the type that module declares, whatever
 /// namesake a third module declares. A `crate::` path written on the impl itself leaves the Orb
-/// module, as before: it may name a namesake outside the Orb, whose impl is not the type's.
+/// module, as before: it may name a namesake outside the Orb, whose impl is not the type's. The
+/// impl is seen as the type's where a derive of a type holding it needs its trait, so one under
+/// `#[cfg(..)]` is refused.
 #[test]
 fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
     let office = |ops: &str, legacy: &str| {
         format!(
             "mod office {{
                 pub mod rights {{
-                    #[flags]
                     pub struct Access {{ pub read: bool, pub write: bool }}
+                    #[derive(PartialEq)]
+                    pub struct Grant {{ pub access: Access }}
                     #[service]
                     pub struct Guard;
-                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                    impl Guard {{ pub fn check(grant: Grant) -> bool {{ grant.access.read }} }}
                 }}
                 pub mod ops {{
                     {ops}
@@ -3054,75 +2621,38 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
             }}"
         )
     };
-    let clone = "impl Clone for Access { fn clone(&self) -> Self { *self } }";
-    let bitor = "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }";
-    let bits = "impl Access { pub fn bits(&self) -> u32 { 0 } }";
-    let without_clone = "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }";
+    let equal =
+        "#[cfg(test)] impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
+    let through = "#[cfg(test)] impl PartialEq for rights::Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
+    let needed =
+        "while the code it writes needs `Access` to implement `PartialEq` in every configuration";
     for (ops, legacy) in [
-        (format!("use crate::office::rights::Access; {clone}"), ""),
+        (format!("use crate::office::rights::Access; {equal}"), ""),
+        (format!("use super::*; {through}"), ""),
         (
-            "use super::*; impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"
-                .to_owned(),
+            format!("pub type Access = super::rights::Access; {equal}"),
             "",
         ),
         (
-            format!("pub type Access = super::rights::Access; {clone}"),
-            "",
-        ),
-        (
-            format!("use super::rights::*; {clone}"),
+            format!("use super::rights::*; {equal}"),
             "pub mod legacy { pub struct Access(pub u32); }",
         ),
+        (format!("use crate::office::rights; {through}"), ""),
         (
-            "use crate::office::rights; impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"
-                .to_owned(),
-            "",
-        ),
-        (
-            format!("use crate::office::rights::*; {clone}"),
+            format!("use crate::office::rights::*; {equal}"),
             "pub mod legacy { pub struct Access(pub u32); }",
         ),
     ] {
-        let generated = tokens(&expanded("example:office@1.0.0", &office(&ops, legacy)));
-        assert!(generated.contains(without_clone), "{ops}\n{generated}");
+        let error = refused("example:office@1.0.0", &office(&ops, legacy));
+        assert!(error.contains(needed), "{ops}\n{error}");
     }
-    let generated = tokens(&expanded(
+    expanded(
         "example:office@1.0.0",
         &office(
-            "impl Clone for crate::elsewhere::Access { fn clone(&self) -> Self { todo!() } }",
+            "#[cfg(test)] impl PartialEq for crate::elsewhere::Access { fn eq(&self, other: &Self) -> bool { todo!() } }",
             "",
         ),
-    ));
-    assert!(
-        generated.contains(
-            "# [derive (:: core :: clone :: Clone , :: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
-        ),
-        "{generated}"
     );
-    for (ops, message) in [
-        (
-            format!("use crate::office::rights::Access; {bitor}"),
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-        (
-            format!("use crate::office::rights::Access; {bits}"),
-            "`Access::bits` takes a name the macro gives a #[flags] struct",
-        ),
-        (
-            format!("pub type Access = super::rights::Access; {bitor}"),
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-        (
-            format!(
-                "use crate::office::rights; {}",
-                bitor.replace("for Access", "for rights::Access")
-            ),
-            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
-        ),
-    ] {
-        let error = refused("example:office@1.0.0", &office(&ops, ""));
-        assert!(error.contains(message), "{ops}: {error}");
-    }
     // A state's `Default` written so is the author's.
     let ledger = |items: &str| {
         format!(
@@ -3195,9 +2725,9 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
 
 /// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
 /// `#[cfg_attr(..)]`: a field, a case or a case's payload under `#[cfg(..)]`, which the WIT would
-/// hold in every configuration, is refused, on a flags as on a record, an enum or a variant, and
-/// so is a `#[cfg_attr(..)]` wrapping a derive, a helper or a `#[cfg(..)]`, on a flags too, whose
-/// derives the macro completes. Kept out of the WIT, the same type is the author's, as written.
+/// hold in every configuration, is refused, on a record, an enum or a variant, and so is a
+/// `#[cfg_attr(..)]` wrapping a derive, a helper or a `#[cfg(..)]`. Kept out of the WIT, the same
+/// type is the author's, as written.
 #[test]
 fn what_the_macro_cannot_evaluate_is_refused() {
     let module = |types: &str, returned: &str| {
@@ -3211,21 +2741,6 @@ fn what_the_macro_cannot_evaluate_is_refused() {
         )
     };
     for (types, returned, message) in [
-        (
-            "#[flags] pub struct Access { pub read: bool, #[cfg(feature = \"sharing\")] pub share: bool }",
-            "Access",
-            "`#[cfg(..)]` on the field `Access::share`: `Access` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration; remove the attribute, or keep `Access` out of the WIT",
-        ),
-        (
-            "#[flags] #[cfg_attr(test, derive(Debug))] pub struct Access { pub read: bool }",
-            "Access",
-            "`Access` enters the WIT as a flags, which the macro completes before the compiler evaluates `#[cfg_attr(..)]`: write the attribute without it, or keep `Access` out of the WIT",
-        ),
-        (
-            "#[flags] pub struct Access { pub read: bool, #[cfg_attr(test, cfg(feature = \"sharing\"))] pub share: bool }",
-            "Access",
-            "`Access` enters the WIT as a flags, which the macro completes before the compiler evaluates `#[cfg_attr(..)]`",
-        ),
         (
             "pub struct Grant { pub who: String, #[cfg(feature = \"audit\")] pub reason: String }",
             "Grant",
@@ -3253,60 +2768,16 @@ fn what_the_macro_cannot_evaluate_is_refused() {
     }
 }
 
-/// The macro writes the WIT and the bindings' `with` before the compiler evaluates `#[cfg(..)]`,
-/// and a flags struct stays the author's: under `#[cfg(..)]`, the WIT would hold the flags and the
-/// bindings name the struct where the compiler drops it, so a `#[flags]` struct under `#[cfg(..)]`
-/// that enters the WIT is refused. The same struct without the attribute enters the WIT, and kept
-/// out of the WIT, the struct is the author's, as written.
-#[test]
-fn a_flags_struct_under_cfg_is_refused() {
-    let module = |cfg: &str, returned: &str| {
-        format!(
-            "mod office {{
-                {cfg}
-                #[flags]
-                pub struct Access {{ pub read: bool, pub share: bool }}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
-            }}"
-        )
-    };
-    let cfg = "#[cfg(feature = \"sharing\")]";
-    let error = refused("example:office@1.0.0", &module(cfg, "Access"));
-    assert!(
-        error.contains("`#[cfg(..)]` on the flags `Access`: `Access` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the flags and the bindings would name the struct in every configuration; remove the attribute, or keep `Access` out of the WIT"),
-        "{error}"
-    );
-    let entered = tokens(&expanded("example:office@1.0.0", &module("", "Access")));
-    assert!(
-        entered.contains(
-            "\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: Access"
-        ),
-        "{entered}"
-    );
-    let kept = tokens(&expanded("example:office@1.0.0", &module(cfg, "u32")));
-    assert!(
-        kept.contains(
-            "# [cfg (feature = \"sharing\")] pub struct Access { pub read : bool , pub share : bool }"
-        ),
-        "{kept}"
-    );
-}
-
 /// A `#[cfg_attr(..)]` wrapping only Rust's own attributes that the generated type never takes,
 /// such as `allow`, `doc` or `deprecated`, changes nothing the macro writes: it may sit on a type
-/// that enters the WIT, its fields and its cases, and a flags struct keeps it as written.
+/// that enters the WIT, its fields and its cases.
 #[test]
 fn a_cfg_attr_wrapping_only_what_the_generated_type_never_takes_expands() {
     let module = expanded(
         "example:office@1.0.0",
         "mod office {
-            #[flags]
-            #[cfg_attr(docsrs, doc = \"With every feature.\")]
-            pub struct Access { #[cfg_attr(test, allow(dead_code))] pub read: bool }
             #[cfg_attr(test, deprecated, cfg_attr(docsrs, doc(hidden)))]
-            pub struct Grant { #[cfg_attr(test, allow(dead_code))] pub who: String, pub access: Access }
+            pub struct Grant { #[cfg_attr(test, allow(dead_code))] pub who: String }
             pub enum Level { #[cfg_attr(test, allow(unused))] Read, Write }
             #[service]
             pub struct Permits;
@@ -3315,19 +2786,11 @@ fn a_cfg_attr_wrapping_only_what_the_generated_type_never_takes_expands() {
     );
     let text = resolved(&module);
     for expected in [
-        "  flags access {\n    read,\n  }\n",
-        "  record grant {\n    who: string,\n    access: access,\n  }\n",
+        "  record grant {\n    who: string,\n  }\n",
         "  enum level {\n    read,\n    write,\n  }\n",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    let generated = tokens(&module);
-    assert!(
-        generated.contains(
-            "pub struct Access { # [cfg_attr (test , allow (dead_code))] pub read : bool }"
-        ),
-        "{generated}"
-    );
 }
 
 /// The macro writes the WIT, and the generated type replacing a record, an enum or a variant that
@@ -3972,98 +3435,6 @@ fn a_parameter_under_cfg_is_refused() {
         "fn helper (level : u32 , # [cfg (test)] extra : u32)",
         "# [cfg (test)] mod tests {",
         "pub fn probe (# [cfg (test)] extra : u32)",
-    ] {
-        assert!(kept.contains(expected), "{expected}\n{kept}");
-    }
-}
-
-/// The bindings name a flags struct that enters the WIT through every module of its path, from the
-/// `with` the macro writes before the compiler evaluates `#[cfg(..)]`: where the attribute on one
-/// of those modules is off, the compiler drops the struct with the module, and that path names
-/// nothing. So a `#[cfg(..)]` on a sub-module holding such a struct, in the module itself or below
-/// it, is refused, written plainly, under `#[cfg_attr(..)]` or inside the module, and the same
-/// module without it expands. A sub-module holding a flags struct that stays out of the WIT keeps
-/// its `#[cfg(..)]`, and so does a `#[cfg(test)] mod tests` holding only tests and impls.
-#[test]
-fn a_sub_module_under_cfg_holding_a_flags_struct_is_refused() {
-    let office = |items: &str, path: &str| {
-        format!(
-            "mod office {{
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn check(access: {path}::Access) -> bool {{ access.read }} }}
-                {items}
-            }}"
-        )
-    };
-    for (module, holding) in [
-        (
-            office(
-                "{cfg} pub mod rights { #[flags] pub struct Access { pub read: bool } }",
-                "rights",
-            ),
-            "rights",
-        ),
-        (
-            office(
-                "{cfg} pub mod grants {
-                    pub mod rights { #[flags] pub struct Access { pub read: bool } }
-                }",
-                "grants::rights",
-            ),
-            "grants",
-        ),
-        (
-            office(
-                "pub mod grants {
-                    {cfg} pub mod rights { #[flags] pub struct Access { pub read: bool } }
-                }",
-                "grants::rights",
-            ),
-            "rights",
-        ),
-    ] {
-        for (condition, written) in CONDITIONS {
-            let error = refused("example:office@1.0.0", &module.replace("{cfg}", condition));
-            let message = format!(
-                "{written} on the module `{holding}` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute, so that code would name `Access` in every configuration; remove the attribute"
-            );
-            assert!(error.contains(&message), "{condition} {module}: {error}");
-        }
-        expanded("example:office@1.0.0", &module.replace("{cfg}", ""));
-    }
-    let inner = office(
-        "pub mod rights {
-            #![cfg(feature = \"sharing\")]
-            #[flags]
-            pub struct Access { pub read: bool }
-        }",
-        "rights",
-    );
-    let error = refused("example:office@1.0.0", &inner);
-    assert!(
-        error.contains("`#[cfg(..)]` on the module `rights` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute, so that code would name `Access` in every configuration; remove the attribute"),
-        "{error}"
-    );
-    let kept = tokens(&expanded(
-        "example:office@1.0.0",
-        &office(
-            "pub mod rights { #[flags] pub struct Access { pub read: bool } }
-            #[cfg(feature = \"sharing\")]
-            pub mod spare { #[flags] pub struct Spare { pub seen: bool } }
-            #[cfg(test)]
-            mod tests {
-                use super::rights::Access;
-                impl Access { fn none() -> Self { Access { read: false } } }
-                #[test]
-                fn one() {}
-            }",
-            "rights",
-        ),
-    ));
-    for expected in [
-        "# [cfg (feature = \"sharing\")] pub mod spare {",
-        "# [cfg (test)] mod tests {",
     ] {
         assert!(kept.contains(expected), "{expected}\n{kept}");
     }
@@ -5522,7 +4893,6 @@ fn a_standard_derive_is_decided_from_the_fields() {
     let module = |types: &str, returned: &str| {
         format!(
             "mod notes {{
-                #[flags]
                 pub struct Access {{ pub read: bool }}
                 impl PartialEq for Access {{
                     fn eq(&self, other: &Self) -> bool {{ self.read == other.read }}
@@ -5647,10 +5017,9 @@ fn a_standard_derive_is_decided_from_the_fields() {
 
 /// The bindings implement `Debug` for every type they generate, `Clone` and `Copy` as far as its
 /// contents allow, the comparisons for an enum, and `Display` and `Error` for the error of a
-/// function's result, and they derive `serde`'s traits on it in an Orb with a state; the macro
-/// implements `BitOr` for a flags struct. An impl of one of those traits that the Orb's modules
-/// write for such a type, under `#[cfg(..)]` too, or a derive implementing `BitOr` on a flags
-/// struct, would implement it twice, so it is refused, saying what implements it already; so is an
+/// function's result, and they derive `serde`'s traits on it in an Orb with a state. An impl of
+/// one of those traits that the Orb's modules write for such a type, under `#[cfg(..)]` too, would
+/// implement it twice, so it is refused, saying what implements it already; so is an
 /// impl of the trait with `Self`, the type itself, placed from the impl's module, or a type
 /// parameter as its type argument, `PartialEq<Self>`, which the derived `PartialEq` is. The same
 /// module without it expands, and so do an impl of a trait the bindings do not implement for that
@@ -5673,7 +5042,6 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
                 pub struct Lease {{ pub pen: Pen }}
                 pub enum Fault {{ Lost, Stuck }}
                 pub enum Heading {{ North, East }}
-                #[flags]
                 pub struct Access {{ pub read: bool }}
                 {items}
                 #[service]
@@ -5747,10 +5115,6 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
             )),
             "`impl serde::Serialize for Point`: `Point` enters the WIT and the generated type replacing it implements `Serialize` already, as the bindings derive it for a type that enters the WIT of an Orb with a state; remove the impl, or keep `Point` out of the WIT",
         ),
-        (
-            module("").replace("#[flags]", "#[flags] #[derive(derive_more::BitOr)]"),
-            "`derive_more::BitOr` on `Access`: `Access` is a #[flags] struct, for which the macro implements `BitOr`, as its bindings combine flags with `|`; remove the derive",
-        ),
     ] {
         let error = refused("example:walk@1.0.0", &source);
         assert!(error.contains(message), "{source}: {error}");
@@ -5782,22 +5146,19 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
 }
 
 /// The macro reads the trait impls of the Orb's modules before the compiler evaluates
-/// `#[cfg(..)]`, and leaves to them what the code it writes needs: the `Clone` of a flags struct,
-/// which its `Copy` needs, and what the bindings of a record holding the struct need of it, the
-/// `Default` of a state, a `serde` trait of a state kept out of the WIT or of a type its fields
-/// reach, and a trait a type's derive needs of a type it holds. An impl under `#[cfg(..)]`, written
+/// `#[cfg(..)]`, and leaves to them what the code it writes needs: the `Default` of a state, a
+/// `serde` trait of a state kept out of the WIT or of a type its fields reach, and a trait a type's
+/// derive needs of a type it holds. An impl under `#[cfg(..)]`, written
 /// plainly or under `#[cfg_attr(..)]`, or in a module under one, such as `#[cfg(test)] mod tests`,
 /// gives the trait in some configurations only, so it is refused, unless other impls, or a derive
 /// under `#[cfg_attr(..)]`, cover the others, as a `#[cfg(not(..))]` impl beside a `#[cfg(..)]` one
 /// does. The same impls without the attribute expand, and so does an impl under `#[cfg(..)]` of a
-/// trait the generated code does not need: the `Debug` or the `Copy` of a flags struct no record
-/// holds, or a test's own `PartialEq`.
+/// trait the generated code does not need, a test's own `PartialEq`.
 #[test]
 fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
     let office = |items: &str| {
         format!(
             "mod office {{
-                #[flags]
                 pub struct Access {{ pub read: bool, pub write: bool }}
                 pub struct Grant {{ pub access: Access, pub level: u32 }}
                 pub struct Note {{ pub text: String }}
@@ -5839,29 +5200,13 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
     let compared = |items: &str| {
         office(items).replace("pub struct Grant", "#[derive(PartialEq)] pub struct Grant")
     };
-    let clone = "impl Clone for Access { fn clone(&self) -> Self { *self } }";
-    let debug = "impl core::fmt::Debug for Access { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } }";
     let equal = "impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
     let compare = "impl PartialEq for Slot { fn eq(&self, other: &Self) -> bool { todo!() } }";
     let default = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
     let serialize = "impl serde::Serialize for Balance { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }";
     for (build, hand, place, owner, name) in [
         (
-            &office as &dyn Fn(&str) -> String,
-            clone,
-            "`impl Clone for Access`",
-            "Access",
-            "Clone",
-        ),
-        (
-            &office,
-            debug,
-            "`impl core::fmt::Debug for Access`",
-            "Access",
-            "Debug",
-        ),
-        (
-            &compared,
+            &compared as &dyn Fn(&str) -> String,
             equal,
             "`impl PartialEq for Access`",
             "Access",
@@ -5922,12 +5267,12 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
     }
     let error = refused(
         "example:office@1.0.0",
-        &office(&format!(
-            "#[cfg(test)] mod tests {{ use super::Access; {clone} }}"
+        &compared(&format!(
+            "#[cfg(test)] mod tests {{ use super::Access; {equal} }}"
         )),
     );
     assert!(
-        error.contains("`#[cfg(..)]` on the module `tests` holding `impl Clone for Access`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Access` to implement `Clone` in every configuration"),
+        error.contains("`#[cfg(..)]` on the module `tests` holding `impl PartialEq for Access`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Access` to implement `PartialEq` in every configuration"),
         "{error}"
     );
     let error = refused(
@@ -5952,14 +5297,6 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
         paired.contains("# [derive (:: serde :: Deserialize)] pub struct Balance"),
         "{paired}"
     );
-    let not_cloned = tokens(&expanded(
-        "example:office@1.0.0",
-        &office(&format!("#[cfg(test)] {clone} #[cfg(not(test))] {clone}")),
-    ));
-    assert!(
-        not_cloned.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)]"),
-        "{not_cloned}"
-    );
     // What the generated code does not need stays the author's, under `#[cfg(..)]`.
     expanded(
         "example:office@1.0.0",
@@ -5973,11 +5310,6 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
             }",
         ),
     );
-    let unheld = office(&format!(
-        "#[cfg(feature = \"audit\")] {debug} #[cfg(feature = \"audit\")] impl Copy for Access {{}}"
-    ))
-    .replace("grant: Grant", "access: Access");
-    expanded("example:office@1.0.0", &unheld);
     // A type a state's fields reach is serialized with the state, and gets the serde derives the
     // macro writes for it but where impls give the trait.
     let reached = |items: &str| {
@@ -6014,12 +5346,10 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
 
 /// Two modules of one name, which `#[cfg(..)]`s select, are two modules: the macro reads the
 /// impls and the attributes of each, and puts a type it reads back in the type's own. A state's
-/// `Default` or a flags struct's `Clone` written in a `#[cfg(x)]` module and again in a
-/// `#[cfg(not(x))]` one of the same name gives the trait in every configuration, as the same
-/// impls side by side do; a sub-module of the second, beside a state kept out of the WIT or a
-/// type that enters it, and a type kept out of the WIT in either stay where they are written; and
-/// the second, holding a sub-module that holds a flags struct, is refused at its `#[cfg(..)]`, as
-/// any module holding one is.
+/// `Default` written in a `#[cfg(x)]` module and again in a `#[cfg(not(x))]` one of the same name
+/// gives the trait in every configuration, as the same impls side by side do; and a sub-module of
+/// the second, beside a state kept out of the WIT or a type that enters it, and a type kept out of
+/// the WIT in either stay where they are written.
 #[test]
 fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
     let ledger = |items: &str| {
@@ -6037,7 +5367,6 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
     let office = |items: &str| {
         format!(
             "mod office {{
-                #[flags]
                 pub struct Access {{ pub read: bool }}
                 {items}
                 #[service]
@@ -6064,18 +5393,6 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
         !seeded.contains("impl :: core :: default :: Default for Balance"),
         "{seeded}"
     );
-    let clone = "impl Clone for super::Access { fn clone(&self) -> Self { *self } }";
-    let cloned = tokens(&expanded(
-        "example:office@1.0.0",
-        &office(&format!(
-            "#[cfg(feature = \"audit\")] mod hands {{ {clone} }}
-             #[cfg(not(feature = \"audit\"))] mod hands {{ {clone} }}"
-        )),
-    ));
-    assert!(
-        cloned.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)]"),
-        "{cloned}"
-    );
     let audit = "#[cfg(feature = \"audit\")] mod audit { pub struct Entry { pub at: u64 } }
         #[cfg(not(feature = \"audit\"))] mod audit { pub struct Entry { pub at: u32 } mod sink {} }";
     for module in [ledger(audit), office(audit)] {
@@ -6087,27 +5404,6 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
             assert!(kept.contains(written), "{written}\n{kept}");
         }
     }
-    let error = refused(
-        "example:office@1.0.0",
-        "mod office {
-            #[cfg(feature = \"audit\")]
-            mod rights {}
-            #[cfg(not(feature = \"audit\"))]
-            pub mod rights {
-                pub mod grants {
-                    #[flags]
-                    pub struct Access { pub read: bool }
-                }
-            }
-            #[service]
-            pub struct Guard;
-            impl Guard { pub fn check(access: rights::grants::Access) -> bool { access.read } }
-        }",
-    );
-    assert!(
-        error.contains("`#[cfg(..)]` on the module `rights` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute"),
-        "{error}"
-    );
 }
 
 /// The values written for a configuration name that takes one at a time, `target_endian =
@@ -10107,9 +9403,9 @@ fn a_codec_is_declared_inside_the_registration_of_its_service() {
 /// Each type of the module that enters the WIT reads and writes its JSON through a hidden trait of
 /// the Orb module, implemented in the type's own module: a record by the bindings' fields, keyed
 /// by the lowerCamelCase form of their WIT names; an enum by the WIT names of its cases; a variant
-/// as `{tag, val}`; the author's enum with a case with named fields by its own cases and fields;
-/// the author's flags by its fields, writing only the flags set. A method's codec reads and writes
-/// them through the trait, as the author names them, and a `Result` as `{tag, val}`.
+/// as `{tag, val}`; the author's enum with a case with named fields by its own cases and fields. A
+/// method's codec reads and writes them through the trait, as the author names them, and a `Result`
+/// as `{tag, val}`.
 #[test]
 fn each_type_of_the_module_gets_its_json() {
     let module = expanded(
@@ -10120,7 +9416,6 @@ fn each_type_of_the_module_gets_its_json() {
                 pub enum Heading { North, SouthWest }
             }
             pub enum Mark { Dot, Cross(shapes::Point), Label { text: String, at: shapes::Point } }
-            #[flags]
             pub struct Pen { pub filled: bool, pub dashed_line: bool }
             pub enum Glyph { Blank, Stroke(Pen) }
             #[service]
@@ -10141,10 +9436,9 @@ fn each_type_of_the_module_gets_its_json() {
         "(\"label\" , :: core :: option :: Option :: Some (item)) => match item { :: tembra :: serde_json :: Value :: Object (mut object) => { let record = Self :: Label { text : match object . remove (\"text\") {",
         "(\"dot\" , :: core :: option :: Option :: None) => :: core :: result :: Result :: Ok (Self :: Dot) ,",
         "Self :: Label { text : __tembra_0 , at : __tembra_1 } =>",
-        // The author's flags, by its fields.
+        // A struct of `bool` fields is a record, by the bindings' fields.
         "impl __TembraBoundary for Pen {",
-        "\"dashedLine\" => & mut flags . dashed_line ,",
-        "if self . dashed_line { flags . insert (:: std :: string :: String :: from (\"dashedLine\") , :: tembra :: serde_json :: Value :: Bool (true) ,) ; }",
+        "dashed_line : match object . remove (\"dashedLine\") {",
         // The bindings' variant, by the bindings' cases.
         "impl __TembraBoundary for Glyph {",
         "Self :: Stroke (item) =>",

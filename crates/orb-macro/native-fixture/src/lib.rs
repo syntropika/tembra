@@ -202,8 +202,7 @@ pub mod calculator {
         Rect { width: u32, height: u32 },
     }
 
-    /// How a shape is drawn.
-    #[flags]
+    /// How a shape is drawn: a record of `bool` fields.
     #[derive(PartialEq)]
     pub struct Pen {
         pub filled: bool,
@@ -232,8 +231,7 @@ pub mod calculator {
         pub pen: Pen,
     }
 
-    /// Plots on a grid, with records, enums, variants, flags, options, results and 64-bit
-    /// integers.
+    /// Plots on a grid, with records, enums, variants, options, results and 64-bit integers.
     #[service]
     pub struct Plotter;
 
@@ -292,7 +290,7 @@ pub mod calculator {
             area.unwrap_or(fallback)
         }
 
-        /// The stroke with its shape scaled by the factor and each flag of its pen flipped.
+        /// The stroke with its shape scaled by the factor and each field of its pen flipped.
         pub fn redrawn(stroke: Stroke, factor: u32) -> Stroke {
             let shape = match stroke.shape {
                 Shape::Dot => Shape::Dot,

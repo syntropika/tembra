@@ -2417,7 +2417,7 @@ enum Kind<'a> {
     Tuple(Vec<Kind<'a>>),
     /// `result<ok, err>`: `{"tag": "ok" | "err", "val": ..}`, without `val` for a side `()`.
     Result(Option<Box<Kind<'a>>>, Option<Box<Kind<'a>>>),
-    /// A record, an enum, a variant, a flags or a newtype of the module, or a record, a variant,
+    /// A record, an enum, a variant or a newtype of the module, or a record, a variant,
     /// an enum or a flags of a consumed interface: its own JSON, through the boundary trait it
     /// implements.
     Named(Cow<'a, Type>),
@@ -3213,10 +3213,9 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
 /// own module, where its members are visible: a record as an object of its fields, keyed by the
 /// lowerCamelCase form of their WIT names; an enum as the WIT name of its case; a variant as an
 /// object of its case's `tag` and payload, `val`, the record of a case with named fields as an
-/// object too; a flags as an object of the flags set, each `true`, which reads a flag left out as
-/// unset. The members and cases are named as the bindings generate them, but those of a type the
-/// macro converts and of a flags, which stay the author's. A member the codec does not cover is
-/// refused, naming it.
+/// object too. The members and cases are named as the bindings generate them, but those of a type
+/// the macro converts, which stay the author's. A member the codec does not cover is refused,
+/// naming it.
 fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let facade = &analysis.options.facade();
     let ident = &shape.ident;
@@ -3291,60 +3290,6 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
             }
             let decode = tagged_decode(quote! { value }, "a variant", reads, facade);
             (decode, quote! { match self { #(#writes,)* } })
-        }
-        ShapeKind::Flags(item) => {
-            let fields: Vec<&Ident> = item
-                .fields
-                .iter()
-                .filter_map(|field| field.ident.as_ref())
-                .collect();
-            let keys: Vec<String> = fields
-                .iter()
-                .map(|field| javascript_name(&wit::kebab(field)))
-                .collect();
-            let decode = quote! {
-                match value {
-                    ::#facade::serde_json::Value::Object(object) => {
-                        let mut flags = Self { #(#fields: false),* };
-                        for (key, set) in object {
-                            let flag = match key.as_str() {
-                                #(#keys => &mut flags.#fields,)*
-                                _ => {
-                                    return ::core::result::Result::Err(
-                                        ::std::format!("unknown flag `{}`", key)
-                                    );
-                                }
-                            };
-                            match set {
-                                ::#facade::serde_json::Value::Bool(set) => *flag = set,
-                                _ => {
-                                    return ::core::result::Result::Err(::std::format!(
-                                        "expected the flag `{}` as a boolean",
-                                        key
-                                    ));
-                                }
-                            }
-                        }
-                        ::core::result::Result::Ok(flags)
-                    }
-                    _ => ::core::result::Result::Err(::std::string::String::from(
-                        "expected flags as an object of booleans",
-                    )),
-                }
-            };
-            let encode = quote! {
-                let mut flags = ::#facade::serde_json::Map::new();
-                #(
-                    if self.#fields {
-                        flags.insert(
-                            ::std::string::String::from(#keys),
-                            ::#facade::serde_json::Value::Bool(true),
-                        );
-                    }
-                )*
-                ::core::result::Result::Ok(::#facade::serde_json::Value::Object(flags))
-            };
-            (decode, encode)
         }
     };
     Ok(boundary_impl(

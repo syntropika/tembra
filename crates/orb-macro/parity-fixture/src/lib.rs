@@ -95,7 +95,8 @@ pub mod parity {
     }
 
     /// Keeps a book in a state, which the kernel stores as the JSON `serde` writes for it: a list
-    /// of records, an option of a variant with a case of each kind, a 64-bit balance and a flags.
+    /// of records, an option of a variant with a case of each kind, a 64-bit balance and a record of
+    /// `bool` fields.
     pub mod ledger {
         /// One deposit.
         pub struct Entry {
@@ -111,7 +112,6 @@ pub mod parity {
         }
 
         /// What the book went through. The state's `Default` starts it from its own.
-        #[flags]
         #[derive(Default)]
         pub struct Marks {
             pub audited: bool,
@@ -282,7 +282,6 @@ pub mod parity {
         }
 
         /// Switches.
-        #[flags]
         pub struct Switches {
             pub on: bool,
             pub loud: bool,

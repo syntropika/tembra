@@ -820,7 +820,7 @@ pub(crate) fn shape_types(shape: &Shape) -> Vec<&Type> {
             .iter()
             .flat_map(|(_, payload)| payload.types())
             .collect(),
-        ShapeKind::Enum(_) | ShapeKind::Flags(_) => Vec::new(),
+        ShapeKind::Enum(_) => Vec::new(),
     }
 }
 

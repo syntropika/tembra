@@ -508,9 +508,7 @@ mod guest {
         }
     }
 
-    /// What a holder may do with a document: each field is a flag of the WIT `flags`. The struct
-    /// stays this one; the bindings take it as it is.
-    #[flags]
+    /// What a holder may do with a document: a record of `bool` fields.
     #[derive(Default, PartialEq)]
     pub struct Access {
         pub read: bool,
@@ -535,7 +533,7 @@ mod guest {
     pub struct Permits;
 
     impl Permits {
-        /// The access with exactly the flags `access` lacks.
+        /// The access with exactly the fields `access` lacks set.
         pub fn invert(access: Access) -> Access {
             Access {
                 read: !access.read,
@@ -553,13 +551,17 @@ mod guest {
             Grant { who, access }
         }
 
-        /// The flags any of the grants or `extra` sets.
+        /// The fields any of the grants or `extra` sets.
         pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Access {
             grants
                 .iter()
                 .map(|grant| grant.access)
                 .chain(extra)
-                .fold(Access::default(), |all, access| all | access)
+                .fold(Access::default(), |all, access| Access {
+                    read: all.read || access.read,
+                    write: all.write || access.write,
+                    share: all.share || access.share,
+                })
         }
 
         /// What the kernel keeps for this object.
