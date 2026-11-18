@@ -36,6 +36,35 @@ impl PreparedContract {
         self.resource_wire(Form::Native, slot, arguments, value)
     }
 
+    /// Check the data arguments of a capability call before any attachment is redeemed. Arguments
+    /// that do not match the WIT are the inner error, the caller's; a fault of the contract, such
+    /// as a slot it does not have, is the outer one.
+    pub fn check_resource_arguments(
+        &self,
+        slot: u32,
+        value: &Value,
+    ) -> Result<Result<(), Error>, Error> {
+        let signature = self.resource_signature(slot)?;
+        let function = self.function(self.slots()[slot as usize]);
+        let parameters = &function.params[usize::from(signature.receiver.is_some())..];
+        let Some(values) = value.as_array() else {
+            return Ok(Err(Error("WIT arguments must be an array".into())));
+        };
+        if values.len() != parameters.len() {
+            return Ok(Err(Error(format!(
+                "{}: expected {} data arguments",
+                function.name,
+                parameters.len()
+            ))));
+        }
+        Ok(parameters
+            .iter()
+            .zip(values)
+            .try_for_each(|(parameter, value)| {
+                self.validate_capabilities(Form::Native, parameter.ty, value)
+            }))
+    }
+
     /// Decode the data part of a capability call, preserving exact 64-bit data values.
     pub fn from_resource_wire(
         &self,

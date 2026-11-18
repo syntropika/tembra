@@ -2,21 +2,18 @@
 use anyhow::{Context, Result, bail};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Write,
     path::{Path, PathBuf},
 };
 use tembra_contracts::{
-    ComponentRoles, Contract, HTTP_HANDLER, Lifetime, ServicePolicy, SystemCapability, guest,
-    system_capability,
+    ComponentRoles, Contract, HTTP_HANDLER, Item, Lifetime, Model, ModuleContract, ServicePolicy,
+    SystemCapability, guest, system_capability,
 };
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
 use wit_parser::{
-    FunctionKind, InterfaceId, PackageId, PackageName, Resolve, UnresolvedPackageGroup, WorldId,
-    WorldItem, WorldKey,
+    FunctionKind, InterfaceId, PackageId, PackageName, Resolve, WorldId, WorldItem, WorldKey,
 };
-
-/// The custom section in which the macro stores the WIT it derived from the module.
-const WIT_SECTION: &str = "tembra:wit";
 
 /// `cargo tembra wit`: print the reconstructed WIT, or write the contract with --emit.
 pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) -> Result<()> {
@@ -54,11 +51,11 @@ pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) 
 
 /// The contract of a component as WIT text, and the name of its world.
 ///
-/// A component built with the macro carries the module's own WIT in a custom section; the
-/// packages it consumes are nested after it, whole, from the directory the macro named when it
-/// is given, else from the component's types, which keep only the functions the component calls.
-/// A package a nested one builds on is nested too, though the component's types do not reach it.
-/// Any other component gets the WIT derived from its types, with the given world name.
+/// A component built with the macro carries the module's own WIT in a custom section, which
+/// `ModuleContract` reads; the packages it consumes are nested after it, whole, from the
+/// directory the macro named when it is given, else from the component's types, which keep only
+/// the functions the component calls. Any other component gets the WIT derived from its types,
+/// with the given world name.
 pub fn contract_text(
     bytes: &[u8],
     resolve: &Resolve,
@@ -66,83 +63,17 @@ pub fn contract_text(
     name: &str,
     consumed: Option<&Path>,
 ) -> Result<(String, String)> {
-    let root = resolve.worlds[world]
-        .package
-        .context("the world has no package")?;
-    match embedded_wit(bytes)? {
-        Some(text) => {
-            let package = text
-                .lines()
-                .find_map(|line| line.strip_prefix("package ")?.strip_suffix(';'))
-                .context("the tembra:wit section declares no package")?
-                .trim()
-                .to_owned();
-            let world_name = text
-                .lines()
-                .find_map(|line| line.trim_start().strip_prefix("world "))
-                .map(|rest| rest.trim_end_matches('{').trim().to_owned())
-                .context("the tembra:wit section declares no world")?;
-            // The whole consumed packages, when the macro said where they are: a provider's
-            // interface keeps the functions this component never calls, so the contract names
-            // the same interface the provider exports.
-            let whole = match consumed {
-                Some(dir) => {
-                    let mut whole = Resolve::default();
-                    whole.push_dir(dir).with_context(|| {
-                        format!("reading the consumed WIT in {}", dir.display())
-                    })?;
-                    Some(whole)
-                }
-                None => None,
-            };
-            let consumed = consumed_packages(resolve, root, &package, &text, whole.as_ref());
-            let mut text = text;
-            for (source, id) in consumed {
-                let mut printer = WitPrinter::default();
-                printer
-                    .print_package(source, id, false)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
-                text.push('\n');
-                text.push_str(&String::from(printer.output));
-            }
-            Ok((text, world_name))
-        }
+    match ModuleContract::from_component(bytes, consumed)
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+    {
+        Some(module) => Ok((module.text().to_owned(), module.world().to_owned())),
         None => Ok((derived_wit(resolve, world, name)?, name.to_owned())),
     }
 }
 
-/// The `tembra:wit` custom section of the component's core module, if the macro wrote one.
-fn embedded_wit(bytes: &[u8]) -> Result<Option<String>> {
-    embedded_section(bytes, WIT_SECTION)?
-        .map(|data| String::from_utf8(data).context("the tembra:wit section is not UTF-8"))
-        .transpose()
-}
-
-/// A custom section of the component's core module, by name.
-fn embedded_section(bytes: &[u8], name: &str) -> Result<Option<Vec<u8>>> {
-    for payload in Parser::new(0).parse_all(bytes) {
-        let Payload::ModuleSection {
-            unchecked_range, ..
-        } = payload?
-        else {
-            continue;
-        };
-        let module = &bytes[unchecked_range.start as usize..unchecked_range.end as usize];
-        for payload in Parser::new(0).parse_all(module) {
-            let Payload::CustomSection(section) = payload? else {
-                continue;
-            };
-            if section.name() == name {
-                return Ok(Some(section.data().to_vec()));
-            }
-        }
-    }
-    Ok(None)
-}
-
 /// The author's package as WIT text, the consumed packages nested in it, and a world with the
 /// given name listing what the component imports and exports.
-fn derived_wit(resolve: &Resolve, world: WorldId, name: &str) -> Result<String> {
+pub(crate) fn derived_wit(resolve: &Resolve, world: WorldId, name: &str) -> Result<String> {
     let root = resolve.worlds[world]
         .package
         .context("the world has no package")?;
@@ -194,60 +125,6 @@ pub(crate) fn standard(name: &PackageName) -> bool {
     matches!(name.namespace.as_str(), "wasi" | "tembra")
 }
 
-/// The packages the module's own package `own`, written as `text`, consumes, each with the
-/// resolve to print it from: the consumed directory `whole` when it holds the package, else the
-/// component's types. First those of the component's types, in their order, then any other the
-/// module's WIT names, which the linker may have dropped from the types with an import the code
-/// never calls, then any other these packages build on: a package printed whole may name one the
-/// component never reaches. A package found nowhere is left to the reading of the contract, which
-/// names it.
-fn consumed_packages<'a>(
-    resolve: &'a Resolve,
-    root: PackageId,
-    own: &str,
-    text: &str,
-    whole: Option<&'a Resolve>,
-) -> Vec<(&'a Resolve, PackageId)> {
-    // Each package wanted, by name, with the resolve that names it.
-    let mut wanted: Vec<(PackageName, &'a Resolve)> = nested(resolve, root, |name| name != own)
-        .map(|id| (resolve.packages[id].name.clone(), resolve))
-        .collect();
-    if let Ok(group) = UnresolvedPackageGroup::parse("contract.wit", text) {
-        wanted.extend(
-            group
-                .main
-                .foreign_deps
-                .into_keys()
-                .map(|name| (name, resolve)),
-        );
-    }
-    let mut packages: Vec<(&'a Resolve, PackageId)> = Vec::new();
-    let mut next = 0;
-    while let Some((name, named_by)) = wanted.get(next).cloned() {
-        next += 1;
-        let taken = packages
-            .iter()
-            .any(|(source, id)| source.packages[*id].name == name);
-        if standard(&name) || name.to_string() == own || taken {
-            continue;
-        }
-        let Some((source, id)) = whole
-            .into_iter()
-            .chain([named_by])
-            .find_map(|source| Some((source, *source.package_names.get(&name)?)))
-        else {
-            continue;
-        };
-        packages.push((source, id));
-        wanted.extend(
-            source
-                .package_direct_deps(id)
-                .map(|dependency| (source.packages[dependency].name.clone(), source)),
-        );
-    }
-    packages
-}
-
 /// The package the component defines: the one owning the interfaces it exports without importing.
 fn author_package(resolve: &Resolve, world: WorldId) -> Result<PackageId> {
     let world = &resolve.worlds[world];
@@ -271,7 +148,9 @@ fn interface(item: &WorldItem) -> Option<InterfaceId> {
 }
 
 /// The component roles of a contract. A hook interface is one the world both imports and
-/// exports: the component's manifest says which it declares, with their composition, which it
+/// exports, importing it itself (`Model::pairs`): an import elaboration added because a view
+/// `use`s its types, the view of the interface the Orb implements, pairs with no export. The
+/// component's manifest says which hooks it declares, with their composition, which it
 /// contributes to, with their priorities, which of its services chose a lifetime or a linger, and
 /// which imports are the views of interfaces it imports by key, as `Contract::embedded_roles`
 /// reads and checks them. Every other hook interface is a contribution at priority 0, as for a
@@ -280,19 +159,8 @@ pub fn roles(contract: &Contract, component: &[u8]) -> Result<ComponentRoles> {
     let mut roles = contract
         .embedded_roles(component)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let model = contract.prepared().model();
-    let identities = |entries: &[tembra_contracts::Entry]| -> BTreeSet<String> {
-        entries
-            .iter()
-            .filter_map(|entry| match &entry.item {
-                tembra_contracts::Item::Interface(interface) => interface.contract.clone(),
-                _ => None,
-            })
-            .collect()
-    };
-    let exported = identities(&model.exports);
-    for id in identities(&model.imports) {
-        if exported.contains(&id) && !roles.hooks.contains_key(&id) {
+    for id in contract.prepared().model().paired() {
+        if !roles.hooks.contains_key(&id) {
             roles.contributions.entry(id).or_insert(0);
         }
     }
@@ -351,7 +219,17 @@ pub fn inspect(
         Some((contract, ..)) => self::roles(contract, &bytes)?,
         None => ComponentRoles::default(),
     };
-    summary(&resolve, world, "orb", &roles);
+    let model = contract
+        .as_ref()
+        .map(|(contract, ..)| contract.prepared().model());
+    summary(
+        &mut std::io::stdout(),
+        &resolve,
+        world,
+        "orb",
+        &roles,
+        model,
+    )?;
     if let Some((contract, name, wit_dir)) = contract {
         println!("checked against world {name} of {}:", wit_dir.display());
         match contract.component_artifact(&bytes, "orb", 1, &roles) {
@@ -445,8 +323,21 @@ fn classify_import(id: &str, handler_only: bool) -> Import {
 /// Exports as services and methods, with the lifetime a service chose, the incoming HTTP
 /// handler, hooks declared and contributed to, kernel-managed state and resources, and imports
 /// with the grant they will need at installation; an import by key with the interface whose
-/// objects it reaches.
-pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &ComponentRoles) {
+/// objects it reaches, and not the interface itself when the world imports it only for the types
+/// the view `use`s. The imports listed are those installation binds to a provider or a grant, by
+/// the rule of the contract's `model`, whether the world exports their interface or not: one with
+/// a function or a resource that the world imports itself, or one elaboration added for the types
+/// another import `use`s that holds a resource (`Interface::callable`), unless the contract pairs
+/// it with an export as a hook (`Model::pairs`). Without the contract, an import with functions
+/// is listed unless the world exports its interface besides. Written to `out`.
+pub fn summary(
+    out: &mut impl Write,
+    resolve: &Resolve,
+    world: WorldId,
+    orb_name: &str,
+    roles: &ComponentRoles,
+    model: Option<&Model>,
+) -> std::io::Result<()> {
     let ComponentRoles {
         contributions,
         hooks,
@@ -456,7 +347,7 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
     let world = &resolve.worlds[world];
     let (mut state, mut resources) = (false, false);
     let ingress = world.exports.keys().any(|key| is_ingress(resolve, key));
-    println!("exports, the services of {orb_name}:");
+    writeln!(out, "exports, the services of {orb_name}:")?;
     for (key, item) in &world.exports {
         let id = world_key(resolve, key, None);
         if contributions.contains_key(&id) || hooks.contains_key(&id) {
@@ -487,45 +378,56 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
                 }
                 _ => String::new(),
             };
-            println!(
+            writeln!(
+                out,
                 "  {orb_name}::{id}  methods: {}{policy}",
                 methods.join(", ")
-            );
+            )?;
         } else {
-            println!("  {id}");
+            writeln!(out, "  {id}")?;
         }
     }
     if ingress {
-        println!(
+        writeln!(
+            out,
             "incoming HTTP handler: called by the host's ingress, never a portable Orb service ({HTTP_HANDLER})"
-        );
+        )?;
     }
     if !hooks.is_empty() {
-        println!("hooks declared, run by the kernel's plan of contributions:");
+        writeln!(
+            out,
+            "hooks declared, run by the kernel's plan of contributions:"
+        )?;
         for (id, composition) in hooks {
-            println!(
+            writeln!(
+                out,
                 "  {id}  {}",
                 serde_json::json!(composition).as_str().unwrap_or_default()
-            );
+            )?;
         }
     }
     if !contributions.is_empty() {
-        println!("hook contributions, bound to the provider with Install::requires:");
+        writeln!(
+            out,
+            "hook contributions, bound to the provider with Install::requires:"
+        )?;
         for (id, priority) in contributions {
-            println!("  {id}  priority {priority}");
+            writeln!(out, "  {id}  priority {priority}")?;
         }
     }
     if state {
-        println!(
+        writeln!(
+            out,
             "kernel-managed state: the kernel keeps the state of this Orb's service objects ({})",
             guest::STATE
-        );
+        )?;
     }
     if resources {
-        println!(
+        writeln!(
+            out,
             "kernel-managed resources: the kernel opens and closes the resources of this Orb's root ({})",
             guest::RESOURCE
-        );
+        )?;
     }
     // An Orb serving incoming HTTP without the HTTP client gets no HTTP grant: planning binds its
     // HTTP types to the ingress.
@@ -542,14 +444,40 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
         let WorldItem::Interface { id: interface, .. } = item else {
             continue;
         };
-        if resolve.interfaces[*interface].functions.is_empty() {
+        let id = world_key(resolve, key, None);
+        // Installation binds the import by the contract's rule, whether the component calls any
+        // of its functions or not: to nothing when it is not callable, with neither a function
+        // nor a resource, or held only for the types another import `use`s and holding no
+        // resource; to the hook it declares or contributes to when the contract pairs it with an
+        // export; and otherwise to the provider the installer names or to a grant. Without the
+        // contract, an import with functions is callable, and paired when the world exports its
+        // interface besides.
+        let imported = model.and_then(|model| {
+            model.imports.iter().find_map(|entry| match &entry.item {
+                Item::Interface(import) if entry.key == id => Some((model, import)),
+                _ => None,
+            })
+        });
+        let (callable, paired) = match imported {
+            Some((model, import)) => (import.callable(), model.pairs(import)),
+            None => (
+                !resolve.interfaces[*interface].functions.is_empty(),
+                world.exports.contains_key(key),
+            ),
+        };
+        if !callable {
             continue; // types only: nothing to bind
         }
-        let id = world_key(resolve, key, None);
         if contributions.contains_key(&id) || hooks.contains_key(&id) || guest::reserved(&id) {
             // Bound to the provider through the contribution, the entry to the Orb's own hook,
             // or served by the kernel.
             context |= id == guest::CONTEXT;
+            continue;
+        }
+        if paired {
+            // With the contract, the roles name every import it pairs, a hook. Without it, an
+            // import of an interface the world exports besides may be a hook or one elaboration
+            // added for the types a view `use`s, which the summary cannot tell apart: left out.
             continue;
         }
         match classify_import(&id, handler_only) {
@@ -559,39 +487,42 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
         }
     }
     if !ingress_types.is_empty() {
-        println!(
+        writeln!(
+            out,
             "incoming HTTP types: a handler-only Orb needs no grant for them ({})",
             ingress_types.join(", ")
-        );
+        )?;
     }
     if context {
-        println!(
+        writeln!(
+            out,
             "kernel-served context: the call's principal and cancellation, the object's address and the log ({})",
             guest::CONTEXT
-        );
+        )?;
     }
     if requires.is_empty() && grants.is_empty() {
         if contributions.is_empty() && hooks.is_empty() {
-            println!("imports: none; the installer grants nothing");
+            writeln!(out, "imports: none; the installer grants nothing")?;
         } else {
-            println!("other imports: none; the installer grants nothing");
+            writeln!(out, "other imports: none; the installer grants nothing")?;
         }
     }
     if !requires.is_empty() {
-        println!("imports of other Orbs, bound with Install::requires:");
+        writeln!(out, "imports of other Orbs, bound with Install::requires:")?;
         for id in requires {
             match references.get(&id) {
-                Some(target) => println!("  {id}  by key, the objects of {target}"),
-                None => println!("  {id}"),
+                Some(target) => writeln!(out, "  {id}  by key, the objects of {target}")?,
+                None => writeln!(out, "  {id}")?,
             }
         }
     }
     if !grants.is_empty() {
-        println!("WASI imports, grants the installer must give:");
+        writeln!(out, "WASI imports, grants the installer must give:")?;
         for (kind, ids) in grants {
-            println!("  {kind}: {}", ids.join(", "));
+            writeln!(out, "  {kind}: {}", ids.join(", "))?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

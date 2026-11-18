@@ -37,6 +37,7 @@ deps:
 test: build-node build-wasm build-sdk
     cargo test --locked --workspace --all-features
     just test-no-hooks
+    just test-native-fixture
     just test-native-rpc
     bun test scripts/release.test.ts
     bun run --cwd packages/ts/sdk test
@@ -46,6 +47,14 @@ test: build-node build-wasm build-sdk
 # Verify the core and bridge with optional hook APIs disabled.
 test-no-hooks:
     cargo test --locked -p tembra-core -p tembra-bridge --no-default-features
+
+# Verify the macro's native fixture without its `archive` feature, whose `#[cfg]` items then leave its WIT and `orb(..)`.
+test-native-fixture:
+    cargo test --locked -p tembra-orb-native-fixture
+
+# Run the `cargo tembra` commands end to end on scratch crates: `new`, `build --out`, `wit` and `inspect`. The crates build as components and natively.
+test-cargo-tembra:
+    cargo test --locked -p cargo-tembra --test commands -- --ignored
 
 # Execute documented Rust guarantees, including the optional native hooks facade.
 test-doc:
@@ -177,7 +186,91 @@ test-orb-macro:
     TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \
         cargo test --locked -p tembra-executor-wasm --test orb_macro_async --test orb_macro_runtime -- --ignored
 
-check: fmt-check build-node build-wasm build-sdk
+# Build the parity fixture's Orb as a component into one reusable target directory, with the overflow checks of its native tests.
+build-orb-parity target-dir:
+    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true cargo rustc --locked --release --target wasm32-unknown-unknown --crate-type cdylib --manifest-path crates/orb-macro/parity-fixture/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+
+# Require the same answers from the parity fixture's Orb built natively and as a component; acceptance uses the same builder.
+test-orb-parity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fixture_target="${CARGO_TARGET_DIR:-target}/orb-parity"
+    just build-orb-parity "$fixture_target"
+    fixture_target="$(cd "$fixture_target" && pwd)"
+    TEMBRA_WASM_ORB_PARITY="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_parity_fixture.wasm" \
+        cargo test --locked -p tembra-executor-wasm --test orb_macro_parity -- --ignored
+
+# Build with Cargo the fixtures of crates/orb-macro/config-fixtures and the facade's features; a failing test names its configuration.
+test-configurations:
+    cargo test --locked -p tembra-orb-macro --test configurations -- --ignored
+
+# Build each Orb crate of the examples and of the macro's fixtures the way the other recipes do not: natively, or, the native fixture, checked for wasm32. Every step runs; the recipe then fails, naming each step that failed.
+test-orb-both-ways:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="${CARGO_TARGET_DIR:-target}/orb-both-ways"
+    hosts=crates/orb-macro/config-fixtures/native-hosts
+    native_hosts="tembra-config-native-host tembra-config-native-hooks-host"
+    failed=""
+    # Run the command after the step's name, and note the step when it fails.
+    step() {
+        echo "== $1"
+        if ! "${@:2}"; then
+            failed+="  $1"$'\n'
+        fi
+    }
+    # Natively, the Orb crates of the examples, as the fixture's native hosts link them: with the
+    # facade's `host`, and `hooks` where a module contributes to a hook. Each host builds on its
+    # own, so that Cargo unifies the features of its Orb crates only, and names every crate that
+    # fails.
+    for host in $native_hosts; do
+        step "$host" cargo build --locked --keep-going --manifest-path "$hosts/Cargo.toml" -p "$host" --target-dir "$target"
+    done
+    # The native hosts link each Orb crate of the examples but those native already: the hosts, the
+    # hook's provider written by hand, and the Orb crates the native example's host links. Cargo
+    # lists the hosts' normal dependencies, which a commented-out entry or a dev-dependency is not.
+    each_crate_linked() {
+        local linked crate status=0
+        linked="$(for host in $native_hosts; do
+            cargo tree --locked --manifest-path "$hosts/Cargo.toml" -p "$host" -e normal --depth 1 --prefix none --format '{p}' || exit 1
+        done)" || return 1
+        for manifest in examples/rust-orb-*/*/Cargo.toml; do
+            crate="${manifest%/Cargo.toml}"
+            case "$crate" in
+                */host | examples/rust-orb-hook-contribution/gate | examples/rust-orb-native/*) ;;
+                *)
+                    if ! grep -qF "($(pwd -P)/$crate)" <<< "$linked"; then
+                        echo "No native host of $hosts links $crate" >&2
+                        status=1
+                    fi
+                    ;;
+            esac
+        done
+        return "$status"
+    }
+    step "a native host links each Orb crate of the examples" each_crate_linked
+    # Natively, the async and host feature fixtures, whose `host` feature puts the runtime in their
+    # lockfiles. Not the parity fixture, which `just test-orb-parity` builds both ways.
+    for fixture in async-fixture host-feature-fixture; do
+        step "crates/orb-macro/$fixture natively" cargo build --locked --manifest-path "crates/orb-macro/$fixture/Cargo.toml" --features host --target-dir "$target"
+    done
+    # Natively, the runtime fixture's default module `guest`, std and `no-std`, with the facade's
+    # `host` through the fixture's `native` feature. `just test-orb-macro` builds `guest` only as a
+    # component. It builds natively, std, and tests each module that a feature selects in place of
+    # `guest`, but `flagged`, whose native test the native fixture's `tests/flags.rs` runs.
+    for features in native native,no-std; do
+        step "crates/orb-macro/runtime-fixture natively, with $features" cargo build --locked --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --features "$features" --target-dir "$target"
+    done
+    # For wasm32, the native fixture, which its tests build natively. Checked, not built: a
+    # component holds one Orb, so a build of a crate with several fails on the second, which
+    # `just test-configurations` asserts on `crates/orb-macro/config-fixtures/two-orbs`.
+    step "crates/orb-macro/native-fixture checked for wasm32" cargo check --locked -p tembra-orb-native-fixture --target wasm32-unknown-unknown --target-dir "$target"
+    if [ -n "$failed" ]; then
+        printf 'These steps failed:\n%s' "$failed" >&2
+        exit 1
+    fi
+
+check: fmt-check check-ci-parts build-node build-wasm build-sdk
     bun run typecheck
     just lint
     just deps
@@ -192,6 +285,88 @@ install-tools:
 
 install-ts: install
 check-all: check
+
+# Run every part of the verification in order, and fail when the parts change the tree; CI runs each part in a job of its own.
+ci: _record-tree \
+    check \
+    test-orb-examples \
+    test-orb-macro \
+    test-cargo-tembra \
+    test-orb-parity \
+    test-configurations \
+    test-orb-both-ways \
+    && _compare-tree
+
+# Fail when the parts of `ci` and the recipes of the job matrix in the quality workflow differ.
+check-ci-parts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The parts are the recipes `ci` runs before its own steps, except the helpers whose names start
+    # with an underscore. The matrix lists each part as `- { recipe: <name>, timeout: <minutes> }`.
+    parts="$(just --show ci | sed -n 's/^ci: \(.*\) && .*/\1/p' | tr ' ' '\n' | grep -v '^_' | sort || true)"
+    jobs="$(sed -n 's/^ *- { recipe: \([a-z0-9-]*\),.*/\1/p' .github/workflows/quality.yml | sort)"
+    only_ci="$(comm -23 <(echo "$parts") <(echo "$jobs") | paste -sd ' ' -)"
+    only_jobs="$(comm -13 <(echo "$parts") <(echo "$jobs") | paste -sd ' ' -)"
+    if [ -z "$parts" ] || [ -z "$jobs" ] || [ -n "$only_ci$only_jobs" ]; then
+        echo "The parts of \`just ci\` and the job matrix of .github/workflows/quality.yml differ:" >&2
+        echo "  only in ci: ${only_ci:-none}" >&2
+        echo "  only in the matrix: ${only_jobs:-none}" >&2
+        exit 1
+    fi
+
+# Fail on any modified or deleted file, and on any new file that .gitignore does not list; CI runs it after each part, on a clean checkout.
+check-clean-tree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Show new files whatever `status.showUntrackedFiles` says.
+    changes="$(git status --porcelain --untracked-files=normal)"
+    if [ -n "$changes" ]; then
+        echo "The checks changed the tree:" >&2
+        echo "$changes" >&2
+        exit 1
+    fi
+
+# Print the id of a Git tree that holds the working tree as it is: the tracked files with their changes, and the new files that .gitignore does not list, but no nested repository that HEAD does not record.
+_tree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # An index of its own keeps the real index as it is.
+    scratch="$(mktemp -d)"
+    trap 'rm -rf "$scratch"' EXIT
+    export GIT_INDEX_FILE="$scratch/index"
+    git read-tree HEAD
+    # Git warns about each nested repository it adds, and the next step takes them out again.
+    git add --all 2> "$scratch/warnings" || { cat "$scratch/warnings" >&2; exit 1; }
+    # A nested repository, or a linked worktree, in a directory that .gitignore does not list is added
+    # as a gitlink at its current commit, which another process may move while the parts run. Leave out
+    # the gitlinks that HEAD does not have.
+    git ls-files --stage -z | while IFS= read -r -d '' entry; do
+        path="${entry#*$'\t'}"
+        if [ "${entry%% *}" = 160000 ] && [ "$(git ls-tree HEAD -- "$path" | cut -c1-6)" != 160000 ]; then
+            printf '%s\0' "$path"
+        fi
+    done | git update-index --force-remove -z --stdin
+    git write-tree
+
+# Record the working tree before the parts of `ci` run.
+_record-tree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _tree > "$(git rev-parse --git-path tembra-ci-tree)"
+
+# Fail when the working tree is not the one that `_record-tree` recorded, and name the files that differ.
+_compare-tree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    record="$(git rev-parse --git-path tembra-ci-tree)"
+    before="$(cat "$record")"
+    rm -f "$record"
+    after="$(just _tree)"
+    if [ "$before" != "$after" ]; then
+        echo "The parts changed the tree (A added, M modified, D deleted):" >&2
+        git diff-tree -r --name-status "$before" "$after" >&2
+        exit 1
+    fi
 
 # Generate matching Swift and Kotlin bindings from the shared engine.
 build-mobile-bindings:

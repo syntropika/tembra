@@ -6,8 +6,9 @@
 //! that defines it; it refuses at installation an Orb whose function takes a borrowed one,
 //! `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
 use crate::{
-    Constructor, Declared, Function, Handles, Service, Shape, WitResource, foreign::Modules,
-    handles_of, rebuild, wit, with_handles,
+    Constructor, Declared, Function, Handles, Service, Shape, Towards, WitResource, convert,
+    converted_reason, foreign::Modules, handles_of, mentions, own_or_only, rebuild, wit,
+    with_handles,
 };
 use quote::quote;
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,74 +74,53 @@ pub(crate) fn derived<'a>(
     functions
 }
 
-/// Refuse a resource of the module where the runtime cannot carry it, before the WIT is derived: a
-/// parameter of a derived function takes a resource of its own interface, owned, because the
-/// runtime moves an owned resource only into the interface that defines it, and the input of a
-/// derived hook holds no resource. A resource of an implemented interface is that interface's: a
-/// derived function takes none. What a consumed interface's module names, `foreign` checks.
-pub(crate) fn check(
-    services: &[Service],
-    resources: &[WitResource],
-    declared: &[Declared],
-    modules: &Modules,
-) -> syn::Result<()> {
-    let resource_named = |ident: &Ident| resources.iter().find(|resource| resource.ident == *ident);
-    for function in derived(services, resources) {
-        for (_, ty, _) in function.params {
-            let mut mentioned = Vec::new();
-            modules.references(ty, function.scope, &mut mentioned);
-            for resource in mentioned.iter().filter_map(resource_named) {
-                if let Some(owner) = foreign_owner(services, resource, function.interface) {
-                    return Err(taking_error(&function, ty, resource, None, owner));
-                }
-            }
-        }
-    }
-    for declaration in declared {
-        let Some((ty, _)) = &declaration.input else {
-            continue;
-        };
-        let mut mentioned = Vec::new();
-        modules.references(ty, declaration.scope, &mut mentioned);
-        if let Some(resource) = mentioned.iter().find_map(resource_named) {
-            return Err(syn::Error::new(
-                ty.span(),
-                format!(
-                    "the input of the hook `{}` holds the resource `{}`: a hook's input holds no resource",
-                    declaration.ident, resource.ident
-                ),
-            ));
-        }
-    }
-    Ok(())
+/// The resource a name written in the module `scope` resolves to, by `own_or_only`: that module's
+/// own resource of the name, none when that module declares another type of the name, of any
+/// shape, as `declares` says, else the only resource of the name in the Orb.
+pub(crate) fn resource_named<'a>(
+    ident: &Ident,
+    scope: usize,
+    resources: &'a [WitResource],
+    declares: bool,
+) -> Option<&'a WitResource> {
+    let named = resources
+        .iter()
+        .filter(|resource| resource.ident == *ident)
+        .map(|resource| (resource.scope, resource));
+    own_or_only(named, scope).filter(|resource| resource.scope == scope || !declares)
 }
 
-/// Refuse, once the types that enter the WIT are known, a resource the runtime would not carry
-/// through a derived function: its result holds, anywhere, only resources of its own interface,
-/// itself or in the records and variants of the module it reaches, because the runtime returns a
-/// resource only from the interface that defines it; the records and variants a parameter takes
-/// hold none of another interface either, which the runtime would not move in; and those of a
-/// derived hook's input hold no resource. What a parameter or a hook's input names itself `check`
-/// has refused already.
+/// Refuse, once the types that enter the WIT are known, a resource of the module the runtime would
+/// not carry through a derived function, itself or in the records and variants of the module a
+/// type reaches: a parameter takes only resources of its own interface, owned, because the runtime
+/// moves an owned resource only into the interface that defines it; a result holds only those
+/// too, because the runtime returns a resource only from the interface that defines it; and the
+/// input of a derived hook holds no resource. A resource of an implemented interface is that
+/// interface's: a derived function takes none. What a consumed interface's module names, `foreign`
+/// checks. Every parameter is read before the results.
 pub(crate) fn check_reached(
     services: &[Service],
     resources: &[WitResource],
     declared: &[Declared],
     shapes: &[Shape],
+    types: &[(usize, Ident)],
     modules: &Modules,
 ) -> syn::Result<()> {
-    for function in derived(services, resources) {
+    let functions = derived(services, resources);
+    for function in &functions {
         for (_, ty, _) in function.params {
-            for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
+            for (resource, via) in held(ty, function.scope, shapes, resources, types, modules) {
                 if let Some(owner) = foreign_owner(services, resource, function.interface) {
-                    return Err(taking_error(&function, ty, resource, via, owner));
+                    return Err(taking_error(function, ty, resource, via, owner));
                 }
             }
         }
+    }
+    for function in &functions {
         let Some(ty) = function.result else {
             continue;
         };
-        for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
+        for (resource, via) in held(ty, function.scope, shapes, resources, types, modules) {
             let Some(owner) = foreign_owner(services, resource, function.interface) else {
                 continue;
             };
@@ -163,14 +143,18 @@ pub(crate) fn check_reached(
         let Some((ty, _)) = &declaration.input else {
             continue;
         };
-        if let Some((resource, Some(via))) =
-            held(ty, declaration.scope, shapes, resources, modules).first()
+        if let Some((resource, via)) =
+            held(ty, declaration.scope, shapes, resources, types, modules).first()
         {
+            let holds = match via {
+                Some(via) => format!("`{via}`, which holds the resource `{}`", resource.ident),
+                None => format!("the resource `{}`", resource.ident),
+            };
             return Err(syn::Error::new(
                 ty.span(),
                 format!(
-                    "the input of the hook `{}` holds `{via}`, which holds the resource `{}`: a hook's input holds no resource",
-                    declaration.ident, resource.ident
+                    "the input of the hook `{}` holds {holds}: a hook's input holds no resource",
+                    declaration.ident
                 ),
             ));
         }
@@ -239,55 +223,158 @@ fn taking_error(
 /// Each resource of the module a type written in the module `scope` holds, with the record or
 /// variant of the module that holds it, if one does: the resource itself or inside options,
 /// results, lists and tuples, or in the fields and cases of the records and variants the type
-/// reaches, followed by name as the WIT names them.
+/// reaches, followed by name as the WIT names them, each name resolved first in the module its
+/// path names it in, the one a path leads into or the one writing a bare name
+/// (`Modules::references_in`), where a type of any shape among `types` keeps it from the resources
+/// of other modules.
 fn held<'a>(
     ty: &Type,
     scope: usize,
     shapes: &'a [Shape],
     resources: &'a [WitResource],
+    types: &[(usize, Ident)],
     modules: &Modules,
 ) -> Vec<(&'a WitResource, Option<&'a Ident>)> {
     let mut mentioned = Vec::new();
-    modules.references(ty, scope, &mut mentioned);
-    let mut pending: Vec<(Ident, Option<&'a Ident>)> =
-        mentioned.into_iter().map(|ident| (ident, None)).collect();
+    modules.references_in(ty, scope, &mut mentioned);
+    let mut pending: Vec<(Ident, usize, Option<&'a Ident>)> = mentioned
+        .into_iter()
+        .map(|(ident, scope)| (ident, scope, None))
+        .collect();
     let mut seen = BTreeSet::new();
     let mut held = Vec::new();
-    while let Some((ident, via)) = pending.pop() {
-        if !seen.insert(ident.to_string()) {
-            continue;
-        }
-        if let Some(resource) = resources.iter().find(|resource| resource.ident == ident) {
-            held.push((resource, via));
-        } else if let Some(shape) = shapes.iter().find(|shape| shape.ident == ident) {
+    while let Some((ident, scope, via)) = pending.pop() {
+        let named = shapes
+            .iter()
+            .filter(|shape| shape.ident == ident)
+            .map(|shape| (shape.scope, shape));
+        let declares = types
+            .iter()
+            .any(|(module, name)| *module == scope && *name == ident);
+        if let Some(resource) = resource_named(&ident, scope, resources, declares) {
+            if seen.insert((ident.to_string(), resource.scope)) {
+                held.push((resource, via));
+            }
+        } else if let Some(shape) = own_or_only(named, scope)
+            && seen.insert((ident.to_string(), shape.scope))
+        {
             let via = via.or(Some(&shape.ident));
             pending.extend(
                 shape
                     .references
                     .iter()
-                    .map(|reference| (reference.clone(), via)),
+                    .map(|(reference, scope)| (reference.clone(), *scope, via)),
             );
         }
     }
     held
 }
 
+/// Refuse, once the types that enter the WIT are known, a parameter or a result of a derived
+/// function that holds both a resource and a type the macro converts, the enum with a case with
+/// named fields, free JSON, a newtype or a type holding one: the bridge converts such a type
+/// between the author's and the bindings', through `From`, as JSON text or as the newtype's field,
+/// which carries no handle, and wraps or takes back a resource where the author's type is the
+/// bindings' own.
+pub(crate) fn check_converted(
+    services: &[Service],
+    resources: &[WitResource],
+    shapes: &[Shape],
+    converted: &BTreeMap<String, Ident>,
+    types: &[(usize, Ident)],
+    modules: &Modules,
+) -> syn::Result<()> {
+    for function in derived(services, resources) {
+        let params = function.params.iter().map(|(_, ty, _)| (ty, "takes"));
+        for (ty, verb) in params.chain(function.result.map(|ty| (ty, "returns"))) {
+            if wit::holds_free_json(ty)
+                && let Some((resource, _)) =
+                    held(ty, function.scope, shapes, resources, types, modules).first()
+            {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    format!(
+                        "`{}` {verb} `{}`, which holds the resource `{}` and free JSON, `serde_json::Value`: the macro converts free JSON between the author's value and the bindings' text, and converts no resource; keep the resource apart from the JSON",
+                        function.name,
+                        quote!(#ty),
+                        resource.ident,
+                    ),
+                ));
+            }
+            if let Some(newtype) = modules.newtypes_in(ty, function.scope).first()
+                && let Some((resource, _)) =
+                    held(ty, function.scope, shapes, resources, types, modules).first()
+            {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    format!(
+                        "`{}` {verb} `{}`, which holds the resource `{}` and the newtype `{}`: the macro converts a newtype between the author's struct and the bindings' type of its field, and converts no resource; keep the resource apart from the newtype",
+                        function.name,
+                        quote!(#ty),
+                        resource.ident,
+                        newtype.ident,
+                    ),
+                ));
+            }
+            let mut mentioned = Vec::new();
+            modules.references(ty, function.scope, &mut mentioned);
+            let Some(shape) = mentioned.iter().find_map(|name| {
+                shapes
+                    .iter()
+                    .find(|shape| shape.ident == *name && converted.contains_key(&name.to_string()))
+            }) else {
+                continue;
+            };
+            if let Some((resource, _)) =
+                held(ty, function.scope, shapes, resources, types, modules).first()
+            {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    format!(
+                        "`{}` {verb} `{}`, which holds the resource `{}` and `{}`, {}: the macro converts such a type between the author's and the bindings', and converts no resource; give the case an unnamed payload, a record of the module, or keep the resource apart from the type",
+                        function.name,
+                        quote!(#ty),
+                        resource.ident,
+                        shape.ident,
+                        converted_reason(shape, shapes)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The parameters of a derived function's bridge and the arguments it calls the author's function
 /// with, the function written in the module `scope`: a parameter holding a resource of the module
 /// is the bindings' handle type there, and each handle is taken back into the author's value,
-/// which consumes it; any other parameter, one a consumed interface's module names included,
-/// crosses as it is.
+/// which consumes it; one holding a type the macro converts is the bindings' type there, as for a
+/// handle, and converted part by part; any other parameter, one a consumed interface's module
+/// names included, crosses as it is.
 pub(crate) fn bridged(
     params: &[(Ident, Type, String)],
     scope: usize,
     module: &proc_macro2::TokenStream,
     resources: &BTreeMap<String, Ident>,
+    converted: &BTreeMap<String, Ident>,
     modules: &Modules,
 ) -> (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) {
     params
         .iter()
-        .map(
-            |(ident, ty, _)| match handles_of(ty, scope, resources, modules) {
+        .map(|(ident, ty, _)| {
+            if mentions(ty, scope, converted, modules) {
+                let spelled = with_handles(ty, scope, converted, module, modules);
+                return (
+                    quote! { #ident: #spelled },
+                    convert(
+                        ty,
+                        quote! { #ident },
+                        Towards::Author,
+                        Some((modules, scope)),
+                    ),
+                );
+            }
+            match handles_of(ty, scope, resources, modules) {
                 Some(handles) => {
                     let spelled = with_handles(ty, scope, resources, module, modules);
                     (
@@ -296,8 +383,8 @@ pub(crate) fn bridged(
                     )
                 }
                 None => (quote! { #ident: #ty }, quote! { #ident }),
-            },
-        )
+            }
+        })
         .unzip()
 }
 

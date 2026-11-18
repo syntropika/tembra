@@ -1,0 +1,3 @@
+# The TOML 1.1 configuration fixture keeps the trailing comma in an inline table it is there for,
+# which the formatter would remove.
+crates/orb-macro/config-fixtures/toml-1-1/Cargo.toml

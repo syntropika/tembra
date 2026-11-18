@@ -1,0 +1,12 @@
+package example:ledger@1.0.0;
+
+/// A ledger's entries, which a tally adds up. The fixture imports it and uses none of it.
+interface book {
+  /// One entry of the ledger.
+  resource entry;
+
+  /// The entries a tally adds up, by their handles.
+  record tally {
+    entries: list<entry>,
+  }
+}

@@ -1,7 +1,36 @@
-//! The same WIT implementation with std's runtime or the explicit freestanding runtime.
+//! The same WIT implementation with std's runtime or the explicit freestanding runtime. The module
+//! `guest` is the default component; a feature selects another module in its place, alone, since
+//! a component carries the WIT of one Orb module. With `native`, the selected module's tests
+//! install its `orb()` in a native host.
 #![cfg_attr(all(target_arch = "wasm32", feature = "no-std"), no_std)]
 extern crate alloc;
 
+#[cfg(feature = "configured")]
+mod configured;
+#[cfg(feature = "contributor")]
+mod contributor;
+#[cfg(feature = "flagged")]
+mod flagged;
+#[cfg(feature = "hooks")]
+mod hooks;
+#[cfg(feature = "io")]
+mod io;
+#[cfg(feature = "keywords")]
+mod keywords;
+#[cfg(feature = "lamps")]
+mod lamps;
+#[cfg(all(test, any(feature = "native", feature = "native-sdk")))]
+mod native;
+#[cfg(feature = "renamed")]
+mod renamed;
+#[cfg(feature = "steady")]
+mod steady;
+#[cfg(feature = "system")]
+mod system;
+#[cfg(feature = "versioned")]
+mod versioned;
+
+#[cfg(feature = "guest")]
 #[cfg_attr(
     feature = "no-std",
     tembra::orb(
@@ -11,6 +40,9 @@ extern crate alloc;
         import = "wasi:clocks/monotonic-clock@0.3.0",
         import("example:counters/counter@1.0.0", keyed),
         import = "example:counters/counter@1.0.0",
+        import = "example:ledger/book@1.0.0",
+        import = "example:texts/texts@1.0.0",
+        import("example:shelves/shelf@1.0.0", keyed),
         no_std
     )
 )]
@@ -22,7 +54,10 @@ extern crate alloc;
         import = "wasi:random/random@0.3.0",
         import = "wasi:clocks/monotonic-clock@0.3.0",
         import("example:counters/counter@1.0.0", keyed),
-        import = "example:counters/counter@1.0.0"
+        import = "example:counters/counter@1.0.0",
+        import = "example:ledger/book@1.0.0",
+        import = "example:texts/texts@1.0.0",
+        import("example:shelves/shelf@1.0.0", keyed)
     )
 )]
 mod guest {
@@ -216,6 +251,10 @@ mod guest {
         pub struct Recorded {
             pub last: Option<counter::Tally>,
             pub readings: u32,
+            /// How many readings were thrown away: no build holds the field, as `any()` is never
+            /// on, and the `Default` the macro writes for the state leaves it out with it.
+            #[cfg(any())]
+            pub discarded: u32,
         }
 
         #[service]
@@ -253,12 +292,48 @@ mod guest {
         }
     }
 
+    /// Spells words into the builders of `example:texts/texts@1.0.0`, an interface the attribute
+    /// imports plainly, from the package in `consumed/deps/`: a job holds the caller's builder, the
+    /// imported interface's handle, in a record of the module, which the runtime moves into the
+    /// call as it moves the handle alone. The Orb calls every function of the interface, since the
+    /// test reads its contract from the component, which keeps no import function the code never
+    /// calls.
+    pub mod spelling {
+        use super::texts;
+        use alloc::string::String;
+
+        /// A word to append to the builder the caller hands over.
+        pub struct Job {
+            pub builder: texts::Builder,
+            pub word: String,
+        }
+
+        #[service]
+        pub struct Speller;
+
+        impl Speller {
+            /// Append the job's word to its builder and return the length of the text; the
+            /// builder is consumed.
+            pub fn spell_job(job: Job) -> u32 {
+                job.builder.append(&job.word)
+            }
+
+            /// Spell `word` into a builder of the Orb's own, started through the import and
+            /// dropped with the call, and return the length of its text.
+            pub fn spell(word: String) -> u32 {
+                texts::Builder::new("").append(&word)
+            }
+        }
+    }
+
     /// Keeps a shelf of `example:shelves/shelf@1.0.0`, an interface of a consumed package this Orb
-    /// implements, and sorts its books in `library`, a derived interface that takes and returns
-    /// them as the shelf's export defines them.
+    /// implements, sorts its books in `library`, a derived interface that takes and returns them
+    /// as the shelf's export defines them, and lends them to the shelves of another keeper, which
+    /// `lending` reaches by key through the view the macro derives for the attribute's
+    /// `import("example:shelves/shelf@1.0.0", keyed)`: the interface this Orb implements.
     pub mod shelves {
-        use super::shelf;
-        use alloc::vec::Vec;
+        use super::{shelf, shelf_ref};
+        use alloc::{string::String, vec, vec::Vec};
         use core::sync::atomic::{AtomicU32, Ordering};
 
         /// How many books the shelf holds.
@@ -297,6 +372,42 @@ mod guest {
             /// The longest book, if any.
             pub fn longest(books: Vec<shelf::Book>) -> Option<shelf::Book> {
                 books.into_iter().max_by_key(|book| book.pages)
+            }
+        }
+
+        /// Lends books to the shelves of another keeper of `example:shelves/shelf@1.0.0`, the
+        /// interface this Orb implements, selected by key. The world imports the interface only for
+        /// the types the view `use`s, so the installation binds the view alone, and the shelf this
+        /// Orb exports stays a service.
+        #[service]
+        pub struct Lending;
+
+        impl Lending {
+            /// Put `books` on the shelf of `key` of the keeper the view reaches, one by one, and
+            /// return how many books that shelf holds. A key the keeper refuses is the error.
+            pub async fn lend(key: String, books: Vec<shelf::Book>) -> Result<u32, String> {
+                let shelf = shelf_ref::get(vec![key]).await?;
+                let mut held = 0;
+                for book in books {
+                    held = shelf.shelve(&lent(book));
+                }
+                Ok(held)
+            }
+        }
+
+        /// A book as the view takes it. A derived signature names the shelf's types through the
+        /// implemented interface's module, `shelf::Book`, the copy of the export; the view's methods
+        /// take the copy of the import, which the view's module names, `shelf_ref::Book`, and whose
+        /// `Topic` the bindings' import module of the interface defines.
+        fn lent(book: shelf::Book) -> shelf_ref::Book {
+            use super::example::shelves::shelf as imported;
+            shelf_ref::Book {
+                title: book.title,
+                pages: book.pages,
+                topic: match book.topic {
+                    shelf::Topic::Fiction => imported::Topic::Fiction,
+                    shelf::Topic::Science => imported::Topic::Science,
+                },
             }
         }
     }
@@ -423,6 +534,195 @@ mod guest {
         /// What the kernel keeps for this object.
         pub fn kept() -> Granted {
             Granted::read()
+        }
+    }
+
+    /// What a reviewer decided about a text. The case with named fields enters the WIT as a record
+    /// of its own, `outcome-refused`; the enum stays this one, converted at the boundary.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Outcome {
+        Accepted,
+        Refused { reason: String, severity: u32 },
+        Deferred(u32),
+    }
+
+    /// A decision with its reviewer; it holds the enum, so it stays the author's too.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Decision {
+        pub reviewer: String,
+        pub outcome: Outcome,
+    }
+
+    #[service]
+    pub struct Reviews;
+
+    impl Reviews {
+        /// Decide on `text` for `reviewer`: an empty text is refused, one under four characters
+        /// deferred by the characters it lacks, any other accepted.
+        pub fn decide(reviewer: String, text: String) -> Decision {
+            let outcome = match text.chars().count() {
+                0 => Outcome::Refused {
+                    reason: String::from("empty"),
+                    severity: 3,
+                },
+                length if length < 4 => Outcome::Deferred(4 - length as u32),
+                _ => Outcome::Accepted,
+            };
+            Decision { reviewer, outcome }
+        }
+
+        /// The refusals among the decisions, each as `reviewer: reason (severity)`.
+        pub fn reasons(decisions: Vec<Decision>) -> Vec<String> {
+            decisions
+                .into_iter()
+                .filter_map(|decision| match decision.outcome {
+                    Outcome::Refused { reason, severity } => {
+                        Some(format!("{}: {reason} ({severity})", decision.reviewer))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The worst of the outcomes, a refusal before a deferral before an acceptance, else
+        /// `fallback`; the error when there is neither.
+        pub fn worst(outcomes: Vec<Outcome>, fallback: Option<Outcome>) -> Result<Outcome, String> {
+            let rank = |outcome: &Outcome| match outcome {
+                Outcome::Refused { severity, .. } => 200 + *severity,
+                Outcome::Deferred(by) => 100 + *by,
+                Outcome::Accepted => 0,
+            };
+            outcomes
+                .into_iter()
+                .max_by_key(rank)
+                .or(fallback)
+                .ok_or_else(|| String::from("no outcome"))
+        }
+    }
+
+    /// A titled document: free JSON in a record, which the macro keeps the author's, converted to
+    /// and from the bindings' record of its text.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Note {
+        pub title: String,
+        pub body: serde_json::Value,
+    }
+
+    /// Free JSON, `serde_json::Value`, crosses as a WIT `string` that holds its text: alone, in a
+    /// list, in an option and in a record of the module.
+    #[service]
+    pub struct Documents;
+
+    impl Documents {
+        /// The document, with `note` under the key `note` when it is an object.
+        pub fn annotated(document: serde_json::Value, note: String) -> serde_json::Value {
+            let mut document = document;
+            if let Some(object) = document.as_object_mut() {
+                object.insert(String::from("note"), serde_json::Value::String(note));
+            }
+            document
+        }
+
+        /// A note of each document, titled by its position.
+        pub fn notes(documents: Vec<serde_json::Value>) -> Vec<Note> {
+            documents
+                .into_iter()
+                .enumerate()
+                .map(|(index, body)| Note {
+                    title: format!("{index}"),
+                    body,
+                })
+                .collect()
+        }
+
+        /// The body of the note when it is an object.
+        pub fn object(note: Note) -> Option<serde_json::Value> {
+            note.body.is_object().then_some(note.body)
+        }
+    }
+
+    /// A unit of measure, by its symbol: a newtype, which the WIT spells as a `string`, and which
+    /// every symbol makes, through `From`, as a component reads a newtype.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Unit(String);
+
+    impl From<String> for Unit {
+        fn from(symbol: String) -> Self {
+            Self(symbol)
+        }
+    }
+
+    /// How many there are: a newtype every `u32` makes, through `From`.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Count(u32);
+
+    impl From<u32> for Count {
+        fn from(count: u32) -> Self {
+            Self(count)
+        }
+    }
+
+    /// An amount in a unit: a record holding a newtype, which the macro keeps the author's,
+    /// converted to and from the bindings' record of the unit's symbol.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Measure {
+        pub amount: f64,
+        pub unit: Unit,
+    }
+
+    /// A newtype crosses as its field, read back through its `From`: alone, in a list, in a tuple
+    /// and in a record of the module.
+    #[service]
+    pub struct Units;
+
+    impl Units {
+        /// The amount in the unit.
+        pub fn measured(amount: f64, unit: Unit) -> Measure {
+            Measure { amount, unit }
+        }
+
+        /// How many of the measures are in the unit, and the units of the others, in order.
+        pub fn tally(measures: Vec<Measure>, unit: Unit) -> (Count, Vec<Unit>) {
+            let (same, others): (Vec<Measure>, Vec<Measure>) = measures
+                .into_iter()
+                .partition(|measure| measure.unit == unit);
+            let others = others.into_iter().map(|measure| measure.unit).collect();
+            (Count::from(same.len() as u32), others)
+        }
+    }
+}
+
+/// A module whose newtype only a refusing `TryFrom` makes, which a component cannot take: it has no
+/// error channel for an argument refused before its method runs, only a trap. The
+/// `native-only-newtype` feature adds it, and a component build of the crate then fails, naming the
+/// newtype, as `executor-wasm/tests/orb_macro_runtime.rs` checks.
+#[cfg(feature = "native-only-newtype")]
+#[tembra::orb(package = "example:refusing@1.0.0")]
+mod refusing {
+    use alloc::string::String;
+
+    /// A symbol, which is never empty.
+    pub struct Symbol(String);
+
+    impl TryFrom<String> for Symbol {
+        type Error = String;
+
+        fn try_from(symbol: String) -> Result<Self, String> {
+            if symbol.is_empty() {
+                Err(String::from("a symbol is never empty"))
+            } else {
+                Ok(Self(symbol))
+            }
+        }
+    }
+
+    #[service]
+    pub struct Symbols;
+
+    impl Symbols {
+        /// The symbol, as given.
+        pub fn echo(symbol: Symbol) -> Symbol {
+            symbol
         }
     }
 }

@@ -1,0 +1,14 @@
+[package]
+name = "tembra-config-hidden-client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# What a guest depends on: the facade's authoring entry point, without the host runtime.
+tembra = { path = "../../../tembra", default-features = false, features = ["macros"] }

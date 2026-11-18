@@ -11,6 +11,8 @@ members = [
   "crates/executor-wasm",
   "crates/mobile",
   "crates/orb-macro",
+  "crates/orb-macro/native-fixture",
+  "crates/orb-macro/parity-fixture",
   "crates/cargo-tembra",
 ]
 resolver = "2"
@@ -23,6 +25,7 @@ exclude = [
   "crates/executor-wasm/rust-sockets",
   "crates/executor-wasm/probe-provider",
   "crates/executor-wasm/stream-adapter",
+  "crates/orb-macro/config-fixtures",
   "examples/rust-orb-service/greeter",
   "examples/rust-orb-service/host",
   "examples/rust-orb-hook-contribution/gate",
@@ -45,6 +48,9 @@ exclude = [
   "examples/rust-orb-wit-resource/text",
   "examples/rust-orb-wit-resource/speller",
   "examples/rust-orb-wit-resource/host",
+  "examples/rust-orb-native/english",
+  "examples/rust-orb-native/italian",
+  "examples/rust-orb-native/host",
 ]
 
 [workspace.package]

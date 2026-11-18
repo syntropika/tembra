@@ -1,0 +1,13 @@
+package example:italian@1.0.0;
+
+world italian {
+  export example:greeter/greeting@1.0.0;
+}
+
+package example:greeter@1.0.0 {
+  /// Greets people by name, the contract both greeters of the example implement.
+  interface greeting {
+    /// Greet by name.
+    hello: func(name: string) -> string;
+  }
+}

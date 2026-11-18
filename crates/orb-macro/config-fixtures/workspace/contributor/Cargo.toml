@@ -1,0 +1,10 @@
+[package]
+name = "tembra-config-contributor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# What a guest depends on, as the other guest: the application's `host` reaches it, without the
+# runtime's `hooks`, which its native contribution needs.
+tembra = { path = "../../../../tembra", default-features = false, features = ["macros"] }

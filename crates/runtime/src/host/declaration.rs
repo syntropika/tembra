@@ -138,6 +138,7 @@ impl Declaration {
                 key: ResourceKey {
                     host: self.host.clone(),
                     id: record.id,
+                    name: name.into(),
                     version,
                 },
                 marker: std::marker::PhantomData,
@@ -149,6 +150,7 @@ impl Declaration {
                 ResourceKey {
                     host: self.host.clone(),
                     id: record.id,
+                    name: name.into(),
                     version,
                 },
             );
@@ -192,6 +194,7 @@ impl Declaration {
             key: ResourceKey {
                 host: self.host.clone(),
                 id: resource,
+                name: name.into(),
                 version,
             },
             marker: std::marker::PhantomData,

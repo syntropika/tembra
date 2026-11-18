@@ -350,8 +350,10 @@ impl Engine {
         };
         let layout = layout(&artifact.contract, services, bindings, hooks)?;
         // Admit the binary's actual imports before preparing any provider: a refused
-        // installation opens no CLI file and invokes no configured factory.
-        let component = self.compiled(bytes)?.as_ref().clone();
+        // installation opens no CLI file and invokes no configured factory. The worker keeps the
+        // engine's shared component while its Store lives, so the cache serves other loads of the
+        // artifact meanwhile.
+        let component = self.compiled(bytes)?;
         check_component_imports(&self.engine, &component, grants)?;
         let prepared = self.providers.context(&plan.host_imports, grants, cli)?;
         // The WASI context and whether the bound name-lookup provider grants resolution.

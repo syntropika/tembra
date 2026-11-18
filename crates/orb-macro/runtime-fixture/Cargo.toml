@@ -10,23 +10,60 @@ publish = false
 crate-type = ["cdylib"]
 
 [features]
+default = ["guest"]
+# The module `guest`, which `just build-orb-macro` builds std and `no-std`.
+guest = ["dep:tembra"]
 no-std = ["dep:dlmalloc"]
+# Adds the module `refusing`, whose newtype only a refusing `TryFrom` makes: a component build of
+# the crate then fails, naming it, which `executor-wasm/tests/orb_macro_runtime.rs` checks.
+native-only-newtype = ["dep:tembra"]
+# Each of these, built without the default features, selects another Orb module of the crate in
+# place of `guest`: a component carries the WIT of one Orb module, in its `tembra:wit` section.
+# `executor-wasm/tests/orb_macro_runtime.rs` builds each std and `no-std`, and calls it, then runs
+# its native tests with `native` or `native-sdk`.
+keywords = ["dep:tembra"]
+configured = ["dep:tembra"]
+renamed = ["dep:sdk"]
+flagged = ["dep:tembra"]
+steady = ["dep:tembra"]
+hooks = ["dep:tembra"]
+contributor = ["dep:tembra"]
+versioned = ["dep:tembra"]
+lamps = ["dep:tembra"]
+system = ["dep:tembra"]
+io = ["dep:tembra"]
+# The predicate of the `#[cfg]`s in the modules that `configured` and `renamed` select.
+archive = []
+# The next revision of the Orb that `versioned` or `lamps` selects.
+revised = []
+# The facade's `host`, for the native tests of the selected module, which install its `orb()` in a
+# native host, and its `authoring`, with which they read the module's WIT as a contract.
+# `native-sdk` serves `renamed`, whose crate names the facade `sdk`: Cargo refuses a build whose
+# features name the facade by both names, even through `?`.
+native = ["tembra?/host", "tembra?/authoring"]
+native-sdk = ["sdk?/host"]
+# `native` with the runtime's `hooks`, with which the module that `contributor` selects contributes
+# natively; without it, its `orb(..)` answers an error naming the feature.
+native-hooks = ["native", "tembra?/hooks"]
 
 [dependencies]
-tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
-# `async` for `chance`, which awaits a WASI clock, and for the keyed import's `get`.
-wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+tembra = { path = "../../tembra", default-features = false, features = ["macros"], optional = true }
+# The facade under another name, which the module that `renamed` selects gives with
+# `crate = "sdk"`. That build has no `tembra`, so generated code naming the facade `tembra` fails.
+sdk = { package = "tembra", path = "../../tembra", default-features = false, features = [
   "macros",
-  "realloc",
-  "async",
-] }
+], optional = true }
 dlmalloc = { version = "0.2.12", features = ["global"], optional = true }
 # The code the macro generates for the walker's state names these.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
+[dev-dependencies]
+# The native tests' host runs on a local executor.
+futures = "0.3"
+
 [package.metadata.cargo-machete]
-ignored = ["wit-bindgen", "dlmalloc", "serde", "serde_json"]
+ignored = ["dlmalloc", "serde", "serde_json"]
 
 [profile.release]
 panic = "abort"

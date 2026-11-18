@@ -1,0 +1,56 @@
+package example:ledger@1.0.0;
+
+/// Money, which a book counts in.
+interface money {
+  /// The currency of an amount.
+  enum currency {
+    eur,
+    usd,
+  }
+}
+
+/// A book of entries, the contract shared by whoever keeps one.
+interface book {
+  use money.{currency};
+
+  /// Which way an entry moves the balance.
+  enum direction {
+    credit,
+    debit,
+  }
+
+  /// What an entry went through.
+  flags marks {
+    audited,
+    disputed-once,
+  }
+
+  /// One entry of the book.
+  record entry {
+    label: string,
+    amount: u64,
+    currency: currency,
+    direction: direction,
+    marks: marks,
+  }
+
+  /// What became of an entry the book was given.
+  variant outcome {
+    /// Recorded, with the balance after it.
+    recorded(s64),
+    /// Refused, and why.
+    refused(string),
+  }
+
+  /// Entries of the book, in order.
+  type journal = list<entry>;
+
+  /// Record an entry, unless it moves no amount.
+  add: func(entry: entry) -> outcome;
+
+  /// The entries recorded in a direction, or all of them, in order.
+  entries: func(direction: option<direction>) -> list<entry>;
+
+  /// The last entries recorded, at most `count` of them, in order.
+  recent: func(count: u32) -> journal;
+}

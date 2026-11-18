@@ -8,6 +8,8 @@
 //! `.git` at the root, as in an archive of the sources, the variable is empty and the build goes on.
 use std::{path::Path, process::Command};
 
+mod watched;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2);
@@ -16,8 +18,7 @@ fn main() {
 }
 
 /// The full hash of the commit at HEAD of the repository whose root is `root`. The script runs
-/// again when HEAD moves: its file changes on a checkout; its log and the branch it names, loose or
-/// packed, on a commit.
+/// again when HEAD moves, which changes one of the files `watched::files` names.
 fn head(root: &Path) -> Option<String> {
     // The repository of these sources, not one around them: an archive of the sources unpacked
     // inside another repository has no `.git` of its own.
@@ -34,14 +35,10 @@ fn head(root: &Path) -> Option<String> {
         let text = String::from_utf8(output.stdout).ok()?;
         output.status.success().then(|| text.trim().to_owned())
     };
-    let branch = git(&["symbolic-ref", "--quiet", "HEAD"]);
-    for name in ["HEAD", "logs/HEAD", "packed-refs"]
-        .into_iter()
-        .chain(branch.as_deref())
-    {
-        // Only a file that exists: cargo runs the script on every build for one that does not.
-        let file = git(&["rev-parse", "--git-path", name]).map(|path| root.join(path));
-        if let Some(file) = file.filter(|file| file.exists()) {
+    let path = |option: &str| git(&["rev-parse", option]).map(|path| root.join(path));
+    if let (Some(own), Some(common)) = (path("--git-dir"), path("--git-common-dir")) {
+        let branch = git(&["symbolic-ref", "--quiet", "HEAD"]);
+        for file in watched::files(&own, &common, branch.as_deref()) {
             println!("cargo:rerun-if-changed={}", file.display());
         }
     }

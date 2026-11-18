@@ -29,10 +29,13 @@ installing `cargo-tembra` from another commit, move the crate's `rev` along.
 
 The build of `cargo-tembra` reads that commit with git from the sources it compiles: the checkout
 `cargo install --git` builds in keeps its `.git`, as a clone or a worktree does for
-`cargo install --path`. Built without git, or from sources without `.git` such as an archive,
-`cargo-tembra` knows no commit, and `new` outside a checkout asks for `--tembra` rather than
-depend on whatever the default branch holds. A commit the repository does not have, one not
-pushed yet, fails when Cargo fetches it; `--tembra` serves there too.
+`cargo install --path`. A `--path` build pins the commit at HEAD, not the changes not committed
+yet: `cargo-tembra` compiles them, but the crate `new` creates outside a checkout takes the
+facade, its macro included, as that commit holds it, unless `--tembra` names the checkout. Built
+without git, or from sources without `.git` such as an archive, `cargo-tembra` knows no commit,
+and `new` outside a checkout asks for `--tembra` rather than depend on whatever the default branch
+holds. A commit the repository does not have, one not pushed yet, fails when Cargo fetches it;
+`--tembra` serves there too.
 
 ## Where the contract comes from
 
@@ -57,19 +60,34 @@ imports and exports a contribution at priority 0.
 
 `contract/` thus resolves on its own, in the layout `wit-parser` reads: another Orb consumes it
 with `wit = "../x/contract"`, and `Contract::from_dir` reads it, as `inspect --wit` does, skipping
-the bundled copies in `deps/`. One limit remains: an Orb that keeps state, owns resources or reads
-the context does not compile yet against a contract holding `deps/tembra-guest.wit`, because the
-macro adds the kernel's package to its bindings a second time.
+the bundled copies in `deps/`. An Orb that keeps state, owns resources or reads the context
+consumes a contract holding `deps/tembra-guest.wit` too: the macro reads the kernel's package from
+there and does not add it to its bindings a second time.
 
 The contract goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` directory inside the
 crate on its own, even with an inline WIT, and finding the package twice it panics with
 "attempting to re-add package".
 
-`build` reads the contract on its own before writing it, so no other file in `contract/` takes
-part in it, and checks that it resolves with its standard packages alone. The world is named after
-the Orb's module: when the module is renamed, the `.wit` file of the former name, which declares
-the same package, is removed, and `build` says so on stderr. A standard package in `deps/` the
-contract no longer depends on is removed the same way. Any other file stays.
+The macro writes the same files when Cargo compiles the Orb crate's library for itself, as the
+primary package, on any target: a crate used natively, which `build` never compiles, has its
+contract too, a dependency's is never written into, and the Orb modules of the crate's integration
+tests, benches and binaries write nothing. Both writers are `ModuleContract` of `tembra-contracts`,
+so `build` finds the contract current after the compilation it runs, and a file is rewritten only
+when its content changes, through a temporary file renamed into place. The consumed packages are
+nested in the order the module's WIT names them, the one text both writers share, so a
+`cargo check` and a `build` of the same source write the same contract.
+
+`contract/` must be committed, current and packaged. `cargo publish`, and `cargo package`, verify
+the package with a build of the packaged crate, which is its primary package, so the macro writes
+the contract into it; Cargo then refuses a package whose build changed or added a file. A stale
+`contract/`, or one left out by an `include` list in `Cargo.toml`, fails the publication; any
+`cargo check` or `cargo tembra build` of the crate leaves it current.
+
+The contract is read on its own before it is written, so no other file in `contract/` takes part
+in it, and checked to resolve with its standard packages alone. The world is named after the Orb's
+module: when the module is renamed, the `.wit` file of the former name, which declares the same
+package, is removed, and `build` says so on stderr. A standard package in `deps/` the contract no
+longer depends on is removed the same way. Any other file stays.
 
 ## Manifest metadata
 
@@ -106,6 +124,11 @@ the first is committed, the second is a build output to ignore. With `--out <dir
 the artifact, a copy of the contract and the checksums go to that directory instead, so a
 repository with several Orbs can collect them in one place. A build replaces the lines of its own
 files in `checksums.txt` and keeps the others, sorted by file name.
+
+The compilation goes where Cargo builds the crate, the `target_directory` of `cargo metadata`: the
+`target/` beside the workspace root, or the directory that `CARGO_TARGET_DIR` or `build.target-dir`
+names. The component Cargo wrote is `<target directory>/wasm32-unknown-unknown/release/<lib>.wasm`
+(`debug/` with `--debug`), and `artifacts/<name>.wasm` is a copy of it.
 
 and a summary, here for the filter of the hooks example:
 
@@ -146,8 +169,8 @@ serves the kernel interfaces and the declared hooks itself, as the native execut
 ## Not yet
 
 - Registry-based scaffolding instead of a checkout path or a git commit. The facade already
-  exports the macro; generated bindings still use the explicit `wit-bindgen` and `dlmalloc`
-  dependencies.
+  exports the macro and the bindings generator; generated bindings still use the explicit
+  `dlmalloc`, `serde` and `serde_json` dependencies.
 - `run --call`, behind an optional feature, to install and call the Orb with the executor.
 - `wasm-opt`, once Binaryen handles components; today it works on core modules only.
 - Reproducible builds in a container, like the optimizer, when a marketplace must trust a hash.

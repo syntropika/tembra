@@ -3,7 +3,10 @@
 //! Authoring tools lower a resolved WIT world into this typed model once. Runtimes decode it,
 //! re-check every bound and reference and never rely on hashes or flags supplied by the artifact.
 use crate::{Error, codec};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// Maximum type definitions retained for one selected world.
 pub(crate) const MAX_TYPES: usize = 4096;
@@ -257,6 +260,33 @@ pub struct Model {
     pub types: Vec<Kind>,
     pub imports: Vec<Entry>,
     pub exports: Vec<Entry>,
+}
+
+impl Model {
+    /// Whether the world pairs its import `interface` with an export, as a hook it declares or
+    /// contributes to: it exports an interface of the same identity and imports this one itself
+    /// (`Interface::explicit`). An interface the world imports only because another import `use`s
+    /// its types, as the view of the interface an Orb implements does, pairs with nothing: its
+    /// export is a service.
+    pub fn pairs(&self, interface: &Interface) -> bool {
+        interface.explicit
+            && interface.contract.is_some()
+            && self.exports.iter().any(|entry| {
+                matches!(&entry.item, Item::Interface(exported)
+                    if exported.contract == interface.contract)
+            })
+    }
+
+    /// The identities of the interfaces whose import the world pairs with an export (`pairs`).
+    pub fn paired(&self) -> BTreeSet<String> {
+        self.imports
+            .iter()
+            .filter_map(|entry| match &entry.item {
+                Item::Interface(interface) if self.pairs(interface) => interface.contract.clone(),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// A bound function: side, world item and function index.

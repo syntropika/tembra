@@ -72,20 +72,33 @@ fn the_facade_repository_and_commit_are_written_as_a_git_dependency() {
 }
 
 #[test]
-fn wit_bindgen_is_written_with_the_async_feature() {
-    // `async` for a `pub async fn` and an import by key, whose `get` is an `async func`: without
-    // it, the code the macro generates for them does not compile.
+fn the_guest_names_no_wit_bindgen() {
+    // The facade's `macros` feature brings the wit-bindgen whose rules the macro follows; a
+    // version the guest chose on its own would break the generated code without a clear error.
+    let facade = Facade::Path("/home/ada/tembra/crates/tembra".to_owned());
+    let text = manifest("greeter", &facade);
+    assert!(!text.contains("wit-bindgen"), "{text}");
+    let manifest: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(manifest["dependencies"].get("wit-bindgen"), None);
+    // What the generated code still names stays: the allocator of a `no_std` guest and serde.
+    for dependency in ["dlmalloc", "serde", "serde_json"] {
+        assert!(
+            manifest["dependencies"].get(dependency).is_some(),
+            "{dependency}"
+        );
+    }
+}
+
+#[test]
+fn the_library_keeps_the_default_crate_type() {
+    // `cargo tembra build` asks for the cdylib, so the crate keeps the default library type, which
+    // a native host can depend on.
     let facade = Facade::Path("/home/ada/tembra/crates/tembra".to_owned());
     let manifest: toml::Value = toml::from_str(&manifest("greeter", &facade)).unwrap();
-    let bindgen = &manifest["dependencies"]["wit-bindgen"];
-    assert_eq!(bindgen["default-features"].as_bool(), Some(false));
-    let features: Vec<&str> = bindgen["features"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|feature| feature.as_str().unwrap())
-        .collect();
-    assert_eq!(features, ["macros", "realloc", "async"]);
+    assert_eq!(
+        manifest.get("lib").and_then(|lib| lib.get("crate-type")),
+        None
+    );
 }
 
 #[test]

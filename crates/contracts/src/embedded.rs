@@ -1,19 +1,20 @@
-//! Read what a component built with `#[orb]` says about itself beyond its WIT.
+//! What a component built with `#[orb]` says about itself beyond its WIT.
 //!
-//! The macro writes the module's manifest into the `tembra:manifest` custom section of the core
-//! module the component linker produces, as a JSON object:
+//! The macro serializes the module's [`EmbeddedManifest`] into the `tembra:manifest` custom
+//! section of the core module the component linker produces, as a JSON object:
 //! `{"contributes": {"ns:name/hook@version": n}, "declares": {"ns:name/hook@version": "waterfall"},
 //! "services": {"ns:name/service@version": {"lifetime": "host", "linger_ms": 0}},
 //! "references": {"ns:orb/view@version": "ns:name/service@version"}, "wit": "dir"}`.
 //! Every tool that packages such a component reads its roles here, so a component packaged by
 //! `cargo tembra build` and one packaged through the Node binding carry the same roles. A member
 //! the macro did not write, `references` in a manifest older than keyed imports, reads as empty.
-use crate::{
-    ComponentRoles, Entry, Error, HookComposition, Item, PreparedContract, ServicePolicy,
-    artifact::COMPONENT_HEADER, codec::Reader,
-};
-use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "authoring")]
+use crate::{ComponentRoles, Entry, Item, PreparedContract};
+use crate::{Error, HookComposition, ServicePolicy, artifact::COMPONENT_HEADER, codec::Reader};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+#[cfg(feature = "authoring")]
+use std::collections::BTreeSet;
 
 /// The custom section of the core module holding the manifest.
 const SECTION: &str = "tembra:manifest";
@@ -26,14 +27,17 @@ const MODULE_HEADER: [u8; 8] = *b"\0asm\x01\0\0\0";
 /// `#[service]` attribute names a lifetime or a linger, by interface identity, the reference
 /// views of the interfaces it imports by key, each view's import mapped to the provider interface
 /// it reaches, and the directory of the WIT packages the module consumes, relative to the crate
-/// manifest, as written on the attribute.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+/// manifest, as written on the attribute. The views and the directory are left out when there
+/// are none, so the manifest of an Orb without them is what it was before them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmbeddedManifest {
     pub contributes: BTreeMap<String, i32>,
     pub declares: BTreeMap<String, HookComposition>,
     pub services: BTreeMap<String, ServicePolicy>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub references: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub wit: Option<String>,
 }
 
@@ -55,29 +59,32 @@ impl EmbeddedManifest {
 /// The roles the manifest of `component` gives, checked against the contract. A hook the
 /// component declares or contributes to is an interface the world both imports and exports, and
 /// takes one of the two roles; a service policy names an interface the world exports and does
-/// not import; a reference view names an interface the world imports and does not export. The
-/// contract checks the roles themselves, a view's shape included, when the component is packaged.
+/// not import; a reference view names an interface the world imports and does not export. An
+/// import pairs with an export only when the world imports the interface itself (`Model::pairs`):
+/// one elaboration added because a view `use`s its types, the view of the interface the component
+/// implements, is no hook, and the kernel binds it to nothing, or to the provider the installer
+/// names when it holds a resource. The contract checks the roles themselves, a view's shape
+/// included, when the component is packaged.
+#[cfg(feature = "authoring")]
 pub(crate) fn roles(
     contract: &PreparedContract,
     component: &[u8],
 ) -> Result<ComponentRoles, Error> {
     let manifest = EmbeddedManifest::read(component)?;
-    let interfaces = |entries: &[Entry]| -> BTreeSet<String> {
+    let interfaces = |entries: &[Entry], own: bool| -> BTreeSet<String> {
         entries
             .iter()
             .filter_map(|entry| match &entry.item {
-                Item::Interface(interface) => interface.contract.clone(),
+                Item::Interface(interface) if interface.explicit || !own => {
+                    interface.contract.clone()
+                }
                 _ => None,
             })
             .collect()
     };
-    let exported = interfaces(&contract.model().exports);
-    let imported = interfaces(&contract.model().imports);
-    let paired: BTreeSet<String> = imported
-        .iter()
-        .filter(|identity| exported.contains(*identity))
-        .cloned()
-        .collect();
+    let exported = interfaces(&contract.model().exports, false);
+    let imported = interfaces(&contract.model().imports, true);
+    let paired = contract.model().paired();
     if let Some(identity) = manifest
         .declares
         .keys()
@@ -125,7 +132,10 @@ pub(crate) fn roles(
 /// The custom section `name` of the first core module holding one, in the order of the binary,
 /// the modules of nested components included: the component linker keeps the custom sections of
 /// the compiled code in the core module it links.
-fn module_section<'a>(component: &'a [u8], name: &str) -> Result<Option<&'a [u8]>, Error> {
+pub(crate) fn module_section<'a>(
+    component: &'a [u8],
+    name: &str,
+) -> Result<Option<&'a [u8]>, Error> {
     const CUSTOM: u8 = 0;
     const CORE_MODULE: u8 = 1;
     const COMPONENT: u8 = 4;

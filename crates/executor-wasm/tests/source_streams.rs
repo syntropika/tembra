@@ -805,12 +805,11 @@ fn cooperative_waits_settle_after_root_end_without_restoring_authority() {
             let outcome = fixture.pool.run_until(result);
             if cancel {
                 let error = outcome.unwrap_err();
-                // The retained signal or the Store's revocation can observe this first.
+                // The retained signal or the Store's revocation can observe this first. A guest
+                // that rethrows the host's refusal of its cancelled wait answers that refusal.
                 assert!(
                     error.message.contains("callback cancelled")
-                        || error
-                            .message
-                            .contains("cancelled/call: operation was cancelled"),
+                        || (error.code == tembra::core::Code::Cancelled && error.reason == "call"),
                     "{mode}: {error:?}"
                 );
             } else if fail {

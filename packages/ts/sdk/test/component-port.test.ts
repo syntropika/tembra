@@ -10,6 +10,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+/** Hold the thread for `milliseconds`, as a busy machine or a long synchronous import can. */
+function hold(milliseconds: number) {
+  const until = performance.now() + milliseconds;
+  while (performance.now() < until) {
+    // Nothing else runs on this thread meanwhile, the deadline's timer included.
+  }
+}
+
 function harness(timeout = 1000) {
   let current: number | null = null;
   let disposed = 0;
@@ -27,7 +35,7 @@ function harness(timeout = 1000) {
     fuel: new WebAssembly.Global({ value: "i64", mutable: true }, 0n),
     pages: new WebAssembly.Global({ value: "i64", mutable: true }, 100n),
   };
-  const start = (head: unknown = "head") => {
+  const start = (head: unknown = "head", held = 0) => {
     const id = ++nextId;
     let cancelled = 0;
     let callback!: Callback;
@@ -40,6 +48,7 @@ function harness(timeout = 1000) {
     const task = port.start(BigInt(id), scope, () => {
       port.observer.taskStarted({ id, entry: "stream", isAsync: true });
       callback = port.current();
+      hold(held);
       return head;
     });
     return { ...task, id, callback, cancelled: () => cancelled };
@@ -271,6 +280,48 @@ test("quarantine revokes bounded waits but retains actual task and provider work
   provider.resolve();
   await expect(task.physical).rejects.toThrow("wall time limit");
   expect(released).toBe(true);
+  await port.settled();
+  await port.close();
+});
+
+test("a result after the callback's deadline is a timeout, even before its late timer runs", async () => {
+  const { port, start, exit } = harness(20);
+  const task = start("head", 50);
+  await expect(task.result).rejects.toThrow("wall time limit");
+  expect(port.usable).toBe(false);
+  exit(task.id);
+  await expect(task.physical).rejects.toThrow("wall time limit");
+  await port.close();
+});
+
+test("a rejection after the callback's deadline is a timeout, even before its late timer runs", async () => {
+  const { port } = harness(20);
+  const scope = { check() {}, cancel() {} } as unknown as CallbackScope;
+  const task = port.start(1n, scope, () => {
+    port.observer.taskStarted({ id: 1, entry: "stream", isAsync: true });
+    hold(50);
+    throw new Error("the guest's own failure");
+  });
+  const timeout = await task.result.catch((error: unknown) => error);
+  expect(String(timeout)).toContain("wall time limit");
+  expect(port.usable).toBe(false);
+  port.observer.taskExited({ id: 1 });
+  // One timeout, the cause the port was poisoned with, ends every wait of the callback.
+  expect(await task.physical.catch((error: unknown) => error)).toBe(timeout);
+  let refused: unknown;
+  try {
+    port.start(2n, scope, () => 0);
+  } catch (error) {
+    refused = error;
+  }
+  expect((refused as Error).cause).toBe(timeout);
+  await port.close();
+});
+
+test("a destructor that ends after its deadline is a timeout, even before its late timer runs", async () => {
+  const { port } = harness(20);
+  await expect(port.destroy(() => hold(50))).rejects.toThrow("wall time limit");
+  expect(port.usable).toBe(false);
   await port.settled();
   await port.close();
 });

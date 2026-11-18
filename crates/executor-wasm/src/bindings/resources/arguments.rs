@@ -22,6 +22,14 @@ impl Environment {
         let mut carried = Vec::new();
         let mut retained = Vec::new();
         let mut delivery: Option<Delivery> = None;
+        // Arguments that do not match the WIT are the caller's, as natively; a fault of the
+        // contract is the executor's.
+        self.contract
+            .check_resource_arguments(slot, &arguments)
+            .map_err(failure)?
+            .map_err(|error| {
+                tembra::Error::invalid(tembra::core::Reason::Arguments, error.to_string())
+            })?;
         self.contract
             .map_owned_arguments(slot, &mut arguments, |identity, index| {
                 let expected = nominal(identity)

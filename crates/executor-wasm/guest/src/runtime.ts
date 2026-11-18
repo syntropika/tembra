@@ -2,6 +2,8 @@ import "./builtins.ts";
 
 // Host state and authority never live in these guest-side proxy objects.
 (() => {
+  const nameRefusal = globalThis.__tembraNameRefusal!;
+  delete globalThis.__tembraNameRefusal;
   const environments = new Map<number, unknown>();
   /** The service alias of each declared environment; `null` names an Orb root. */
   const environmentServices = new Map<number, string | null>();
@@ -404,6 +406,17 @@ import "./builtins.ts";
 
   /** Run only a synchronous factory while native host declaration authority is available. */
   globalThis.__tembraDeclare = (packet) => {
+    try {
+      return declare(packet);
+    } catch (error) {
+      // A declaration that fails with the host's refusal unchanged answers it.
+      nameRefusal(error);
+      throw error;
+    }
+  };
+
+  /** Run one declaration command. */
+  function declare(packet: string): string {
     const request = JSON.parse(packet);
     if (request.kind === "validate") {
       const result = callbacks.get(request.callback)!(request.value);
@@ -425,7 +438,7 @@ import "./builtins.ts";
     environments.set(request.environment, value);
     environmentServices.set(request.environment, request.service);
     return "null";
-  };
+  }
 
   /** Execute one bounded host-selected callback against the retained Orb revision. */
   globalThis.__tembraDispatch = async (packet) => {
@@ -512,6 +525,10 @@ import "./builtins.ts";
           throw new Error("Unknown interpreter command");
       }
       return JSON.stringify(result === undefined ? null : result);
+    } catch (error) {
+      // A callback that fails with the host's refusal unchanged answers it.
+      nameRefusal(error);
+      throw error;
     } finally {
       // Callback end: also close this callback's unfinished standard input pumps.
       sweepStandard(true);

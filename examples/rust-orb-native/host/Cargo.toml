@@ -1,0 +1,16 @@
+[package]
+name = "tembra-example-native-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# A native host: it links both greeters as ordinary dependencies and installs the Orb each module's
+# `orb()` builds. `tembra` with its default `host` feature runs them, and Cargo unifies the feature
+# into the greeters' own `tembra`, which gives their modules `orb()`.
+[dependencies]
+tembra = { path = "../../../crates/tembra" }
+tembra-example-english = { path = "../english" }
+tembra-example-italian = { path = "../italian" }
+futures = "0.3"
