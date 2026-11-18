@@ -63,13 +63,15 @@ interface Described {
 }
 /**
  * The contract's `type-names` answer: a WIT name for some ids of the describe graph, an alias's
- * own where an interface takes a type with `use`, and the interface that declares it.
+ * own where an interface takes a type with `use`, the interface where it is written, and its
+ * spelling alone and after the interface that declares the definition (`Point`, `APoint`).
  */
 type TypeNames = readonly {
   readonly id: number;
   readonly name: string;
-  readonly javascript: string;
   readonly interface?: string | null;
+  readonly javascript: string;
+  readonly qualified: string;
 }[];
 
 const PRIMITIVES: Readonly<Record<string, string>> = {
@@ -222,12 +224,17 @@ function clientModule(
   const spelled = graph.javascriptNames[interfaceName] ?? camel(interfaceName);
   const pascal = spelled.charAt(0).toUpperCase() + spelled.slice(1);
   const service = OWN.has(pascal) ? `${pascal}_` : pascal;
-  const { render, declarations } = renderer(graph, names, identity, new Set([...OWN, service]));
+  const functions = Object.values(entry.functions ?? {});
+  const { render, declarations } = renderer(
+    graph,
+    names,
+    identity,
+    new Set([...OWN, service]),
+    functions.flatMap((fn) => [...fn.params.map((parameter) => parameter.type), fn.result]),
+  );
   const signatures: string[] = [];
   const members: string[] = [];
-  for (const fn of Object.values(entry.functions ?? {}).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  )) {
+  for (const fn of functions.sort((a, b) => a.name.localeCompare(b.name))) {
     const method = graph.javascriptNames[fn.name] ?? camel(fn.name);
     if (Object.hasOwn(MEMBERS, fn.name) || Object.hasOwn(MEMBERS, method))
       throw new Error(
@@ -304,26 +311,74 @@ function clientModule(
 /**
  * Render WIT value types as the TypeScript of the host's value form; memoized per type id. A type
  * the contract names renders as its name, which takes a `_` where `taken` has it;
- * `declarations()` then answers the exported type of each name rendered, in name order. Two
- * different types that render as one name are refused, naming both, so that no name depends on
- * the order the functions render in.
+ * `declarations()` then answers the exported type of each one `roots` reach, in name order. The
+ * names are chosen over every type `roots` reach before any renders, so that none depends on the
+ * order the functions render in: two different types of one name are named after the interface
+ * that declares each (`APoint`, `BPoint`), and two that still share a name are refused, each
+ * named with the interface where its name is written.
  */
 function renderer(
   graph: Described,
   names: TypeNames,
   identity: string,
-  taken: Set<string>,
+  taken: ReadonlySet<string>,
+  roots: readonly WitType[],
 ): { render: (type: WitType) => string; declarations: () => string[] } {
   const kinds = new Map(graph.types.map(({ id, definition }) => [id, definition.kind]));
   const wit = new Map(names.map((entry) => [entry.id, entry]));
   const rendered = new Map<number, string>();
-  /** The named types rendered so far, by their name in the module. */
-  const named = new Map<string, number>();
   /** The definition an alias stands for, which a type and its aliases share. */
   const target = (type: number): number => {
     const kind = kinds.get(type);
     return typeof kind === "object" && typeof kind.type === "number" ? target(kind.type) : type;
   };
+  /** Every named type the roots reach, through the definitions of the types they reach. */
+  const reached = new Set<number>();
+  const visited = new Set<number>();
+  const reach = (type: WitType): void => {
+    if (typeof type !== "number" || visited.has(type)) return;
+    visited.add(type);
+    // A named alias renders as its own name and declares its definition's members: the type
+    // it stands for is not reached by it.
+    if (wit.has(type)) reached.add(type);
+    const kind = kinds.get(wit.has(type) ? target(type) : type);
+    if (kind === undefined || typeof kind === "string") return;
+    [
+      kind.type,
+      kind.list,
+      kind.option,
+      ...(kind.record?.fields.map((field) => field.type) ?? []),
+      ...(kind.tuple?.types ?? []),
+      ...(kind.variant?.cases.map((item) => item.type) ?? []),
+      kind.result?.ok,
+      kind.result?.err,
+    ].forEach(reach);
+  };
+  roots.forEach(reach);
+  const ordered = [...reached].sort((a, b) => a - b);
+  /** The definitions each spelling alone would name in this module. */
+  const spellings = new Map<string, Set<number>>();
+  for (const type of ordered) {
+    const { javascript } = wit.get(type)!;
+    spellings.set(javascript, (spellings.get(javascript) ?? new Set()).add(target(type)));
+  }
+  /** The name of each named type, and the type each name declares. */
+  const naming = new Map<number, string>();
+  const named = new Map<string, number>();
+  for (const type of ordered) {
+    const entry = wit.get(type)!;
+    let spelled = spellings.get(entry.javascript)!.size > 1 ? entry.qualified : entry.javascript;
+    while (taken.has(spelled)) spelled += "_";
+    const other = named.get(spelled);
+    if (other === undefined) named.set(spelled, type);
+    else if (target(other) !== target(type)) {
+      const [first, second] = [wit.get(other)!, entry]
+        .map((each) => `${each.name}${each.interface ? ` of ${each.interface}` : ""}`)
+        .sort();
+      throw new Error(`${identity}: the WIT types ${first} and ${second} both name ${spelled}`);
+    }
+    naming.set(type, spelled);
+  }
   const refuse = (what: string): never => {
     throw new Error(`${identity}: ${what} is outside the portable value profile`);
   };
@@ -381,29 +436,15 @@ function renderer(
     if (known !== undefined) return known;
     const definition = kinds.get(type);
     if (definition === undefined) throw new Error(`${identity}: unknown WIT type ${type}`);
-    const name = wit.get(type);
-    if (name !== undefined) {
-      let spelled = name.javascript;
-      while (taken.has(spelled)) spelled += "_";
-      const other = named.get(spelled);
-      if (other === undefined) named.set(spelled, type);
-      else if (target(other) !== target(type)) {
-        const [first, second] = [wit.get(other)!, name]
-          .map((entry) => `${entry.name}${entry.interface ? ` of ${entry.interface}` : ""}`)
-          .sort();
-        throw new Error(`${identity}: the WIT types ${first} and ${second} both name ${spelled}`);
-      }
-      rendered.set(type, spelled);
-      return spelled;
-    }
+    const spelled = naming.get(type);
+    if (spelled !== undefined) return spelled;
     const text = kind(definition);
     rendered.set(type, text);
     return text;
   };
-  /** One exported type per named type rendered, those its definition renders included. */
+  /** One exported type per name, for each named type the roots reach. */
   const declarations = (): string[] => {
     const declared = new Map<string, string[]>();
-    // Rendering a definition may name more types, which this loop then visits too.
     for (const [spelled, type] of named) {
       const definition = kinds.get(target(type)) as WitKind;
       const what = Object.keys(definition).find((key) => definition[key] !== undefined);

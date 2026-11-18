@@ -395,7 +395,7 @@ test("a generated client type-checks for WIT names TypeScript reads otherwise", 
 /** Types an interface takes with `use`, one renamed, and a type of another interface inside one. */
 const USED = (extra: string) => `package example:used@1.0.0;
 interface a { record point { x: u32 } record holder { at: point } }
-interface b { record point { y: string } }
+interface b { record point { y: string } record shape { at: point } }
 interface s {
   use a.{point};
   use b.{point as spot};
@@ -405,9 +405,12 @@ interface s {
 }
 interface u { use a.{holder}; k: func(h: holder); }
 interface other { record point { z: bool } m: func(p: point); }
-interface clash { use a.{holder}; use b.{point}; n: func(h: holder, p: point); }
-world app { export s; export u; export other; }
-world clashing { export clash; }
+interface both { use a.{holder}; use b.{shape}; n: func(h: holder, s: shape); }
+interface fields { use a.{holder}; use b.{shape}; record a-point { w: u8 } r: func(h: holder, s: shape, p: a-point); }
+interface renamed { use a.{holder}; use b.{shape}; use b.{point as a-point}; r: func(h: holder, s: shape, p: a-point); }
+world app { export s; export u; export other; export both; }
+world record-clash { export fields; }
+world alias-clash { export renamed; }
 `;
 
 test("a generated client names the types its interface takes by their names there", async () => {
@@ -421,7 +424,12 @@ test("a generated client names the types its interface takes by their names ther
       await rm(out, { recursive: true, force: true });
       await client({ wit: path.join(root, "contract.wit"), world: "app", out });
       const read = (name: string) => readFile(path.join(out, `example-used-${name}.ts`), "utf8");
-      return { s: await read("s"), u: await read("u"), other: await read("other") };
+      return {
+        s: await read("s"),
+        u: await read("u"),
+        other: await read("other"),
+        both: await read("both"),
+      };
     };
     // The alias names the type it takes; a function rendered first changes no name.
     for (const extra of ["", "e: func(x: point);", "a0: func(x: point, y: spot);"]) {
@@ -432,18 +440,31 @@ test("a generated client names the types its interface takes by their names ther
       expect(s).toContain("  g(p: Point, context?: Context): Promise<void>;");
       expect(s).not.toContain("Point_");
     }
-    const { u, other } = await generate("");
+    const { u, other, both } = await generate("");
     // A named type reached only inside another type's declaration is exported too.
     expect(u).toContain("export type Holder = { at: Point };");
     expect(u).toContain("export type Point = { x: number };");
     // Two interfaces with one type name each have their own, in their own module.
     expect(other).toContain("export type Point = { z: boolean };");
-    // Two different types left with one name in one module are refused, naming both.
+    // Two different types of one name in one module are named after the interface of each.
+    expect(both).toContain("export type APoint = { x: number };");
+    expect(both).toContain("export type BPoint = { y: string };");
+    expect(both).toContain("export type Holder = { at: APoint };");
+    expect(both).toContain("export type Shape = { at: BPoint };");
+    expect(both).not.toMatch(/export type Point\b/);
+    // Two different types left with one name after that are refused, each named with the
+    // interface where its name is written.
     await expect(
-      client({ wit: path.join(root, "contract.wit"), world: "clashing", out: root }),
+      client({ wit: path.join(root, "contract.wit"), world: "record-clash", out: root }),
     ).rejects.toThrow(
-      "example:used/clash@1.0.0: the WIT types point of example:used/a@1.0.0 and point of " +
-        "example:used/b@1.0.0 both name Point",
+      "example:used/fields@1.0.0: the WIT types a-point of example:used/fields@1.0.0 and " +
+        "point of example:used/a@1.0.0 both name APoint",
+    );
+    await expect(
+      client({ wit: path.join(root, "contract.wit"), world: "alias-clash", out: root }),
+    ).rejects.toThrow(
+      "example:used/renamed@1.0.0: the WIT types a-point of example:used/renamed@1.0.0 and " +
+        "point of example:used/a@1.0.0 both name APoint",
     );
   } finally {
     await rm(root, { recursive: true, force: true });
