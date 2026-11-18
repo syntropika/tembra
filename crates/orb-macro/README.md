@@ -1724,6 +1724,13 @@ the version whose rules the macro follows, and the generated code reaches it the
 
 ## Limits
 
+- A component holds one Orb. A crate with several Orb modules builds natively, each module an Orb
+  of its own, but a build for wasm32 fails on the second module with the error
+  "symbol `A component holds one Orb, ...` is already defined", whose symbol says how to split the
+  crate: its component would hold the WIT of both in one `tembra:wit` section, which
+  `cargo tembra build` does not read, and export the kernel's interfaces twice. Put each Orb
+  module a component serves in a crate of its own. `cargo check` for wasm32 defines no symbol, so
+  it passes.
 - WASI interfaces are imported, never implemented: serving incoming HTTP, an export of
   `wasi:http/handler`, is not expressed, and a WASI interface's types and handles stay out of a
   derived signature, also where another Orb's interface `use`s them. An Orb consumes another

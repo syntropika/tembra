@@ -110,6 +110,39 @@ fn the_other_targets_of_a_library_leave_its_contract_unchanged() {
     }
 }
 
+/// A crate with two Orb modules builds natively, each module an Orb of its own, but a component
+/// holds one Orb: built as one, the crate fails on its second module, with an error that says why
+/// and how to split the crate, and not first on the kernel's interfaces both modules export.
+#[test]
+#[ignore = "runs cargo on a fixture: just test-configurations"]
+fn a_crate_with_two_orbs_builds_natively_and_fails_as_a_component() {
+    let manifest = fixture("two-orbs/Cargo.toml");
+    if let Err(errors) = cargo(&manifest, &["build", "--lib"]) {
+        panic!("{errors}");
+    }
+    let component = [
+        "rustc",
+        "--lib",
+        "--target",
+        "wasm32-unknown-unknown",
+        "--crate-type",
+        "cdylib",
+        "--config",
+        "target.wasm32-unknown-unknown.linker = \"wasm-component-ld\"",
+    ];
+    let errors = cargo(&manifest, &component).expect_err("a component of two Orbs builds");
+    let refusal = "A component holds one Orb, and this crate holds more than one Orb module: \
+        put each in a crate of its own to build it for wasm32";
+    assert!(
+        errors.contains(&format!("symbol `{refusal}` is already defined")),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("src/lib.rs:26:"),
+        "not on the second module\n{errors}"
+    );
+}
+
 /// The facade's manifest.
 const FACADE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tembra/Cargo.toml");
 
