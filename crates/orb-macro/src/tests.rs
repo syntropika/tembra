@@ -2765,6 +2765,70 @@ fn a_resource_whose_module_cannot_see_the_client_has_no_constructor() {
     );
 }
 
+/// Where 1.2's rule stops: a `pub(super)` service seen from a sibling under the same parent, and a
+/// resource in the parent of the service's private module, see the client and expand; a private
+/// service seen from that parent is refused, naming the service.
+#[test]
+fn a_resource_sees_the_client_of_a_service_its_parent_holds() {
+    let constructor = "#[constructor] pub fn new(n: u32) -> Token { Token { n } }";
+    let resource = format!(
+        "#[wit_resource(service = Tokens)]
+        pub struct Token {{ pub(crate) n: u32 }}
+        impl Token {{
+            {constructor}
+            pub fn number(&self) -> u32 {{ self.n }}
+        }}"
+    );
+    let nest = |service: &str, use_token: &str| {
+        format!(
+            "mod nest {{
+                use {use_token};
+                #[service]
+                {service} struct Tokens;
+                impl Tokens {{ pub fn open(n: u32) -> Token {{ Token::new(n) }} }}
+            }}"
+        )
+    };
+    let package = "example:burrow@1.0.0";
+    let sibling = expanded(
+        package,
+        &format!(
+            "mod burrow {{
+                pub mod den {{
+                    {}
+                    pub mod tags {{ {resource} }}
+                }}
+            }}",
+            nest("pub(super)", "super::tags::Token")
+        ),
+    );
+    let tags = native(&sibling, &["den", "tags"]);
+    assert!(
+        tags.contains("impl super :: super :: den :: nest :: TokensClient {"),
+        "{tags}"
+    );
+    let parent = |service: &str| {
+        format!(
+            "mod burrow {{
+                pub mod den {{
+                    {}
+                    {resource}
+                }}
+            }}",
+            nest(service, "super::Token")
+        )
+    };
+    let den = native(&expanded(package, &parent("pub")), &["den"]);
+    assert!(
+        den.contains("impl super :: den :: nest :: TokensClient {"),
+        "{den}"
+    );
+    assert_eq!(
+        refused(package, &parent("")),
+        "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `den`, which cannot see it: make the service `Tokens` visible to the module `den`, at least `pub(crate)`"
+    );
+}
+
 /// What WIT or the bindings rule out of a flags struct is refused on the item: a field that is no
 /// `bool`, no field or more than the component model's 32, a generic parameter, two fields of one
 /// WIT name, an option on the attribute, a function of a name the bindings call or the author's own

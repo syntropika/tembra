@@ -1047,7 +1047,8 @@ fn check_seen(
 /// writes those functions on the client, in the resource's module. The error names the module of
 /// the path and the service to make visible to it. Writing the calls in the service's module
 /// instead would name the parameter types from there, and raising a visibility would change the
-/// author's code.
+/// author's code. A `pub(in crate::..)` module or service counts as visible everywhere, as `reach`
+/// leaves it to the compiler, which reports one the resource's module cannot see.
 fn client_seen(
     service: &Service,
     path: &[Ident],
