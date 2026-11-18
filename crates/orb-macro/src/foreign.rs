@@ -376,13 +376,18 @@ impl Modules {
     }
 
     /// The WIT spelling of a type written in the module `scope`, inside the fields of the newtypes
-    /// `within`, which the type may not name again.
-    fn spelled_within(&self, ty: &Type, scope: usize, within: &[&Ident]) -> syn::Result<String> {
+    /// `within`, each by its name and its module, which the type may not name again.
+    fn spelled_within(
+        &self,
+        ty: &Type,
+        scope: usize,
+        within: &[(&Ident, usize)],
+    ) -> syn::Result<String> {
         wit::wit_type_with(ty, &|named| {
             let Some(newtype) = self.newtype(named, scope) else {
                 return Ok(self.wit_name(named, scope));
             };
-            if within.contains(&&newtype.ident) {
+            if within.contains(&(&newtype.ident, newtype.scope)) {
                 return Err(syn::Error::new(
                     named.span(),
                     format!(
@@ -392,7 +397,7 @@ impl Modules {
                 ));
             }
             let mut within = within.to_vec();
-            within.push(&newtype.ident);
+            within.push((&newtype.ident, newtype.scope));
             self.spelled_within(&newtype.inner, newtype.scope, &within)
                 .map(Some)
         })
@@ -647,13 +652,14 @@ impl Modules {
         self.walk_within(ty, scope, visit, &mut Vec::new());
     }
 
-    /// `walk`, inside the fields of the newtypes `within`, which are not read again.
+    /// `walk`, inside the fields of the newtypes `within`, each by its name and its module, which
+    /// are not read again.
     fn walk_within<'m, 't>(
         &'m self,
         ty: &'t Type,
         scope: usize,
         visit: &mut impl FnMut(Reached<'m, 't>),
-        within: &mut Vec<&'m Ident>,
+        within: &mut Vec<(&'m Ident, usize)>,
     ) where
         'm: 't,
     {
@@ -665,8 +671,9 @@ impl Modules {
             return;
         }
         if let Some(newtype) = self.newtype(ty, scope) {
-            if !within.contains(&&newtype.ident) {
-                within.push(&newtype.ident);
+            let key = (&newtype.ident, newtype.scope);
+            if !within.contains(&key) {
+                within.push(key);
                 self.walk_within(&newtype.inner, newtype.scope, visit, within);
                 within.pop();
             }

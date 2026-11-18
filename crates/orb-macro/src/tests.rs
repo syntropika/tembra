@@ -5490,6 +5490,25 @@ fn a_type_from_outside_named_like_a_resource_is_not_its_handle() {
     );
 }
 
+/// A newtype may hold a newtype of the same name in another module: `a`'s `Id` holds `c`'s, which
+/// the WIT spells as its own field, `u64`, without taking the two for one newtype holding itself.
+#[test]
+fn a_newtype_holds_a_same_named_newtype_of_another_module() {
+    let text = resolved(&expanded(
+        "example:desk@1.0.0",
+        "mod desk {
+            pub mod a { pub struct Id(pub super::c::Id); }
+            pub mod c { pub struct Id(pub u64); }
+            #[service]
+            pub struct Tickets;
+            impl Tickets {
+                pub fn check(id: a::Id) -> bool { true }
+            }
+        }",
+    ));
+    assert!(text.contains("  check: func(id: u64) -> bool;\n"), "{text}");
+}
+
 /// A newtype is the one its name resolves to, whatever another module declares of the name: `a`'s
 /// tuple struct `Id` crosses as its field beside `b`'s record `Id`, which stays out of the WIT, and
 /// so does a second newtype `Id` of `c`, each read through to its own field.
