@@ -24,7 +24,7 @@ pub struct PreparedState {
 impl Host {
     /// Attach initial state once while the object is loading.
     pub fn initialize_state(&self, object: Id, value: Id, version: Version) -> Result<Snapshot> {
-        if value == 0 || version == 0 {
+        if value == 0 || !crate::valid_version(version) {
             return Err(Error::invalid(
                 Reason::State,
                 "value and state version must be nonzero",

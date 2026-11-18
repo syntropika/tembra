@@ -84,6 +84,26 @@ fn redefined(
     Ok(())
 }
 
+/// What [`Contract::from_dir`] reads of a directory: the bundled standard packages resolved, with
+/// their names and the unresolved packages they were read from, the directory's own packages, and
+/// those of its `deps/`.
+type ReadDir = (
+    Resolve,
+    BTreeSet<PackageName>,
+    Vec<UnresolvedPackage>,
+    UnresolvedPackageGroup,
+    Vec<(PathBuf, UnresolvedPackageGroup)>,
+);
+
+/// Read a directory of WIT packages and its `deps/` after the bundled standard packages.
+fn read_dir(path: &Path) -> Result<ReadDir, Error> {
+    let (mut resolve, known) = crate::standard::resolve()?;
+    let standard: BTreeSet<_> = resolve.package_names.keys().cloned().collect();
+    let main = UnresolvedPackageGroup::parse_dir(path).map_err(|error| package(path, error))?;
+    let dependencies = dependencies(&mut resolve, &path.join("deps"))?;
+    Ok((resolve, standard, known, main, dependencies))
+}
+
 /// The dependency packages of a `deps/` directory, as `Resolve::push_dir` finds them, each with
 /// its path: a subdirectory or a text file is parsed, for the checks and the provenance to come;
 /// an encoded package (`*.wasm`, `*.wat`, or a `*.wit` whose content is binary) is merged into
@@ -235,11 +255,23 @@ impl Contract {
     /// of a bundled package is refused.
     pub fn from_dir(path: impl AsRef<Path>, world: Option<&str>) -> Result<Self, Error> {
         let path = path.as_ref();
-        let (mut resolve, known) = crate::standard::resolve()?;
-        let standard: BTreeSet<_> = resolve.package_names.keys().cloned().collect();
-        let main = UnresolvedPackageGroup::parse_dir(path).map_err(|error| package(path, error))?;
-        let dependencies = dependencies(&mut resolve, &path.join("deps"))?;
+        let (resolve, standard, known, main, dependencies) = read_dir(path)?;
         Self::elaborate(resolve, standard, known, (path, main), dependencies, world)
+    }
+
+    /// Read a WIT directory and its `deps/` as [`Self::from_dir`] reads them, and refuse what it
+    /// refuses before it selects a world: a definition of a bundled standard package, but for a
+    /// `deps/` file that is the bundled contract line for line; an encoded package that disagrees
+    /// with the bundled one of its name; and a package an encoded dependency defines already. The
+    /// `#[tembra::orb]` macro asks it of the directory of the packages a module consumes.
+    pub fn check_dir(path: impl AsRef<Path>) -> Result<(), Error> {
+        let path = path.as_ref();
+        let (resolve, standard, _, main, dependencies) = read_dir(path)?;
+        dependencies
+            .iter()
+            .map(|(origin, group)| (origin.as_path(), group))
+            .chain([(path, &main)])
+            .try_for_each(|(origin, group)| redefined(&resolve, &standard, origin, group))
     }
 
     /// Resolve a world's own WIT source with the packages of a directory, as the bindings of an
@@ -346,6 +378,15 @@ impl Contract {
     /// The compact runtime contract embedded in artifacts.
     pub fn prepared(&self) -> &PreparedContract {
         &self.prepared
+    }
+
+    /// Check the roles a component declares beyond its contract, as [`Self::component_artifact`]
+    /// checks them when `cargo tembra build` packages it: each hook it declares exports a callback
+    /// that fits the hook's composition, each hook it contributes to is paired with its import, and
+    /// each service policy names an exported service, a host-lifetime one without a linger. The
+    /// `#[tembra::orb]` macro asks it of the roles it embeds, so the error comes at `cargo check`.
+    pub fn check_roles(&self, roles: &ComponentRoles) -> Result<(), Error> {
+        self.prepared.check_roles(roles)
     }
 
     /// Encode the resolved package and standard dependencies for in-memory binding generation.

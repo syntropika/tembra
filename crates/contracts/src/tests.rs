@@ -753,3 +753,61 @@ fn one_type_is_checked_as_a_signature_is() {
         ))
     );
 }
+
+/// `Contract::check_roles` checks the roles a component's manifest gives as `cargo tembra build`
+/// checks them when it packages the component, and the `#[tembra::orb]` macro asks it of the
+/// roles it embeds: a declared hook's callback fits its composition, and a host-lifetime service
+/// does not linger.
+#[test]
+fn roles_are_checked_against_the_contract() {
+    let contract = Contract::from_source(
+        "roles.wit",
+        "package test:roles@1.0.0;
+        interface gate { record ticket { value: s32 } apply: func(input: ticket) -> ticket; }
+        interface desk { open: func() -> u32; }
+        world app { import gate; export gate; export desk; }",
+        Some("app"),
+    )
+    .unwrap();
+    let hook = |composition| ComponentRoles {
+        hooks: BTreeMap::from([("test:roles/gate@1.0.0".into(), composition)]),
+        ..ComponentRoles::default()
+    };
+    assert_eq!(
+        contract.check_roles(&hook(HookComposition::Waterfall)),
+        Ok(())
+    );
+    assert_eq!(
+        contract.check_roles(&hook(HookComposition::Series)),
+        Err(Error(
+            "test:roles/gate@1.0.0: series callbacks must return no value".into()
+        ))
+    );
+    assert_eq!(
+        contract.check_roles(&hook(HookComposition::Bail)),
+        Err(Error(
+            "test:roles/gate@1.0.0: bail callbacks must return an option".into()
+        ))
+    );
+    let service = |lifetime, linger_ms| ComponentRoles {
+        services: BTreeMap::from([(
+            "test:roles/desk@1.0.0".into(),
+            ServicePolicy {
+                lifetime,
+                linger_ms,
+            },
+        )]),
+        ..ComponentRoles::default()
+    };
+    assert_eq!(contract.check_roles(&service(Lifetime::Host, 0)), Ok(()));
+    assert_eq!(
+        contract.check_roles(&service(Lifetime::Referenced, 5)),
+        Ok(())
+    );
+    assert_eq!(
+        contract.check_roles(&service(Lifetime::Host, 5)),
+        Err(Error(
+            "test:roles/desk@1.0.0: host-lifetime objects cannot linger".into()
+        ))
+    );
+}

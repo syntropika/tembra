@@ -670,23 +670,19 @@ pub(crate) type Copies = BTreeMap<PackageName, Vec<PathBuf>>;
 
 /// The bundled packages the consumed packages, read from the consumed directory, hold copies of,
 /// as a contract `cargo tembra build` wrote holds them in its `deps/`: the inline WIT leaves those
-/// out, since the bindings would read them twice. Every consumed package named as a bundled one, a
-/// WASI package Tembra serves or the kernel's, is checked as `Contract::from_dir` checks it,
-/// whether the Orb uses it or not. One decoded from an encoded file of `deps/` has no source to
-/// compare: it is a copy, with the files it was decoded from, once `from_dir`'s merge of the
-/// encoded files accepts it (`merged`), but for the kernel's package where the macro brings it
-/// itself, for a state, a resource or the context, `kernel`: a copy of it decoded so is then an
-/// error asking to remove it. Any other must be read from a file of `deps/` itself: a copy in a
-/// directory of `deps/` or in the directory itself, even line for line, is `from_dir`'s error
-/// naming that directory. And that file must be the bundled file line for line, whatever its line
-/// endings (`tembra_contracts::bundled`): a copy nested in a file of another package, the one its
-/// `package` line declares as wit-parser reads it, even line for line, is `from_dir`'s error
-/// naming that file, and a file of the package that differs, if only in its comments, is an error
-/// naming the file, the package and what it is.
+/// out, since the bindings would read them twice. The directory is read first as
+/// `Contract::from_dir` reads it, and its error is tembra-contracts' (`Contract::check_dir`): a
+/// copy of a bundled package, a WASI package Tembra serves or the kernel's, is accepted only in a
+/// file of `deps/` that is the bundled file line for line, or decoded from an encoded file of
+/// `deps/` that agrees with the bundled package. A copy decoded so comes with the files it was
+/// decoded from, which hold only the parts of the package they use; but for the kernel's package
+/// where the macro brings it itself, for a state, a resource or the context, `kernel`: a copy of
+/// it decoded so is then an error asking to remove it.
 pub(crate) fn bundled_copies(parsed: &Parsed, kernel: bool) -> syn::Result<Copies> {
     let Some(dir) = parsed.dir() else {
         return Ok(Copies::new());
     };
+    tembra_contracts::Contract::check_dir(dir.path()).map_err(|cause| error(cause.to_string()))?;
     let (consumed, sources) = (dir.packages()?, dir.sources()?);
     // The bundled packages by the names their sources declare: resolved together with the
     // consumed ones, each would be found as its own copy.
@@ -696,94 +692,57 @@ pub(crate) fn bundled_copies(parsed: &Parsed, kernel: bool) -> syn::Result<Copie
         .chain([GUEST])
         .filter_map(|source| source.lines().find_map(declared))
         .collect();
-    let deps = dir.path().join("deps");
-    // Each consumed package named as a bundled one, with a file it was read from: none when it was
-    // decoded from an encoded file.
-    let named: Vec<(&PackageName, Option<&Path>)> = consumed
+    // Each consumed package named as a bundled one, and whether it was read from a file: not when
+    // it was decoded from an encoded file.
+    let named: Vec<(&PackageName, bool)> = consumed
         .package_names
         .iter()
         .filter(|(name, _)| bundled.contains(&name.to_string().as_str()))
         .map(|(name, &package)| {
-            let file = sources
+            let read = sources
                 .package_paths(package)
-                .and_then(|mut files| files.next());
-            (name, file)
+                .and_then(|mut files| files.next())
+                .is_some();
+            (name, read)
         })
         .collect();
-    let decoded = if named.iter().any(|(_, file)| file.is_none()) {
-        merged(parsed, &deps)?
+    let decoded = if named.iter().any(|(_, read)| !read) {
+        decoded(&dir.path().join("deps"))?
     } else {
         BTreeMap::new()
     };
-    let duplicate = |name: &PackageName, place: &Path| {
-        error(format!(
-            "WIT package {name} in {} is already provided by the standard contracts bundled with Tembra; remove the duplicate",
-            place.display()
-        ))
-    };
     let mut copies = Copies::new();
-    for (name, file) in named {
-        let Some(file) = file else {
-            let files = decoded.get(name).cloned().unwrap_or_default();
-            if kernel && name.namespace != "wasi" {
-                let files: Vec<String> = files
-                    .iter()
-                    .map(|file| file.display().to_string())
-                    .collect();
-                return Err(error(format!(
-                    "{}: this copy of {name}, the kernel's package, is encoded; remove it, since the macro brings the kernel's package",
-                    files.join(", ")
-                )));
-            }
-            copies.insert(name.clone(), files);
-            continue;
-        };
-        if let Some(place) = file.parent().filter(|place| *place != deps.as_path()) {
-            return Err(duplicate(name, place));
-        }
-        let source = std::fs::read_to_string(file).ok();
-        if source.as_deref().is_some_and(tembra_contracts::bundled) {
-            copies.insert(name.clone(), Vec::new());
-            continue;
-        }
-        // The file's own package, as wit-parser reads the line declaring it, whatever else that
-        // line holds, a comment included.
-        let own = source
-            .as_deref()
-            .and_then(|source| UnresolvedPackageGroup::parse(file, source).ok())
-            .map(|parse| parse.main.name);
-        if own.is_some_and(|own| own != *name) {
-            return Err(duplicate(name, file));
-        }
-        let what = if name.namespace == "wasi" {
-            "a WASI package Tembra serves"
+    for (name, read) in named {
+        let files = if read {
+            Vec::new()
         } else {
-            "the kernel's package"
+            decoded.get(name).cloned().unwrap_or_default()
         };
-        return Err(error(format!(
-            "{}: this copy of {name}, {what}, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version",
-            file.display()
-        )));
+        if !read && kernel && name.namespace != "wasi" {
+            let files: Vec<String> = files
+                .iter()
+                .map(|file| file.display().to_string())
+                .collect();
+            return Err(error(format!(
+                "{}: this copy of {name}, the kernel's package, is encoded; remove it, since the macro brings the kernel's package",
+                files.join(", ")
+            )));
+        }
+        copies.insert(name.clone(), files);
     }
     Ok(copies)
 }
 
-/// Check the encoded WIT packages of `deps/` as `Contract::from_dir` checks them: each `.wat` file,
-/// and each `.wit` or `.wasm` file that starts with the wasm magic `\0asm`, is merged, in the order
-/// of the file names, into the bundled packages. The merge refuses a package that disagrees with
-/// the bundled one of its name, and the error is `from_dir`'s, naming the file. Each package the
-/// files hold comes with the files that hold it.
-fn merged(parsed: &Parsed, deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec<PathBuf>>> {
+/// The packages the encoded files of `deps/` hold, each with the files that hold it: each `.wat`
+/// file, and each `.wit` or `.wasm` file that starts with the wasm magic `\0asm`, decoded apart.
+/// `Contract::check_dir` has read them already.
+fn decoded(deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec<PathBuf>>> {
     let failed = |path: &Path, cause: &dyn std::fmt::Display| {
         error(format!(
             "failed to parse WIT package {}: {cause:#}",
             path.display()
         ))
     };
-    let mut standard = parsed.bundled()?.0.clone();
-    standard
-        .push_group(parsed.guest()?.clone())
-        .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
     let mut files = std::fs::read_dir(deps)
         .and_then(|entries| {
             entries
@@ -800,8 +759,6 @@ fn merged(parsed: &Parsed, deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec
         }
         let bytes = std::fs::read(&file).map_err(|cause| failed(&file, &cause))?;
         if extension == Some("wat") || bytes.starts_with(b"\0asm") {
-            // `Resolve::push_file` decodes the file and merges what it holds; decoded apart first,
-            // its packages are known.
             let mut packages = Resolve::default();
             packages
                 .push_file(&file)
@@ -809,9 +766,6 @@ fn merged(parsed: &Parsed, deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec
             for name in packages.package_names.keys() {
                 decoded.entry(name.clone()).or_default().push(file.clone());
             }
-            standard
-                .merge(packages)
-                .map_err(|cause| failed(&file, &cause))?;
         }
     }
     Ok(decoded)
@@ -858,16 +812,10 @@ pub(crate) fn absolute(dir: &str) -> syn::Result<PathBuf> {
     Ok(PathBuf::from(manifest).join(dir))
 }
 
-/// The callback of one hook, read from the consumed packages: its name, which compositions its
-/// shape admits, and how the bindings spell its input and result.
+/// The callback of one hook, read from the consumed packages: its name, and how the bindings spell
+/// its input and result. Which compositions its shape admits is tembra-contracts' `check_roles`.
 pub(crate) struct Callback {
     pub name: String,
-    /// The callback returns nothing.
-    pub series: bool,
-    /// The callback returns its input type.
-    pub waterfall: bool,
-    /// The callback returns an option.
-    pub bail: bool,
     pub input: Spelled,
     pub result: Option<Spelled>,
     /// How the import takes the input, as the bindings bind it: `run` lends it so.
@@ -2097,11 +2045,6 @@ pub(crate) fn callbacks<'a>(
                 hook.clone(),
                 Callback {
                     name: function.name.clone(),
-                    series: function.result.is_none(),
-                    waterfall: function
-                        .result
-                        .is_some_and(|result| same_type(resolve, result, param.ty)),
-                    bail: function.result.is_some_and(|ty| optional(resolve, ty)),
                     input: spell(param.ty)?,
                     result: function.result.map(spell).transpose()?,
                     passed: passed(resolve, param.ty),
@@ -2119,52 +2062,6 @@ fn dealias(resolve: &Resolve, mut ty: wit_parser::Type) -> wit_parser::Type {
         ty = inner;
     }
     ty
-}
-
-/// Whether two WIT types are one, through aliases: a record, a variant, an enum, a flags type or
-/// a resource is itself, and a list, an option, a result, a tuple or a handle, named or not, is
-/// the same shape over the same types. The kernel holds a waterfall callback's input and result
-/// to the same rule.
-fn same_type(resolve: &Resolve, left: wit_parser::Type, right: wit_parser::Type) -> bool {
-    let (left, right) = (dealias(resolve, left), dealias(resolve, right));
-    let (wit_parser::Type::Id(left), wit_parser::Type::Id(right)) = (left, right) else {
-        return left == right;
-    };
-    if left == right {
-        return true;
-    }
-    let (left, right) = (&resolve.types[left], &resolve.types[right]);
-    let same = |left: wit_parser::Type, right: wit_parser::Type| same_type(resolve, left, right);
-    let same_side =
-        |left: Option<wit_parser::Type>, right: Option<wit_parser::Type>| match (left, right) {
-            (Some(left), Some(right)) => same(left, right),
-            (None, None) => true,
-            _ => false,
-        };
-    match (&left.kind, &right.kind) {
-        (TypeDefKind::List(left), TypeDefKind::List(right))
-        | (TypeDefKind::Option(left), TypeDefKind::Option(right)) => same(*left, *right),
-        (TypeDefKind::Result(left), TypeDefKind::Result(right)) => {
-            same_side(left.ok, right.ok) && same_side(left.err, right.err)
-        }
-        (TypeDefKind::Tuple(left), TypeDefKind::Tuple(right)) => {
-            left.types.len() == right.types.len()
-                && left
-                    .types
-                    .iter()
-                    .zip(&right.types)
-                    .all(|(left, right)| same(*left, *right))
-        }
-        (
-            TypeDefKind::Handle(wit_parser::Handle::Own(left)),
-            TypeDefKind::Handle(wit_parser::Handle::Own(right)),
-        )
-        | (
-            TypeDefKind::Handle(wit_parser::Handle::Borrow(left)),
-            TypeDefKind::Handle(wit_parser::Handle::Borrow(right)),
-        ) => same(wit_parser::Type::Id(*left), wit_parser::Type::Id(*right)),
-        _ => false,
-    }
 }
 
 /// What `wit-bindgen` records of a type to choose how an import takes it: whether the type holds a
@@ -2385,20 +2282,6 @@ fn passed(resolve: &Resolve, ty: wit_parser::Type) -> Passed {
         }
         TypeDefKind::Map(..) => Passed::Named,
         _ => Passed::Owned,
-    }
-}
-
-/// Whether a WIT type is an option, through aliases.
-fn optional(resolve: &Resolve, mut ty: wit_parser::Type) -> bool {
-    loop {
-        let wit_parser::Type::Id(id) = ty else {
-            return false;
-        };
-        match &resolve.types[id].kind {
-            TypeDefKind::Option(_) => return true,
-            TypeDefKind::Type(inner) => ty = *inner,
-            _ => return false,
-        }
     }
 }
 

@@ -775,7 +775,40 @@ fn a_host_lifetime_cannot_linger_and_unknown_options_are_refused() {
         PACKAGE,
         &ledger("#[service(lifetime = host, linger_ms = 5)]"),
     );
-    assert!(error.contains("cannot linger"), "{error}");
+    assert!(
+        error.contains(": host-lifetime objects cannot linger"),
+        "{error}"
+    );
+    // A service a native host alone serves, built by its `#[create]` with `#[local]` methods only,
+    // installs with its policy too.
+    let pinned = |attribute: &str| {
+        format!(
+            "mod book {{
+                use tembra::Declaration;
+                #[inputs]
+                pub struct Inputs {{ pub n: u32 }}
+                {attribute}
+                pub struct Pinned {{ n: u32 }}
+                impl Pinned {{
+                    #[create]
+                    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {{
+                        Ok(Self {{ n: inputs.n }})
+                    }}
+                    #[local]
+                    pub fn peek(&self) -> u32 {{ self.n }}
+                }}
+            }}"
+        )
+    };
+    expanded(PACKAGE, &pinned("#[service(lifetime = host)]"));
+    let error = refused(
+        PACKAGE,
+        &pinned("#[service(lifetime = host, linger_ms = 5)]"),
+    );
+    assert!(
+        error.contains("example:book/pinned@1.0.0: host-lifetime objects cannot linger"),
+        "{error}"
+    );
     let error = refused(PACKAGE, &ledger("#[service(lifetime = forever)]"));
     assert!(
         error.contains("referenced (the default) or host"),
@@ -6034,7 +6067,10 @@ fn a_declared_hook_may_name_a_consumed_interface() {
         options("example:gate@1.0.0", Some(&dir)),
         &SHARED_GATE.replace("composition = waterfall", "composition = series"),
     );
-    assert!(error.contains("does not fit a series hook"), "{error}");
+    assert!(
+        error.contains("example:admission/guard@1.0.0: series callbacks must return no value"),
+        "{error}"
+    );
     let error = refused("example:gate@1.0.0", SHARED_GATE);
     assert!(error.contains("hooks need wit ="), "{error}");
 }
@@ -6170,8 +6206,9 @@ fn run_lends_the_parts_of_an_option_a_result_or_a_tuple() {
 }
 
 /// A waterfall callback returns its input type, through aliases and anonymous types alike, as
-/// the kernel compares them: `type out = admission` returns an admission, `list<u32>` is one
-/// type wherever it is written; another record is not the input type.
+/// tembra-contracts compares them for `cargo tembra build` and the kernel: `type out = admission`
+/// returns an admission, `list<u32>` is one type wherever it is written; a record of another
+/// shape is not the input type.
 #[test]
 fn a_waterfall_result_is_its_input_type_through_aliases() {
     let waterfall = |name: &str, callback: &str| {
@@ -6210,21 +6247,22 @@ fn a_waterfall_result_is_its_input_type_through_aliases() {
         // the composition itself is accepted.
         if let Err(error) = accepted {
             assert!(
-                !error.to_string().contains("does not fit a waterfall hook"),
+                !error.to_string().contains("waterfall input and result"),
                 "{name}: {error}"
             );
         }
     }
     let error = waterfall(
         "unlike",
-        "  record other { value: s32, blocked: bool }\n  apply: func(input: admission) -> other;",
+        "  record other { value: s32 }\n  apply: func(input: admission) -> other;",
     )
     .map(|_| ())
     .unwrap_err()
     .to_string();
     assert!(
-        error
-            .contains("does not fit a waterfall hook: a waterfall callback returns its input type"),
+        error.contains(
+            "example:admission/guard@1.0.0: waterfall input and result must have the same WIT type"
+        ),
         "{error}"
     );
 }
@@ -7111,8 +7149,8 @@ fn a_consumed_contract_may_bring_the_kernel_package() {
     ] {
         let error = with_deps(name, &guest).map(|_| ()).unwrap_err().to_string();
         assert!(
-            error.contains("deps/tembra-guest.wit:")
-                && error.contains("this copy of tembra:guest@1.0.0, the kernel's package, differs from the one bundled with this macro"),
+            error.contains("WIT package tembra:guest@1.0.0 in ")
+                && error.contains("deps/tembra-guest.wit is already provided by the standard contracts bundled with Tembra; remove the duplicate"),
             "{name}: {error}"
         );
     }

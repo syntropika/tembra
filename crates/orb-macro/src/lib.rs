@@ -57,7 +57,9 @@ use syn::{
     Attribute, Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitInt, LitStr, Pat,
     ReturnType, Token, Type, Visibility, spanned::Spanned,
 };
-use tembra_contracts::{EmbeddedManifest, HookComposition, Lifetime, ServicePolicy};
+use tembra_contracts::{
+    ComponentRoles, EmbeddedManifest, HookComposition, Lifetime, ServicePolicy,
+};
 
 /// Declare a compiled Orb from a module; the crate documentation lists the rules.
 #[proc_macro_attribute]
@@ -415,6 +417,20 @@ impl Guard {
 }
 
 impl Service {
+    /// The ownership policy of the service's objects as the component's roles name it, when the
+    /// service chose a lifetime or a linger.
+    fn role(&self) -> Option<ServicePolicy> {
+        let policy = self.policy.as_ref()?;
+        Some(ServicePolicy {
+            lifetime: if policy.host {
+                Lifetime::Host
+            } else {
+                Lifetime::Referenced
+            },
+            linger_ms: policy.linger_ms,
+        })
+    }
+
     /// The versioned identity of the service's interface.
     fn identity(&self, package: &str) -> String {
         self.implements
@@ -533,11 +549,12 @@ enum Composition {
 }
 
 impl Composition {
-    fn name(self) -> &'static str {
+    /// The composition as the component's roles name it.
+    fn role(self) -> HookComposition {
         match self {
-            Self::Series => "series",
-            Self::Waterfall => "waterfall",
-            Self::Bail => "bail",
+            Self::Series => HookComposition::Series,
+            Self::Waterfall => HookComposition::Waterfall,
+            Self::Bail => HookComposition::Bail,
         }
     }
 }
@@ -1696,6 +1713,7 @@ fn expand(
     let native = native::emit(&analysis, metadata.as_ref());
     let component = component(&analysis, &native.nested, &native.served)?;
     check_profile(&analysis)?;
+    check_roles(&analysis)?;
     let native = native.root;
     // Last, once both sides accepted the module: the signature of each service, from the WIT.
     let signatures = signatures(&analysis)?;
@@ -1884,7 +1902,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                             "`{}::{}` is a method named `{member}`, a member every reference to a service object has ({}): the kernel refuses such a method, so rename it",
                             service.ident,
                             read.ident,
-                            RESERVED_MEMBERS.join(", ")
+                            tembra_contracts::RESERVED_MEMBERS.join(", ")
                         ),
                     ));
                 }
@@ -2624,7 +2642,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                     format!(
                         "{identity} has a function `{}`, a member every reference to a service object has as `{member}` ({}): the kernel refuses such a method, so no Orb can serve this interface",
                         function.name,
-                        RESERVED_MEMBERS.join(", ")
+                        tembra_contracts::RESERVED_MEMBERS.join(", ")
                     ),
                 ));
             }
@@ -2687,30 +2705,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                     check_async(authored, function)?;
                 }
             }
-        }
-    }
-    for declaration in declarations
-        .values()
-        .filter(|declaration| declaration.input.is_none())
-    {
-        let callback = &callbacks[&declaration.hook];
-        let (fits, rule) = match declaration.composition {
-            Composition::Series => (callback.series, "a series callback returns nothing"),
-            Composition::Waterfall => (
-                callback.waterfall,
-                "a waterfall callback returns its input type",
-            ),
-            Composition::Bail => (callback.bail, "a bail callback returns an option"),
-        };
-        if !fits {
-            return Err(syn::Error::new(
-                declaration.ident.span(),
-                format!(
-                    "the callback of {} does not fit a {} hook: {rule}",
-                    declaration.hook,
-                    declaration.composition.name()
-                ),
-            ));
         }
     }
     // The functions and a derived hook's input were spelled by the names they write, before the
@@ -3109,38 +3103,7 @@ fn component(
     // lifetime or a linger, the interfaces imported by key, and the directory of the consumed
     // packages, as written on the attribute: `cargo tembra build` nests the whole packages from
     // there, where the component's own types would keep only the functions it calls.
-    let manifest = EmbeddedManifest {
-        contributes: hooks.clone(),
-        declares: declarations
-            .iter()
-            .map(|(hook, declaration)| {
-                let composition = match declaration.composition {
-                    Composition::Series => HookComposition::Series,
-                    Composition::Waterfall => HookComposition::Waterfall,
-                    Composition::Bail => HookComposition::Bail,
-                };
-                (hook.clone(), composition)
-            })
-            .collect(),
-        services: services
-            .iter()
-            .filter_map(|service| {
-                let policy = service.policy.as_ref()?;
-                let lifetime = if policy.host {
-                    Lifetime::Host
-                } else {
-                    Lifetime::Referenced
-                };
-                let policy = ServicePolicy {
-                    lifetime,
-                    linger_ms: policy.linger_ms,
-                };
-                Some((service.identity(package), policy))
-            })
-            .collect(),
-        references: keyed::manifest(package, views),
-        wit: options.wit.clone(),
-    };
+    let manifest = manifest(analysis);
     let manifest_section = if manifest == EmbeddedManifest::default() {
         quote! {}
     } else {
@@ -3493,6 +3456,82 @@ fn check_profile(analysis: &Analysis) -> syn::Result<()> {
     Ok(())
 }
 
+/// The manifest the component carries: the contributions with their priorities, the declarations
+/// with their composition, the services that chose a lifetime or a linger, the interfaces imported
+/// by key, and the directory of the consumed packages, as written on the attribute.
+fn manifest(analysis: &Analysis) -> EmbeddedManifest {
+    EmbeddedManifest {
+        contributes: analysis.hooks.clone(),
+        declares: analysis
+            .declarations()
+            .iter()
+            .map(|(hook, declaration)| (hook.clone(), declaration.composition.role()))
+            .collect(),
+        services: analysis
+            .services
+            .iter()
+            .filter_map(|service| Some((service.identity(&analysis.package), service.role()?)))
+            .collect(),
+        references: keyed::manifest(&analysis.package, &analysis.views),
+        wit: analysis.options.wit.clone(),
+    }
+}
+
+/// Refuse a hook declaration whose callback does not fit its composition, and a service policy the
+/// kernel refuses, a host lifetime with a linger, as tembra-contracts' `check_roles` says, which
+/// `cargo tembra build` runs on the roles it packages: each is checked alone, with the error on
+/// the struct. A service without a function of the contract, which a native host alone serves,
+/// has no role in a component: its linger is the kernel's `admits_linger`'s to check.
+fn check_roles(analysis: &Analysis) -> syn::Result<()> {
+    // A service with no role in a component, which a native host alone serves, still installs with
+    // its policy, which the kernel checks by `admits_linger`.
+    for service in &analysis.services {
+        if let Some(policy) = service.role()
+            && !service.planned(&analysis.wit_resources)
+            && !tembra_contracts::admits_linger(policy.lifetime.into(), policy.linger_ms)
+        {
+            return Err(syn::Error::new(
+                service.ident.span(),
+                format!(
+                    "{}: host-lifetime objects cannot linger",
+                    service.identity(&analysis.package)
+                ),
+            ));
+        }
+    }
+    let declarations = analysis.declarations();
+    let services: Vec<&Service> = analysis
+        .services
+        .iter()
+        .filter(|service| service.role().is_some() && service.planned(&analysis.wit_resources))
+        .collect();
+    if declarations.is_empty() && services.is_empty() {
+        return Ok(());
+    }
+    let contract = resolved(analysis)?;
+    let check = |roles: ComponentRoles, span: Span| {
+        contract
+            .check_roles(&roles)
+            .map_err(|error| syn::Error::new(span, error.to_string()))
+    };
+    for (hook, declaration) in declarations {
+        let roles = ComponentRoles {
+            hooks: BTreeMap::from([(hook, declaration.composition.role())]),
+            ..ComponentRoles::default()
+        };
+        check(roles, declaration.ident.span())?;
+    }
+    for service in services {
+        let policy = service.role().expect("a policy");
+        let roles = ComponentRoles {
+            services: BTreeMap::from([(service.identity(&analysis.package), policy)]),
+            ..ComponentRoles::default()
+        };
+        check(roles, service.ident.span())?;
+    }
+    Ok(())
+}
+
 /// The derived WIT, resolved as a contract with the consumed packages the way `cargo tembra build`
 /// reads it.
 fn resolved(analysis: &Analysis) -> syn::Result<tembra_contracts::Contract> {
@@ -3570,17 +3609,12 @@ fn signature_ident(service: &Service) -> Ident {
 /// with a capital letter, which sorts before the kernel's exports and mangled names.
 const ONE_ORB: &str = "A component holds one Orb module, of this crate or of a dependency, and this build holds more than one: put each Orb module in a crate of its own, and what another crate uses of it in a crate without one";
 
-/// The members every reference to a service object has, which the kernel refuses as method names
-/// when it installs an Orb; `tembra-core` checks the same list.
-const RESERVED_MEMBERS: [&str; 6] = ["then", "release", "state", "ready", "status", "opaque"];
-
-/// The reserved member a WIT function would take on a reference, if any: the kernel compares the
-/// lowerCamelCase spelling of the official JavaScript bindings.
+/// The reserved member a WIT function would take on a reference, if any, as the kernel's
+/// `reserved_member` says when it installs an Orb: it compares the lowerCamelCase spelling of the
+/// official JavaScript bindings.
 fn reserved_member(wit_name: &str) -> Option<String> {
     let member = wit_name.to_lower_camel_case();
-    RESERVED_MEMBERS
-        .contains(&member.as_str())
-        .then_some(member)
+    tembra_contracts::reserved_member(&member).then_some(member)
 }
 
 /// The type-level helper attribute through which a derive names the traits it implements, for
@@ -3651,7 +3685,7 @@ fn identity(package: &str, interface: &str) -> String {
 /// Read a `#[service]` attribute: the identity of an interface the service implements, if it
 /// names one first, then the ownership policy of its objects, if any: `lifetime = host` pins
 /// the objects until the host closes, `linger_ms = n` keeps an unreferenced object for `n`
-/// milliseconds; a host-lifetime object cannot linger, as the kernel rules. Then the guard of
+/// milliseconds; that a host-lifetime object cannot linger is `check_roles`'s. Then the guard of
 /// their address, if any: `key = main` admits the key `["main"]` alone, `principal = "name"` that
 /// principal alone, which is `host` for a host-lifetime object, as the kernel rules.
 fn service_attribute(
@@ -3713,16 +3747,10 @@ fn service_attribute(
                 input.parse::<Token![,]>()?;
             }
         }
-        if host && linger_ms != 0 {
-            return Err(syn::Error::new(
-                span,
-                "host-lifetime objects cannot linger: they live until the host closes",
-            ));
-        }
         // The host creates a host-lifetime object as `main` for itself when it installs the Orb.
         if host
             && let Some((principal, _)) = &guard.principal
-            && principal != "host"
+            && !tembra_contracts::admits_principal(Lifetime::Host.into(), principal)
         {
             return Err(syn::Error::new(
                 span,
@@ -8054,7 +8082,7 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
             } else if meta.path.is_ident("version") {
                 let literal: LitInt = meta.value()?.parse()?;
                 version = literal.base10_parse::<u32>()?;
-                if version == 0 {
+                if !tembra_contracts::valid_version(version) {
                     return Err(syn::Error::new(literal.span(), "versions start at 1"));
                 }
             } else {
@@ -8302,7 +8330,7 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
             if meta.path.is_ident("version") {
                 let literal: LitInt = meta.value()?.parse()?;
                 version = literal.base10_parse::<u32>()?;
-                if version == 0 {
+                if !tembra_contracts::valid_version(version) {
                     return Err(syn::Error::new(literal.span(), "versions start at 1"));
                 }
             } else {

@@ -432,8 +432,8 @@ fn a_consumed_contract_may_bring_the_wasi_packages() {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("deps/wasi-clocks.wit:")
-                && error.contains("this copy of wasi:clocks@0.3.0, a WASI package Tembra serves, differs from the one bundled with this macro"),
+            error.contains("WIT package wasi:clocks@0.3.0 in ")
+                && error.contains("deps/wasi-clocks.wit is already provided by the standard contracts bundled with Tembra; remove the duplicate"),
             "{name}: {error}"
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -488,16 +488,16 @@ fn every_copy_of_a_bundled_package_is_checked() {
     std::fs::remove_dir_all(dir).unwrap();
     let edited_random = random.replace("/// ", "/// (another text) ");
     let edited_guest = guest.replace("/// ", "/// (another text) ");
-    for (file, copy, what) in [
+    for (file, copy, package) in [
         (
             "wasi-random.wit",
             edited_random.as_str(),
-            "wasi:random@0.3.0, a WASI package Tembra serves",
+            "wasi:random@0.3.0",
         ),
         (
             "tembra-guest.wit",
             edited_guest.as_str(),
-            "tembra:guest@1.0.0, the kernel's package",
+            "tembra:guest@1.0.0",
         ),
     ] {
         let dir = contract(
@@ -507,9 +507,7 @@ fn every_copy_of_a_bundled_package_is_checked() {
         for imports in imports {
             let error = refused(imports, &dir);
             assert!(
-                error.contains(&format!(
-                    "deps/{file}: this copy of {what}, differs from the one bundled with this macro"
-                )),
+                error.contains(&provided(package, &dir.join("deps").join(file))),
                 "{imports:?}: {error}"
             );
         }
