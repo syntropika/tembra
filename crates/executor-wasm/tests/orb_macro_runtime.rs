@@ -2143,6 +2143,7 @@ fn a_renamed_facade_serves_the_copies_both_ways() {
 /// The hooks the gatehouse declares, its desk, and the Orb it is installed as.
 const VISITS: &str = "example:gatehouse/visits@1.0.0";
 const SPOTS: &str = "example:gatehouse/spots@1.0.0";
+const DOORS: &str = "example:gatehouse/doors@1.0.0";
 const ROOMS: &str = "example:gatehouse/rooms@1.0.0";
 const GUARD: &str = "example:admission/guard@1.0.0";
 const DESK: &str = "gatehouse::example:gatehouse/desk@1.0.0";
@@ -2155,13 +2156,21 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
     let signature = |hook: &str| contract.function_signature(hook, "apply", true).unwrap();
     let visits = tembra::Hook::<Value, ()>::series(VISITS).signature(signature(VISITS));
     let spots = tembra::Hook::<Value, ()>::series(SPOTS).signature(signature(SPOTS));
+    let doors = tembra::Hook::<Value, ()>::series(DOORS).signature(signature(DOORS));
     let rooms = tembra::Hook::<u32, Option<u32>>::bail(ROOMS).signature(signature(ROOMS));
     let guard = tembra::Hook::<Value, Value>::waterfall(GUARD).signature(signature(GUARD));
     let mut watch = Orb::new("watch", 1).requires(tembra::core::Requirement {
         orb: "gatehouse".into(),
         api_version: 1,
         methods: Default::default(),
-        hooks: [VISITS.into(), SPOTS.into(), ROOMS.into(), GUARD.into()].into(),
+        hooks: [
+            VISITS.into(),
+            SPOTS.into(),
+            DOORS.into(),
+            ROOMS.into(),
+            GUARD.into(),
+        ]
+        .into(),
         signatures: Default::default(),
         hook_signatures: Default::default(),
     });
@@ -2176,6 +2185,13 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
         let seen = seen.clone();
         watch = watch.contribute("gatehouse", &spots, priority, move |_, spot: Value| {
             seen.borrow_mut().push((priority, spot));
+            async { Ok(()) }
+        });
+    }
+    for priority in [-1, 1] {
+        let seen = seen.clone();
+        watch = watch.contribute("gatehouse", &doors, priority, move |_, door: Value| {
+            seen.borrow_mut().push((priority, door));
             async { Ok(()) }
         });
     }
@@ -2199,9 +2215,10 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
 /// Hook declarations of each composition, in a component build, std and freestanding, on the
 /// compiled and on the interpreted engine: the module `gatehouse` of the `hooks` feature declares
 /// a series whose input holds a newtype, a series whose input is a newtype holding a record of the
-/// module, and a bail from their input, and the waterfall of a consumed package by its identity,
+/// module, a series in a module of no imports whose input is a newtype of a `String` declared in
+/// another, and a bail from their input, and the waterfall of a consumed package by its identity,
 /// which the component's roles name with their compositions. Native contributions answer them in
-/// plan order: every contribution to a series sees each visit and each spot, a newtype as its
+/// plan order: every contribution to a series sees each visit, spot and door, a newtype as its
 /// field, the first answer of the bail gives the room, and each contribution to the waterfall
 /// changes the admission in turn. Without contributions, the series end, the bail answers nothing
 /// and the waterfall hands its input back. Natively, the module compiles, and its `orb()` refuses
@@ -2233,6 +2250,7 @@ fn compose_the_declared_hooks(engine: &Engine) {
                     GUARD.to_owned(),
                     tembra_contracts::HookComposition::Waterfall
                 ),
+                (DOORS.to_owned(), tembra_contracts::HookComposition::Series),
                 (ROOMS.to_owned(), tembra_contracts::HookComposition::Bail),
                 (SPOTS.to_owned(), tembra_contracts::HookComposition::Series),
                 (VISITS.to_owned(), tembra_contracts::HookComposition::Series),
@@ -2254,10 +2272,12 @@ fn compose_the_declared_hooks(engine: &Engine) {
             };
             assert_eq!(call("visit", json!(["ada", 9])), Value::Null, "{features}");
             assert_eq!(call("go", json!([3, "east"])), Value::Null, "{features}");
+            assert_eq!(call("knock", json!(["east"])), Value::Null, "{features}");
             let rooms = [0, 3].map(|floor| call("room", json!([floor])));
             let admitted = [5, 10].map(|value| call("admit", json!([value])));
             let visit = json!({"who": "ada", "hour": 9});
             let spot = json!({"floor": 3, "door": "east"});
+            let door = json!("east");
             if contributed {
                 assert_eq!(
                     *seen.borrow(),
@@ -2265,7 +2285,9 @@ fn compose_the_declared_hooks(engine: &Engine) {
                         (-1, visit.clone()),
                         (1, visit),
                         (-1, spot.clone()),
-                        (1, spot)
+                        (1, spot),
+                        (-1, door.clone()),
+                        (1, door)
                     ],
                     "{features}"
                 );

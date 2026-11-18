@@ -58,6 +58,28 @@ pub mod gatehouse {
         }
     }
 
+    /// A hook declared in a module that imports nothing: its input is a newtype of another module,
+    /// whose `String` the hook's conversions spell through the newtype.
+    pub mod lobby {
+        /// Every contributor sees which door a guest knocks at.
+        #[hook(composition = series, input = super::keys::Door)]
+        pub struct Doors;
+    }
+
+    /// Where the newtype of a `String` lives, in a module whose `use` brings the type.
+    pub mod keys {
+        use alloc::string::String;
+
+        /// The name of a door: a newtype, which the WIT spells as its `String`.
+        pub struct Door(String);
+
+        impl From<String> for Door {
+            fn from(name: String) -> Self {
+                Self(name)
+            }
+        }
+    }
+
     /// The first contributor with an answer gives the room of a floor.
     #[hook(composition = bail, input = u32)]
     pub struct Rooms;
@@ -82,6 +104,11 @@ pub mod gatehouse {
         /// Tell every contributor where a guest goes.
         pub fn go(floor: u32, door: String) {
             Spots::run(places::Spot::from(places::Place { floor, door }))
+        }
+
+        /// Tell every contributor which door a guest knocks at.
+        pub fn knock(door: String) {
+            lobby::Doors::run(keys::Door::from(door))
         }
 
         /// The room the first contributor with an answer gives the floor, if any.
