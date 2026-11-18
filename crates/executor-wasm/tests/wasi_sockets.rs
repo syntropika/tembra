@@ -191,9 +191,10 @@ fn free_port() -> u16 {
 }
 
 /// The ports a test may name: from the first unprivileged port up to the start of the ephemeral
-/// range, else above its end; none when the range leaves neither.
+/// range, else above its end; none when the range leaves neither. Never port 0, which a bind
+/// takes as "any port".
 fn named_ports(unprivileged: u16, (low, high): (u16, u16)) -> Option<std::ops::Range<u32>> {
-    let first = u32::from(unprivileged);
+    let first = u32::from(unprivileged).max(1);
     if u32::from(low) > first {
         Some(first..u32::from(low))
     } else if high < u16::MAX {
@@ -213,6 +214,8 @@ fn the_named_ports_lie_outside_the_ephemeral_range() {
     assert_eq!(named_ports(1024, (1024, 60999)), Some(61000..65536));
     // A range that covers every unprivileged port: the OS picks the port.
     assert_eq!(named_ports(1024, (1024, 65535)), None);
+    // Every port unprivileged, as containers often set it: never port 0, which binds any port.
+    assert_eq!(named_ports(0, (32768, 60999)), Some(1..32768));
 }
 
 /// TCP idle drop, UDP with a granted and a denied peer, listen/accept of real clients, and name
