@@ -78,6 +78,8 @@ impl Cancellation {
 pub struct ResourceKey {
     pub(super) host: Host,
     pub(super) id: core::Id,
+    /// The name it is declared under, which a refusal of its value names.
+    pub(super) name: Rc<str>,
     pub(super) version: u32,
 }
 
@@ -93,9 +95,18 @@ impl<T: 'static> Resource<T> {
 
     /// Resolve the opened value under this resource's ownership.
     pub fn value(&self) -> Result<Rc<T>> {
-        self.key
-            .host
-            .value(self.key.host.kernel().resource_value(self.key.id)?)
+        let host = &self.key.host;
+        host.value(host.kernel().resource_value(self.key.id)?)
+            .map_err(|_| {
+                Error::invalid(
+                    Reason::RustType,
+                    format!(
+                        "the resource `{}` holds a value of another Rust type than the one it is \
+                         read as",
+                        self.key.name
+                    ),
+                )
+            })
     }
 }
 
