@@ -3847,8 +3847,8 @@ impl Handles {
 /// the names `wit_type` reads: `Option`, `Vec`, `Result` and tuples around a type that names a
 /// resource's struct, which `resources` maps to the bindings' handle type, however the author
 /// names it, through a `use` that renames it or an alias included, as `with_handles` resolves it. A
-/// name a consumed interface's module reaches, `counter::Tally`, is that interface's, whatever its
-/// last segment.
+/// name a consumed interface's module reaches, `counter::Tally`, is that interface's, and one the
+/// resolver places outside the Orb, `other::Tally`, that crate's, whatever its last segment.
 fn handles_of(
     ty: &Type,
     scope: usize,
@@ -3880,9 +3880,6 @@ fn handles_of(
             };
             let name = segment.ident.to_string();
             match (name.as_str(), arguments.as_slice()) {
-                (name, []) if resources.contains_key(name) => {
-                    Some(Handles::Resource(resources[name].clone()))
-                }
                 ("Option", [inner]) => {
                     Handles::option(handles_of(inner, scope, resources, modules))
                 }
@@ -3909,7 +3906,8 @@ fn handles_of(
 /// resource of the module is the handle type there, and each type of `resources` the bindings'
 /// type it names, however the author names it, through a `use` that renames it or an alias
 /// included; free JSON is a string, a newtype the bindings' type of its field, everything else
-/// keeps the author's spelling, a name a consumed interface's module reaches included.
+/// keeps the author's spelling, a name a consumed interface's module reaches or the resolver places
+/// outside the Orb included.
 fn with_handles(
     ty: &Type,
     scope: usize,
@@ -3942,10 +3940,6 @@ fn with_handles(
             };
             let ident = &last.ident;
             match &last.arguments {
-                syn::PathArguments::None if resources.contains_key(&ident.to_string()) => {
-                    let handle = &resources[&ident.to_string()];
-                    quote! { #module::#handle }
-                }
                 syn::PathArguments::AngleBracketed(arguments) => {
                     let leading = &path.path.leading_colon;
                     let prefix = path

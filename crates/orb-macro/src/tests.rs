@@ -5449,6 +5449,47 @@ fn books(uses: &str, signature: &str) -> String {
     )
 }
 
+/// A type from outside the Orb named like a resource of the module is not the resource: beside the
+/// module's own `Tally` in a signature, `Option<other::Tally>` and a `Tally` a sub-module's
+/// `use other::Tally;` brings are refused as types declared outside the Orb module, never wrapped
+/// as the resource's handle, and the signature without them expands, the resource wrapped.
+#[test]
+fn a_type_from_outside_named_like_a_resource_is_not_its_handle() {
+    let counter = |uses: &str, outside: &str| {
+        format!(
+            "mod counter {{
+                #[wit_resource]
+                pub struct Tally {{ count: u32 }}
+                impl Tally {{ pub fn count(&self) -> u32 {{ self.count }} }}
+                pub mod api {{
+                    {uses}
+                    #[service]
+                    pub struct Counting;
+                    impl Counting {{ pub fn pair() -> (super::Tally, {outside}) {{ todo!() }} }}
+                }}
+            }}"
+        )
+    };
+    for (uses, outside) in [
+        ("", "Option<other::Tally>"),
+        ("use other::Tally;", "Option<Tally>"),
+    ] {
+        let error = refused("example:counter@1.0.0", &counter(uses, outside));
+        assert!(
+            error.contains("`Tally` is declared outside the Orb module"),
+            "{uses}\n{error}"
+        );
+    }
+    let generated = tokens(&expanded(
+        "example:counter@1.0.0",
+        &counter("", "Option<u32>"),
+    ));
+    assert!(
+        generated.contains("fn pair () -> (super :: exports :: example :: counter :: counting :: Tally , Option < u32 > ,)"),
+        "{generated}"
+    );
+}
+
 /// A newtype is the one its name resolves to, whatever another module declares of the name: `a`'s
 /// tuple struct `Id` crosses as its field beside `b`'s record `Id`, which stays out of the WIT, and
 /// so does a second newtype `Id` of `c`, each read through to its own field.
