@@ -1,6 +1,7 @@
 //! The signal of a call answers the same whenever it is first read: a call that outlives its root,
 //! which ended normally, reads its signal uncancelled before and after the root ends, and a call
-//! of a root that was cancelled reads it cancelled, also once the root and the call are gone.
+//! of a root that was cancelled reads it cancelled, also once the root and the call are gone. A
+//! root reads its own signal alike.
 use futures::{FutureExt, channel::oneshot, executor::LocalPool};
 use std::{cell::RefCell, rc::Rc};
 use tembra::{Context, Host, Orb, Service};
@@ -94,4 +95,39 @@ fn a_call_of_a_cancelled_root_reads_its_signal_cancelled_after_the_root_ends() {
     drop(call);
     reference.release().unwrap();
     pool.run_until(host.close()).unwrap();
+}
+
+/// Run a root that reads its own signal, with no call, and is cancelled or not, as `cancel` says;
+/// answer what it read then and what its context reads after the root ended.
+fn root_signal(cancel: bool) -> (bool, bool) {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let (context, before) = pool
+        .run_until(host.root("alice", move |context| {
+            async move {
+                if cancel {
+                    context.cancel()?;
+                }
+                let before = context.signal().is_cancelled();
+                Ok((context, before))
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    let after = context.signal().is_cancelled();
+    pool.run_until(host.close()).unwrap();
+    (before, after)
+}
+
+/// A root that ended normally reads its own signal as uncancelled before it ends and after it.
+#[test]
+fn a_root_reads_its_signal_alike_before_and_after_it_ends() {
+    assert_eq!(root_signal(false), (false, false));
+}
+
+/// A root that was cancelled and then ended reads its own signal as cancelled before it ends and
+/// after the kernel forgot it.
+#[test]
+fn a_cancelled_root_reads_its_signal_cancelled_after_it_ends() {
+    assert_eq!(root_signal(true), (true, true));
 }

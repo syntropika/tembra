@@ -187,7 +187,7 @@ impl Context {
     pub fn signal(&self) -> Cancellation {
         match &self.call {
             Some(call) => self.host.call_signal(self.root, &self.signal, call.id),
-            None => self.host.context_signal(self.root),
+            None => self.signal.clone(),
         }
     }
 }
@@ -230,6 +230,9 @@ impl Host {
         }
     }
 
+    /// The signal of a root, for a context of it: the one its other contexts hold, or a new one.
+    /// A context is issued only for a root neither ended nor cancelled, so a new signal starts
+    /// uncancelled, and the root's cancellation reaches it while a context holds it.
     fn context_signal(&self, root: core::Id) -> Cancellation {
         let mut signals = self.0.context_signals.borrow_mut();
         // Each context of a root asks for its signal: only a new one sweeps the released ones.
@@ -238,9 +241,6 @@ impl Host {
         }
         signals.retain(|_, signal| signal.strong_count() != 0);
         let signal = Cancellation::new("root");
-        if self.kernel().check_root(root).is_err() {
-            signal.cancel();
-        }
         signals.insert(root, Rc::downgrade(&signal.0));
         signal
     }
