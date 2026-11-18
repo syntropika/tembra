@@ -5733,6 +5733,66 @@ fn a_contract_type_the_macro_does_not_follow_is_refused_with_how_to_name_it() {
     }
 }
 
+/// The `use` a refusal suggests is written from the module that writes the name to the module that
+/// declares the type: for a `crate::` path, and for a glob that a module two levels up re-exports
+/// from another module, and it resolves where it is written.
+#[test]
+fn the_suggested_use_leads_from_the_writing_module_to_the_type() {
+    let shelf = |inner: &str, signature: &str| {
+        format!(
+            "mod books {{
+                pub mod model {{ pub struct Entry {{ pub id: u32 }} }}
+                pub mod shelf {{
+                    pub use super::model::*;
+                    pub mod api {{
+                        pub mod inner {{
+                            {inner}
+                            #[service]
+                            pub struct Library;
+                            impl Library {{ {signature} }}
+                        }}
+                    }}
+                }}
+            }}"
+        )
+    };
+    let suggested = "use super::super::super::model::Entry;";
+    for (inner, signature, message) in [
+        (
+            "",
+            "pub fn first() -> super::super::Entry { todo!() }",
+            format!(
+                "`Entry` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `{suggested}`"
+            ),
+        ),
+        (
+            "",
+            "pub fn first() -> crate::books::model::Entry { todo!() }",
+            format!(
+                "`Entry` is named through `crate::`, which the macro cannot place in the Orb module; name it from this module, through `self::`, `super::` or a `use` of the Orb's modules, `{suggested}`"
+            ),
+        ),
+        (
+            "use crate::books::model::Entry as Item;",
+            "pub fn first() -> Item { todo!() }",
+            "is named through `crate::`, which the macro cannot place in the Orb module; name it from this module, through `self::`, `super::` or a `use` of the Orb's modules, `use super::super::super::model::Entry as Item;`".to_owned(),
+        ),
+    ] {
+        let error = refused("example:books@1.0.0", &shelf(inner, signature));
+        assert!(error.contains(&message), "{signature}\n{error}");
+    }
+    for (inner, signature) in [
+        (suggested, "pub fn first() -> Entry { todo!() }"),
+        (
+            "use super::super::super::model::Entry as Item;",
+            "pub fn first() -> Item { todo!() }",
+        ),
+    ] {
+        let text = resolved(&expanded("example:books@1.0.0", &shelf(inner, signature)));
+        assert!(text.contains("  record entry {\n"), "{text}");
+    }
+}
+
 /// Documentation over several lines, a block comment or a `#[doc]` string, is carried line by
 /// line into the WIT, each line after its own `///`, so no line of it becomes WIT; a character
 /// the WIT lexer refuses is an error on the attribute.

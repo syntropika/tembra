@@ -528,10 +528,7 @@ impl Modules {
                 continue;
             }
             if first == "crate" {
-                let written = written.map_or_else(String::new, Ident::to_string);
-                return Resolution::Refused(format!(
-                    "`{written}` is named through `crate::`, which the macro cannot place in the Orb module; name it from this module, through `self::`, `super::` or a `use` of the Orb's modules, `use super::model::{written};`"
-                ));
+                return Resolution::Refused(self.through_crate(written, &rest, scope));
             }
             if first == "Self" {
                 return outside(segments);
@@ -548,7 +545,7 @@ impl Modules {
                 if !wit::BUILTIN.contains(&name.as_str())
                     && let Some(module) = crate::through_globs(&first, at, &self.uses, &self.paths)
                 {
-                    return Resolution::Refused(self.globbed(&first, at, module));
+                    return Resolution::Refused(self.globbed(&first, scope, module));
                 }
                 return Resolution::Module(first, at);
             }
@@ -560,7 +557,7 @@ impl Modules {
                 continue;
             }
             if let Some(module) = crate::through_globs(&first, at, &self.uses, &self.paths) {
-                return Resolution::Refused(self.globbed(&first, at, module));
+                return Resolution::Refused(self.globbed(&first, scope, module));
             }
             break;
         }
@@ -609,13 +606,59 @@ impl Modules {
         }
     }
 
-    /// Why `name`, written in the module `scope`, is not followed through the glob import that
-    /// brings it from the module `module`, with the `use` that imports it by name.
+    /// Why `name`, in a path written in the module `scope`, is not followed through the glob
+    /// import that brings it from the module `module`, with the `use` that imports it by name in
+    /// `scope`.
     fn globbed(&self, name: &Ident, scope: usize, module: usize) -> String {
         format!(
-            "`{name}` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `use {}::{name};`",
-            self.path_to(scope, module)
+            "`{name}` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `use {};`",
+            self.declared_use(name, scope, module)
         )
+    }
+
+    /// Why `written`, a path written in the module `scope` through `crate::` and then `rest`, is
+    /// not followed, with the `use` that names it from `scope` when a module of the Orb whose path
+    /// ends the path of `rest` declares it.
+    fn through_crate(&self, written: Option<&Ident>, rest: &[Ident], scope: usize) -> String {
+        let name = written.map_or_else(String::new, Ident::to_string);
+        let why = format!(
+            "`{name}` is named through `crate::`, which the macro cannot place in the Orb module; name it from this module, through `self::`, `super::` or a `use` of the Orb's modules"
+        );
+        let Some((declared, modules)) = rest.split_last() else {
+            return why;
+        };
+        // The longest path of the Orb's modules that ends the written one.
+        let module = (0..self.paths.len())
+            .filter(|&module| {
+                self.uses[module].items.contains(&declared.to_string())
+                    && modules.ends_with(&self.paths[module])
+            })
+            .max_by_key(|&module| self.paths[module].len());
+        let Some(module) = module else {
+            return why;
+        };
+        format!(
+            "{why}, `use {}::{declared}{};`",
+            self.path_to(scope, module),
+            renamed(declared, &name)
+        )
+    }
+
+    /// The path of the `use`, written in the module `scope`, that imports `name` of the module
+    /// `module` by name: from the module that declares it when `module` only imports it.
+    fn declared_use(&self, name: &Ident, scope: usize, module: usize) -> String {
+        if !self.uses[module].items.contains(&name.to_string())
+            && let Resolution::Module(declared, at) =
+                self.resolve(&syn::Path::from(name.clone()), module)
+            && self.uses[at].items.contains(&declared.to_string())
+        {
+            return format!(
+                "{}::{declared}{}",
+                self.path_to(scope, at),
+                renamed(&declared, &name.to_string())
+            );
+        }
+        format!("{}::{name}", self.path_to(scope, module))
     }
 
     /// The path from the module `from` to the module `to`, both by scope, as a `use` written in
@@ -876,6 +919,15 @@ impl Modules {
             self.references_in(ty, scope, &mut references);
         }
         references
+    }
+}
+
+/// The `as` a `use` of the type `declared` needs to bind it as `name`: none for its own name.
+fn renamed(declared: &Ident, name: &str) -> String {
+    if *declared == name {
+        String::new()
+    } else {
+        format!(" as {name}")
     }
 }
 
