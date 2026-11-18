@@ -2430,8 +2430,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     // targets: a field holding a resource has no conversion.
     let newtypes = named_newtypes(
         &newtypes,
-        &services,
-        &wit_resources,
+        (&services, &wit_resources, &declared),
         &shapes,
         &placement,
         &consumed_modules,
@@ -2797,17 +2796,31 @@ fn component(
         (&hook_shapes, defining.as_ref()),
     );
     // A newtype the WIT spells as its field crosses as that field, through the trait `NEWTYPE`,
-    // implemented next to it, where the field is visible.
+    // implemented next to it, where the field is visible. With a derived hook, whose types the
+    // bindings hold twice, it crosses to the hook's import side too, through `IMPORT_NEWTYPE`.
     for (newtype, interface) in newtypes {
         let interface = interface_module(interface);
-        let root = supers(modules[newtype.scope].len());
+        let depth = modules[newtype.scope].len();
+        let root = supers(depth);
         let module = quote! { #root exports::#ns_ident::#name_ident::#interface };
+        let export = Side::Export { converted };
         tree.at(newtype.scope).generated.push(newtype_conversions(
             newtype,
             &module,
-            converted,
+            export,
             consumed_modules,
         ));
+        if let Some(defining) = defining.as_ref() {
+            let module = import_module(depth, defining);
+            tree.at(newtype.scope).generated.push(newtype_conversions(
+                newtype,
+                &module,
+                Side::Import {
+                    hook_shapes: &hook_shapes,
+                },
+                consumed_modules,
+            ));
+        }
     }
     let newtype_trait = (!newtypes.is_empty()).then(newtype_trait);
     // A derived service's bridge forwards each function, named as the bindings name it, to the
@@ -3749,6 +3762,7 @@ fn derived_result(
             scope,
             resources,
             module,
+            import: false,
         };
         return (
             quote! { -> #spelled },
@@ -4398,15 +4412,14 @@ fn reachable(
     Ok(shapes)
 }
 
-/// The newtypes a type that enters the WIT names, in module order, each with the service whose
-/// interface names it: in its functions or its resources' functions, through the fields of a type
-/// the interface defines, or through the field of another newtype the interface names. That
-/// interface defines or `use`s every type of the module the newtype's field holds, so its bindings
-/// name each of them.
+/// The newtypes a type that enters the WIT names, in module order, each with the service or the
+/// derived hook whose interface names it: in its functions or its resources' functions, in a
+/// derived hook's input, through the fields of a type the interface defines, or through the field
+/// of another newtype the interface names. That interface defines or `use`s every type of the
+/// module the newtype's field holds, so its bindings name each of them.
 fn named_newtypes(
     newtypes: &[Newtype],
-    services: &[Service],
-    resources: &[WitResource],
+    (services, resources, declared): (&[Service], &[WitResource], &[Declared]),
     shapes: &[Shape],
     placement: &BTreeMap<String, Ident>,
     modules: &foreign::Modules,
@@ -4422,6 +4435,14 @@ fn named_newtypes(
             for newtype in modules.newtypes_in(ty, function.scope) {
                 pending.push((newtype, function.interface));
             }
+        }
+    }
+    for declaration in declared {
+        let Some((input, _)) = &declaration.input else {
+            continue;
+        };
+        for newtype in modules.newtypes_in(input, declaration.scope) {
+            pending.push((newtype, &declaration.ident));
         }
     }
     for shape in shapes {
@@ -5210,6 +5231,7 @@ fn derived_hook_code(
         scope,
         resources: &resources,
         module: import_types,
+        import: true,
     });
     let (result, exported, settle) = match declaration.composition {
         Composition::Series => (quote! {}, quote! {}, None),
@@ -5341,6 +5363,23 @@ struct At<'a> {
     scope: usize,
     resources: &'a BTreeMap<String, Ident>,
     module: &'a proc_macro2::TokenStream,
+    /// Whether `module` is the import side of a derived hook's bindings, whose copy of a type a
+    /// newtype reaches through `IMPORT_NEWTYPE` rather than `NEWTYPE`.
+    import: bool,
+}
+
+/// The side of the bindings a newtype's conversions reach (`newtype_conversions`): the export of
+/// the interface that names it, where the types the macro converts, `converted`, are the bindings'
+/// own, or the import of a derived hook, whose copies of the types the hooks reach, `hook_shapes`,
+/// are another Rust type of the same WIT definition.
+#[derive(Clone, Copy)]
+enum Side<'a> {
+    Export {
+        converted: &'a BTreeMap<String, Ident>,
+    },
+    Import {
+        hook_shapes: &'a BTreeSet<String>,
+    },
 }
 
 /// An expression converting `value`, of the author's type `ty` on one side of the bindings, to the
@@ -5361,6 +5400,13 @@ fn convert(
     if let Some(at) = at
         && at.modules.newtype(ty, at.scope).is_some()
     {
+        if at.import {
+            let newtype = at.modules.import_newtype_trait(at.scope);
+            return match towards {
+                Towards::Bindings => quote! { <#ty as #newtype>::__tembra_into_import(#value) },
+                Towards::Author => quote! { <#ty as #newtype>::__tembra_from_import(#value) },
+            };
+        }
         let newtype = at.modules.newtype_trait(at.scope);
         return match towards {
             Towards::Bindings => quote! { <#ty as #newtype>::__tembra_into_bindings(#value) },
@@ -5448,7 +5494,8 @@ fn convert(
 
 /// The author's type, written in the module `scope`, as the import side of the bindings spells it:
 /// a type of the module that a hook reaches, by the name `modules` resolves it to, lives in
-/// `module` there, free JSON is a string, a newtype its field, everything else keeps its spelling.
+/// `module` there, free JSON is a string, a newtype the import side of its field, which its trait
+/// `IMPORT_NEWTYPE` names, as its own module spells the field, everything else keeps its spelling.
 fn respell(
     ty: &Type,
     hook_shapes: &BTreeSet<String>,
@@ -5458,13 +5505,9 @@ fn respell(
     if wit::free_json(ty) {
         return quote! { __tembra_alloc::string::String };
     }
-    if let Some(newtype) = modules.newtype(ty, scope) {
-        return respell(
-            &newtype.inner,
-            hook_shapes,
-            module,
-            (modules, newtype.scope),
-        );
+    if modules.newtype(ty, scope).is_some() {
+        let newtype = modules.import_newtype_trait(scope);
+        return quote! { <#ty as #newtype>::Import };
     }
     match ty {
         Type::Path(path) => {
@@ -5623,12 +5666,14 @@ fn converted_conversions(
             .filter(|_| hook_shapes.contains(&name))
             .map(|defining| import_module(depth, defining));
         let generated = &converted[&name];
-        for bindings in std::iter::once(export).chain(import) {
+        let sides = std::iter::once((export, false)).chain(import.map(|import| (import, true)));
+        for (bindings, import) in sides {
             let at = Some(At {
                 modules: consumed,
                 scope: shape.scope,
                 resources,
                 module: &bindings,
+                import,
             });
             let (outward, inward) = match &shape.kind {
                 ShapeKind::Record(fields) => {
@@ -5734,6 +5779,10 @@ const NEWTYPE: &str = "__TembraNewtype";
 /// the Orb module.
 const FROM_FIELD: &str = "__TembraFromField";
 
+/// The trait through which a newtype crosses to the import side of a derived hook's bindings,
+/// which the Orb module declares beside `NEWTYPE`.
+const IMPORT_NEWTYPE: &str = "__TembraImportNewtype";
+
 /// The trait through which a newtype of the module crosses the bindings, as its field, and the one
 /// through which a component reads it from its field: private to the Orb module, so its
 /// sub-modules implement them and every bridge names them, and no other crate sees them. A module
@@ -5746,6 +5795,7 @@ const FROM_FIELD: &str = "__TembraFromField";
 /// build then refuses: such a newtype is native only.
 fn newtype_trait() -> proc_macro2::TokenStream {
     let name = format_ident!("{NEWTYPE}");
+    let import_name = format_ident!("{IMPORT_NEWTYPE}");
     let from_field = format_ident!("{FROM_FIELD}");
     quote! {
         /// How a newtype of the module crosses the bindings: as the bindings' type of its field.
@@ -5760,6 +5810,21 @@ fn newtype_trait() -> proc_macro2::TokenStream {
 
             /// The field's value, as the bindings' type.
             fn __tembra_into_bindings(self) -> Self::Bindings;
+        }
+
+        /// How a newtype of the module crosses to the import side of a derived hook's bindings, whose
+        /// copy of a type the hooks reach is another Rust type than the export's: as the import's
+        /// type of its field.
+        #[allow(dead_code)]
+        trait #import_name: ::core::marker::Sized {
+            /// The import's type of the field.
+            type Import;
+
+            /// The newtype of the field's value, as `NEWTYPE` reads it.
+            fn __tembra_from_import(value: Self::Import) -> Self;
+
+            /// The field's value, as the import's type.
+            fn __tembra_into_import(self) -> Self::Import;
         }
 
         /// A newtype a component reads from its field: one `From` makes of every value of it.
@@ -5789,11 +5854,12 @@ fn newtype_trait() -> proc_macro2::TokenStream {
 /// into the field's type, then into the newtype: in a component through `From`, by the trait
 /// `FROM_FIELD`, whose diagnostic, at the newtype, names one that implements no `From`; in a host
 /// build, whose bridges never run, through `TryFrom`, which a `From` implements too. The field is
-/// written back as it is.
+/// written back as it is. On the import `side` of a derived hook, `module` is that import, and the
+/// impl is of the trait `IMPORT_NEWTYPE`, the same way.
 fn newtype_conversions(
     newtype: &Newtype,
     module: &proc_macro2::TokenStream,
-    converted: &BTreeMap<String, Ident>,
+    side: Side<'_>,
     modules: &foreign::Modules,
 ) -> proc_macro2::TokenStream {
     let Newtype {
@@ -5808,11 +5874,26 @@ fn newtype_conversions(
         scope: *scope,
         resources: &resources,
         module,
+        import: matches!(side, Side::Import { .. }),
     });
-    let bindings = with_handles(inner, *scope, converted, module, modules);
+    let (bindings, newtype_trait, field, from, into) = match side {
+        Side::Export { converted } => (
+            with_handles(inner, *scope, converted, module, modules),
+            modules.newtype_trait(*scope),
+            format_ident!("Bindings"),
+            format_ident!("__tembra_from_bindings"),
+            format_ident!("__tembra_into_bindings"),
+        ),
+        Side::Import { hook_shapes } => (
+            respell(inner, hook_shapes, module, (modules, *scope)),
+            modules.import_newtype_trait(*scope),
+            format_ident!("Import"),
+            format_ident!("__tembra_from_import"),
+            format_ident!("__tembra_into_import"),
+        ),
+    };
     let read = convert(inner, quote! { value }, Towards::Author, at);
     let written = convert(inner, quote! { self.0 }, Towards::Bindings, at);
-    let newtype_trait = modules.newtype_trait(*scope);
     let root = supers(modules.depth(*scope));
     let from_field = format_ident!("{FROM_FIELD}", span = ident.span());
     let component = quote_spanned! { ident.span() =>
@@ -5820,9 +5901,9 @@ fn newtype_conversions(
     };
     quote! {
         impl #newtype_trait for #ident {
-            type Bindings = #bindings;
+            type #field = #bindings;
 
-            fn __tembra_from_bindings(value: Self::Bindings) -> Self {
+            fn #from(value: Self::#field) -> Self {
                 #[cfg(target_arch = "wasm32")]
                 {
                     #component
@@ -5836,7 +5917,7 @@ fn newtype_conversions(
                 }
             }
 
-            fn __tembra_into_bindings(self) -> Self::Bindings {
+            fn #into(self) -> Self::#field {
                 #written
             }
         }

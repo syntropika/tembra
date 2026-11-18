@@ -3116,8 +3116,8 @@ fn record_encode(
 /// The kind of a member of the type of the module `shape`, written in its module, or its refusal,
 /// after `place`, which names the member: "the field `count` of `Entry` is". A member holding a
 /// resource is refused, pointing to a tuple, which carries the resource natively too: a record or
-/// a variant holding one is component-only, since the bindings generate such a type, with their
-/// handle in the resource's place, which only a component can create.
+/// a variant holding one is component-only, since only a component's conversions wrap the
+/// resource into the bindings' handle and take it back.
 fn member<'a>(
     ty: &'a Type,
     place: &str,

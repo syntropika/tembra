@@ -361,6 +361,14 @@ impl Modules {
         quote::quote! { #root #name }
     }
 
+    /// The path of the trait `IMPORT_NEWTYPE`, which the Orb module declares, from the module
+    /// `scope`.
+    pub(crate) fn import_newtype_trait(&self, scope: usize) -> proc_macro2::TokenStream {
+        let root = crate::supers(self.depth(scope));
+        let name = quote::format_ident!("{}", crate::IMPORT_NEWTYPE);
+        quote::quote! { #root #name }
+    }
+
     /// The WIT spelling of a type written in the module `scope`: a newtype as its field's type. A
     /// newtype whose field holds it, through other newtypes too, has none.
     pub(crate) fn spelled(&self, ty: &Type, scope: usize) -> syn::Result<String> {

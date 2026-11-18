@@ -7677,7 +7677,9 @@ fn what_a_newtype_cannot_be_is_refused() {
 /// Free JSON and a newtype cross beside a resource, each converted while the resource is wrapped
 /// into its handle type, and into a derived hook's input: the input's WIT spells a newtype as its
 /// field, and `run` converts a record holding both, or a newtype alone, to the import's copy, which
-/// the import takes by reference, as it holds a string.
+/// the import takes by reference, as it holds a string. A newtype reaches each side of the hook's
+/// bindings through a trait of its own, `__TembraNewtype` the export, `__TembraImportNewtype` the
+/// import, implemented next to it, which spells its field there.
 #[test]
 fn free_json_and_a_newtype_cross_beside_a_resource_and_into_a_derived_hook() {
     let module = expanded(
@@ -7717,10 +7719,13 @@ fn free_json_and_a_newtype_cross_beside_a_resource_and_into_a_derived_hook() {
         format!("fn noted () -> ({ledger} :: Ticket , __tembra_alloc :: string :: String ,) {{ {{ let (item0 , item1 ,) = Ledger :: noted () ; ({ledger} :: Ticket :: new (item0) , match serde_json :: to_string (& item1) {{"),
         format!("impl :: core :: convert :: From < Event > for {import} :: Event {{ fn from (value : Event) -> Self {{ Self {{ data : match serde_json :: to_string (& value . data) {{"),
         "code : < Code as __TembraNewtype > :: __tembra_into_bindings (value . code) } } }".to_owned(),
+        "code : < Code as __TembraImportNewtype > :: __tembra_into_import (value . code) } } }".to_owned(),
+        "impl __TembraImportNewtype for Code { type Import = String ;".to_owned(),
+        "fn __tembra_into_import (self) -> Self :: Import { :: core :: convert :: Into :: into (self . 0) } }".to_owned(),
         "fn apply (_input : exports :: example :: book :: audit :: Event) -> :: core :: option :: Option < exports :: example :: book :: audit :: Event > {".to_owned(),
         format!("pub fn run (input : Event) -> :: core :: option :: Option < Event > {{ let input : {import} :: Event = {into} (input) ; let answer = {import} :: apply (& input) ; answer . map (| item | {into} (item)) }}"),
         "fn apply (_input : < Code as __TembraNewtype > :: Bindings) -> < Code as __TembraNewtype > :: Bindings {".to_owned(),
-        "pub fn run (input : Code) -> Code { let input : String = < Code as __TembraNewtype > :: __tembra_into_bindings (input) ; let answer = self :: example :: book :: coded :: apply (& input) ; < Code as __TembraNewtype > :: __tembra_from_bindings (answer) }".to_owned(),
+        "pub fn run (input : Code) -> Code { let input : < Code as __TembraImportNewtype > :: Import = < Code as __TembraImportNewtype > :: __tembra_into_import (input) ; let answer = self :: example :: book :: coded :: apply (& input) ; < Code as __TembraImportNewtype > :: __tembra_from_import (answer) }".to_owned(),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }

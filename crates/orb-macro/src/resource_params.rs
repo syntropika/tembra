@@ -312,6 +312,7 @@ pub(crate) fn bridged(
                     scope,
                     resources,
                     module,
+                    import: false,
                 };
                 return (
                     quote! { #ident: #spelled },

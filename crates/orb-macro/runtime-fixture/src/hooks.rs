@@ -33,6 +33,31 @@ pub mod gatehouse {
         }
     }
 
+    /// Every contributor sees where a guest goes: a newtype holding a record of the module.
+    #[hook(composition = series, input = places::Spot)]
+    pub struct Spots;
+
+    /// Where guests go, in a module of its own, whose `use` brings what its types hold.
+    pub mod places {
+        use alloc::string::String;
+
+        /// A door of a floor.
+        pub struct Place {
+            pub floor: u32,
+            pub door: String,
+        }
+
+        /// Where a guest goes: a newtype, which the WIT spells as its record, converted to each
+        /// side of the hook's bindings.
+        pub struct Spot(Place);
+
+        impl From<Place> for Spot {
+            fn from(place: Place) -> Self {
+                Self(place)
+            }
+        }
+    }
+
     /// The first contributor with an answer gives the room of a floor.
     #[hook(composition = bail, input = u32)]
     pub struct Rooms;
@@ -52,6 +77,11 @@ pub mod gatehouse {
                 who,
                 hour: Hour(hour),
             })
+        }
+
+        /// Tell every contributor where a guest goes.
+        pub fn go(floor: u32, door: String) {
+            Spots::run(places::Spot::from(places::Place { floor, door }))
         }
 
         /// The room the first contributor with an answer gives the floor, if any.

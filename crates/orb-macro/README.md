@@ -956,9 +956,10 @@ into the author's value, which the function then owns and drops, running `Drop`,
 it. An imported interface's handle crosses as the bindings' own type, the one the imported
 functions return; the derived interface knows its resource by the kebab-case form of the handle's
 Rust name, so a type or a resource of the module named like the handle is a compile error in an
-interface that also defines or uses it. A record or a variant holding a resource is the bindings'
-type, with the bindings' handle in the resource's place: a function taking one gets the handle,
-whose `into_inner` gives the value.
+interface that also defines or uses it. A record or a variant of the module holding a resource
+stays the author's type, holding the resource's struct: its conversions take the struct back from
+the bindings' handle, so a function taking one gets the value, and wrap it into the handle again
+on the way out.
 
 The runtime moves an owned resource only into the interface that defines it, or into an Orb that
 imports that interface, anywhere in an argument: a record or a variant of the module holds an
@@ -1703,7 +1704,7 @@ the version whose rules the macro follows, and the generated code reaches it the
   Orb's WIT by importing an interface, plainly or by key, implementing one or contributing to a
   hook, and passes the interface's data types on as they are. A view takes the name of the
   interface imported by key, so two interfaces of one name are not both imported by key.
-- A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list, of the module's own types. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
+- A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a newtype, a scalar, a string or a list, of the module's own types, and a newtype, alone or held, converts to each side of the hook's bindings, the export's and the import's copy of the record its field holds. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`, unless the service's
   `#[create]` builds its objects, natively; the methods of a `#[wit_resource]` struct take
   `&self`, and none takes `&mut self`. Besides a service's state, a resource's fields, the root's
