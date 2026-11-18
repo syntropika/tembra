@@ -1,0 +1,20 @@
+# A manifest in TOML 1.1 syntax, which Cargo reads: the inline tables below end with a trailing
+# comma. A native build reads the manifest for `orb()`, so the macro reads it too.
+[package]
+name = "tembra-config-toml"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[package.metadata.tembra]
+name = "greeter"
+api-version = 1
+
+[features]
+# The facade's `host`, with which the module's `orb()` exists and names the Orb from the manifest.
+host = ["tembra/host"]
+
+[dependencies]
+tembra = { path = "../../../tembra", default-features = false, features = ["macros"], }

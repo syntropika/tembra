@@ -385,6 +385,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tembra-config-contributor"
+version = "0.1.0"
+dependencies = [
+ "tembra",
+]
+
+[[package]]
 name = "tembra-config-guest"
 version = "0.1.0"
 dependencies = [

@@ -67,14 +67,52 @@ fn files(directory: &Path) -> BTreeMap<PathBuf, String> {
 }
 
 /// A guest's `tembra` with only `macros` gets the facade's `host` when another member of its
-/// workspace enables it, since Cargo unifies the features of the members it builds. The guest's
-/// module, a hook declaration the native side does not cover, compiles all the same, so
-/// `cargo check --workspace` passes.
+/// workspace enables it, since Cargo unifies the features of the members it builds. The guests'
+/// modules compile all the same, so `cargo check --workspace` passes: a hook declaration the native
+/// side does not cover, and a contribution to a hook, which natively needs the runtime's `hooks`
+/// that the application leaves out.
 #[test]
 #[ignore = "runs cargo on a fixture: just test-configurations"]
 fn a_workspace_whose_application_enables_host_checks_beside_a_guest() {
     let manifest = fixture("workspace/Cargo.toml");
     if let Err(errors) = cargo(&manifest, &["check", "--workspace"]) {
+        panic!("{errors}");
+    }
+}
+
+/// A `no_std` guest builds for wasm32 whatever the facade's features: without one that links std,
+/// on its module's panic handler, and with `host` or `contracts`, which another crate of its build
+/// may enable, on std's, which the facade then links in its place.
+#[test]
+#[ignore = "runs cargo on a fixture: just test-configurations"]
+fn a_freestanding_guest_builds_for_wasm32_whatever_links_std() {
+    let manifest = fixture("freestanding/Cargo.toml");
+    let failed = ["", "host", "contracts"]
+        .into_iter()
+        .filter_map(|features| {
+            let args = [
+                "build",
+                "--lib",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--features",
+                features,
+            ];
+            cargo(&manifest, &args)
+                .err()
+                .map(|errors| format!("--features '{features}'\n{errors}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// A manifest in TOML 1.1 syntax, with a trailing comma in an inline table, which Cargo reads:
+/// the macro reads it too, for the Orb's name in `orb()`, so the crate builds natively.
+#[test]
+#[ignore = "runs cargo on a fixture: just test-configurations"]
+fn a_manifest_in_toml_1_1_builds_natively() {
+    let manifest = fixture("toml-1-1/Cargo.toml");
+    if let Err(errors) = cargo(&manifest, &["build", "--features", "host"]) {
         panic!("{errors}");
     }
 }
