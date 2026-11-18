@@ -10,7 +10,7 @@ mod keeper {
     use alloc::vec::Vec;
 
     /// The entries of one book object, kept by the kernel: the shared package's own records,
-    /// which the bindings give `serde`'s derives in an Orb with a state.
+    /// which the bindings give `serde`'s derives because the state holds them.
     #[state]
     #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Entries {

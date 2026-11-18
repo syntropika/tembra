@@ -5642,11 +5642,11 @@ interface grants {
 }
 ";
 
-/// A state makes the bindings derive serde's traits on the generated types; a record or a variant
-/// holding a flags type or a resource handle, anywhere, has no serde implementation to derive, so
-/// the derives leave it out, whatever package it comes from.
+/// A state makes the bindings derive serde's traits only on the consumed types it holds: a state
+/// holding none asks for no derive, whatever the imported interfaces define, flags and records
+/// holding a resource handle included, and neither does a module without a state.
 #[test]
-fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
+fn a_state_holding_no_consumed_type_asks_the_bindings_for_no_derive() {
     let dir = consumed("access", ACCESS_WIT);
     let imports = Options {
         imports: vec![literal("example:access/grants@1.0.0")],
@@ -5664,10 +5664,9 @@ fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
     )
     .unwrap_or_else(|error| panic!("{error}"));
     let generated = tokens(&module);
-    assert!(
-        generated.contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize] , additional_derives_ignore : [\"change\" , \"grant\" , \"held\"] ,"),
-        "{generated}"
-    );
+    for unexpected in ["additional_derives", "additional_type_attributes"] {
+        assert!(!generated.contains(unexpected), "{unexpected}\n{generated}");
+    }
     // Without a state the bindings derive nothing more, and nothing is left out.
     let stateless = orb_with(
         Options {
@@ -8758,9 +8757,10 @@ interface counter {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
+    let generated = tokens(&module);
     assert!(
-        tokens(&module)
-            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]")
+        generated.contains("additional_type_attributes : { \"example:ledger/reports@1.0.0/report\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]]"),
+        "{generated}"
     );
     assert_eq!(
         (
@@ -8773,11 +8773,10 @@ interface counter {
 }
 
 /// A module whose expansion reads the bundled WASI packages in every place that reads them: a WASI
-/// import, which nests the packages it needs in the inline WIT, a state holding a WASI record,
-/// which the expansion looks up in the bundled packages, and the state's serde derives, which make
-/// the expansion read the WIT as the bindings do, the packages the inline WIT nests included. A
-/// test build counts a parse of the bundled packages wherever the expansion parses them, the WIT the
-/// bindings read included.
+/// import, which nests the packages it needs in the inline WIT, and a state holding a WASI record,
+/// which the expansion looks up in the bundled packages and whose bindings take serde's derives
+/// by its full name. A test build counts a parse of the bundled packages wherever the expansion
+/// parses them.
 #[test]
 fn every_reader_of_the_bundled_packages_takes_them_parsed_once() {
     let options = Options {
@@ -8797,9 +8796,10 @@ fn every_reader_of_the_bundled_packages_takes_them_parsed_once() {
             }
         }",
     );
+    let generated = tokens(&module);
     assert!(
-        tokens(&module)
-            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]")
+        generated.contains("additional_type_attributes : { \"wasi:clocks/system-clock@0.3.0/instant\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,"),
+        "{generated}"
     );
     assert_eq!(
         super::wasi::BUNDLED_PARSES.get() - bundled,

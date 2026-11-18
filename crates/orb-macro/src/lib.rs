@@ -1623,6 +1623,9 @@ struct Analysis {
     /// The WIT packages the expansion parsed, each once: the consumed packages, the bundled WASI
     /// packages and the kernel's, which the bindings read again.
     parsed: wit::Parsed,
+    /// The consumed records, variants and enums a state holds, directly or through the types of
+    /// the module, and those they hold, by full name: the bindings derive serde's traits on these.
+    serialized: BTreeSet<String>,
     /// The module types that enter the WIT, with their definitions.
     shapes: Vec<Shape>,
     /// The interface defining each type that enters the WIT, by the type's name.
@@ -2664,7 +2667,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             services: &services,
             resources: &wit_resources,
             declared: &declared,
-            foreign: &foreign,
+            foreign: &foreign.uses,
             modules: &consumed_modules,
         },
         consumed_hooks.iter(),
@@ -2704,6 +2707,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         views,
         wit_dir,
         parsed,
+        serialized: foreign.serialized,
         shapes,
         placement,
         converted,
@@ -2741,6 +2745,7 @@ fn component(
         consumed_modules,
         views,
         parsed,
+        serialized,
         shapes,
         placement,
         converted,
@@ -3115,40 +3120,16 @@ fn component(
         let dir = LitStr::new(&dir.path().display().to_string(), Span::call_site());
         quote! { path: #dir, }
     });
-    // What the bindings make of the WIT, read for the serde derives of a state: which generated
-    // types cannot carry them. The bindings add the inline WIT to the consumed packages, so they
-    // read them last, and the bundled packages it nests as the expansion parsed them.
-    let serde = !states.is_empty();
-    let bindings = if serde {
-        wit::bindings(parsed, wit, guest, &nested, serde)
-    } else {
-        wit::Bindings::default()
-    };
-    // A state may hold a consumed type, which the kernel's JSON needs to serialize; the derives
-    // reach every generated type that can carry them. A record or a variant holding a resource
-    // handle or a consumed package's flags type cannot: the bindings give those no serde
-    // implementation, so the derives leave it alone. The bindings leave a type alone by its bare
-    // name, so one that can carry them but shares the name of such a record or variant takes them
-    // by its full name.
-    let derives = serde.then(|| {
-        let ignored = &bindings.unserializable;
-        let ignore =
-            (!ignored.is_empty()).then(|| quote! { additional_derives_ignore: [#(#ignored),*], });
-        let namesakes = bindings
-            .namesakes
-            .iter()
-            .map(|selector| LitStr::new(selector, Span::call_site()));
-        let namesakes = (!bindings.namesakes.is_empty()).then(|| {
-            quote! {
-                additional_type_attributes: {
-                    #(#namesakes: [#[derive(::serde::Serialize, ::serde::Deserialize)]]),*
-                },
-            }
-        });
+    // A state's JSON holds the consumed types it reaches as the bindings generate them: those
+    // types alone, and the types they hold, take serde's derives, each selected by its full name.
+    let serialized = serialized
+        .iter()
+        .map(|name| LitStr::new(name, Span::call_site()));
+    let derives = (!analysis.serialized.is_empty()).then(|| {
         quote! {
-            additional_derives: [::serde::Serialize, ::serde::Deserialize],
-            #ignore
-            #namesakes
+            additional_type_attributes: {
+                #(#serialized: [#[derive(::serde::Serialize, ::serde::Deserialize)]]),*
+            },
         }
     });
     // The generated code follows the derive rules and the flags lowering of one wit-bindgen

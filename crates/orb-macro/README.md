@@ -812,10 +812,11 @@ A consumed type implements what its bindings give it: a record or a variant `Clo
 whose type the bindings' is; `Copy` on one holding a consumed type that holds a string or a list is
 a compile error on the derive, naming the consumed type.
 
-A state holds a consumed type too, in its fields or in the types of the module they reach. In an Orb
-with a state the bindings give the consumed packages' records, variants and enums `serde`'s
-derives, so the kernel keeps the value as the JSON `serde` writes for the bindings' type, with the
-Rust names of its fields and cases. A state is a struct of the module: it holds a consumed type,
+A state holds a consumed type too, in its fields or in the types of the module they reach. The
+bindings give `serde`'s derives to the consumed records, variants and enums a state holds, and to
+those these hold, each selected by its full name, and to no other type, so the kernel keeps the
+value as the JSON `serde` writes for the bindings' type, with the Rust names of its fields and
+cases. A state is a struct of the module: it holds a consumed type,
 but is none.
 
 What a derived interface or a state does not take from a consumed interface is a compile error on
@@ -1633,11 +1634,10 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    remove a copy of the kernel's package an encoded package holds, since it brings that package
    itself. With a WASI import, the WASI packages it needs are nested the same way, from the
    sources `tembra-contracts` bundles.
-   With a state, also `serde` derives on the generated types, except the records and
-   variants holding a consumed package's flags type or a resource handle, which have no `serde`
-   implementation to derive. `wit-bindgen` leaves those out by their bare names, so a type
-   sharing the name of one, in another interface or package, takes the derives by its full name
-   in `additional_type_attributes`;
+   With a state holding a consumed type, also `serde` derives on the bindings of the consumed
+   records, variants and enums the state holds, directly or through the types of the module, and
+   of those they hold, each by its full name in `additional_type_attributes`, and on no other
+   type;
 5. for each record, enum and variant of the module, `From` in both directions between the
    author's type and the bindings', written in the type's module, where its private fields are
    visible: a record field by field, an enum and a variant case by case, a case with named fields

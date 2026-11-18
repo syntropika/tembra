@@ -4,7 +4,7 @@ use crate::resource_params::{self, Derived};
 use crate::{
     Composition, Declared, Function, Handles, Payload, Service, Shape, ShapeKind, WitResource,
 };
-use heck::{ToKebabCase, ToUpperCamelCase};
+use heck::ToKebabCase;
 use proc_macro2::Span;
 use std::{
     cell::OnceCell,
@@ -988,15 +988,6 @@ impl Parsed {
             .as_ref()
             .map_err(Clone::clone)
     }
-
-    /// The consumed packages, owned, for a reader that adds to them: a copy of the directory's,
-    /// parsed now if nothing asked for them yet, or none without a directory.
-    pub(crate) fn consumed(&self) -> syn::Result<Resolve> {
-        match &self.dir {
-            Some(dir) => dir.packages().cloned(),
-            None => Ok(Resolve::default()),
-        }
-    }
 }
 
 impl Directory {
@@ -1369,6 +1360,10 @@ pub(crate) enum Kind {
         /// What the type holds anywhere that the bindings give no `serde` implementation, if
         /// anything: a flags, which they generate without the derives a state asks for.
         unwritable: Option<&'static str>,
+        /// The records, variants and enums the type is or holds anywhere, of its package or of
+        /// another, by full name, `ns:name/interface@version/type`: those whose bindings a state
+        /// holding the type needs serde's derives on.
+        serialized: Vec<String>,
     },
 }
 
@@ -1471,6 +1466,7 @@ pub(crate) fn defined<'a>(
                         carries: crate::keyed::no_data(resolve, ty),
                         unsupported: unsupported(resolve, ty),
                         unwritable: unwritable(resolve, ty),
+                        serialized: serialized(resolve, ty),
                     },
                 };
                 let definition = Definition {
@@ -1615,6 +1611,28 @@ pub(crate) fn anywhere<T>(
     walk(resolve, ty, &test, &mut BTreeSet::new())
 }
 
+/// The records, variants and enums a WIT type is or holds anywhere, through aliases, each by the
+/// full name of its definition, `ns:name/interface@version/type`, as the bindings' option
+/// `additional_type_attributes` selects it.
+fn serialized(resolve: &Resolve, ty: wit_parser::Type) -> Vec<String> {
+    let found = std::cell::RefCell::new(BTreeSet::new());
+    anywhere(resolve, ty, |ty| {
+        if let wit_parser::Type::Id(id) = ty
+            && let definition = &resolve.types[id]
+            && matches!(
+                definition.kind,
+                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
+            )
+            && let wit_parser::TypeOwner::Interface(owner) = definition.owner
+            && let (Some(identity), Some(name)) = (resolve.id_of(owner), &definition.name)
+        {
+            found.borrow_mut().insert(format!("{identity}/{name}"));
+        }
+        None::<()>
+    });
+    found.into_inner().into_iter().collect()
+}
+
 /// What a WIT type of a consumed package holds anywhere that its bindings give no `serde`
 /// implementation, if anything, as `unwritable_itself` finds it in each type.
 fn unwritable(resolve: &Resolve, ty: wit_parser::Type) -> Option<&'static str> {
@@ -1667,189 +1685,6 @@ fn handles(resolve: &Resolve, ty: wit_parser::Type) -> Option<Handles> {
         }
         _ => None,
     }
-}
-
-/// What the bindings make of the WIT they read, for what the macro asks them to add to the types
-/// they generate.
-#[derive(Default)]
-pub(crate) struct Bindings {
-    /// The records and variants of the world's interfaces, which the bindings generate, that cannot
-    /// derive `serde`'s traits: those holding a consumed package's flags type, a resource handle, a
-    /// stream or a future, directly or through other types, which the bindings give no `serde`
-    /// implementation. They are named as the `additional_derives_ignore` option of `wit-bindgen`
-    /// compares them, by `ignored_name`.
-    pub unserializable: Vec<String>,
-    /// The records, variants and enums of the world's interfaces, which the bindings generate,
-    /// that can derive `serde`'s traits but share their name, as `ignored_name` gives it, with one
-    /// of `unserializable`, so the ignore option leaves them without the derives as well. They are
-    /// named by their full names, `ns:name/interface@version/type`, for the selectors that give
-    /// the derives back.
-    pub namesakes: BTreeSet<String>,
-}
-
-/// Read the WIT the bindings read, for what they make of its types, where a state, `serde`, makes
-/// them derive serde's traits on the types that can carry them: the consumed packages `parsed`
-/// holds, which makes this their last reader, the bundled packages the inline WIT nests, the
-/// kernel's when `guest` and the WASI packages `wasi` (`wasi::packages`), each as `parsed` holds
-/// it parsed, and the module's own WIT, `wit`, which the inline WIT starts with. A WIT the bindings
-/// would refuse yields nothing, and the bindings report it.
-pub(crate) fn bindings(
-    parsed: &Parsed,
-    wit: &str,
-    guest: bool,
-    wasi: &[PackageId],
-    serde: bool,
-) -> Bindings {
-    let mut nested = Vec::new();
-    if guest {
-        let Ok(parse) = parsed.guest() else {
-            return Bindings::default();
-        };
-        nested.push(parse.clone());
-    }
-    if !wasi.is_empty() {
-        let Ok((_, sources)) = parsed.bundled() else {
-            return Bindings::default();
-        };
-        nested.extend(
-            sources
-                .iter()
-                .filter(|(id, ..)| wasi.contains(id))
-                .map(|(.., parse)| parse.clone()),
-        );
-    }
-    let Ok(mut resolve) = parsed.consumed() else {
-        return Bindings::default();
-    };
-    // The nested packages resolve after the consumed ones, as the bindings resolve the inline WIT,
-    // each after the packages it builds on.
-    for parse in nested {
-        if resolve.push_group(parse).is_err() {
-            return Bindings::default();
-        }
-    }
-    #[cfg(test)]
-    let before = resolve.packages.len();
-    let Ok(own) = resolve.push_str("orb.wit", wit) else {
-        return Bindings::default();
-    };
-    // The text parsed here holds no bundled WASI package, which the expansion parsed once and the
-    // loop above pushed parsed; a test build counts it as a second parse of them if it does.
-    #[cfg(test)]
-    if resolve
-        .packages
-        .iter()
-        .skip(before)
-        .any(|(_, package)| package.name.namespace == "wasi")
-    {
-        crate::wasi::BUNDLED_PARSES.set(crate::wasi::BUNDLED_PARSES.get() + 1);
-    }
-    // The bindings generate the types of every interface the world imports or exports, and the
-    // derives reach those alone.
-    let generated: BTreeSet<wit_parser::InterfaceId> = resolve.packages[own]
-        .worlds
-        .values()
-        .flat_map(|world| {
-            let world = &resolve.worlds[*world];
-            world.imports.values().chain(world.exports.values())
-        })
-        .filter_map(|item| match item {
-            wit_parser::WorldItem::Interface { id, .. } => Some(*id),
-            _ => None,
-        })
-        .collect();
-    let in_world = |owner: wit_parser::TypeOwner| matches!(owner, wit_parser::TypeOwner::Interface(owner) if generated.contains(&owner));
-    let unserializable: BTreeSet<String> = resolve
-        .types
-        .iter()
-        .filter(|(_, definition)| {
-            matches!(
-                definition.kind,
-                TypeDefKind::Record(_) | TypeDefKind::Variant(_)
-            ) && in_world(definition.owner)
-        })
-        .filter(|(id, _)| holds_unserializable(&resolve, wit_parser::Type::Id(*id), own, false))
-        .filter_map(|(_, definition)| definition.name.as_deref())
-        .map(ignored_name)
-        .collect();
-    // Every record, variant and enum an interface defines, by its full name. `holds` reports owned
-    // handles, streams and futures where the bindings count any resource, but a type of the module
-    // holds no borrowed handle, bare resource or error context, which no Rust type the macro
-    // translates spells, so for such a type the two agree.
-    let full_name = |id: wit_parser::TypeId| {
-        let definition = &resolve.types[id];
-        let wit_parser::TypeOwner::Interface(owner) = definition.owner else {
-            return None;
-        };
-        Some(format!(
-            "{}/{}",
-            resolve.id_of(owner)?,
-            definition.name.as_ref()?
-        ))
-    };
-    // In an Orb with a state, the ignore option also leaves out of the derives the types that only
-    // share a name with one in `unserializable`.
-    let namesakes: BTreeSet<String> = resolve
-        .types
-        .iter()
-        .filter(|(_, definition)| {
-            serde
-                && matches!(
-                    definition.kind,
-                    TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
-                )
-                && in_world(definition.owner)
-                && definition
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| unserializable.contains(&ignored_name(name)))
-        })
-        .filter(|(id, _)| !holds_unserializable(&resolve, wit_parser::Type::Id(*id), own, false))
-        .filter_map(|(id, _)| full_name(id))
-        .collect();
-    Bindings {
-        unserializable: unserializable.into_iter().collect(),
-        namesakes,
-    }
-}
-
-/// The name by which the `additional_derives_ignore` option of `wit-bindgen` compares a type of
-/// the given WIT name: the kebab-case form of the Rust name the bindings give it.
-pub(crate) fn ignored_name(name: &str) -> String {
-    name.to_upper_camel_case().to_kebab_case()
-}
-
-/// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: what
-/// is no data, as `keyed::no_data_itself` finds it, a resource handle, a stream, a future or an
-/// error context, and what `unwritable_itself` finds, an array longer than `serde`'s or a flags
-/// type; and, `stateless`, in an Orb without a state, where the bindings derive serde's traits on no
-/// type, a record, a variant or an enum of another package too.
-fn holds_unserializable(
-    resolve: &Resolve,
-    ty: wit_parser::Type,
-    own: wit_parser::PackageId,
-    stateless: bool,
-) -> bool {
-    let foreign = |id: wit_parser::TypeId| match resolve.types[id].owner {
-        wit_parser::TypeOwner::Interface(owner) => resolve.interfaces[owner].package != Some(own),
-        _ => true,
-    };
-    anywhere(resolve, ty, |ty| {
-        if let wit_parser::Type::Id(id) = ty {
-            match &resolve.types[id].kind {
-                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
-                    if stateless && foreign(id) =>
-                {
-                    return Some(());
-                }
-                _ => {}
-            }
-        }
-        crate::keyed::no_data_itself(resolve, ty)
-            .or_else(|| unwritable_itself(resolve, ty))
-            .map(|_| ())
-    })
-    .is_some()
 }
 
 /// The callback of every hook: the single function of its interface in the consumed packages.

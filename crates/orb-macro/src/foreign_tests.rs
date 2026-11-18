@@ -1360,7 +1360,10 @@ fn a_wasi_type_a_consumed_interface_uses_is_refused_as_a_wasi_type() {
 
 /// A state holds a consumed type whose bindings `serde` writes, in its fields or in the module
 /// types they reach, whether it stays out of the WIT, with the author's serde derives, or enters
-/// it; a resource, a type holding a resource handle and a consumed flags are refused.
+/// it; a resource, a type holding a resource handle and a consumed flags are refused. The bindings
+/// derive serde's traits on the consumed types the state holds and on those these hold, `status`
+/// of another interface, each by its full name, and on no other: not on `pick` or `a-b`, which
+/// only a signature names.
 #[test]
 fn a_state_holds_the_consumed_types_serde_writes() {
     let dir = consumed("state", SHOP);
@@ -1381,13 +1384,27 @@ fn a_state_holds_the_consumed_types_serde_writes() {
         )
     };
     let fields = "pub last: Option<catalog::Item>, pub all: Vec<catalog::Item>, pub size: Option<catalog::Size>";
-    let out = expanded(shopping(&dir), &module(fields, ""));
+    let out = expanded(
+        shopping(&dir),
+        &module(
+            fields,
+            "pub fn choose(pick: catalog::Pick) -> catalog::AB { todo!() }",
+        ),
+    );
     let generated = tokens(&out);
     for expected in [
         "pub struct Kept { pub last : Option < catalog :: Item > , pub all : Vec < catalog :: Item > , pub size : Option < catalog :: Size > }",
-        "additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]",
+        concat!(
+            "additional_type_attributes : { ",
+            "\"example:shop/catalog@1.0.0/item\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
+            "\"example:shop/catalog@1.0.0/size\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
+            "\"example:shop/kinds@1.0.0/status\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
+        ),
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    for unexpected in ["additional_derives", "/pick\"", "/a-b\""] {
+        assert!(!generated.contains(unexpected), "{unexpected}\n{generated}");
     }
     assert!(!wit(&out).contains("record kept"), "{}", wit(&out));
     let entered = expanded(
@@ -1440,13 +1457,11 @@ interface lending {
 }
 ";
 
-/// The bindings leave a type out of a state's serde derives by its bare name, as they compare the
-/// names of `additional_derives_ignore`: a consumed record `serde` writes loses them to a record of
-/// the module of the same name that holds a resource handle, and a record of the module to such a
-/// consumed record. The macro gives each its derives back by its full name, so a state holds the
-/// consumed record; the record of the module is the author's, which the state holds as it is, with
-/// its own derives. The ignore list names only the types the bindings
-/// generate: `loan`, in an interface the Orb does not import, is not on it.
+/// The bindings derive serde's traits on a consumed type a state holds by its full name, so a
+/// consumed record `serde` writes takes them beside a record of the module of the same name that
+/// holds a resource handle, and a consumed record named like the module's `slot` gives that one
+/// nothing: the record of the module is the author's, which the state holds as it is, with its own
+/// derives.
 #[test]
 fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
     let dir = consumed("namesake", CATALOG);
@@ -1471,14 +1486,10 @@ fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
     );
     let generated = tokens(&module);
     for expected in [
-        "additional_derives_ignore : [\"entry\" , \"slot\"] ,",
-        concat!(
-            "additional_type_attributes : { ",
-            "\"example:shop/catalog@1.0.0/entry\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
-            "\"example:shopper/shopping@1.0.0/slot\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
-        ),
+        "additional_type_attributes : { \"example:shop/catalog@1.0.0/entry\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
         "# [derive (serde :: Serialize , Hash)] pub struct Slot { pub shelf : u32 }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
+    assert!(!generated.contains("additional_derives"), "{generated}");
 }

@@ -962,15 +962,28 @@ pub(crate) struct Reach<'a> {
     pub unreached: &'a [Candidate],
 }
 
+/// What the module reaches of the consumed interfaces (`foreign`).
+#[derive(Default)]
+pub(crate) struct Consumption {
+    /// What each derived interface `use`s from the consumed interfaces, by the interface's WIT
+    /// name.
+    pub uses: BTreeMap<String, Vec<Foreign>>,
+    /// The consumed records, variants and enums a state holds, directly or through the types of
+    /// the module, and those they hold in turn, by full name, `ns:name/interface@version/type`:
+    /// the bindings derive serde's traits on these alone.
+    pub serialized: BTreeSet<String>,
+}
+
 /// What each derived interface `use`s from the consumed interfaces, by the interface's WIT name,
-/// once every item a consumed interface's module names is checked where it is named. A derived
+/// and the consumed types a state holds (`Consumption`), once every item a consumed interface's module
+/// names is checked where it is named. A derived
 /// function, a constructor and a type of the module that enters the WIT name the data types of an
 /// interface imported, plainly or by key, or implemented, or of a hook the module contributes to,
 /// and the handles of their resources, which tembra-contracts' check of the derived WIT refuses
 /// where the runtime does not carry them; a derived hook's input names none; a state names the
 /// data types that `serde` can write. Nothing is read from the consumed packages when nothing
 /// names them.
-pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Foreign>>> {
+pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<Consumption> {
     let Reach {
         modules,
         parsed,
@@ -1043,7 +1056,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         }
     }
     if found.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(Consumption::default());
     }
     // The consumed interfaces the world exports: the implemented ones, the hooks the module
     // contributes to and those it declares from a consumed package.
@@ -1075,6 +1088,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             .collect(),
     )?;
     let mut foreign: BTreeMap<String, Vec<Foreign>> = BTreeMap::new();
+    let mut serialized = BTreeSet::new();
     for (named, place) in &found {
         let items = &defined[&named.interface.identity];
         // A view's module holds its resource, named after the interface, and re-exports the types
@@ -1108,8 +1122,17 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         let dependency = exported
             .iter()
             .find(|interface| items.depends.contains(&interface.identity));
-        let Some(interface) = checked(named, definition, place, declared, dependency, modules)?
-        else {
+        let checked = checked(named, definition, place, declared, dependency, modules)?;
+        if let (
+            Place::State { .. },
+            wit::Kind::Type {
+                serialized: held, ..
+            },
+        ) = (place, &definition.kind)
+        {
+            serialized.extend(held.iter().cloned());
+        }
+        let Some(interface) = checked else {
             continue;
         };
         let uses = foreign.entry(wit::kebab(interface)).or_default();
@@ -1131,7 +1154,10 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             names.push((definition.name.clone(), named.ident.clone()));
         }
     }
-    Ok(foreign)
+    Ok(Consumption {
+        uses: foreign,
+        serialized,
+    })
 }
 
 /// The type of the objects the view of a keyed import gives the interface `identity`, which takes
