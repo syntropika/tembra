@@ -1041,7 +1041,10 @@ fn reads_exactly(fixture: &mut Fixture) {
 fn a_source_consumer_reads_native_and_source_producers_exactly() {
     engines(|interpreter, interpreted| {
         for kind in [Kind::Native, Kind::Source] {
-            let mut fixture = install(interpreter, interpreted, limits(30_000), kind, None);
+            // The per-byte read below runs JavaScript for each of 66,000 bytes. Interpreted on
+            // Pulley in a debug build, its callback takes about 25 s on four busy cores: too
+            // close to the 30 s the other tests allow, so this one allows 120 s.
+            let mut fixture = install(interpreter, interpreted, limits(120_000), kind, None);
             reads_exactly(&mut fixture);
             if kind == Kind::Native {
                 // The jco per-byte iterator, across more than one pipe.

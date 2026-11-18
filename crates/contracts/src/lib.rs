@@ -14,6 +14,8 @@ mod hooks;
 mod implementation;
 mod lower;
 mod model;
+#[cfg(feature = "authoring")]
+mod module_contract;
 mod permissions;
 mod port;
 #[cfg(feature = "authoring")]
@@ -45,6 +47,8 @@ pub use model::{
     Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, Model, PreparedContract,
     ResourceIdentity, Ty,
 };
+#[cfg(feature = "authoring")]
+pub use module_contract::{ModuleContract, WrittenContract};
 pub use permissions::{
     FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability, host_serves,
     system_capability,
@@ -89,6 +93,8 @@ mod artifact_tests;
 mod conformance_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod ingress_tests;
+#[cfg(all(test, feature = "authoring"))]
+mod module_contract_tests;
 #[cfg(test)]
 mod permission_tests;
 #[cfg(test)]

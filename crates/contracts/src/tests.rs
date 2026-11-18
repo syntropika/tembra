@@ -47,6 +47,89 @@ fn resolved_contracts_drive_kernel_admission() {
     );
 }
 
+const SHOP: &str = r#"
+package example:shop@1.0.0;
+interface catalog {
+    record item { name: string, price: u32 }
+    variant refusal { closed, over(u32) }
+    add: func(item: item) -> result<u32, refusal>;
+}
+interface marks { type score = u32; }
+world shop { export catalog; export marks; }
+"#;
+
+/// A native provider declares the signature the kernel computes for its interface: for each
+/// exported interface that becomes a service, by its identity, the one the plan of the same
+/// contract gives the service. An interface without functions becomes no service.
+#[test]
+fn a_service_signature_is_the_plan_s_by_interface_identity() {
+    let contract = Contract::from_source("shop.wit", SHOP, Some("shop")).unwrap();
+    let plan = contract.plan("shop", 1, &BTreeMap::new()).unwrap();
+    assert_eq!(plan.orb.services.len(), 1);
+    assert_eq!(
+        plan.orb.services[0].name,
+        "shop::example:shop/catalog@1.0.0"
+    );
+    assert_eq!(
+        contract.service_signatures().unwrap(),
+        BTreeMap::from([(
+            "example:shop/catalog@1.0.0".to_owned(),
+            plan.orb.services[0].signature.clone().unwrap()
+        )])
+    );
+}
+
+const LEDGER: &str = "package example:ledger@1.0.0;
+interface types {
+  record entry { label: string, amount: s64 }
+}
+";
+
+/// A world's own WIT resolves with the packages of a directory, as the bindings of an Orb module
+/// read `path` and `inline` together: a type the source `use`s from the directory's package
+/// shapes its signature, and the bundled packages answer its imports, a copy of one in the
+/// directory's `deps/` adding nothing, whatever its comments. It reads as the same world nested
+/// whole.
+#[test]
+fn a_source_resolves_with_the_packages_of_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("ledger.wit"), LEDGER).unwrap();
+    std::fs::create_dir(dir.path().join("deps")).unwrap();
+    std::fs::write(
+        dir.path().join("deps").join("tembra-guest.wit"),
+        format!("{}// A local note.\n", crate::guest::SOURCE),
+    )
+    .unwrap();
+    let source = "package example:keeper@1.0.0;
+interface book {
+  use example:ledger/types@1.0.0.{entry};
+  add: func(entry: entry) -> u32;
+}
+world keeper {
+  import tembra:guest/context@1.0.0;
+  export book;
+}
+";
+    let read = Contract::from_source_in(dir.path(), "keeper.wit", source, Some("keeper")).unwrap();
+    let nested = format!(
+        "{source}\npackage example:ledger@1.0.0 {{\n{}}}\n",
+        LEDGER.lines().skip(1).collect::<Vec<_>>().join("\n")
+    );
+    let whole = Contract::from_source("keeper.wit", &nested, Some("keeper")).unwrap();
+    assert_eq!(read.prepared(), whole.prepared());
+    let signatures = read.service_signatures().unwrap();
+    assert_eq!(
+        signatures.keys().collect::<Vec<_>>(),
+        ["example:keeper/book@1.0.0"]
+    );
+    assert_eq!(signatures, whole.service_signatures().unwrap());
+    // Without the directory, the source names a package it does not hold.
+    let error = Contract::from_source("keeper.wit", source, Some("keeper"))
+        .err()
+        .unwrap();
+    assert!(error.0.contains("example:ledger"), "{error}");
+}
+
 #[test]
 fn identity_and_orb_version_are_not_wit_versions() {
     let contract = Contract::from_source("example.wit", SOURCE, Some("provider")).unwrap();

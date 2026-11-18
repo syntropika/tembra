@@ -1,0 +1,6 @@
+# A guest and a native application in one workspace. Cargo unifies the features of the members it
+# builds, so `cargo check --workspace` gives the guest's `tembra` the application's `host`, and the
+# guest's module compiles where the runtime is linked.
+[workspace]
+members = ["guest", "app"]
+resolver = "3"

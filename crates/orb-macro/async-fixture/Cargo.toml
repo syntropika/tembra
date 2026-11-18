@@ -9,6 +9,11 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# The facade's `host`, for the native build `just test-orb-both-ways` makes: with the feature, the
+# lockfile pins the runtime that `host` brings.
+host = ["tembra/host"]
+
 [dependencies]
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
 dlmalloc = { version = "0.2.12", features = ["global"] }

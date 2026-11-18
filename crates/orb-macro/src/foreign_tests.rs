@@ -1346,8 +1346,10 @@ fn an_item_named_like_a_bindings_module_is_refused() {
 /// The `context` option imports the kernel's interface tembra:guest/context, which the Orb module
 /// re-exports as `context`: a service implementing that interface, a hook contributing to it and a
 /// hook declaring it would each re-export a second module under that name, and each is refused at
-/// its item, naming the option. Without the option the service expands, while a hook on that
-/// interface is refused there too, as the interface has more than one function.
+/// its item, naming the option. Without the option the service is refused as well, since the
+/// derived WIT does not resolve as a contract, which the signature of its interface needs: the
+/// kernel's namespace is reserved; a hook on that interface is refused there too, as the interface
+/// has more than one function.
 #[test]
 fn a_service_or_a_hook_of_the_kernels_context_is_refused_beside_the_context_option() {
     let dir = consumed(
@@ -1415,7 +1417,11 @@ fn a_service_or_a_hook_of_the_kernels_context_is_refused_beside_the_context_opti
         let error = refused(watching(true), module);
         assert!(error.contains(&message), "{message}\n{error}");
     }
-    expanded(watching(false), service);
+    let error = refused(watching(false), service);
+    assert!(
+        error.contains("the derived WIT does not resolve as a contract: tembra:guest/context@1.0.0: the tembra namespace is reserved for kernel interfaces"),
+        "{error}"
+    );
     for module in [&contribution, &declaration] {
         let error = refused(watching(false), module);
         assert!(

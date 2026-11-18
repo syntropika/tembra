@@ -34,7 +34,7 @@ impl Host {
             )
             .await?
             .into_parts();
-            let value = head.and_then(crate::portable::Payload::into_data);
+            let value = head.and_then(crate::portable::Payload::data_only);
             let settled = match physical {
                 Some(physical) => physical.await,
                 None => Ok(()),

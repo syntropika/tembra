@@ -1,7 +1,7 @@
 //! Native callback environments follow the kernel's pinned code versions.
 use futures::{FutureExt, channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
 use std::rc::Rc;
-use tembra::{Host, Orb, Service};
+use tembra::{Host, Orb, Service, core::Lifetime};
 
 /// Build two implementations with the same contract and state schema.
 fn counter(offset: u32) -> Orb {
@@ -200,6 +200,36 @@ fn pending_activation_refuses_replacement_before_candidate_capture() {
     let called = reference.clone();
     assert_eq!(
         pool.run_until(host.root("alice", move |context| {
+            async move { called.call::<_, u32>(&context, "read", ()).await }.boxed_local()
+        }))
+        .unwrap(),
+        2
+    );
+    reference.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// The installation creates the object of a host-lifetime service and releases its reference
+/// without waiting for it; once the host settles, the object's activation has finished, though
+/// nobody awaited it, so a reload replaces its provider, whose next call answers.
+#[test]
+fn a_settled_host_lifetime_object_nobody_called_lets_a_reload_through() {
+    let pinned = |value: u32| {
+        Orb::new("pinned", 1).service(
+            Service::new("pinned", |_| Ok(()))
+                .lifetime(Lifetime::Host, 0)
+                .method("read", move |_, _, (): ()| async move { Ok(value) }),
+        )
+    };
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![pinned(1)]).unwrap();
+    pool.run_until(host.settled());
+    pool.run_until(host.reload(vec![pinned(2)], 5000)).unwrap();
+    let reference = Rc::new(host.get("pinned", vec!["main".into()], "host").unwrap());
+    let called = reference.clone();
+    assert_eq!(
+        pool.run_until(host.root("host", move |context| {
             async move { called.call::<_, u32>(&context, "read", ()).await }.boxed_local()
         }))
         .unwrap(),

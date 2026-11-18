@@ -1,5 +1,5 @@
 //! `cargo tembra build`: compile, derive the WIT, verify, package, summarize.
-use crate::component::{contract_text, decode, summary};
+use crate::component::{decode, derived_wit, summary};
 use anyhow::{Context, Result, bail};
 use heck::ToKebabCase;
 use sha2::{Digest, Sha256};
@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use wit_parser::{Resolve, UnresolvedPackageGroup};
+use tembra_contracts::{EmbeddedManifest, ModuleContract};
 
 /// `[package.metadata.tembra]`: what the WIT does not carry.
 #[derive(Default, serde::Deserialize)]
@@ -76,11 +76,16 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .unwrap_or_else(|| orb_name.to_kebab_case());
     let target_dir = manifest_dir.join("target");
     let profile = if release { "release" } else { "debug" };
+    // What contract/ holds before the compilation, in which the macro writes it too.
+    let contract_dir = manifest_dir.join("contract");
+    let before = contract_files(&contract_dir)?;
 
-    // 1. Compile the component on stable: a core module linked by the component linker. Cargo
-    //    reports the files it built as JSON on stdout and still renders the diagnostics on
-    //    stderr. The component is the file cargo names: a name derived from the crate's misses
-    //    a [lib] name, and may find a file an earlier build left.
+    // 1. Compile the component on stable: a core module linked by the component linker. The
+    //    library is compiled as a cdylib whatever crate type the manifest names, so that an Orb
+    //    crate keeps the default one and a native host can depend on it. Cargo reports the files
+    //    it built as JSON on stdout and still renders the diagnostics on stderr. The component is
+    //    the file cargo names: a name derived from the crate's misses a [lib] name, and may find
+    //    a file an earlier build left.
     println!("compiling {crate_name} for wasm32-unknown-unknown ({profile})");
     let package = manifest_path
         .canonicalize()
@@ -92,6 +97,8 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .arg(&manifest_path)
         .arg("--target")
         .arg("wasm32-unknown-unknown")
+        .arg("--crate-type")
+        .arg("cdylib")
         .arg("--target-dir")
         .arg(&target_dir)
         .arg("--message-format=json-render-diagnostics")
@@ -113,66 +120,52 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
             "compilation failed; if the target is missing: rustup target add wasm32-unknown-unknown"
         );
     }
-    let component_path = built.with_context(|| {
-        format!(
-            "cargo built no cdylib for {crate_name}; an Orb's [lib] has crate-type = [\"cdylib\"]"
-        )
-    })?;
+    let component_path =
+        built.with_context(|| format!("cargo built no cdylib for {crate_name}"))?;
     let component = std::fs::read(&component_path)
         .with_context(|| format!("missing {}", component_path.display()))?;
     let (resolve, world_id) = decode(&component)?;
 
-    // 2. The contract is an output: the WIT the macro embedded in the component, or the one
-    //    derived from its types, written to contract/<world>.wit. Not wit/: wit-bindgen loads a
-    //    directory of that name on its own and finds the package twice. The packages the module
-    //    consumes are nested whole from the directory the macro named.
-    let consumed = tembra_contracts::EmbeddedManifest::read(&component)
+    // 2. The contract is an output: the WIT the macro embedded in the component, with the
+    //    packages the module consumes nested whole from the directory the macro named, or the one
+    //    derived from the component's types, written to contract/<world>.wit with the standard
+    //    packages it depends on in contract/deps/. The macro writes the same files when the crate
+    //    is compiled for itself; `ModuleContract` is the one writer of both. The world takes the
+    //    module's name, so renaming the module leaves the former contract behind, a file of the
+    //    same package, which the write removes. The macro's write, during the compilation, removes
+    //    it first, so the build names what went from the files contract/ held before.
+    let consumed = EmbeddedManifest::read(&component)
         .map_err(|error| anyhow::anyhow!("{error}"))?
         .wit
         .map(|dir| manifest_dir.join(dir));
-    let (text, world) = contract_text(&component, &resolve, world_id, &world, consumed.as_deref())?;
-    let wit_dir = manifest_dir.join("contract");
-    let wit_file = wit_dir.join(format!("{world}.wit"));
-    //    The contract is read on its own, before anything is written: no other file in
-    //    contract/ takes part in it. The world takes the module's name, so renaming the module
-    //    leaves the former contract behind, a file of the same package, which is removed.
-    let contract = tembra_contracts::Contract::from_source(
-        &wit_file.display().to_string(),
-        &text,
-        Some(&world),
-    )
-    .map_err(|error| anyhow::anyhow!("{error}"))
-    .with_context(|| format!("reading the contract derived for {}", wit_file.display()))?;
-    //    The standard packages the contract depends on, which tembra-contracts bundles, go to
-    //    contract/deps/, where wit-parser looks for the packages a directory names: another Orb's
-    //    `wit = "../x/contract"` resolves the directory on its own, and `Contract::from_dir`
-    //    skips them. That the directory resolves alone is checked before anything is written.
-    let dependencies = contract.standard_dependencies();
-    let deps_dir = wit_dir.join("deps");
-    resolves_alone(&wit_file, &text, &deps_dir, &dependencies)
-        .with_context(|| format!("reading {} on its own", wit_dir.display()))?;
-    std::fs::create_dir_all(&wit_dir)?;
-    // Removed before the new file is written: where file names ignore case, a former name that
-    // differs only in case is the new file.
-    for former in former_contracts(&wit_dir, &wit_file, &text)? {
-        std::fs::remove_file(&former).with_context(|| format!("removing {}", former.display()))?;
-        eprintln!(
-            "removed {}, the contract of the world's former name",
-            former.display()
-        );
+    let module = match ModuleContract::from_component(&component, consumed.as_deref())
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+    {
+        Some(module) => module,
+        None => ModuleContract::new(&derived_wit(&resolve, world_id, &world)?, None)
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .context("reading the contract derived from the component")?,
+    };
+    let world = module.world().to_owned();
+    let written = module
+        .write(&manifest_dir)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    for notice in removed(&contract_dir, &before)? {
+        eprintln!("{notice}");
     }
-    std::fs::write(&wit_file, &text)?;
+    let wit_file = written.contract;
     println!("contract -> {}", wit_file.display());
-    for file in write_dependencies(&deps_dir, &dependencies)? {
+    for file in &written.dependencies {
         println!("contract -> {}", file.display());
     }
+    let contract = module.contract();
 
     // 3. Verify and package: the same component_artifact the SDK build uses for a provider.
     //    Hook interfaces are the ones the contract both imports and exports; which are declared,
     //    with what composition, and which are contributions, with what priority, travels in the
     //    component with the lifetime each service chose: the macro writes them from the #[hook]
     //    and #[service] attributes.
-    let roles = crate::component::roles(&contract, &component)?;
+    let roles = crate::component::roles(contract, &component)?;
     let artifact = contract
         .component_artifact(&component, &orb_name, api_version, &roles)
         .map_err(|error| anyhow::anyhow!("{error}"))
@@ -258,123 +251,57 @@ fn built_component(messages: impl BufRead, package: &Path) -> Result<Option<Path
     Ok(component)
 }
 
-/// The contracts an earlier build wrote into `dir` under a former name of the world: the `.wit`
-/// files other than `current` whose own package is the one `text` declares. A file declaring
-/// another package, or one that does not parse, is not this tool's output and stays.
-fn former_contracts(dir: &Path, current: &Path, text: &str) -> Result<Vec<PathBuf>> {
-    let package = |path: &Path, source: &str| {
-        UnresolvedPackageGroup::parse(path, source)
-            .ok()
-            .map(|group| group.main.name)
-    };
-    let Some(own) = package(current, text) else {
-        return Ok(Vec::new());
-    };
-    let mut formers = Vec::new();
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let path = entry?.path();
-        if path.file_name() == current.file_name()
-            || path.extension().is_none_or(|extension| extension != "wit")
-            || !path.is_file()
-        {
-            continue;
-        }
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
+/// The `.wit` files of the contract directory `dir`, then those of its `deps/`, each sorted: the
+/// files a write of the contract removes, the contract of a world's former name and the standard
+/// packages no world depends on any more. Empty when the directory does not exist yet.
+fn contract_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for dir in [dir.to_path_buf(), dir.join("deps")] {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", dir.display()));
+            }
         };
-        if package(&path, &source).as_ref() == Some(&own) {
-            formers.push(path);
+        let mut found = Vec::new();
+        for entry in entries {
+            let path = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
+            if path.extension().is_some_and(|extension| extension == "wit") && path.is_file() {
+                found.push(path);
+            }
         }
-    }
-    formers.sort();
-    Ok(formers)
-}
-
-/// Check that a contract directory resolves on its own, as `Resolve::push_dir` reads it: the
-/// contract `text`, to be written as `file`, and the standard packages it depends on, to be
-/// written into `deps`.
-fn resolves_alone(
-    file: &Path,
-    text: &str,
-    deps: &Path,
-    dependencies: &[(&str, &str)],
-) -> Result<()> {
-    let parse = |path: &Path, source: &str| {
-        UnresolvedPackageGroup::parse(path, source)
-            .map_err(|(map, error)| anyhow::anyhow!("{}", error.render(&map)))
-    };
-    let main = parse(file, text)?;
-    let dependencies = dependencies
-        .iter()
-        .map(|(name, source)| parse(&deps.join(name), source))
-        .collect::<Result<Vec<_>>>()?;
-    let mut resolve = Resolve::default();
-    resolve
-        .push_groups(main, dependencies)
-        .map_err(|error| anyhow::anyhow!("{}", resolve.render_error(&error.into())))?;
-    Ok(())
-}
-
-/// Write the standard packages the contract depends on into `deps`, one file each, and return
-/// the files written. A standard package an earlier build wrote there that the contract no longer
-/// depends on is removed first, and `deps` too when nothing else is left in it.
-fn write_dependencies(deps: &Path, dependencies: &[(&str, &str)]) -> Result<Vec<PathBuf>> {
-    let files: Vec<PathBuf> = dependencies
-        .iter()
-        .map(|(name, _)| deps.join(name))
-        .collect();
-    for former in former_dependencies(deps, &files)? {
-        std::fs::remove_file(&former).with_context(|| format!("removing {}", former.display()))?;
-        eprintln!(
-            "removed {}, a standard package the contract no longer depends on",
-            former.display()
-        );
-    }
-    if !files.is_empty() {
-        std::fs::create_dir_all(deps)?;
-    }
-    for ((_, source), file) in dependencies.iter().zip(&files) {
-        std::fs::write(file, source)?;
-    }
-    if deps.is_dir()
-        && std::fs::read_dir(deps)
-            .with_context(|| format!("reading {}", deps.display()))?
-            .next()
-            .is_none()
-    {
-        std::fs::remove_dir(deps).with_context(|| format!("removing {}", deps.display()))?;
+        found.sort();
+        files.extend(found);
     }
     Ok(files)
 }
 
-/// The standard packages an earlier build wrote into `deps` and this one does not: the `.wit`
-/// files other than `current` whose package is a standard one, of the `wasi` or `tembra`
-/// namespace. A file of another package, or one that does not parse, is not this tool's output
-/// and stays.
-fn former_dependencies(deps: &Path, current: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    if !deps.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut formers = Vec::new();
-    for entry in std::fs::read_dir(deps).with_context(|| format!("reading {}", deps.display()))? {
-        let path = entry?.path();
-        if current.contains(&path)
-            || path.extension().is_none_or(|extension| extension != "wit")
-            || !path.is_file()
-        {
-            continue;
-        }
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if UnresolvedPackageGroup::parse(&path, &source)
-            .is_ok_and(|group| crate::component::standard(&group.main.name))
-        {
-            formers.push(path);
-        }
-    }
-    formers.sort();
-    Ok(formers)
+/// What the build says on stderr of each file of the contract directory `dir` removed since it
+/// held the files `before`, in their order: the macro writes the contract while cargo compiles
+/// the crate, so the build's own write finds removed already what the compilation removed.
+fn removed(dir: &Path, before: &[PathBuf]) -> Result<Vec<String>> {
+    let after = contract_files(dir)?;
+    let deps = dir.join("deps");
+    Ok(before
+        .iter()
+        .filter(|file| !after.contains(file))
+        .map(|file| {
+            if file.parent() == Some(deps.as_path()) {
+                format!(
+                    "removed {}, a standard package the contract no longer depends on",
+                    file.display()
+                )
+            } else {
+                format!(
+                    "removed {}, the contract of the world's former name",
+                    file.display()
+                )
+            }
+        })
+        .collect())
 }
 
 /// The checksums of a directory after a build, `previous` being the file's former content: one

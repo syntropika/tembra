@@ -1,7 +1,7 @@
 //! WASI imports: `import = "wasi:..."` names an interface of the WASI packages bundled with
 //! `tembra-contracts`, which the inline WIT nests unless the consumed directory holds them.
 use super::tests::literal;
-use super::{Options, expand};
+use super::{Options, expand, metadata::Metadata};
 use std::path::{Path, PathBuf};
 
 const DICE: &str = "mod dice {
@@ -34,7 +34,13 @@ fn importing(imports: &[&str], wit: Option<&Path>) -> Options {
 
 /// The generated module as one token string, or the macro's error.
 fn expanded(options: Options, module: &str) -> syn::Result<String> {
-    expand(options, syn::parse_str(module).expect("a module")).map(|tokens| tokens.to_string())
+    expand(
+        options,
+        syn::parse_str(module).expect("a module"),
+        Ok(Metadata::named("dice")),
+        None,
+    )
+    .map(|tokens| tokens.to_string())
 }
 
 /// The inline WIT the bindings read, from the generated tokens.
@@ -270,8 +276,9 @@ fn two_imports_of_one_interface_name_are_refused() {
 /// WIT holds one package of a name: an Orb's package named like one of them, a WASI package an
 /// import builds on or the kernel's package a state uses, is an error on the package, whether the
 /// macro reads the bindings' types, as for a state, or not. The same modules under a package of
-/// their own expand, and so does an Orb's package named like a bundled package the expansion does
-/// not nest.
+/// their own expand. An Orb's package named like a bundled package the expansion does not nest
+/// passes the bindings, and is refused where the derived WIT resolves as a contract, beside the
+/// bundled packages, for the signature of each service.
 #[test]
 fn an_orb_package_named_like_a_nested_package_is_refused() {
     let named = |package: &str, imports: &[&str]| Options {
@@ -299,8 +306,15 @@ fn an_orb_package_named_like_a_nested_package_is_refused() {
         ("wasi:http@0.3.0", filesystem, DICE_WITH_STATE),
         ("tembra:guest@1.0.0", filesystem, DICE),
     ] {
-        expanded(named(package, imports), module)
-            .unwrap_or_else(|error| panic!("{package}, {imports:?}: {error}"));
+        let error = expanded(named(package, imports), module)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("the derived WIT does not resolve as a contract")
+                && error.contains(package),
+            "{package}, {imports:?}: {error}"
+        );
     }
 }
 

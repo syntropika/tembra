@@ -1,0 +1,10 @@
+[package]
+name = "tembra-config-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The facade with its default `host`. The application does not depend on the guest, but Cargo
+# enables `host` for the guest's `tembra` too when it builds both.
+tembra = { path = "../../../../tembra" }

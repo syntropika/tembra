@@ -328,14 +328,24 @@ impl Host {
                     }
                 }
                 self.0.scope_activations.borrow_mut().remove(scope);
-                if let Some((object, orb)) = self.0.scope_objects.borrow_mut().remove(scope) {
-                    let mut objects = self.0.objects.borrow_mut();
-                    if let Some(record) = objects.get_mut(&object) {
-                        record.versions.remove(&orb);
-                        if record.versions.is_empty() {
+                let version = self.0.scope_objects.borrow_mut().remove(scope);
+                if let Some((object, orb)) = version {
+                    let retired = {
+                        let mut objects = self.0.objects.borrow_mut();
+                        let retired = objects
+                            .get_mut(&object)
+                            .and_then(|record| record.versions.remove(&orb));
+                        if objects
+                            .get(&object)
+                            .is_some_and(|record| record.versions.is_empty())
+                        {
                             objects.remove(&object);
                         }
-                    }
+                        retired
+                    };
+                    // The version's native resources close with it, outside the host's
+                    // borrows: a value's drop may reach the host.
+                    drop(retired);
                 }
             }
             core::Effect::Stop { scope, .. } => self.stop_scope(*scope)?,

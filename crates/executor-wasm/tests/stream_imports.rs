@@ -364,6 +364,9 @@ fn an_idle_producer_ends_both_calls_at_their_terminal_timeout() {
     engines(|producer, consumer, interpreted| {
         let mut pair = compiled(producer, consumer, interpreted, 1000);
         let started = Instant::now();
+        // Both Orbs have the same timeout, and the consumer's call starts first. Its guest reads
+        // until the producer's later deadline ends the stream, so it answers past its own
+        // deadline: the call fails with its timeout, whichever timer the machine runs first.
         let error = pair.sum(0, 0, IDLE, u64::MAX).unwrap_err();
         assert!(
             started.elapsed() >= Duration::from_millis(900),
