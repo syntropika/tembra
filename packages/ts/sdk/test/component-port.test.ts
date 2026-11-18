@@ -294,6 +294,30 @@ test("a result after the callback's deadline is a timeout, even before its late 
   await port.close();
 });
 
+test("a rejection after the callback's deadline is a timeout, even before its late timer runs", async () => {
+  const { port } = harness(20);
+  const scope = { check() {}, cancel() {} } as unknown as CallbackScope;
+  const task = port.start(1n, scope, () => {
+    port.observer.taskStarted({ id: 1, entry: "stream", isAsync: true });
+    hold(50);
+    throw new Error("the guest's own failure");
+  });
+  const timeout = await task.result.catch((error: unknown) => error);
+  expect(String(timeout)).toContain("wall time limit");
+  expect(port.usable).toBe(false);
+  port.observer.taskExited({ id: 1 });
+  // One timeout, the cause the port was poisoned with, ends every wait of the callback.
+  expect(await task.physical.catch((error: unknown) => error)).toBe(timeout);
+  let refused: unknown;
+  try {
+    port.start(2n, scope, () => 0);
+  } catch (error) {
+    refused = error;
+  }
+  expect((refused as Error).cause).toBe(timeout);
+  await port.close();
+});
+
 test("a destructor that ends after its deadline is a timeout, even before its late timer runs", async () => {
   const { port } = harness(20);
   await expect(port.destroy(() => hold(50))).rejects.toThrow("wall time limit");

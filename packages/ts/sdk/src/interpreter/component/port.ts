@@ -375,10 +375,14 @@ export class ComponentPort {
     };
     this.#callbacks.add(callback);
     this.#active = callback;
+    // The one timeout of this callback, which poisons the port when it first happens.
+    let timeout: Error | undefined;
     const expired = () => {
-      const error = new Error("Component callback exceeded its wall time limit");
-      this.poison(error);
-      return error;
+      if (!timeout) {
+        timeout = new Error("Component callback exceeded its wall time limit");
+        this.poison(timeout);
+      }
+      return timeout;
     };
     const started = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -386,12 +390,18 @@ export class ComponentPort {
       timer = setTimeout(() => reject(expired()), this.timeout);
     });
     deadline.catch(() => {});
-    // A result after the deadline is a timeout too: a thread held past it runs the timer late,
-    // and the race still takes a result that is ready by then.
+    // An outcome after the deadline, a result or a rejection, is a timeout too: a thread held
+    // past it runs the timer late, and the race still takes an outcome that is ready by then.
     const bounded = async <V>(operation: Promise<V>) => {
-      const value = await Promise.race([operation, deadline, this.#trap]);
+      let outcome: { value: V } | { error: unknown };
+      try {
+        outcome = { value: await Promise.race([operation, deadline, this.#trap]) };
+      } catch (error) {
+        outcome = { error };
+      }
       if (performance.now() - started > this.timeout) throw expired();
-      return value;
+      if ("error" in outcome) throw outcome.error;
+      return outcome.value;
     };
     let ended = false;
     const revoke = () => {
