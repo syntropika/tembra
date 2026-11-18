@@ -649,8 +649,8 @@ fn a_contract_read_from_wit_names_its_types_outside_the_describe_graph_and_the_a
         first.source_artifact("export {}", "named", 1).unwrap(),
         second.source_artifact("export {}", "named", 1).unwrap()
     );
-    // The contract read from WIT answers them by the describe graph's ids; an alias and a tuple
-    // have no name of their own.
+    // The contract read from WIT answers them by the describe graph's ids, an alias of one by its
+    // own name; a tuple has none.
     let graph = first.describe();
     let names: serde_json::Value =
         serde_json::from_str(&first.request(r#"{"kind":"type-names"}"#)).unwrap();
@@ -676,6 +676,7 @@ fn a_contract_read_from_wit_names_its_types_outside_the_describe_graph_and_the_a
         ("enum", "mode", "Mode"),
         ("flags", "access", "Access"),
         ("record", "item-value", "ItemValue"),
+        ("type", "alias", "Alias"),
         ("variant", "shape", "Shape"),
     ];
     assert_eq!(

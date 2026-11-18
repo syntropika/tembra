@@ -392,6 +392,64 @@ test("a generated client type-checks for WIT names TypeScript reads otherwise", 
   }
 });
 
+/** Types an interface takes with `use`, one renamed, and a type of another interface inside one. */
+const USED = (extra: string) => `package example:used@1.0.0;
+interface a { record point { x: u32 } record holder { at: point } }
+interface b { record point { y: string } }
+interface s {
+  use a.{point};
+  use b.{point as spot};
+  ${extra}
+  f: func(p: spot);
+  g: func(p: point);
+}
+interface u { use a.{holder}; k: func(h: holder); }
+interface other { record point { z: bool } m: func(p: point); }
+interface clash { use a.{holder}; use b.{point}; n: func(h: holder, p: point); }
+world app { export s; export u; export other; }
+world clashing { export clash; }
+`;
+
+test("a generated client names the types its interface takes by their names there", async () => {
+  const root = await mkdtemp(
+    path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-client-"),
+  );
+  try {
+    const generate = async (extra: string) => {
+      await writeFile(path.join(root, "contract.wit"), USED(extra));
+      const out = path.join(root, "clients");
+      await rm(out, { recursive: true, force: true });
+      await client({ wit: path.join(root, "contract.wit"), world: "app", out });
+      const read = (name: string) => readFile(path.join(out, `example-used-${name}.ts`), "utf8");
+      return { s: await read("s"), u: await read("u"), other: await read("other") };
+    };
+    // The alias names the type it takes; a function rendered first changes no name.
+    for (const extra of ["", "e: func(x: point);", "a0: func(x: point, y: spot);"]) {
+      const { s } = await generate(extra);
+      expect(s).toContain("export type Point = { x: number };");
+      expect(s).toContain("export type Spot = { y: string };");
+      expect(s).toContain("  f(p: Spot, context?: Context): Promise<void>;");
+      expect(s).toContain("  g(p: Point, context?: Context): Promise<void>;");
+      expect(s).not.toContain("Point_");
+    }
+    const { u, other } = await generate("");
+    // A named type reached only inside another type's declaration is exported too.
+    expect(u).toContain("export type Holder = { at: Point };");
+    expect(u).toContain("export type Point = { x: number };");
+    // Two interfaces with one type name each have their own, in their own module.
+    expect(other).toContain("export type Point = { z: boolean };");
+    // Two different types left with one name in one module are refused, naming both.
+    await expect(
+      client({ wit: path.join(root, "contract.wit"), world: "clashing", out: root }),
+    ).rejects.toThrow(
+      "example:used/clash@1.0.0: the WIT types point of example:used/a@1.0.0 and point of " +
+        "example:used/b@1.0.0 both name Point",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 const MAX = (1n << 64n) - 1n;
 const MIN = -(1n << 63n);

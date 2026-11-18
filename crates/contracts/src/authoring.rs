@@ -170,32 +170,44 @@ impl Contract {
     }
 
     /// The WIT name of each record, variant, enum and flags type of the describe graph, by its
-    /// `id` there, with the name's JavaScript spelling (`Point` for `point`), in id order.
+    /// `id` there, with the name's JavaScript spelling (`Point` for `point`) and the interface
+    /// that declares the definition, in id order. An alias of one is named too, by its own name:
+    /// a type an interface takes with `use b.{point as spot}` is `spot` there, an alias of `b`'s
+    /// `point`.
     pub fn type_names(&self) -> serde_json::Value {
-        use wit_parser::TypeDefKind;
-        let mut named: Vec<(u32, &str)> = self
+        use wit_parser::{Type, TypeDefKind, TypeOwner};
+        let mut named: Vec<(u32, &str, &wit_parser::TypeDef)> = self
             .lowered
             .iter()
             .filter_map(|(id, index)| {
-                let definition = &self.resolve.types[*id];
-                let named = matches!(
+                let name = self.resolve.types[*id].name.as_deref()?;
+                let mut target = *id;
+                while let TypeDefKind::Type(Type::Id(next)) = self.resolve.types[target].kind {
+                    target = next;
+                }
+                let definition = &self.resolve.types[target];
+                matches!(
                     definition.kind,
                     TypeDefKind::Record(_)
                         | TypeDefKind::Variant(_)
                         | TypeDefKind::Enum(_)
                         | TypeDefKind::Flags(_)
-                );
-                Some((*index, definition.name.as_deref().filter(|_| named)?))
+                )
+                .then_some((*index, name, definition))
             })
             .collect();
-        named.sort_unstable();
+        named.sort_unstable_by_key(|(index, ..)| *index);
         named
             .into_iter()
-            .map(|(id, name)| {
+            .map(|(id, name, definition)| {
                 serde_json::json!({
                     "id": id,
                     "name": name,
                     "javascript": heck::ToUpperCamelCase::to_upper_camel_case(name),
+                    "interface": match definition.owner {
+                        TypeOwner::Interface(owner) => self.resolve.id_of(owner),
+                        TypeOwner::World(_) | TypeOwner::None => None,
+                    },
                 })
             })
             .collect()

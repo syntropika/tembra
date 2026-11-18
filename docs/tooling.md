@@ -382,7 +382,9 @@ The types are the values a host sends and receives: camelCase record fields, `{ 
 variants and results (with the declared error type), `T | null` for options, plain arrays for
 lists, `bigint` for `u64` and `s64`. Each record, variant, enum and flags type the interface uses
 is exported under its WIT name (`Item` for `item`, with a `_` where the module already uses the
-name), so a call site can name the values it builds. Every method takes an optional `Context` last, leaves it out
+name), so a call site can name the values it builds. A type the interface takes with `use` keeps
+its name there (`Spot` for `use b.{point as spot}`), and two different types left with one name in
+one module are refused. Every method takes an optional `Context` last, leaves it out
 when it is `undefined`, and returns a promise. The wrapper adds no other behaviour: the contract
 still checks every value, and an interface that declares WIT resources is refused, since a host
 cannot call it by name.

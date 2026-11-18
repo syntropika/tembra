@@ -61,11 +61,15 @@ interface Described {
   }[];
   readonly javascriptNames: Readonly<Record<string, string>>;
 }
-/** The contract's `type-names` answer: a WIT name for some ids of the describe graph. */
+/**
+ * The contract's `type-names` answer: a WIT name for some ids of the describe graph, an alias's
+ * own where an interface takes a type with `use`, and the interface that declares it.
+ */
 type TypeNames = readonly {
   readonly id: number;
   readonly name: string;
   readonly javascript: string;
+  readonly interface?: string | null;
 }[];
 
 const PRIMITIVES: Readonly<Record<string, string>> = {
@@ -299,8 +303,10 @@ function clientModule(
 
 /**
  * Render WIT value types as the TypeScript of the host's value form; memoized per type id. A type
- * the contract names renders as its name, which takes a `_` where `taken` or an earlier type of
- * the module has it; `declarations()` then answers the exported type of each name rendered.
+ * the contract names renders as its name, which takes a `_` where `taken` has it;
+ * `declarations()` then answers the exported type of each name rendered, in name order. Two
+ * different types that render as one name are refused, naming both, so that no name depends on
+ * the order the functions render in.
  */
 function renderer(
   graph: Described,
@@ -311,8 +317,13 @@ function renderer(
   const kinds = new Map(graph.types.map(({ id, definition }) => [id, definition.kind]));
   const wit = new Map(names.map((entry) => [entry.id, entry]));
   const rendered = new Map<number, string>();
-  /** The named types rendered so far, in the order they were first rendered. */
-  const named = new Map<number, string>();
+  /** The named types rendered so far, by their name in the module. */
+  const named = new Map<string, number>();
+  /** The definition an alias stands for, which a type and its aliases share. */
+  const target = (type: number): number => {
+    const kind = kinds.get(type);
+    return typeof kind === "object" && typeof kind.type === "number" ? target(kind.type) : type;
+  };
   const refuse = (what: string): never => {
     throw new Error(`${identity}: ${what} is outside the portable value profile`);
   };
@@ -374,8 +385,14 @@ function renderer(
     if (name !== undefined) {
       let spelled = name.javascript;
       while (taken.has(spelled)) spelled += "_";
-      taken.add(spelled);
-      named.set(type, spelled);
+      const other = named.get(spelled);
+      if (other === undefined) named.set(spelled, type);
+      else if (target(other) !== target(type)) {
+        const [first, second] = [wit.get(other)!, name]
+          .map((entry) => `${entry.name}${entry.interface ? ` of ${entry.interface}` : ""}`)
+          .sort();
+        throw new Error(`${identity}: the WIT types ${first} and ${second} both name ${spelled}`);
+      }
       rendered.set(type, spelled);
       return spelled;
     }
@@ -385,17 +402,20 @@ function renderer(
   };
   /** One exported type per named type rendered, those its definition renders included. */
   const declarations = (): string[] => {
-    const lines: string[] = [];
-    for (const [type, spelled] of named) {
-      const definition = kinds.get(type) as WitKind;
+    const declared = new Map<string, string[]>();
+    // Rendering a definition may name more types, which this loop then visits too.
+    for (const [spelled, type] of named) {
+      const definition = kinds.get(target(type)) as WitKind;
       const what = Object.keys(definition).find((key) => definition[key] !== undefined);
-      lines.push(
+      declared.set(spelled, [
         `/** The WIT ${what} \`${wit.get(type)!.name}\`. */`,
         `export type ${spelled} = ${kind(definition)};`,
         ``,
-      );
+      ]);
     }
-    return lines;
+    return [...declared]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .flatMap(([, lines]) => lines);
   };
   return { render, declarations };
 }
