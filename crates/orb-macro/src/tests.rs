@@ -2767,9 +2767,10 @@ fn an_impls_type_resolves_as_a_contract_types_name() {
 
 /// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
 /// `#[cfg_attr(..)]`: a field, a case or a case's payload under `#[cfg(..)]`, which the WIT would
-/// hold in every configuration, is refused, on a record, an enum or a variant; a `#[cfg_attr(..)]`
-/// on the type or on a member is the compiler's to evaluate, on the author's type. Kept out of the
-/// WIT, the same type is the author's, as written.
+/// hold in every configuration, is refused, on a record, an enum or a variant, and so is the
+/// type, a field or a case under a `#[cfg_attr(..)]` wrapping a `#[cfg(..)]`, at any depth; any
+/// other `#[cfg_attr(..)]` on the type or on a member is the compiler's to evaluate, on the
+/// author's type. Kept out of the WIT, the same type is the author's, as written.
 #[test]
 fn what_the_macro_cannot_evaluate_is_refused() {
     let module = |types: &str, returned: &str| {
@@ -2797,6 +2798,21 @@ fn what_the_macro_cannot_evaluate_is_refused() {
             "pub enum Holder { Person(#[cfg(feature = \"named\")] String), Nobody }",
             "Holder",
             "`#[cfg(..)]` on the payload of `Holder::Person`: `Holder` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the payload in every configuration",
+        ),
+        (
+            "#[cfg_attr(test, cfg(feature = \"audit\"))] pub struct Grant { pub who: String }",
+            "Grant",
+            "`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the record `Grant`: `Grant` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the record and the macro would convert `Grant` to and from the bindings' type in every configuration",
+        ),
+        (
+            "pub struct Grant { pub who: String, #[cfg_attr(test, cfg(feature = \"audit\"))] pub reason: String }",
+            "Grant",
+            "`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the field `Grant::reason`: `Grant` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration",
+        ),
+        (
+            "pub enum Level { Read, #[cfg_attr(test, cfg_attr(docsrs, cfg(feature = \"admin\")))] Admin }",
+            "Level",
+            "`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the case `Level::Admin`: `Level` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the case in every configuration",
         ),
     ] {
         let error = refused("example:office@1.0.0", &module(types, returned));

@@ -4477,10 +4477,10 @@ fn named_newtypes(
 }
 
 /// Refuse what the macro cannot evaluate in a type that enters the WIT, as it reads the type before
-/// the compiler evaluates `#[cfg(..)]`: the type under `#[cfg(..)]`, which the WIT would hold, and
-/// the macro convert, in every configuration; and a field, a case or a case's payload under
-/// `#[cfg(..)]`, which the WIT would hold in every configuration. The type keeps its other
-/// attributes as the author writes them.
+/// the compiler evaluates `#[cfg(..)]`: the type under `#[cfg(..)]`, written plainly or under
+/// `#[cfg_attr(..)]` (`conditional`), which the WIT would hold, and the macro convert, in every
+/// configuration; and a field, a case or a case's payload under one, which the WIT would hold in
+/// every configuration. The type keeps its other attributes as the author writes them.
 fn unconditional(item: &Item) -> syn::Result<()> {
     // Each member, by what it is and its name as the errors say them.
     let (owner, attrs, members) = match item {
@@ -4513,10 +4513,8 @@ fn unconditional(item: &Item) -> syn::Result<()> {
         ),
         _ => return Ok(()),
     };
-    if let Some(attribute) = attrs
-        .iter()
-        .find(|attribute| attribute.path().is_ident("cfg"))
-    {
+    if let Some(attribute) = attrs.iter().find(|attribute| conditional(&attribute.meta)) {
+        let written = written_condition(attribute);
         let kind = match item {
             Item::Enum(item)
                 if item
@@ -4533,19 +4531,17 @@ fn unconditional(item: &Item) -> syn::Result<()> {
         return Err(syn::Error::new(
             attribute.span(),
             format!(
-                "`#[cfg(..)]` on the {kind} `{owner}`: `{owner}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} and {named} in every configuration; remove the attribute, or keep `{owner}` out of the WIT"
+                "{written} on the {kind} `{owner}`: `{owner}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} and {named} in every configuration; remove the attribute, or keep `{owner}` out of the WIT"
             ),
         ));
     }
     for (kind, name, attrs) in &members {
-        if let Some(attribute) = attrs
-            .iter()
-            .find(|attribute| attribute.path().is_ident("cfg"))
-        {
+        if let Some(attribute) = attrs.iter().find(|attribute| conditional(&attribute.meta)) {
             return Err(syn::Error::new(
                 attribute.span(),
                 format!(
-                    "`#[cfg(..)]` on the {kind} {name}: `{owner}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} in every configuration; remove the attribute, or keep `{owner}` out of the WIT"
+                    "{} on the {kind} {name}: `{owner}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} in every configuration; remove the attribute, or keep `{owner}` out of the WIT",
+                    written_condition(attribute)
                 ),
             ));
         }

@@ -1758,9 +1758,10 @@ the version whose rules the macro follows, and the generated code reaches it the
   [the types of a consumed interface](#the-types-of-a-consumed-interface) says, is the compiler's
   error on the author's derive.
 - The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
-  `#[cfg_attr(..)]`. The type, a field, a case or a case's payload under `#[cfg(..)]`, which the
-  WIT would hold in every configuration, is a compile error; the type keeps its attributes,
-  `#[cfg_attr(..)]` included, which the compiler evaluates on the author's type.
+  `#[cfg_attr(..)]`. The type, a field, a case or a case's payload under `#[cfg(..)]`, written
+  plainly or under `#[cfg_attr(..)]`, which the WIT would hold in every configuration, is a compile
+  error; the type keeps its other attributes, any other `#[cfg_attr(..)]` included, which the
+  compiler evaluates on the author's type.
 - The macro writes the code serving a struct marked `#[state]`, `#[resource]` or `#[wit_resource]`,
   and the code calling the `pub fn` of a WIT resource and a function marked `#[constructor]`,
   `#[validate]`, `#[open]` or `#[close]`, before the compiler evaluates `#[cfg(..)]`, and that code
