@@ -109,7 +109,9 @@ fn cargo(directory: &Path, arguments: &[&str]) {
 }
 
 /// The target directory every crate of these tests shares, which the commands that build take
-/// from `CARGO_TARGET_DIR`, set for the processes the tests spawn only.
+/// from `CARGO_TARGET_DIR`, set for the processes the tests spawn only. The tests run in parallel
+/// and Cargo names its files after the crate, so each test that builds a crate gives it a name of
+/// its own: no other test's build overwrites a file the test reads.
 fn shared_target() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("cargo-tembra-tests")
 }
@@ -310,16 +312,16 @@ fn a_new_crate_builds_as_a_component_and_natively() {
 #[ignore = "builds scratch crates, which is slow from a cold target directory; run by `just test-cargo-tembra`"]
 fn wit_and_inspect_read_back_the_component_a_build_wrote() {
     let dir = scratch("read-back");
-    let (krate, _) = scaffold(&dir, NAME, PACKAGE);
+    let (krate, _) = scaffold(&dir, "reader-orb", "example:reader-orb@1.0.0");
     let manifest = krate.join("Cargo.toml");
     tembra(&dir, &["build", "--manifest-path", text(&manifest)]);
     assert_pinned(&krate);
-    let component = krate.join("artifacts/greeter-orb.wasm");
-    let contract = read(&krate.join("contract/greeter-orb.wit"));
+    let component = krate.join("artifacts/reader-orb.wasm");
+    let contract = read(&krate.join("contract/reader-orb.wit"));
 
     let printed = tembra(&dir, &["wit", text(&component)]);
     for expected in [
-        "export example:greeter-orb/api@1.0.0;",
+        "export example:reader-orb/api@1.0.0;",
         "hello: func(name: string) -> string;",
     ] {
         assert!(printed.contains(expected), "{expected}\n{printed}");
@@ -334,16 +336,16 @@ fn wit_and_inspect_read_back_the_component_a_build_wrote() {
             "--emit",
             text(&emitted),
             "--world",
-            NAME,
+            "reader-orb",
         ],
     );
-    let file = emitted.join("greeter-orb.wit");
+    let file = emitted.join("reader-orb.wit");
     assert_eq!(read(&file), contract);
     assert_eq!(printed, format!("written {}\n{contract}", file.display()));
 
     let printed = tembra(&dir, &["inspect", text(&component)]);
     for expected in [
-        "orb::example:greeter-orb/api@1.0.0  methods: hello\n",
+        "orb::example:reader-orb/api@1.0.0  methods: hello\n",
         "imports: none; the installer grants nothing\n",
     ] {
         assert!(printed.contains(expected), "{expected}\n{printed}");
@@ -357,11 +359,11 @@ fn wit_and_inspect_read_back_the_component_a_build_wrote() {
             "--wit",
             text(&wit),
             "--world",
-            NAME,
+            "reader-orb",
         ],
     );
     let verdict = format!(
-        "checked against world greeter-orb of {}:\n  ACCEPTED, artifact of ",
+        "checked against world reader-orb of {}:\n  ACCEPTED, artifact of ",
         wit.display()
     );
     assert!(printed.contains(&verdict), "{verdict}\n{printed}");
@@ -421,10 +423,10 @@ fn inspect_names_the_grants_a_wasi_import_needs() {
 #[ignore = "builds scratch crates, which is slow from a cold target directory; run by `just test-cargo-tembra`"]
 fn build_writes_the_component_into_the_target_directory_of_cargo() {
     let dir = scratch("target-dir");
-    let (krate, _) = scaffold(&dir, NAME, PACKAGE);
+    let (krate, _) = scaffold(&dir, "probe-orb", "example:probe-orb@1.0.0");
     let target = shared_target();
     tembra(&krate, &["build"]);
-    let built = target.join("wasm32-unknown-unknown/release/greeter_orb.wasm");
+    let built = target.join("wasm32-unknown-unknown/release/probe_orb.wasm");
     assert!(built.is_file(), "{}", built.display());
     assert!(
         !krate.join("target").exists(),
@@ -432,7 +434,7 @@ fn build_writes_the_component_into_the_target_directory_of_cargo() {
     );
     // The copy in artifacts/ is the file Cargo wrote.
     assert_eq!(
-        std::fs::read(krate.join("artifacts/greeter-orb.wasm")).unwrap(),
+        std::fs::read(krate.join("artifacts/probe-orb.wasm")).unwrap(),
         std::fs::read(&built).unwrap()
     );
     std::fs::remove_dir_all(dir).unwrap();
