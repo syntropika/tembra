@@ -93,20 +93,34 @@ impl<T: 'static> Resource<T> {
         self.key.clone()
     }
 
-    /// Resolve the opened value under this resource's ownership.
+    /// Resolve the opened value under this resource's ownership: a value the host released reads
+    /// as gone, one of another Rust type is refused.
     pub fn value(&self) -> Result<Rc<T>> {
         let host = &self.key.host;
-        host.value(host.kernel().resource_value(self.key.id)?)
-            .map_err(|_| {
-                Error::invalid(
-                    Reason::RustType,
-                    format!(
-                        "the resource `{}` holds a value of another Rust type than the one it is \
-                         read as",
-                        self.key.name
-                    ),
+        let id = host.kernel().resource_value(self.key.id)?;
+        let value = host
+            .0
+            .values
+            .borrow()
+            .get(&id)
+            .map(|record| record.value.clone())
+            .ok_or_else(|| {
+                Error::new(
+                    core::Code::Gone,
+                    Reason::Resource,
+                    format!("the value of the resource `{}` was released", self.key.name),
                 )
-            })
+            })?;
+        value.downcast().map_err(|_| {
+            Error::invalid(
+                Reason::RustType,
+                format!(
+                    "the resource `{}` holds a value of another Rust type than the one it is \
+                         read as",
+                    self.key.name
+                ),
+            )
+        })
     }
 }
 
