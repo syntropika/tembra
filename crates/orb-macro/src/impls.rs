@@ -1,6 +1,6 @@
 //! The trait impls the Orb's modules write by hand for a type that enters the WIT, read before the
 //! compiler resolves names: the impls whose type, written in its module, is the type.
-use crate::{DeclaredTypes, Module, Uses};
+use crate::{Module, foreign};
 use std::collections::BTreeMap;
 use syn::{Ident, Item, Type};
 
@@ -11,13 +11,12 @@ use syn::{Ident, Item, Type};
 pub(crate) fn implemented_by_hand(
     tree: &mut Module,
     modules: &[Vec<Ident>],
-    uses: &[Uses],
-    declared: DeclaredTypes<'_>,
+    resolver: &foreign::Modules,
     ident: &Ident,
     home: usize,
 ) -> BTreeMap<String, Vec<(usize, syn::ItemImpl)>> {
     let mut implemented: BTreeMap<String, Vec<(usize, syn::ItemImpl)>> = BTreeMap::new();
-    for (scope, block) in impls_of(tree, modules, uses, declared, ident, home) {
+    for (scope, block) in impls_of(tree, modules, resolver, ident, home) {
         let Some(last) = block
             .trait_
             .as_ref()
@@ -39,8 +38,7 @@ pub(crate) fn implemented_by_hand(
 pub(crate) fn impls_of(
     tree: &mut Module,
     modules: &[Vec<Ident>],
-    uses: &[Uses],
-    declared: DeclaredTypes<'_>,
+    resolver: &foreign::Modules,
     ident: &Ident,
     home: usize,
 ) -> Vec<(usize, syn::ItemImpl)> {
@@ -49,7 +47,7 @@ pub(crate) fn impls_of(
         for item in &tree.at(scope).items {
             if let Item::Impl(block) = item
                 && block.trait_.is_some()
-                && names(&block.self_ty, scope, ident, home, modules, uses, declared)
+                && names(&block.self_ty, scope, ident, home, resolver)
             {
                 found.push((scope, block.clone()));
             }
@@ -59,49 +57,13 @@ pub(crate) fn impls_of(
 }
 
 /// Whether a type, written in the module `scope`, is the type `ident` of the module `home`: a path
-/// that names it in that module, followed through the module's `use`s, `self::`, `super::`, the
-/// sub-modules and the glob imports from the Orb's modules (`type_module`), as `Access` in its own
-/// module, `model::Access` from the Orb module and `Access` after `use super::model::Access;` or
-/// `use super::model::*;` in any module. A name the macro cannot place, one a glob import from a
-/// module it does not read brings into a module declaring no type of that name, or one a `use`
-/// leads to through `crate::`, is the type when no other type of the Orb's modules that may enter
-/// the WIT has its name, as the state's `impl Default` is read; `declared` are the types of the
-/// Orb's modules, an alias of a namesake left out, which stands for the type it names as a `use`
-/// does, with the candidates for the WIT among them. A path leaving the Orb module through a
-/// crate is not the type.
-fn names(
-    ty: &Type,
-    scope: usize,
-    ident: &Ident,
-    home: usize,
-    modules: &[Vec<Ident>],
-    uses: &[Uses],
-    declared: DeclaredTypes<'_>,
-) -> bool {
-    let Type::Path(path) = ty else {
-        return false;
-    };
-    if path.qself.is_some() {
-        return false;
-    }
-    let Some((module, name)) = crate::type_module(&path.path, scope, uses, modules) else {
-        return false;
-    };
-    if name != *ident {
-        return false;
-    }
-    if module == home {
-        return true;
-    }
-    let elsewhere = declared
-        .all
-        .iter()
-        .any(|(scope, name)| *scope == module && *name == *ident);
-    !elsewhere
-        && declared
-            .candidates
-            .iter()
-            .filter(|(_, name)| *name == *ident)
-            .count()
-            == 1
+/// that resolves to it there as a contract type's name does, through the glob imports from the
+/// Orb's modules too (`foreign::Modules::implemented_type`): `Access` in its own module,
+/// `model::Access` from the Orb module, and `Access` after `use super::model::Access;`,
+/// `use super::model::*;` or `type Access = super::model::Access;` in any module. A name the macro
+/// does not place in the Orb, through `crate::` or out of a crate, is not the type.
+fn names(ty: &Type, scope: usize, ident: &Ident, home: usize, resolver: &foreign::Modules) -> bool {
+    resolver
+        .implemented_type(ty, scope)
+        .is_some_and(|(name, module)| name == *ident && module == home)
 }

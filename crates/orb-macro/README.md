@@ -1754,7 +1754,9 @@ the version whose rules the macro follows, and the generated code reaches it the
   or a list, `Eq`, `Ord` or `Hash` on one holding an `f32` or an `f64`, and `Default` on a record
   holding a `Result`. A handle, a string or a list held through a type of the module or a consumed
   type counts the same, unless the macro sees the trait implemented for that type: by the bindings,
-  by its own derives, by an `impl` of the Orb's modules, by the macro for a state's `Default`. A trait such a type lacks otherwise, `PartialEq` on a record holding a
+  by its own derives, by an `impl` of the Orb's modules, whose type the macro resolves as a contract
+  type's name, through the glob imports from the Orb's modules too but not through `crate::`, by
+  the macro for a state's `Default`. A trait such a type lacks otherwise, `PartialEq` on a record holding a
   `Spot` that derives none, or holding a consumed record, which its bindings give `Debug`, `Clone`
   and `Copy` only, as [the types of a consumed interface](#the-types-of-a-consumed-interface)
   says, is left to the author, who may implement it for the type by hand anywhere in the crate,

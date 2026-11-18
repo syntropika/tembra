@@ -2455,15 +2455,9 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             default_impls
                 .iter()
                 .filter(|(scope, block)| {
-                    names_state(
-                        &block.self_ty,
-                        *scope,
-                        state,
-                        &states,
-                        &modules,
-                        &uses,
-                        &own_types,
-                    )
+                    consumed_modules
+                        .implemented_type(&block.self_ty, *scope)
+                        .is_some_and(|(name, module)| name == state.ident && module == state.scope)
                 })
                 .cloned()
                 .collect()
@@ -2504,16 +2498,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     // every type of the module its fields reach that stays out too, so each of them gets the
     // serde derives the author did not write. The types that enter the WIT are generated with
     // the derives already.
-    // The types that may enter the WIT, by whose uniqueness a name the macro cannot place is read
-    // (`impls::names`), listed before reachability consumes the candidates.
-    let candidate_types: Vec<(usize, Ident)> = candidates
-        .iter()
-        .map(|candidate| (candidate.scope, candidate.ident.clone()))
-        .collect();
-    let declared_types = DeclaredTypes {
-        all: &own_types,
-        candidates: &candidate_types,
-    };
     let mut unreached: Vec<Candidate> = Vec::new();
     let mut shapes = reachable(
         candidates,
@@ -2665,7 +2649,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             // is `serde`'s by its name, as one a crate-root `#[macro_use]` brings.
             let derived = serde_derived(attrs, scope, &uses, &modules, &ident, true);
             let by_hand: Vec<(String, (usize, syn::ItemImpl))> =
-                impls::impls_of(&mut tree, &modules, &uses, declared_types, &ident, scope)
+                impls::impls_of(&mut tree, &modules, &consumed_modules, &ident, scope)
                     .into_iter()
                     .filter_map(|(written, block)| {
                         let (_, path, _) = block.trait_.as_ref()?;
@@ -2754,7 +2738,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &mut tree,
         &modules,
         &uses,
-        declared_types,
+        &consumed_modules,
     );
     // What each other type that enters the WIT implements besides what the bindings implement for
     // it and what its derives implement, which the types holding one may derive: the traits the
@@ -2767,8 +2751,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         let hands = impls::implemented_by_hand(
             &mut tree,
             &modules,
-            &uses,
-            declared_types,
+            &consumed_modules,
             &shape.ident,
             shape.scope,
         );
@@ -3564,7 +3547,14 @@ fn component(
         ) else {
             continue;
         };
-        clashing(shape, generated, hands, uses, modules)?;
+        clashing(
+            shape,
+            generated,
+            hands,
+            uses,
+            modules,
+            &analysis.consumed_modules,
+        )?;
     }
     // A state's record that a method mentions is a generated type, which the kernel's JSON needs
     // to serialize; the derives reach every generated type that can carry them. A record or a
@@ -3839,131 +3829,6 @@ fn implemented_by(derive: &Ident, attrs: &[Attribute]) -> Vec<String> {
         .flatten()
         .filter_map(|meta| Some(meta.path().segments.last()?.ident.to_string()))
         .collect()
-}
-
-/// The types the Orb's modules declare, by scope, which place the type an impl names
-/// (`impls::names`): every type of any shape but an alias of a namesake, which stands for the type
-/// it names as a `use` does, and among them the candidates for the WIT, the structs with named
-/// fields and the enums, by whose uniqueness a name the macro cannot place is read.
-#[derive(Clone, Copy)]
-struct DeclaredTypes<'a> {
-    all: &'a [(usize, Ident)],
-    candidates: &'a [(usize, Ident)],
-}
-
-/// Whether the type of an `impl Default for ..`, written in the module `scope`, is `state`: its
-/// path, followed from that module through the module's `use`s, `self::`, `super::`, sub-modules
-/// and the glob imports from the Orb's modules (`type_module`), ends at the state; a path ending at
-/// another type of the Orb module, one of `declared`, is not the state, and one leaving the Orb
-/// module through a crate neither. A name the macro cannot place, one a glob import from a module
-/// it does not read brings in or one reached through `crate::`, is the state when no other state
-/// has its name.
-fn names_state(
-    ty: &Type,
-    scope: usize,
-    state: &State,
-    states: &[State],
-    modules: &[Vec<Ident>],
-    uses: &[Uses],
-    declared: &[(usize, Ident)],
-) -> bool {
-    let Type::Path(path) = ty else {
-        return false;
-    };
-    if path.qself.is_some() {
-        return false;
-    }
-    let Some((module, name)) = type_module(&path.path, scope, uses, modules) else {
-        return false;
-    };
-    if name != state.ident {
-        return false;
-    }
-    if module == state.scope {
-        return true;
-    }
-    let elsewhere = declared
-        .iter()
-        .any(|(scope, ident)| *scope == module && *ident == name);
-    !elsewhere
-        && states
-            .iter()
-            .filter(|other| other.ident == state.ident)
-            .count()
-            == 1
-}
-
-/// The module, by scope, in which a type path written in the module `scope` names its type, with
-/// the type's name there: the module declares the type, or binds nothing of the name, so a glob
-/// import from a module the macro does not read, or the prelude, brings it, and the name is placed
-/// by its uniqueness (`impls::names`). The path's prefix is followed as a glob import's is
-/// (`glob_module`): through the `use` binding its first name, `self::`, `super::`, the sub-modules
-/// of the Orb and the modules its glob imports bring in. A single name a `use` of the module
-/// binds, `Access` after `use super::rights::Access;`, stands for the path it imports, and so does
-/// one the module reached re-exports; one the module neither binds nor declares is followed through
-/// its glob imports to the module of the Orb that binds or declares it (`through_globs`). A `use`
-/// leading to a path through `crate::`, which the macro cannot place, binds a name it cannot place
-/// either, the type's or a module's of its path, as a glob import from outside the Orb does: the
-/// name stands alone, in the module that binds it. `None` for a path that leaves the Orb module
-/// through a crate, `Self` or a `crate::` written in the path itself, which may name a namesake
-/// outside the Orb.
-fn type_module(
-    path: &syn::Path,
-    scope: usize,
-    uses: &[Uses],
-    modules: &[Vec<Ident>],
-) -> Option<(usize, Ident)> {
-    if path.leading_colon.is_some() {
-        return None;
-    }
-    let mut scope = scope;
-    let mut segments: Vec<Ident> = path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.clone())
-        .collect();
-    // Whether a `use` has replaced the name by the path it imports.
-    let mut imported = false;
-    // Each step consumes the path's prefix or replaces the name by what a `use` binds it to;
-    // declarations binding one another in a circle would never end.
-    for _ in 0..64 {
-        let (name, prefix) = segments.split_last()?;
-        let (name, prefix) = (name.clone(), prefix.to_vec());
-        if let Some(first) = prefix.first() {
-            if *first == "crate" {
-                return imported.then_some((scope, name));
-            }
-            let prefix = Named {
-                global: false,
-                segments: prefix,
-            };
-            scope = match module_from(&prefix, scope, uses, modules, true) {
-                Prefix::Module(module) => module,
-                // A `use` binds a module of the path to one the macro cannot place: the name
-                // stands alone, as after a `use` binding the name so.
-                Prefix::Crate => return Some((scope, name)),
-                Prefix::Outside => return None,
-            };
-        }
-        match uses[scope].names.get(&name.to_string()) {
-            // `use name;` brings the crate `name` into scope, and a path from the crates leaves.
-            Some(bound)
-                if bound.global || (bound.segments.len() == 1 && bound.segments[0] == name) =>
-            {
-                return None;
-            }
-            Some(bound) => {
-                segments = bound.segments.clone();
-                imported = true;
-            }
-            None if uses[scope].items.contains(&name.to_string()) => return Some((scope, name)),
-            None => match through_globs(&name, scope, uses, modules) {
-                Globbed::In(module) => scope = module,
-                Globbed::Outside | Globbed::Nowhere => return Some((scope, name)),
-            },
-        }
-    }
-    None
 }
 
 /// Remove and return the marker attribute with the given name, if present.
@@ -5644,15 +5509,16 @@ fn known_trait(
 /// type would implement it twice. `hands` are the impls, each with the module it is written in,
 /// whose trait the macro follows from there (`known_trait`); one of the trait with another
 /// right-hand type, `PartialEq<u8>`, is another impl, which coexists with the derived `PartialEq`
-/// (`overlaps`). An impl for a type the macro places only by the uniqueness of its name, one a
-/// glob import from a module it does not read brings into another module (`type_module`), may be
-/// another type's: it is left to the compiler.
+/// (`overlaps`). An impl whose type the macro does not place in the Orb, through `crate::` or a
+/// glob import from a module it does not read (`foreign::Modules::implemented_type`), is left to
+/// the compiler.
 fn clashing(
     shape: &Shape,
     generated: &wit::Generated,
     hands: &[(usize, syn::ItemImpl)],
     uses: &[Uses],
     modules: &[Vec<Ident>],
+    resolver: &foreign::Modules,
 ) -> syn::Result<()> {
     let owner = &shape.ident;
     let own = implemented(&shape.kind, generated);
@@ -5660,23 +5526,21 @@ fn clashing(
         let Some((_, path, _)) = &block.trait_ else {
             continue;
         };
-        let Type::Path(self_ty) = &*block.self_ty else {
-            continue;
-        };
-        let placed = type_module(&self_ty.path, *scope, uses, modules)
-            .is_some_and(|(module, name)| module == shape.scope && name == *owner);
+        let placed = resolver
+            .implemented_type(&block.self_ty, *scope)
+            .is_some_and(|(name, module)| module == shape.scope && name == *owner);
         if !placed {
             continue;
         }
         let Some(name) = known_trait(path, *scope, uses, modules, owner) else {
             continue;
         };
-        // The type itself as a type argument, `PartialEq<Heading>`, as `type_module` places it
-        // from the impl's module; another module's namesake is another type.
+        // The type itself as a type argument, `PartialEq<Heading>`, as the impl's module resolves
+        // it; another module's namesake is another type.
         let is_owner = |rhs: &Type| {
-            matches!(rhs, Type::Path(rhs) if rhs.qself.is_none()
-                && type_module(&rhs.path, *scope, uses, modules)
-                    .is_some_and(|(module, name)| module == shape.scope && name == *owner))
+            resolver
+                .implemented_type(rhs, *scope)
+                .is_some_and(|(name, module)| module == shape.scope && name == *owner)
         };
         if !path
             .segments
@@ -8315,7 +8179,7 @@ fn keep_converted(
     tree: &mut Module,
     modules: &[Vec<Ident>],
     uses: &[Uses],
-    declared: DeclaredTypes<'_>,
+    resolver: &foreign::Modules,
 ) {
     for shape in shapes
         .iter()
@@ -8331,7 +8195,7 @@ fn keep_converted(
             // The traits of `serde` the type has already: a derive of one, under any name, or an
             // impl the Orb's modules write by hand.
             let derived = serde_derived(attrs, scope, uses, modules, ident, true);
-            let by_hand: Vec<String> = impls::impls_of(tree, modules, uses, declared, ident, scope)
+            let by_hand: Vec<String> = impls::impls_of(tree, modules, resolver, ident, scope)
                 .into_iter()
                 .filter_map(|(written, block)| {
                     let (_, path, _) = block.trait_.as_ref()?;

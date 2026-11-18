@@ -2564,20 +2564,15 @@ fn a_resource_sees_the_client_of_a_service_its_parent_holds() {
     );
 }
 
-/// An impl names the type through a `use` the macro follows to a `crate::` path, binding the name
-/// or a module of its path, through a module a glob import brings in, `pinned::Balance` after
-/// `use super::*;`, or through an alias of the type's own name, `pub type Access =
-/// super::rights::Access;`: the macro cannot place the `crate::` path such a `use` leads to, so the
-/// name counts by its uniqueness among the types of the Orb's modules that may enter the WIT, as a
-/// name a glob import the macro cannot follow brings does, whatever type of another shape a module
-/// declares under the name, and such an alias stands for the type it names, as a `use` does. A
-/// glob import from a module of the Orb is followed to the type that module declares, whatever
-/// namesake a third module declares. A `crate::` path written on the impl itself leaves the Orb
-/// module, as before: it may name a namesake outside the Orb, whose impl is not the type's. The
-/// impl is seen as the type's where a derive of a type holding it needs its trait, so one under
-/// `#[cfg(..)]` is refused.
+/// An impl names the type as a contract type's name resolves, through the glob imports from the
+/// Orb's modules too: through a module a glob import brings in, `rights::Access` after
+/// `use super::*;`, a glob import of the type's module, whatever namesake a third module declares,
+/// or an alias of the type, `pub type Access = super::rights::Access;`. The impl is seen as the
+/// type's where a derive of a type holding it needs its trait, so one under `#[cfg(..)]` is
+/// refused. A `crate::` path, written on the impl or reached through a `use`, is not placed in the
+/// Orb: its impl is left to the compiler, as is one of a namesake outside the Orb.
 #[test]
-fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
+fn an_impl_names_the_type_through_a_glob_or_an_alias() {
     let office = |ops: &str, legacy: &str| {
         format!(
             "mod office {{
@@ -2602,7 +2597,6 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
     let needed =
         "while the code it writes needs `Access` to implement `PartialEq` in every configuration";
     for (ops, legacy) in [
-        (format!("use crate::office::rights::Access; {equal}"), ""),
         (format!("use super::*; {through}"), ""),
         (
             format!("pub type Access = super::rights::Access; {equal}"),
@@ -2612,22 +2606,17 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
             format!("use super::rights::*; {equal}"),
             "pub mod legacy { pub struct Access(pub u32); }",
         ),
-        (format!("use crate::office::rights; {through}"), ""),
-        (
-            format!("use crate::office::rights::*; {equal}"),
-            "pub mod legacy { pub struct Access(pub u32); }",
-        ),
     ] {
         let error = refused("example:office@1.0.0", &office(&ops, legacy));
         assert!(error.contains(needed), "{ops}\n{error}");
     }
-    expanded(
-        "example:office@1.0.0",
-        &office(
-            "#[cfg(test)] impl PartialEq for crate::elsewhere::Access { fn eq(&self, other: &Self) -> bool { todo!() } }",
-            "",
-        ),
-    );
+    for ops in [
+        format!("use crate::office::rights::Access; {equal}"),
+        format!("use crate::office::rights; {through}"),
+        "#[cfg(test)] impl PartialEq for crate::elsewhere::Access { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
+    ] {
+        expanded("example:office@1.0.0", &office(&ops, ""));
+    }
     // A state's `Default` written so is the author's.
     let ledger = |items: &str| {
         format!(
@@ -2644,18 +2633,21 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
     let default = "impl Default for Balance { fn default() -> Self { Balance { total: 7 } } }";
     let written = "impl :: core :: default :: Default for";
     for items in [
-        format!("pub mod defaults {{ use crate::ledger::Balance; {default} }}"),
+        format!("pub mod defaults {{ use super::Balance; {default} }}"),
         format!("pub mod api {{ pub type Balance = super::Balance; {default} }}"),
     ] {
         let generated = tokens(&expanded("example:ledger@1.0.0", &ledger(&items)));
         assert!(!generated.contains(written), "{items}\n{generated}");
     }
-    let generated = tokens(&expanded(
-        "example:ledger@1.0.0",
-        &ledger("impl Default for crate::elsewhere::Balance { fn default() -> Self { todo!() } }"),
-    ));
-    assert!(generated.contains(written), "{generated}");
-    for uses in ["use super::*;", "use crate::ledger::pinned;"] {
+    for items in [
+        "impl Default for crate::elsewhere::Balance { fn default() -> Self { todo!() } }"
+            .to_owned(),
+        format!("pub mod defaults {{ use crate::ledger::Balance; {default} }}"),
+    ] {
+        let generated = tokens(&expanded("example:ledger@1.0.0", &ledger(&items)));
+        assert!(generated.contains(written), "{items}\n{generated}");
+    }
+    for uses in ["use super::*;", "use super::pinned;"] {
         let generated = tokens(&expanded(
             "example:ledger@1.0.0",
             &format!(
@@ -2688,13 +2680,64 @@ fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
             #[derive(Clone)]
             pub struct Desk { pub lease: Lease }
             pub mod hands {
-                use crate::walk::Lease;
+                use super::Lease;
                 impl Clone for Lease { fn clone(&self) -> Self { todo!() } }
             }
             #[service]
             pub struct Walker;
             impl Walker { pub fn lend() -> Desk { todo!() } }
         }",
+    );
+}
+
+/// An impl's type resolves as a contract type's name does, not by the uniqueness of its name:
+/// `Token` of `a` enters the WIT, `b` declares a tuple struct `Token`, and an impl in `c` is
+/// `a`'s only where its name leads there. An alias of `b`'s `Token` or a `use` through `crate::`
+/// names no type of `a`, though `a`'s is the only candidate of the name, while a renaming alias
+/// of `a`'s names it: an impl under `#[cfg(..)]` of `a`'s `Token`, whose trait a derive of a type
+/// holding it needs, is refused, and one of another type is left alone.
+#[test]
+fn an_impls_type_resolves_as_a_contract_types_name() {
+    let desk = |c: &str| {
+        format!(
+            "mod desk {{
+                pub mod a {{
+                    pub struct Token {{ pub id: u32 }}
+                    #[derive(PartialEq)]
+                    pub struct Grant {{ pub token: Token }}
+                    #[service]
+                    pub struct Tickets;
+                    impl Tickets {{ pub fn issue() -> Grant {{ todo!() }} }}
+                }}
+                pub mod b {{
+                    pub struct Token(pub u32);
+                }}
+                pub mod c {{
+                    {c}
+                }}
+            }}"
+        )
+    };
+    let equal = |ty: &str| {
+        format!(
+            "#[cfg(test)] impl PartialEq for {ty} {{ fn eq(&self, other: &Self) -> bool {{ todo!() }} }}"
+        )
+    };
+    for c in [
+        format!("pub type Token = super::b::Token; {}", equal("Token")),
+        format!("use crate::desk::b::Token; {}", equal("Token")),
+    ] {
+        expanded("example:desk@1.0.0", &desk(&c));
+    }
+    let error = refused(
+        "example:desk@1.0.0",
+        &desk(&format!("type Item = super::a::Token; {}", equal("Item"))),
+    );
+    assert!(
+        error.contains(
+            "while the code it writes needs `Token` to implement `PartialEq` in every configuration"
+        ),
+        "{error}"
     );
 }
 
