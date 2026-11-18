@@ -430,3 +430,68 @@ fn owned_results_are_checked_and_mapped_inside_typed_containers() {
             .is_ok()
     );
 }
+
+/// The arguments of a capability call tell arguments that do not match the WIT, the caller's,
+/// from a slot the contract does not have, a fault of whoever bound it.
+#[test]
+fn resource_arguments_tell_a_mismatch_from_an_unknown_slot() {
+    use serde_json::json;
+    let contract =
+        contract("resource session { constructor(seed: u64); add: func(value: s64) -> u64; }");
+    let add = contract
+        .bind("test:resources/sessions@1.0.0", "[method]session.add", true)
+        .unwrap();
+    assert_eq!(
+        contract.check_resource_arguments(add, &json!([-1])),
+        Ok(Ok(()))
+    );
+    for mismatch in [json!(["one"]), json!([]), json!([1, 2]), json!(null)] {
+        assert!(
+            contract
+                .check_resource_arguments(add, &mismatch)
+                .unwrap()
+                .is_err(),
+            "{mismatch}"
+        );
+    }
+    assert!(
+        contract
+            .check_resource_arguments(u32::MAX, &json!([1]))
+            .is_err()
+    );
+}
+
+/// `check_signature` says which part of a function the profile refuses: a parameter, by its index
+/// after a method's receiver, or the result, and why.
+#[test]
+fn a_refused_signature_names_the_parameter_or_the_result() {
+    let contract = contract(
+        "resource session { constructor(); fill: func(n: u32, at: option<option<u32>>); } \
+         give: func() -> option<option<u32>>; take: func(at: list<option<option<u32>>>); \
+         fine: func(n: u32) -> option<u32>;",
+    );
+    for (name, part) in [
+        ("[method]session.fill", Some(SignaturePart::Parameter(1))),
+        ("give", Some(SignaturePart::Result)),
+        ("take", Some(SignaturePart::Parameter(0))),
+    ] {
+        let slot = contract
+            .bind("test:resources/sessions@1.0.0", name, true)
+            .unwrap();
+        let refusal = contract.check_signature(slot).unwrap_err();
+        assert_eq!(refusal.part, part, "{name}");
+        assert_eq!(
+            refusal.reason,
+            Some(SignatureReason::NestedOption),
+            "{name}"
+        );
+        assert_eq!(
+            refusal.error.0,
+            "nested options require a tagged option codec"
+        );
+    }
+    let fine = contract
+        .bind("test:resources/sessions@1.0.0", "fine", true)
+        .unwrap();
+    contract.check_signature(fine).unwrap();
+}

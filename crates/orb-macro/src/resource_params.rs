@@ -1,0 +1,343 @@
+//! The resources a derived function takes as parameters: a `#[wit_resource]` struct of the module,
+//! owned, `own<t>` in the WIT, and the handle of an imported interface, `texts::Builder`, which the
+//! derived interface `use`s from the imported one, as `foreign` checks. Either may sit in an
+//! option, a result, a list or a tuple. The runtime moves an owned resource into the interface that
+//! defines it, or into an Orb that imports that interface, and returns one only from the interface
+//! that defines it; it refuses at installation an Orb whose function takes a borrowed one,
+//! `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
+use crate::{
+    At, Constructor, Declared, Function, Handles, Service, Shape, Towards, WitResource,
+    bindings_names, convert, declared_in, foreign::Modules, handles_of, mentions, rebuild, wit,
+    with_handles,
+};
+use quote::quote;
+use std::collections::{BTreeMap, BTreeSet};
+use syn::{Ident, Type, spanned::Spanned};
+
+/// A function or a constructor of a derived interface, for the checks: what it is called in the
+/// errors, the service whose interface holds it, its parameters and its result, and the module
+/// it is written in, by scope.
+pub(crate) struct Derived<'a> {
+    pub name: String,
+    /// The function's name in the WIT: `[constructor]<resource>`, `[method]<resource>.<name>` and
+    /// `[static]<resource>.<name>` for a resource's.
+    pub wit_name: String,
+    /// Where the function is written, for the errors.
+    pub span: proc_macro2::Span,
+    pub interface: &'a Ident,
+    pub params: &'a [(Ident, Type, String)],
+    pub result: Option<&'a Type>,
+    pub scope: usize,
+}
+
+/// The functions and constructors of the derived interfaces: each derived service's functions, and
+/// the constructor, methods and static functions of the resources such a service owns.
+pub(crate) fn derived<'a>(
+    services: &'a [Service],
+    resources: &'a [WitResource],
+) -> Vec<Derived<'a>> {
+    let mut functions = Vec::new();
+    let entry = |owner: &Ident,
+                 interface: &'a Ident,
+                 function: &'a Function,
+                 wit_name: String,
+                 scope: usize| Derived {
+        name: format!("{owner}::{}", function.ident),
+        wit_name,
+        span: function.ident.span(),
+        interface,
+        params: &function.params,
+        result: function.result.as_ref().map(|(ty, _)| ty),
+        scope,
+    };
+    for service in services
+        .iter()
+        .filter(|service| service.implements.is_none())
+    {
+        for function in &service.functions {
+            functions.push(entry(
+                &service.ident,
+                &service.ident,
+                function,
+                wit::kebab(&function.ident),
+                service.scope,
+            ));
+        }
+    }
+    for resource in resources
+        .iter()
+        .filter(|resource| !resource.implemented(services))
+    {
+        let interface = resource.service.as_ref().expect("resolved owner");
+        let name = wit::kebab(&resource.ident);
+        for (kind, written) in [("method", &resource.methods), ("static", &resource.statics)] {
+            for function in written {
+                let wit_name = format!("[{kind}]{name}.{}", wit::kebab(&function.ident));
+                functions.push(entry(
+                    &resource.ident,
+                    interface,
+                    function,
+                    wit_name,
+                    resource.scope,
+                ));
+            }
+        }
+        if let Some(Constructor { ident, params }) = &resource.constructor {
+            functions.push(Derived {
+                name: format!("{}::{ident}", resource.ident),
+                wit_name: format!("[constructor]{name}"),
+                span: ident.span(),
+                interface,
+                params,
+                result: None,
+                scope: resource.scope,
+            });
+        }
+    }
+    functions
+}
+
+/// The resource a name resolved in the module `scope` names: that module's own resource of the
+/// name (`Modules::references_in`).
+pub(crate) fn resource_named<'a>(
+    ident: &Ident,
+    scope: usize,
+    resources: &'a [WitResource],
+) -> Option<&'a WitResource> {
+    resources
+        .iter()
+        .find(|resource| resource.ident == *ident && resource.scope == scope)
+}
+
+/// Refuse, once the types that enter the WIT are known, a resource of the module the runtime would
+/// not carry through a derived function, itself or in the records and variants of the module a
+/// type reaches: a parameter takes only resources of its own interface, owned, because the runtime
+/// moves an owned resource only into the interface that defines it; a result holds only those
+/// too, because the runtime returns a resource only from the interface that defines it; and the
+/// input of a derived hook holds no resource. A resource of an implemented interface is that
+/// interface's: a derived function takes none. What a consumed interface's module names, `foreign`
+/// checks. Every parameter is read before the results.
+pub(crate) fn check_reached(
+    services: &[Service],
+    resources: &[WitResource],
+    declared: &[Declared],
+    shapes: &[Shape],
+    modules: &Modules,
+) -> syn::Result<()> {
+    let functions = derived(services, resources);
+    for function in &functions {
+        for (_, ty, _) in function.params {
+            for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
+                if let Some(owner) = foreign_owner(services, resource, function.interface) {
+                    return Err(taking_error(function, ty, resource, via, owner));
+                }
+            }
+        }
+    }
+    for function in &functions {
+        let Some(ty) = function.result else {
+            continue;
+        };
+        for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
+            let Some(owner) = foreign_owner(services, resource, function.interface) else {
+                continue;
+            };
+            let returned = holding(resource, via);
+            let message = match owner {
+                Owner::Implemented(identity) => format!(
+                    "`{}` returns {returned} a resource of the implemented interface {identity}: the runtime returns a resource only from the interface that defines it",
+                    function.name
+                ),
+                Owner::Interface(owner) => format!(
+                    "`{}` returns {returned} a resource of the interface `{}`: the runtime returns a resource only from the interface that defines it, so return it from a function of `{owner}` or of one of its resources",
+                    function.name,
+                    wit::kebab(owner)
+                ),
+            };
+            return Err(syn::Error::new(ty.span(), message));
+        }
+    }
+    for declaration in declared {
+        let Some((ty, _)) = &declaration.input else {
+            continue;
+        };
+        if let Some((resource, via)) =
+            held(ty, declaration.scope, shapes, resources, modules).first()
+        {
+            let holds = match via {
+                Some(via) => format!("`{via}`, which holds the resource `{}`", resource.ident),
+                None => format!("the resource `{}`", resource.ident),
+            };
+            return Err(syn::Error::new(
+                ty.span(),
+                format!(
+                    "the input of the hook `{}` holds {holds}: a hook's input holds no resource",
+                    declaration.ident
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Where a resource a derived function of `interface` names is defined, when it is not that
+/// interface, the only one the runtime moves it into or returns it from.
+enum Owner<'a> {
+    /// An implemented interface, by its identity.
+    Implemented(&'a str),
+    /// Another derived interface, by the service whose interface it is.
+    Interface(&'a Ident),
+}
+
+/// The interface defining `resource`, when it is another than `interface`.
+fn foreign_owner<'a>(
+    services: &'a [Service],
+    resource: &'a WitResource,
+    interface: &Ident,
+) -> Option<Owner<'a>> {
+    let owner = resource.service.as_ref().expect("resolved owner");
+    let implemented = services
+        .iter()
+        .find(|service| service.ident == *owner)
+        .and_then(|service| service.implements.as_deref());
+    match implemented {
+        Some(identity) => Some(Owner::Implemented(identity)),
+        None if owner != interface => Some(Owner::Interface(owner)),
+        None => None,
+    }
+}
+
+/// The resource a type holds, for the errors: itself, or the record or variant that holds it.
+fn holding(resource: &WitResource, via: Option<&Ident>) -> String {
+    match via {
+        Some(via) => format!("`{via}`, which holds `{}`,", resource.ident),
+        None => format!("`{}`,", resource.ident),
+    }
+}
+
+/// The error of a derived function taking a resource of another interface, on the parameter's type.
+fn taking_error(
+    function: &Derived<'_>,
+    ty: &Type,
+    resource: &WitResource,
+    via: Option<&Ident>,
+    owner: Owner<'_>,
+) -> syn::Error {
+    let taken = holding(resource, via);
+    let message = match owner {
+        Owner::Implemented(identity) => format!(
+            "`{}` takes {taken} a resource of the implemented interface {identity}: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports",
+            function.name
+        ),
+        Owner::Interface(owner) => format!(
+            "`{}` takes {taken} a resource of the interface `{}`: the runtime moves an owned resource only into the interface that defines it, so take it in a function of `{owner}` or of one of its resources",
+            function.name,
+            wit::kebab(owner)
+        ),
+    };
+    syn::Error::new(ty.span(), message)
+}
+
+/// Each resource of the module a type written in the module `scope` holds, with the record or
+/// variant of the module that holds it, if one does: the resource itself or inside options,
+/// results, lists and tuples, or in the fields and cases of the records and variants the type
+/// reaches, followed by name as the WIT names them, each name resolved to the type of the module
+/// that declares it (`Modules::references_in`).
+fn held<'a>(
+    ty: &Type,
+    scope: usize,
+    shapes: &'a [Shape],
+    resources: &'a [WitResource],
+    modules: &Modules,
+) -> Vec<(&'a WitResource, Option<&'a Ident>)> {
+    let mut mentioned = Vec::new();
+    modules.references_in(ty, scope, &mut mentioned);
+    let mut pending: Vec<(Ident, usize, Option<&'a Ident>)> = mentioned
+        .into_iter()
+        .map(|(ident, scope)| (ident, scope, None))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut held = Vec::new();
+    while let Some((ident, scope, via)) = pending.pop() {
+        let named = shapes
+            .iter()
+            .filter(|shape| shape.ident == ident)
+            .map(|shape| (shape.scope, shape));
+        if let Some(resource) = resource_named(&ident, scope, resources) {
+            if seen.insert((ident.to_string(), resource.scope)) {
+                held.push((resource, via));
+            }
+        } else if let Some(shape) = declared_in(named, scope)
+            && seen.insert((ident.to_string(), shape.scope))
+        {
+            let via = via.or(Some(&shape.ident));
+            pending.extend(
+                shape
+                    .references
+                    .iter()
+                    .map(|(reference, scope)| (reference.clone(), *scope, via)),
+            );
+        }
+    }
+    held
+}
+
+/// The parameters of a derived function's bridge and the arguments it calls the author's function
+/// with, the function written in the module `scope`: a parameter holding a resource of the module
+/// is the bindings' handle type there, and each handle is taken back into the author's value,
+/// which consumes it; one holding a type the macro converts is the bindings' type there, as for a
+/// handle, and converted part by part; any other parameter, one a consumed interface's module
+/// names included, crosses as it is.
+pub(crate) fn bridged(
+    params: &[(Ident, Type, String)],
+    scope: usize,
+    module: &proc_macro2::TokenStream,
+    resources: &BTreeMap<String, Ident>,
+    converted: &BTreeMap<String, Ident>,
+    modules: &Modules,
+) -> (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) {
+    params
+        .iter()
+        .map(|(ident, ty, _)| {
+            if mentions(ty, scope, converted, modules) {
+                let spelled = with_handles(
+                    ty,
+                    scope,
+                    &bindings_names(resources, converted),
+                    module,
+                    modules,
+                );
+                let at = At {
+                    modules,
+                    scope,
+                    resources,
+                    module,
+                    import: false,
+                };
+                return (
+                    quote! { #ident: #spelled },
+                    convert(ty, quote! { #ident }, Towards::Author, Some(at)),
+                );
+            }
+            match handles_of(ty, scope, resources, modules) {
+                Some(handles) => {
+                    let spelled = with_handles(ty, scope, resources, module, modules);
+                    (
+                        quote! { #ident: #spelled },
+                        taken(&handles, quote! { #ident }),
+                    )
+                }
+                None => (quote! { #ident: #ty }, quote! { #ident }),
+            }
+        })
+        .unzip()
+}
+
+/// An expression taking each handle `handles` places in `value` back into the author's value, its
+/// type inferred from the author's parameter, and rebuilding the containers around it.
+pub(crate) fn taken(
+    handles: &Handles,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    rebuild(handles, value, &|_, value| quote! { #value.into_inner() })
+}

@@ -1,0 +1,11 @@
+error[E0603]: struct `Lent` is private
+ --> tests/ui/private_inputs.rs:5:16
+  |
+5 |         struct Lent {
+  |                ^^^^ private struct
+  |
+note: the struct `Lent` is defined here
+ --> tests/ui/private_inputs.rs:5:9
+  |
+5 |         struct Lent {
+  |         ^^^^^^^^^^^

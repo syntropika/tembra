@@ -45,8 +45,10 @@ required-features = ["wasm"]
 [features]
 default = ["host"]
 host = ["dep:tembra-runtime"]
-# Guest crates enable macros without linking the application's host implementation.
-macros = ["dep:tembra-orb-macro"]
+# Guest crates enable macros without linking the application's host implementation. The feature
+# brings the wit-bindgen the generated bindings use: the macro follows the rules of one version,
+# so the facade picks it, not the guest.
+macros = ["dep:tembra-orb-macro", "dep:wit-bindgen"]
 contracts = ["dep:tembra-contracts"]
 # WIT parsing and artifact packaging are build-time tools, separate from prepared contracts.
 authoring = ["contracts", "tembra-contracts/authoring"]
@@ -62,6 +64,14 @@ telemetry = ["host", "tembra-runtime/telemetry"]
 tembra-runtime = { workspace = true, optional = true }
 tembra-contracts = { workspace = true, default-features = false, optional = true }
 tembra-orb-macro = { path = "../orb-macro", version = "=0.2.2", optional = true }
+# The version whose derive rules and flags lowering the macro reproduces. `async` serves the
+# bindings of a `pub async fn`, of an import by key, whose `get` is asynchronous, and of a WASI
+# interface that waits.
+wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+  "macros",
+  "realloc",
+  "async",
+], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2", optional = true }
@@ -70,7 +80,7 @@ tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2", optional
 futures-timer = "3"
 futures.workspace = true
 serde.workspace = true
-serde_json = { workspace = true, features = ["arbitrary_precision"] }
+serde_json.workspace = true
 
 [[test]]
 name = "contract_facade"

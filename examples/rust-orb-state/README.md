@@ -18,6 +18,7 @@ reloads the Orb with a fresh component instance while the count stays.
 ```rust
 /// The state of one counter object: its total and the number of additions made.
 #[state(version = 1)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Count {
     pub total: i64,
     pub steps: u32,
@@ -27,8 +28,9 @@ pub struct Count {
 `#[state]` marks the struct as the state of the objects of a service: the module's only one here,
 otherwise `#[state(service = Counter)]`. The kernel keeps exactly one state per object, so a service
 has one state struct; `version` is what the kernel compares when the Orb is reloaded. The macro
-generates `Count::read()` and `Count::update(|count| ...)`, and the initial value is
-`Count::default()`, implemented field by field. `total` is an `i64`: the WIT says `s64`, and the
+generates `Count::read()` and `Count::update(|count| ...)`. The initial value is
+`Count::default()`, and the kernel keeps the value as the JSON `serde` writes: the struct derives
+both, which the macro checks on its name. `total` is an `i64`: the WIT says `s64`, and the
 executor carries 64-bit integers exactly across the boundary, so the host can add five billion.
 
 ```rust

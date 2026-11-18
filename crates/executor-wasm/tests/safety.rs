@@ -324,3 +324,245 @@ globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reent
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
 }
+
+/// A source callback that answers only after its deadline fails with the wall time limit and
+/// quarantines its Orb, even when its Store's thread runs the timer late. The host's log sink
+/// holds that thread past the deadline on `late`; the guest answers as soon as the log returns.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn an_answer_after_the_deadline_is_a_timeout() {
+    let component =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
+    let engine = Engine::new(Limits {
+        timeout_ms: 500,
+        ..Limits::default()
+    })
+    .unwrap()
+    .interpreter(&component)
+    .unwrap()
+    .on_log(|record| {
+        if record.message == "late" {
+            std::thread::sleep(Duration::from_millis(1_000));
+        }
+    });
+    let wit = "package example:late; interface answers { answer: func() -> u32; } world test { export answers; }";
+    let contract = Contract::from_source("late.wit", wit, None).unwrap();
+    let source = r#"globalThis.__tembraOrb = {services:{answers:{methods:{
+  answer() { console.log("late"); return 7; },
+}}}};"#;
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine
+            .load(
+                &contract.source_artifact(source, "late", 1).unwrap(),
+                Install::default(),
+            )
+            .unwrap(),
+    ])
+    .unwrap();
+    let late = Rc::new(
+        host.get("late::example:late/answers", vec!["main".into()], "alice")
+            .unwrap(),
+    );
+    pool.run_until(late.ready()).unwrap();
+    let answer = |pool: &mut LocalPool| {
+        let called = late.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move { called.call::<_, Value>(&context, "answer", json!([])).await }
+                .boxed_local()
+        }))
+    };
+    let error = answer(&mut pool).unwrap_err();
+    assert!(error.message.contains("wall time limit"), "{error}");
+    let refused = answer(&mut pool).unwrap_err();
+    assert_eq!(refused.reason, "wasm_executor_quarantined", "{refused}");
+    late.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
+
+/// A source guest cannot take a code the executor answers by writing its text: a method that
+/// fails with the text of the refusal of a float result answers `unavailable/wasm_executor`,
+/// whether it throws the text or an error carrying it, at once or from a promise.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn a_source_guest_cannot_take_a_refusal_code_by_its_text() {
+    let component =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&component)
+        .unwrap();
+    let wit = "package example:forged; interface answers { text: func() -> f64; error: func() -> f64; later: async func() -> f64; rejected: async func() -> f64; } world test { export answers; }";
+    let contract = Contract::from_source("forged.wit", wit, None).unwrap();
+    let source = r#"const refusal = "invalid/result: component float cannot be represented by the portable profile";
+globalThis.__tembraOrb = {services:{answers:{methods:{
+  text() { throw refusal; },
+  error() { throw new Error(refusal); },
+  async later() { throw refusal; },
+  rejected() { return Promise.reject(new Error(refusal)); },
+}}}};"#;
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine
+            .load(
+                &contract.source_artifact(source, "forged", 1).unwrap(),
+                Install::default(),
+            )
+            .unwrap(),
+    ])
+    .unwrap();
+    let forged = Rc::new(
+        host.get(
+            "forged::example:forged/answers",
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(forged.ready()).unwrap();
+    for method in ["text", "error", "later", "rejected"] {
+        let called = forged.clone();
+        let error = pool
+            .run_until(host.root("alice", move |context| {
+                async move { called.call::<_, Value>(&context, method, json!([])).await }
+                    .boxed_local()
+            }))
+            .unwrap_err();
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            (tembra::Code::Unavailable, "wasm_executor"),
+            "{method}: {error}"
+        );
+    }
+    forged.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
+
+/// A source Orb that fails with a refusal of the host unchanged answers that refusal, as a native
+/// Orb does: an asynchronous method that rethrows the refusal of its import's call, at once or
+/// from a promise, and a factory that rethrows the refusal of its declaration. A guest that throws
+/// its own error with the same text answers `unavailable/wasm_executor`, as does one that rethrows
+/// a refusal another callback received or names a refusal it did not receive.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn a_source_guest_that_rethrows_a_refusal_answers_its_code() {
+    let component =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&component)
+        .unwrap();
+    let wit = "package example:rethrow; interface bridge { bounce: async func() -> u32; } interface checks { run: async func(mode: string) -> u32; } world provider { export bridge; } world test { import bridge; export checks; }";
+    let contract = Contract::from_source("rethrow.wit", wit, Some("test")).unwrap();
+    let source = r#"
+let kept;
+globalThis.__tembraOrb = {services:{checks:{
+  create(self) {
+    const bridge = self.get("example:rethrow/bridge");
+    const key = self.key[0];
+    if (key === "twice") { self.state(1); self.state(2); }
+    if (key === "forged") {
+      self.state(1);
+      try { self.state(2); } catch (error) { throw new Error(error.message); }
+    }
+    return {bridge};
+  },
+  methods:{async run(environment, context, mode) {
+    const bounce = () => environment.bridge.bounce(context);
+    if (mode === "await") return await bounce();
+    if (mode === "caught") { try { return await bounce(); } catch (error) { throw error; } }
+    if (mode === "rejected") return bounce().catch((error) => Promise.reject(error));
+    if (mode === "forged") { try { return await bounce(); } catch (error) { throw new Error(error.message); } }
+    if (mode === "keep") { try { return await bounce(); } catch (error) { kept = error; return 0; } }
+    if (mode === "stale") throw kept;
+    if (mode === "named") {
+      __hostSync('{"operation":"refused","request":1}');
+      __hostSync('{"operation":"refused","effect":1}');
+      throw new Error("its own failure");
+    }
+    return 0;
+  }}
+}}};"#;
+    let signature = Contract::from_bytes(&contract.encode().unwrap(), Some("provider"))
+        .unwrap()
+        .plan("bridge", 1, &Default::default())
+        .unwrap()
+        .orb
+        .services
+        .remove(0)
+        .signature;
+    let bridge = tembra::Orb::new("bridge", 1).service(
+        tembra::Service::new("bridge::example:rethrow/bridge", |_| Ok(()))
+            .signature(signature)
+            .method("bounce", |_, _, _: Vec<Value>| async {
+                Err::<u32, _>(tembra::Error::new(
+                    tembra::Code::Forbidden,
+                    "bridge_closed",
+                    "the bridge refuses",
+                ))
+            }),
+    );
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        bridge,
+        engine
+            .load(
+                &contract.source_artifact(source, "rethrow", 1).unwrap(),
+                Install::default().requires("example:rethrow/bridge", "bridge", 1),
+            )
+            .unwrap(),
+    ])
+    .unwrap();
+    let service = "rethrow::example:rethrow/checks";
+    let executor = (tembra::Code::Unavailable, "wasm_executor");
+    let refused = (tembra::Code::Forbidden, "bridge_closed");
+    let checks = Rc::new(host.get(service, vec!["main".into()], "alice").unwrap());
+    pool.run_until(checks.ready()).unwrap();
+    for (mode, expected) in [
+        ("await", Some(refused)),
+        ("caught", Some(refused)),
+        ("rejected", Some(refused)),
+        ("forged", Some(executor)),
+        ("keep", None),
+        ("stale", Some(executor)),
+        ("named", Some(executor)),
+    ] {
+        let called = checks.clone();
+        let result = pool.run_until(host.root("alice", move |context| {
+            async move {
+                called
+                    .call::<_, Value>(&context, "run", json!([mode]))
+                    .await
+            }
+            .boxed_local()
+        }));
+        let answered = result
+            .as_ref()
+            .map_err(|error| (error.code, error.reason.as_str()));
+        match expected {
+            Some(expected) => assert_eq!(answered.err(), Some(expected), "{mode}: {result:?}"),
+            None => assert_eq!(answered.ok(), Some(&json!(0)), "{mode}: {result:?}"),
+        }
+    }
+    for (key, expected) in [
+        ("twice", (tembra::Code::Invalid, "state")),
+        ("forged", executor),
+    ] {
+        let reference = host.get(service, vec![key.into()], "alice").unwrap();
+        let error = pool.run_until(reference.ready()).unwrap_err();
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            expected,
+            "{key}: {error}"
+        );
+        reference.release().unwrap();
+    }
+    checks.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}

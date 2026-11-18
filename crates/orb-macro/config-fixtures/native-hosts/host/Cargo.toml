@@ -1,0 +1,21 @@
+[package]
+name = "tembra-config-native-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The facade with its default `host`.
+tembra = { path = "../../../../tembra" }
+# The Orb crates of the examples whose modules contribute to no hook, but the native example's,
+# which its own host links.
+tembra-example-audit = { path = "../../../../../examples/rust-orb-context/audit" }
+tembra-example-gate = { path = "../../../../../examples/rust-orb-hook-declaration/gate" }
+tembra-example-import-greeter = { path = "../../../../../examples/rust-orb-import/greeter" }
+tembra-example-welcomer = { path = "../../../../../examples/rust-orb-import/welcomer" }
+tembra-example-greeter = { path = "../../../../../examples/rust-orb-service/greeter" }
+tembra-example-ledger = { path = "../../../../../examples/rust-orb-service-lifetime/ledger" }
+tembra-example-book = { path = "../../../../../examples/rust-orb-shared-interface/book" }
+tembra-example-counter = { path = "../../../../../examples/rust-orb-state/counter" }
+tembra-example-speller = { path = "../../../../../examples/rust-orb-wit-resource/speller" }
+tembra-example-text = { path = "../../../../../examples/rust-orb-wit-resource/text" }

@@ -6,7 +6,10 @@ use crate::{
     Artifact, Error, PreparedContract,
     artifact::{ComponentRoles, Container, Identity, append_section, encode_orb_roles},
 };
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 use wit_parser::{
     PackageId, PackageName, Resolve, UnresolvedPackage, UnresolvedPackageGroup, WorldId,
 };
@@ -17,6 +20,8 @@ pub struct Contract {
     pub(crate) resolve: Resolve,
     pub(crate) world: WorldId,
     prepared: PreparedContract,
+    /// The compact index each WIT definition was lowered to, for [`Self::type_names`].
+    lowered: std::collections::HashMap<wit_parser::TypeId, u32>,
 }
 
 /// Every runtime query is answered by the prepared contract.
@@ -79,6 +84,79 @@ fn redefined(
     Ok(())
 }
 
+/// What [`Contract::from_dir`] and [`Contract::from_source_in`] read of a directory: the bundled standard packages resolved, with
+/// their names and the unresolved packages they were read from, the directory's own packages, and
+/// those of its `deps/`.
+type ReadDir = (
+    Resolve,
+    BTreeSet<PackageName>,
+    Vec<UnresolvedPackage>,
+    UnresolvedPackageGroup,
+    Vec<(PathBuf, UnresolvedPackageGroup)>,
+);
+
+/// Read a directory of WIT packages and its `deps/` after the bundled standard packages.
+fn read_dir(path: &Path) -> Result<ReadDir, Error> {
+    let (mut resolve, known) = crate::standard::resolve()?;
+    let standard: BTreeSet<_> = resolve.package_names.keys().cloned().collect();
+    let main = UnresolvedPackageGroup::parse_dir(path).map_err(|error| package(path, error))?;
+    let dependencies = dependencies(&mut resolve, &path.join("deps"))?;
+    Ok((resolve, standard, known, main, dependencies))
+}
+
+/// The dependency packages of a `deps/` directory, as `Resolve::push_dir` finds them, each with
+/// its path: a subdirectory or a text file is parsed, for the checks and the provenance to come;
+/// an encoded package (`*.wasm`, `*.wat`, or a `*.wit` whose content is binary) is merged into
+/// the Resolve at once and carries no provenance; an exact copy of a bundled standard contract
+/// adds nothing. A directory that does not exist holds none.
+fn dependencies(
+    resolve: &mut Resolve,
+    deps: &Path,
+) -> Result<Vec<(PathBuf, UnresolvedPackageGroup)>, Error> {
+    let mut dependencies = Vec::new();
+    if !deps.exists() {
+        return Ok(dependencies);
+    }
+    let mut entries = std::fs::read_dir(deps)
+        .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
+        .map_err(|error| package(deps, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let dependency = entry.path();
+        if dependency.is_dir() {
+            let group = UnresolvedPackageGroup::parse_dir(&dependency)
+                .map_err(|error| package(&dependency, error))?;
+            dependencies.push((dependency, group));
+            continue;
+        }
+        let extension = dependency
+            .extension()
+            .and_then(|extension| extension.to_str());
+        if !matches!(extension, Some("wit" | "wasm" | "wat")) {
+            continue;
+        }
+        let bytes = std::fs::read(&dependency).map_err(|error| package(&dependency, error))?;
+        if extension == Some("wat") || bytes.starts_with(b"\0asm") {
+            // Encoded packages carry no import provenance; worlds that include them
+            // conservatively treat every import as explicit.
+            resolve
+                .push_file(&dependency)
+                .map_err(|error| package(&dependency, error))?;
+            continue;
+        }
+        let source = String::from_utf8(bytes).map_err(|error| package(&dependency, error))?;
+        // A copy of a bundled standard contract, there so that the directory resolves with
+        // `Resolve::push_dir` alone too, adds nothing to the bundled package.
+        if crate::bundled(&source) {
+            continue;
+        }
+        let group =
+            parse_source(&dependency, &source).map_err(|error| package(&dependency, error))?;
+        dependencies.push((dependency, group));
+    }
+    Ok(dependencies)
+}
+
 impl Contract {
     /// Prepare the compact runtime contract once for a resolved world. `explicit` lists the
     /// world's own imports; `None` (unknown provenance) treats every import as explicit.
@@ -87,12 +165,83 @@ impl Contract {
         world: WorldId,
         explicit: Option<&BTreeSet<String>>,
     ) -> Result<Self, Error> {
-        let prepared = crate::prepare::world(&resolve, world, explicit)?;
+        let (prepared, lowered) = crate::prepare::world(&resolve, world, explicit)?;
         Ok(Self {
             resolve,
             world,
             prepared,
+            lowered,
         })
+    }
+
+    /// Answer a query of the prepared contract, or `{"kind":"type-names"}`, which only a
+    /// contract read from WIT answers with [`Self::type_names`]: the prepared contract, its
+    /// describe graph and the artifacts it is packaged into keep no type names.
+    pub fn request(&self, packet: &str) -> String {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+        enum Own {
+            TypeNames {},
+        }
+        match serde_json::from_str::<Own>(packet) {
+            Ok(Own::TypeNames {}) => crate::port::envelope(Ok(self.type_names())),
+            Err(_) => self.prepared.request(packet),
+        }
+    }
+
+    /// The WIT name of each record, variant, enum and flags type of the describe graph, by its
+    /// `id` there, in id order, with the interface where the name is written, the name's
+    /// JavaScript spelling (`Point` for `point`) and that spelling after the name of the
+    /// interface that declares the definition (`APoint` for `a`'s `point`), for a client module
+    /// where another type has the same name. An alias of one is named too, by its own name: a
+    /// type an interface takes with `use b.{point as spot}` is `spot` there, written in that
+    /// interface, an alias of `b`'s `point`.
+    pub fn type_names(&self) -> serde_json::Value {
+        use wit_parser::{Type, TypeDefKind, TypeOwner};
+        let interface = |owner: TypeOwner| match owner {
+            TypeOwner::Interface(owner) => Some(owner),
+            TypeOwner::World(_) | TypeOwner::None => None,
+        };
+        let mut named: Vec<(u32, &wit_parser::TypeDef, &wit_parser::TypeDef)> = self
+            .lowered
+            .iter()
+            .filter_map(|(id, index)| {
+                self.resolve.types[*id].name.as_ref()?;
+                let mut target = *id;
+                while let TypeDefKind::Type(Type::Id(next)) = self.resolve.types[target].kind {
+                    target = next;
+                }
+                let definition = &self.resolve.types[target];
+                matches!(
+                    definition.kind,
+                    TypeDefKind::Record(_)
+                        | TypeDefKind::Variant(_)
+                        | TypeDefKind::Enum(_)
+                        | TypeDefKind::Flags(_)
+                )
+                .then_some((*index, &self.resolve.types[*id], definition))
+            })
+            .collect();
+        named.sort_unstable_by_key(|(index, ..)| *index);
+        named
+            .into_iter()
+            .map(|(id, written, definition)| {
+                let name = written.name.as_deref().unwrap_or_default();
+                let declared = interface(definition.owner)
+                    .and_then(|owner| self.resolve.interfaces[owner].name.as_deref());
+                let qualified = match declared {
+                    Some(declared) => format!("{declared}-{name}"),
+                    None => name.to_owned(),
+                };
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "interface": interface(written.owner).and_then(|owner| self.resolve.id_of(owner)),
+                    "javascript": heck::ToUpperCamelCase::to_upper_camel_case(name),
+                    "qualified": heck::ToUpperCamelCase::to_upper_camel_case(qualified.as_str()),
+                })
+            })
+            .collect()
     }
 
     /// Resolve a WIT directory and its local `deps/` without acquiring packages.
@@ -106,56 +255,53 @@ impl Contract {
     /// of a bundled package is refused.
     pub fn from_dir(path: impl AsRef<Path>, world: Option<&str>) -> Result<Self, Error> {
         let path = path.as_ref();
-        let (mut resolve, mut known) = crate::standard::resolve()?;
-        let standard: BTreeSet<_> = resolve.package_names.keys().cloned().collect();
-        let main = UnresolvedPackageGroup::parse_dir(path).map_err(|error| package(path, error))?;
-        let mut dependencies = Vec::new();
-        let deps = path.join("deps");
-        if deps.exists() {
-            let mut entries = std::fs::read_dir(&deps)
-                .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
-                .map_err(|error| package(&deps, error))?;
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                let dependency = entry.path();
-                if dependency.is_dir() {
-                    let group = UnresolvedPackageGroup::parse_dir(&dependency)
-                        .map_err(|error| package(&dependency, error))?;
-                    dependencies.push((dependency, group));
-                    continue;
-                }
-                let extension = dependency
-                    .extension()
-                    .and_then(|extension| extension.to_str());
-                if !matches!(extension, Some("wit" | "wasm" | "wat")) {
-                    continue;
-                }
-                let bytes =
-                    std::fs::read(&dependency).map_err(|error| package(&dependency, error))?;
-                if extension == Some("wat") || bytes.starts_with(b"\0asm") {
-                    // Encoded packages carry no import provenance; worlds that include them
-                    // conservatively treat every import as explicit.
-                    resolve
-                        .push_file(&dependency)
-                        .map_err(|error| package(&dependency, error))?;
-                    continue;
-                }
-                let source =
-                    String::from_utf8(bytes).map_err(|error| package(&dependency, error))?;
-                // A copy of a bundled standard contract, there so that the directory resolves
-                // with `Resolve::push_dir` alone too, adds nothing to the bundled package.
-                if crate::standard::bundled(&source) {
-                    continue;
-                }
-                let group = parse_source(&dependency, &source)
-                    .map_err(|error| package(&dependency, error))?;
-                dependencies.push((dependency, group));
-            }
-        }
+        let (resolve, standard, known, main, dependencies) = read_dir(path)?;
+        Self::elaborate(resolve, standard, known, (path, main), dependencies, world)
+    }
+
+    /// Resolve a world's own WIT source with the packages of a directory, as the bindings of an
+    /// Orb module read `path` and `inline` together: the packages the source names and does not
+    /// define come from the directory and its `deps/`, read and refused as [`Self::from_dir`] reads
+    /// and refuses them: a definition of a bundled standard package, but for a `deps/` file that is
+    /// the bundled contract line for line, an encoded package that disagrees with the bundled one
+    /// of its name, and a package an encoded dependency defines already. The `#[tembra::orb]`
+    /// macro resolves its derived WIT so, once per expansion.
+    pub fn from_source_in(
+        dir: impl AsRef<Path>,
+        name: &str,
+        source: &str,
+        world: Option<&str>,
+    ) -> Result<Self, Error> {
+        let dir = dir.as_ref();
+        let (resolve, standard, known, consumed, deps) = read_dir(dir)?;
+        let main = parse_source(name, source)?;
+        let mut dependencies = vec![(dir.to_path_buf(), consumed)];
+        dependencies.extend(deps);
+        Self::elaborate(
+            resolve,
+            standard,
+            known,
+            (Path::new(name), main),
+            dependencies,
+            world,
+        )
+    }
+
+    /// Refuse a package the bundled ones or the encoded dependencies define already, add the
+    /// parsed packages to the Resolve, dependencies first, and prepare the selected world of the
+    /// main package with the provenance of every package read.
+    fn elaborate(
+        mut resolve: Resolve,
+        standard: BTreeSet<PackageName>,
+        mut known: Vec<UnresolvedPackage>,
+        (origin, main): (&Path, UnresolvedPackageGroup),
+        dependencies: Vec<(PathBuf, UnresolvedPackageGroup)>,
+        world: Option<&str>,
+    ) -> Result<Self, Error> {
         for (origin, group) in dependencies
             .iter()
             .map(|(origin, group)| (origin.as_path(), group))
-            .chain([(path, &main)])
+            .chain([(origin, &main)])
         {
             redefined(&resolve, &standard, origin, group)?;
             known.push(group.main.clone());
@@ -214,6 +360,15 @@ impl Contract {
     /// The compact runtime contract embedded in artifacts.
     pub fn prepared(&self) -> &PreparedContract {
         &self.prepared
+    }
+
+    /// Check the roles a component declares beyond its contract, as [`Self::component_artifact`]
+    /// checks them when `cargo tembra build` packages it: each hook it declares exports a callback
+    /// that fits the hook's composition, each hook it contributes to is paired with its import, and
+    /// each service policy names an exported service, a host-lifetime one without a linger. The
+    /// `#[tembra::orb]` macro asks it of the roles it embeds, so the error comes at `cargo check`.
+    pub fn check_roles(&self, roles: &ComponentRoles) -> Result<(), Error> {
+        self.prepared.check_roles(roles)
     }
 
     /// Encode the resolved package and standard dependencies for in-memory binding generation.
@@ -328,9 +483,10 @@ impl Contract {
 
     /// The roles a component built with `#[orb]` carries in its
     /// [`EmbeddedManifest`](crate::EmbeddedManifest), checked against this world: the hooks it
-    /// declares, with their composition, the hooks it contributes to, with their priorities, and
-    /// the lifetimes and lingers of its services. A component without a manifest carries none;
-    /// reference views are never embedded.
+    /// declares, with their composition, the hooks it contributes to, with their priorities, the
+    /// lifetimes and lingers of its services, and the reference views of the interfaces it
+    /// imports by key, each mapped to the provider interface it reaches. A component without a
+    /// manifest carries none.
     ///
     /// Every tool packaging such a component passes these roles to [`Self::component_artifact`],
     /// so the artifact keeps what the module declared whichever tool packaged it.
@@ -347,7 +503,7 @@ pub(crate) fn verify_component(expected: &PreparedContract, bytes: &[u8]) -> Res
         return Err(Error("expected an executable WebAssembly component".into()));
     };
     // A decoded component has no import provenance; only signatures are compared here.
-    let actual = crate::prepare::world(&resolve, world, None)?;
+    let (actual, _) = crate::prepare::world(&resolve, world, None)?;
     if expected.signatures(true)? != actual.signatures(true)? {
         return Err(Error(
             "component export signatures differ from the selected WIT world".into(),

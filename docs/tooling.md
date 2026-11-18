@@ -136,10 +136,11 @@ A `.wasm` entry is a compiled WebAssembly component. `build()` checks its export
 selected world, including imports, and packages it with the contract. The component carries no
 installation identity, so the build name becomes the orb name and the target must supply
 `apiVersion`. A Rust component written with `#[orb]` carries its roles in its core module: the
-hooks it declares, the hooks it contributes to, with their priorities, and its services'
-lifetimes. `build()` packages them as the component carries them, together with the target's
-`contributes` and `references`; a hook named both by the component and by `contributes` must have
-the same priority.
+hooks it declares, the hooks it contributes to, with their priorities, its services'
+lifetimes and the reference views of the interfaces it imports by key. `build()` packages them as
+the component carries them, together with the target's `contributes` and `references`; a hook
+named both by the component and by `contributes` must have the same priority, and a view named
+both by the component and by `references` the same interface.
 
 ### Prepare a compiled Orb for browsers
 
@@ -314,6 +315,12 @@ await host.load(artifacts[0]!.path, {
 
 Rust packaging uses `tembra::wasm::ComponentRoles` as the last argument to
 `Contract::component_artifact`, with the same `references` mapping and optional `contributions`.
+A Rust Orb written with `#[orb]` writes neither the view nor the mapping: it imports the provider
+interface with `import("example:keyed/counter@1.0.0", keyed)`, the macro derives the view
+`counter-ref` in the Orb's own package from the interface's WIT and carries the mapping in the
+component, and `cargo tembra build` or `build()` packages it. The installer selects the provider
+for that view's binding, `<orb package>/counter-ref@<version>`; see
+[importing by key](../crates/orb-macro/README.md#importing-another-orbs-interface-by-key).
 
 The official WIT bindings expose acquisition and methods directly inside the compiled guest:
 
@@ -343,6 +350,45 @@ no longer observes the reply, Tembra releases the claim instead of publishing it
 Keys are opaque to Tembra. The application defines their meaning and authorizes configurations;
 a key grants no permission and creates no separate Wasm heap. Native and prepared browser hosts
 use this same model. See the [compiled fixture](../crates/executor-wasm/rust-keyed-router/src/lib.rs).
+
+## Typed clients for host applications
+
+A host acquires a WIT service by name and receives an untyped reference with kebab-case method
+keys (`reference["resource-value"]()`). `client()` writes a typed client of every exported
+interface of a contract, from the same contract `build()` reads:
+
+```ts
+import { client } from "@syntropika/tembra-sdk/tooling";
+
+await client({ wit: "contract.wit", world: "calculator", out: "src/clients" });
+```
+
+Each exported interface becomes `<out>/<namespace>-<package>-<interface>.ts`, a module the
+application commits and regenerates when the contract changes. It exports the interface identity,
+the service's type (`Calculation` for `calculation`, with a `_` where the module already uses the
+name, as in `Context_` and `Promise_`) and `get`, which acquires the service of an Orb through a
+`Host` or a `Context` and wraps the reference with camelCase methods that call the kebab-case keys:
+
+```ts
+import { get } from "./clients/example-integrated-calculation.ts";
+
+const calculation = await get(host, { orb: "calculator", key: "main" });
+const total: number = await calculation.sum({ values: [3, 4, 5] });
+await calculation.resourceValue();
+calculation.reference.release();
+```
+
+The types are the values a host sends and receives: camelCase record fields, `{ tag, val }` for
+variants and results (with the declared error type), `T | null` for options, plain arrays for
+lists, `bigint` for `u64` and `s64`. Each record, variant, enum and flags type the interface uses
+is exported under its WIT name (`Item` for `item`, with a `_` where the module already uses the
+name), so a call site can name the values it builds. A type the interface takes with `use` keeps
+its name there (`Spot` for `use b.{point as spot}`). Two different types of one name in one module
+are named after the interface that declares each (`APoint` and `BPoint`), and refused only when
+those names clash too. Every method takes an optional `Context` last, leaves it out
+when it is `undefined`, and returns a promise. The wrapper adds no other behaviour: the contract
+still checks every value, and an interface that declares WIT resources is refused, since a host
+cannot call it by name.
 
 ## Install an artifact
 

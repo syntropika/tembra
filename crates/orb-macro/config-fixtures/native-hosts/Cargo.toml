@@ -1,0 +1,8 @@
+# Native hosts that link the Orb crates of the examples, as an application does: Cargo enables a
+# host's facade features for the `tembra` of its Orb crates too, so each module compiles its native
+# side. `just test-orb-both-ways` builds each host on its own, so that only the crates whose modules
+# contribute to a hook get `hooks`. The lockfile pins the runtime that `host` brings, which the
+# examples' lockfiles leave out.
+[workspace]
+members = ["host", "hooks"]
+resolver = "3"

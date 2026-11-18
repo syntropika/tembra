@@ -4,9 +4,9 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
-#[tembra_orb_macro::orb(no_std, package = "example:audit@1.0.0", context)]
+#[tembra::orb(no_std, package = "example:audit@1.0.0", context)]
 mod audit {
-    use alloc::string::String;
+    use alloc::{string::String, vec::Vec};
 
     /// Who called, and which object answered.
     pub struct Caller {

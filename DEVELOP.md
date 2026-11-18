@@ -128,6 +128,8 @@ Repeat `--suite native|sdk|node|browser|example|package` to run a subset. CI run
 and outgoing-proxy fixtures through `--http-handler` and `--http-proxy`. Use `--suite native` to run the Rust tests with the same complete artifact set.
 
 CI restores Cargo dependencies and pinned tools separately from the verified interpreter build cache.
+Only runs on `main` save the Cargo caches, and only after a pass. Other runs restore them when their
+keys match.
 Every build and all acceptance suites still run on cache hits. Interpreter cache keys include its
 sources, private ABI and standard bindings, dependencies and pinned toolchains; the build rechecks
 the upstream source revision and WASI SDK archive checksum before packaging identical engine bytes.
@@ -220,12 +222,97 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
 
 ## Checks
 
+### Checks for one change
+
+Run these while you change one area. They cover less than `just ci` and take less time.
+
+First check the format of the change:
+
 ```sh
-just check
+cargo fmt --all --check
+bun run format:check
+```
+
+Then run Clippy and the tests of each Rust crate you change, with all features, as CI does:
+
+```sh
+cargo clippy --locked -p <crate> --all-features --all-targets -- -D warnings
+cargo test --locked -p <crate> --all-features
+```
+
+Then run the recipe of the area. Each area below names its crates and its recipe:
+
+- The macro: `tembra-orb-macro`, `tembra-orb-native-fixture` and `tembra-orb-macro-compile-fail`,
+  whose cases (`crates/orb-macro/compile-fail/tests/ui`) check where rustc puts the macro's errors.
+  Clippy and the tests of the three take about 80 seconds cold and 40 seconds warm on 16 cores.
+  Run `just test-orb-macro`, which runs the macro's guests as components. A change to what the macro generates also needs the recipe that
+  builds it the way users do: `just test-orb-examples` for the examples,
+  `just test-configurations` for the features and targets that only Cargo sets up,
+  `just test-orb-parity` for the answers of native and compiled Orbs, and
+  `just test-orb-both-ways` for each Orb crate built, or checked, the other way.
+- The runtime and the executor: `tembra-core`, `tembra-runtime`, `tembra` and
+  `tembra-executor-wasm`. Run `just test-hook-lifecycle`, and `just test-no-hooks` when you change
+  feature gates or shared bridge operations.
+- The contracts and `cargo tembra`: `tembra-contracts`, `tembra-contracts-wasm` and
+  `cargo-tembra`. Run `just test-cargo-tembra`.
+- The TypeScript SDK: no crate. Build the engines and the SDK, then check the types, lint and
+  test the SDK:
+
+  ```sh
+  just build-node build-wasm build-sdk
+  bun run typecheck
+  bun run lint
+  bun run --cwd packages/ts/sdk test
+  bun run --cwd packages/ts/sdk test:node
+  ```
+
+### The full verification
+
+`just ci` runs the full verification. It runs these parts in order:
+
+- `just check`, described below;
+- `just test-orb-examples`, which builds and runs every `#[orb]` example. The contracts and
+  lockfiles beside the examples must not change;
+- `just test-orb-macro`, which runs the macro's guests as components in the executor;
+- `just test-cargo-tembra`, which runs `cargo tembra new`, `build --out`, `wit` and `inspect` on
+  scratch crates that build as components and natively;
+- `just test-orb-parity`, which builds the parity fixture's Orb natively and as a component and
+  requires the same answers from both;
+- `just test-configurations`, which builds the configurations that only Cargo sets up: a
+  workspace whose application enables `host` beside a guest, a library whose other targets hold
+  Orb modules, and the facade with each feature alone;
+- `just test-orb-both-ways`, which builds each Orb crate the way the other parts do not: the
+  examples' Orb crates, the async and host feature fixtures and the runtime fixture's default
+  module natively, with the facade's `host`. It checks the native fixture for wasm32.
+
+`just ci` does not run `just test-wasm-acceptance`, which CI runs in its `acceptance` job. That
+recipe qualifies the isolated orbs on native Rust, Node and Chrome. It needs the built interpreter,
+the compiled fixtures and Chrome; see [Isolated orbs](#isolated-orbs).
+
+`just ci` also fails when the parts change the tree: a modified or deleted file, or a new file
+that `.gitignore` does not list. It compares the tree after the parts with the tree before them,
+so the edits you made first do not count. The examples are the exception.
+`just test-orb-examples` ends with `git diff --exit-code -- examples`, which compares `examples/`
+with the index. The contracts and lockfiles committed beside the examples must match what the
+builds write. Any other edit under `examples/` must be staged or committed. Commit an edit under
+`examples/`, with the contract and the lockfile it changes, before you run `just ci`.
+
+CI runs each part in a job of its own, side by side, so that each job fits its timeout.
+Each job starts from a clean checkout and ends with `just check-clean-tree`, which fails on any
+such change. So does the `acceptance` job that runs beside them.
+A new part is a recipe in `ci` and a line in the job matrix of the
+[quality workflow](.github/workflows/quality.yml). `just check` runs `just check-ci-parts`, which
+fails when the two differ.
+
+```sh
+just ci
 bun run test:browser
 ```
 
+### Commands
+
 `just check` builds the engines and SDK. It checks formatting, TypeScript types and dependencies.
+It also checks that the parts of `just ci` are the jobs of the quality workflow.
 It runs Clippy, oxlint, Rust tests, SDK tests and React Native adapter tests.
 It also runs Node compatibility tests, the WASM target check and the Rust examples.
 It does not build the interpreter, so isolated orb tests skip. Browser and isolated orb acceptance
@@ -242,6 +329,8 @@ run separately; see [Isolated orbs](#isolated-orbs).
 | `just test-hook-lifecycle` | Build adapters and test the native hook lifecycle  |
 | `just test-no-hooks`       | Test the core and bridge without optional features |
 | `just check-wasm`          | Check the WASM target with all features            |
+| `just check-ci-parts`      | Check that the parts of `just ci` are CI jobs      |
+| `just check-clean-tree`    | Fail on a modified, deleted or untracked file      |
 | `bun run typecheck`        | Check TypeScript across the workspace              |
 | `bun run test:browser`     | Exercise Chrome and a module Worker                |
 

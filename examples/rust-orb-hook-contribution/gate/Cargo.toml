@@ -7,8 +7,9 @@ publish = false
 [workspace]
 
 # The native provider of the hook: trusted application code declared with the `tembra` facade,
-# in a crate of its own so the host stays the wiring that installs and drives the Orbs.
+# in a crate of its own so the host stays the wiring that installs and drives the Orbs. It reads
+# the hook's callback signature from the WIT package and runs no Wasm, so it enables `authoring`,
+# not `wasm`.
 [dependencies]
-tembra = { path = "../../../crates/tembra", features = ["hooks"] }
-tembra-executor-wasm = { path = "../../../crates/executor-wasm" }
+tembra = { path = "../../../crates/tembra", features = ["authoring", "hooks"] }
 serde = { version = "1", features = ["derive"] }

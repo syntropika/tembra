@@ -48,11 +48,14 @@ impl Host {
                     .map(|service| service.name.as_str())
             })
             .collect::<BTreeSet<_>>();
+        // An activation that has finished counts as finished, whether or not anyone awaited it:
+        // the installation creates a host-lifetime object and waits for nothing. Polling a clone
+        // of the shared readiness once reads it without waiting.
         for (id, object) in self.0.objects.borrow().iter() {
             if object
                 .activation
                 .as_ref()
-                .is_some_and(|ready| ready.peek().is_none())
+                .is_some_and(|ready| ready.clone().now_or_never().is_none())
                 && services.contains(self.kernel().object_address(*id)?.service.as_str())
             {
                 return Err(Error::new(

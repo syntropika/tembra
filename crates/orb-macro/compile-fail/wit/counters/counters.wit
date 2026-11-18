@@ -1,0 +1,24 @@
+package example:counters@1.0.0;
+
+/// A counter whose objects a keyed import reaches.
+interface counter {
+  record count { value: u32 }
+  record tally { key: list<string>, count: count }
+  read: async func() -> tally;
+}
+
+/// An interface with a function its view's objects define already for their handle.
+interface handles {
+  handle: func() -> u32;
+}
+
+/// An interface a service implements, with a resource.
+interface book {
+  record entry { label: string, amount: s64 }
+  resource cursor {
+    constructor();
+    position: func() -> u32;
+  }
+  add: func(entry: entry) -> u32;
+  total: func() -> s64;
+}

@@ -1,0 +1,5 @@
+error: example:counters/handles@1.0.0 cannot be imported by key: `handle` would be the method `handle` of the objects a keyed import reaches, which their bindings define already for the object's handle
+ --> tests/ui/keyed_import_with_a_handle_function.rs:4:12
+  |
+4 |     import("example:counters/handles@1.0.0", keyed)
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

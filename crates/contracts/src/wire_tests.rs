@@ -235,3 +235,26 @@ fn signatures_without_64_bit_integers_pass_through_and_packets_are_strict() {
     assert!(!accepted(r#"["18446744073709551616","0"]"#));
     assert!(!accepted(r#"["0","-0"]"#));
 }
+
+/// Arguments spelled for the wire tell arguments that do not match the WIT, the caller's, from a
+/// slot the contract does not have, a fault of whoever bound it.
+#[test]
+fn arguments_tell_a_mismatch_from_an_unknown_slot() {
+    let contract = contract();
+    let extreme = slot(&contract, "extreme");
+    assert_eq!(
+        contract.arguments_to_wire(extreme, exact("[1, -1]")),
+        Ok(Ok(json!(["1", "-1"])))
+    );
+    let mismatch = contract
+        .arguments_to_wire(extreme, json!(["one", -1]))
+        .unwrap();
+    assert!(mismatch.unwrap_err().0.contains("does not match"));
+    assert!(
+        contract
+            .arguments_to_wire(extreme, json!([1]))
+            .unwrap()
+            .is_err()
+    );
+    assert!(contract.arguments_to_wire(99, json!([1, -1])).is_err());
+}

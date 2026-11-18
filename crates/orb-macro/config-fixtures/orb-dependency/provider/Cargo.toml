@@ -1,0 +1,9 @@
+[package]
+name = "tembra-config-provider"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# What a guest depends on: the facade's authoring entry point, without the host runtime.
+tembra = { path = "../../../../tembra", default-features = false, features = ["macros"] }

@@ -205,12 +205,19 @@ impl Driver {
                     continue;
                 }
                 let receive = request(store.data(), text(packet)?, true);
+                let refusals = store.data().refusals.clone();
                 pending.push(
                     async move {
                         let value = match receive {
-                            Ok(receive) => receive
-                                .await
-                                .unwrap_or_else(|_| Err("host callback scope ended".into())),
+                            Ok((request, receive)) => match receive.await {
+                                Ok(Err(refusal)) => {
+                                    // The guest may fail with this refusal, by its effect's id.
+                                    refusals.lock().expect("refusals").effect(id, request);
+                                    Err(refusal)
+                                }
+                                Ok(reply) => reply,
+                                Err(_) => Err("host callback scope ended".into()),
+                            },
                             Err(error) => Err(error),
                         };
                         (

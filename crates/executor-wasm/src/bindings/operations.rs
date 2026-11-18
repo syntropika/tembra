@@ -335,13 +335,7 @@ impl Environment {
             AsyncRequest::ReferenceReady { scope: owner, id } => {
                 let signal = Self::signal(scope, "readiness requires an active callback")?;
                 let (reference, _) = self.reference(scope, owner, id)?;
-                // Only the logical wait ends; activation stays owned by the kernel.
-                let ready = std::pin::pin!(reference.ready());
-                let cancelled = std::pin::pin!(signal.cancelled());
-                match futures::future::select(ready, cancelled).await {
-                    futures::future::Either::Left((result, _)) => result.map(|()| Value::Null),
-                    futures::future::Either::Right(_) => Err(failure("operation cancelled")),
-                }
+                ready(&signal, &reference).await.map(|()| Value::Null)
             }
             AsyncRequest::ReferenceAcquire { .. } => Err(failure("acquisition was not forwarded")),
             // Forwarded above, where its reply can carry installed resources.
@@ -360,15 +354,7 @@ impl Environment {
                         return Err(failure("timer requires an active callback"));
                     }
                 };
-                signal.check()?;
-                let wait = std::pin::pin!(futures_timer::Delay::new(
-                    std::time::Duration::from_millis(milliseconds.into())
-                ));
-                let cancelled = std::pin::pin!(signal.cancelled());
-                match futures::future::select(wait, cancelled).await {
-                    futures::future::Either::Left(_) => Ok(Value::Null),
-                    futures::future::Either::Right(_) => Err(failure("operation cancelled")),
-                }
+                wait(&signal, milliseconds).await
             }
             AsyncRequest::Unsupported => Err(failure("unsupported asynchronous host operation")),
         };
@@ -433,14 +419,7 @@ impl Environment {
         // Dropping an async import also drops this future while readiness is pending. The
         // root still owns the native claim, so dropping an Rc alone would leave it live.
         let mut pending = PendingAcquisition(Some(reference.clone()));
-        let ready = {
-            let ready = std::pin::pin!(reference.ready());
-            let cancelled = std::pin::pin!(signal.cancelled());
-            match futures::future::select(ready, cancelled).await {
-                futures::future::Either::Left((result, _)) => result,
-                futures::future::Either::Right(_) => Err(failure("operation cancelled")),
-            }
-        };
+        let ready = ready(&signal, &reference).await;
         // The invocation or root may have ended while readiness was pending.
         if let Err(error) = ready.and_then(|()| context.check()) {
             return Err(pending.fail(error));
@@ -572,6 +551,42 @@ fn encode<T: serde::Serialize + ?Sized>(value: &T) -> Result<Value> {
     serde_json::to_value(value).map_err(failure)
 }
 
+/// Wait `milliseconds` under `signal`; a cancellation, before or during the wait, answers with
+/// its own error.
+async fn wait(signal: &Cancellation, milliseconds: u32) -> Result<Value> {
+    cancellable(signal, async {
+        futures_timer::Delay::new(std::time::Duration::from_millis(milliseconds.into())).await;
+        Ok(Value::Null)
+    })
+    .await
+}
+
+/// Wait under `signal` until `reference` is ready; a cancellation, before or during the wait,
+/// answers with its own error. Only the logical wait ends; activation stays owned by the kernel.
+async fn ready(signal: &Cancellation, reference: &tembra::Reference) -> Result<()> {
+    cancellable(signal, reference.ready()).await
+}
+
+/// Run `work` under `signal`; a cancellation, before or during it, answers with its own error.
+async fn cancellable<T>(
+    signal: &Cancellation,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    signal.check()?;
+    let work = std::pin::pin!(work);
+    let cancelled = std::pin::pin!(signal.cancelled());
+    match futures::future::select(work, cancelled).await {
+        futures::future::Either::Left((result, _)) => result,
+        // The cancellation itself, as `check` reports it before the wait. Whether this answer
+        // or the Store's revocation of the callback reaches the guest first depends on thread
+        // timing; either way the guest sees its call cancelled.
+        futures::future::Either::Right(_) => Err(signal
+            .check()
+            .err()
+            .unwrap_or_else(|| failure("operation cancelled"))),
+    }
+}
+
 /// Return the kernel's snapshot revision rather than inventing guest state identities.
 fn snapshot_value(value: Value, revision: u64, version: u32) -> Result<Value> {
     encode(&protocol::Snapshot {
@@ -603,6 +618,57 @@ fn snapshot_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wait cancelled while it runs answers with the cancellation, as one cancelled before it
+    /// starts does: the guest's call fails as cancelled, never as a failed timer.
+    #[test]
+    fn a_wait_cancelled_while_it_runs_answers_with_the_cancellation() {
+        let mut pool = futures::executor::LocalPool::new();
+        let host = tembra::Host::new(pool.spawner());
+        let error = pool
+            .run_until(host.root("alice", |context| {
+                async move {
+                    let signal = context.signal();
+                    let (waited, cancelled) =
+                        futures::join!(wait(&signal, 5_000), async { context.cancel() });
+                    cancelled?;
+                    Ok(waited.unwrap_err())
+                }
+                .boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(error.code, tembra::core::Code::Cancelled, "{error}");
+    }
+
+    /// A readiness wait cancelled while it runs answers with the cancellation, as a timer does:
+    /// the reference-ready request and an acquisition both wait so. The provider's object never
+    /// becomes ready, so only the cancellation ends the wait.
+    #[test]
+    fn a_readiness_wait_cancelled_while_it_runs_answers_with_the_cancellation() {
+        let mut pool = futures::executor::LocalPool::new();
+        let host = tembra::Host::new(pool.spawner());
+        host.install(vec![
+            tembra::Orb::new("slow", 1).service(
+                tembra::Service::new("slow", |_| Ok(()))
+                    .before_create(futures::future::pending::<Result<()>>),
+            ),
+        ])
+        .unwrap();
+        let error = pool
+            .run_until(host.root("alice", |context| {
+                async move {
+                    let signal = context.signal();
+                    let reference = context.get("slow", vec!["main".into()], Default::default())?;
+                    let (waited, cancelled) =
+                        futures::join!(ready(&signal, &reference), async { context.cancel() });
+                    cancelled?;
+                    Ok(waited.unwrap_err())
+                }
+                .boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(error.code, tembra::core::Code::Cancelled, "{error}");
+    }
 
     #[test]
     fn unchanged_snapshot_reads_omit_only_the_value() {

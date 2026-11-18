@@ -4,8 +4,8 @@
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
+use tembra::wasm::{Engine, Install, Limits};
 use tembra::{Host, Reference, portable::Owned};
-use tembra_executor_wasm::{Engine, Install, Limits};
 
 /// The text Orb's interface, imported by the speller and bound to the `text` Orb at installation.
 const TEXTS: &str = "example:text/texts@1.0.0";

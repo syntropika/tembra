@@ -10,13 +10,9 @@ use std::sync::{
 use tembra::{Orb, Result};
 use wasmtime::{Module, component::Component};
 
-/// Console output is attributed by the host, never by a guest-provided Orb name.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct LogRecord {
-    pub orb: String,
-    pub level: String,
-    pub message: String,
-}
+/// Console output is attributed by the host, never by a guest-provided Orb name: the runtime's
+/// record, which a native Orb's log takes too.
+pub use tembra::LogRecord;
 
 pub(crate) type LogSink = Arc<dyn Fn(&LogRecord) + Send + Sync>;
 
@@ -196,6 +192,18 @@ impl Engine {
         self.live_resources.load(Ordering::Acquire)
     }
 
+    /// Count compiled components retained by this engine's prepared or installed Orbs. The Orbs
+    /// loaded from one artifact share one, compiled by the first load and kept while any of their
+    /// Stores lives.
+    pub fn components(&self) -> usize {
+        self.compiled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|component| component.strong_count() != 0)
+            .count()
+    }
+
     /// Receive attributed guest diagnostics without allowing observer panics to interrupt execution.
     /// Wall clock for `wasi:clocks/system-clock` and granted source built-ins; one fresh
     /// instance per Store.
@@ -349,6 +357,43 @@ mod tests {
         let second = clone.compiled(bytes).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(engine.instances(), 0);
+    }
+
+    /// A second load of an artifact finds the component its first load compiled, which the
+    /// loaded Orb keeps in the cache, and each Orb keeps it while the other is dropped.
+    #[test]
+    fn loads_of_one_artifact_share_one_compiled_component() {
+        let contract = tembra_contracts::Contract::from_source(
+            "probe.wit",
+            "package example:probe@1.0.0;
+             interface probe { ping: func() -> u32; }
+             world app { export probe; }",
+            None,
+        )
+        .unwrap();
+        let component = wat::parse_str(
+            r#"(component
+              (core module $m (func (export "ping") (result i32) i32.const 7))
+              (core instance $i (instantiate $m))
+              (func $ping (result u32) (canon lift (core func $i "ping")))
+              (instance $probe (export "ping" (func $ping)))
+              (export "example:probe/probe@1.0.0" (instance $probe)))"#,
+        )
+        .unwrap();
+        let artifact = contract
+            .component_artifact(&component, "probe", 1, &Default::default())
+            .unwrap();
+        let engine = Engine::new(Limits::default()).unwrap();
+        let first = engine.load(&artifact, crate::Install::default()).unwrap();
+        assert_eq!((engine.instances(), engine.components()), (1, 1));
+        let second = engine.load(&artifact, crate::Install::default()).unwrap();
+        assert_eq!((engine.instances(), engine.components()), (2, 1));
+        // Had the second load compiled the artifact again, the cache would keep only its copy,
+        // which dropping the second Orb would release.
+        drop(second);
+        assert_eq!((engine.instances(), engine.components()), (1, 1));
+        drop(first);
+        assert_eq!((engine.instances(), engine.components()), (0, 0));
     }
 
     #[test]

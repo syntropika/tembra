@@ -87,6 +87,45 @@ fn cli_authority_never_implies_process_execution_or_other_host_capabilities() {
     }
 }
 
+/// `host_serves` is the import check's own rule: an interface it names is one the check admits
+/// under a grant, whatever the version written, and refuses only for want of that grant; one it
+/// does not name, an interface a component exports instead, an unstable one or one of another
+/// package, the check refuses as unsupported.
+#[test]
+fn a_host_serves_the_interfaces_the_import_check_admits() {
+    for interface in [
+        "wasi:clocks/monotonic-clock@0.3.0",
+        "wasi:clocks/system-clock@0.3.0",
+        "wasi:random/insecure@0.3.0",
+        "wasi:cli/terminal-stderr@0.3.0",
+        "wasi:filesystem/preopens@0.3.0",
+        "wasi:sockets/ip-name-lookup@0.3.0",
+        "wasi:http/types@0.3.0",
+        "wasi:http/client@0.3.0",
+        "wasi:http/client@0.3.1",
+    ] {
+        assert!(host_serves(interface), "{interface}");
+        let error = Grants::default()
+            .check_component_import(interface, false)
+            .unwrap_err();
+        assert_eq!(error.code, tembra_core::Code::Forbidden, "{interface}");
+        assert_eq!(error.reason, "orb_grant", "{interface}");
+    }
+    for interface in [
+        "wasi:cli/run@0.3.0",
+        "wasi:http/handler@0.3.0",
+        "wasi:clocks/timezone@0.3.0",
+        "wasi:keyvalue/store@0.3.0",
+    ] {
+        assert!(!host_serves(interface), "{interface}");
+        let error = Grants::default()
+            .check_component_import(interface, false)
+            .unwrap_err();
+        assert_eq!(error.code, tembra_core::Code::Unsupported, "{interface}");
+        assert_eq!(error.reason, "wasi_contract", "{interface}");
+    }
+}
+
 #[test]
 fn filesystem_grants_require_real_providers_imports_and_distinct_normalized_mounts() {
     let providers = BTreeSet::from(["files".into()]);

@@ -12,7 +12,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use serde_json::Value;
 use std::sync::Arc;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::{Mutex, mpsc},
     thread,
@@ -33,8 +33,116 @@ pub(crate) mod wasi;
 pub(crate) use runtime::check;
 pub(crate) use standard::{Pipe, PipeConsumer, StreamAdapter, adapter as stream_adapter};
 
+/// Await `work` for at most `timeout`; `None` is a timeout. A result after the deadline is a
+/// timeout too: a thread held past it, as a busy machine or a slow host callback holds it, runs
+/// the timer late, and `tokio::time::timeout` still returns a result that is ready by then.
+pub(crate) async fn within<F: std::future::Future>(
+    timeout: std::time::Duration,
+    work: F,
+) -> Option<F::Output> {
+    let started = tokio::time::Instant::now();
+    match tokio::time::timeout(timeout, work).await {
+        Ok(output) if started.elapsed() <= timeout => Some(output),
+        _ => None,
+    }
+}
+
+/// Why a callback failed, as its worker reports it. Only the worker's own code builds a variant
+/// other than `Text`, so no guest text can take a code the executor answers.
+#[derive(Debug)]
+pub(crate) enum Failed {
+    /// The executor's own text: the call answers `unavailable/wasm_executor`.
+    Text(String),
+    /// A refusal the worker made with the code a native host answers.
+    Coded(tembra::Error),
+    /// The host's refusal of the request `request` of this callback, which the callback failed
+    /// with unchanged: the call answers that very refusal, as a native one does. A source guest
+    /// names it by the identity the executor gave it, never by its text.
+    Host { request: u64, text: String },
+}
+
+impl Failed {
+    /// The failure of a value a lift refused: the refusal itself when its code is not the
+    /// executor's own, such as a result's `invalid/result`.
+    pub(crate) fn lifted(error: tembra::Error) -> Self {
+        if error.code == tembra::core::Code::Invalid {
+            Self::Coded(error)
+        } else {
+            Self::Text(error.to_string())
+        }
+    }
+
+    /// The text of this failure, for an embedding that carries text only.
+    pub(crate) fn text(self) -> String {
+        match self {
+            Self::Text(text) | Self::Host { text, .. } => text,
+            Self::Coded(error) => error.to_string(),
+        }
+    }
+
+    /// The error a call answers: a coded refusal keeps its code, and any text is the executor's.
+    pub(crate) fn error(self) -> tembra::Error {
+        match self {
+            Self::Coded(error) => error,
+            Self::Text(text) | Self::Host { text, .. } => failure(text),
+        }
+    }
+}
+
+impl From<String> for Failed {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for Failed {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+}
+
+/// The host's refusals of one callback's requests, by request id, which a callback that fails with
+/// one unchanged answers.
+#[derive(Default)]
+pub(crate) struct Refused(std::collections::VecDeque<(u64, tembra::Error)>);
+
+impl Refused {
+    /// A guest rethrows a refusal it has just received: only the most recent ones are kept, so a
+    /// guest that makes refused requests in a loop does not grow this without bound.
+    pub(crate) const KEPT: usize = 64;
+
+    /// Keep the host's refusal of the request `request`.
+    pub(crate) fn insert(&mut self, request: u64, error: tembra::Error) {
+        if self.0.len() == Self::KEPT {
+            self.0.pop_front();
+        }
+        self.0.push_back((request, error));
+    }
+
+    /// The refusal a failure names, if this callback still keeps it.
+    pub(crate) fn answer(
+        &mut self,
+        failed: &std::result::Result<String, Failed>,
+    ) -> Option<tembra::Error> {
+        let Err(Failed::Host { request, .. }) = failed else {
+            return None;
+        };
+        let index = self.0.iter().position(|(id, _)| id == request)?;
+        self.0.remove(index).map(|(_, error)| error)
+    }
+}
+
+/// A new identity for a host request, unique in this process: a refusal of the host is known by
+/// the request it refused.
+pub(crate) fn request_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) enum Event {
     Host {
+        /// The request's identity, by which the host keeps its refusal.
+        id: u64,
         packet: String,
         asynchronous: bool,
         reply: oneshot::Sender<std::result::Result<String, String>>,
@@ -46,7 +154,7 @@ pub(crate) enum Event {
         reply: oneshot::Sender<std::result::Result<String, String>>,
         pipe: Option<Arc<Mutex<Pipe>>>,
     },
-    Done(std::result::Result<String, String>),
+    Done(std::result::Result<String, Failed>),
     /// Incoming HTTP carrier events of a platform exchange (`crate::ingress::IngressPort`).
     Ingress(crate::ingress::IngressEvent),
     /// A guest's asynchronous import whose whole result is a `stream<u8>`: a compiled guest's
@@ -585,6 +693,9 @@ impl Session {
             events: &events,
             completed: false,
         };
+        // The host's refusals in this declaration, by request. A worker that fails with one
+        // unchanged keeps its code, as a native declaration does, such as `invalid/state_version`.
+        let mut refused = Refused::default();
         loop {
             match events.recv_blocking().map_err(failure)? {
                 // Carrier events exist only on platform ingress exchanges.
@@ -592,9 +703,13 @@ impl Session {
                 Event::Done(result) => {
                     self.0.io.scope().end_callback();
                     guard.completed = true;
+                    if let Some(error) = refused.answer(&result) {
+                        return Err(error);
+                    }
                     return decode(result);
                 }
                 Event::Host {
+                    id,
                     packet,
                     asynchronous,
                     reply,
@@ -606,6 +721,9 @@ impl Session {
                     } else {
                         host(&packet, false)
                     };
+                    if let Err(error) = &result {
+                        refused.insert(id, error.clone());
+                    }
                     let _ = reply.send(encode(
                         result.map(|value| value.to_string()),
                         self.0.packet_bytes,
@@ -669,6 +787,9 @@ impl Session {
         // requests pay nothing for it. Declared first: the pending answers borrow it, and
         // whether they still join the dependency calls of abandoned requests.
         let streams = Cell::new(0_usize);
+        // The host's refusals in this callback, by request: a callback that fails with one
+        // unchanged answers it, as a native one does.
+        let refused = RefCell::new(Refused::default());
         let release = Release::default();
         let mut pending = FuturesUnordered::new();
         let mut revoked = false;
@@ -726,9 +847,14 @@ impl Session {
                     while pending.next().await.is_some() {}
                     let cleanup = self.finish_cleanups(&host).await;
                     guard.completed = true;
-                    return cleanup.and_then(|()| decode(result));
+                    cleanup?;
+                    if let Some(error) = refused.borrow_mut().answer(&result) {
+                        return Err(error);
+                    }
+                    return decode(result);
                 }
                 Event::Host {
+                    id,
                     packet,
                     asynchronous,
                     reply,
@@ -743,6 +869,7 @@ impl Session {
                     reply,
                     None,
                     &release,
+                    Some((id, &refused)),
                 )),
                 Event::Arguments {
                     packet,
@@ -764,7 +891,8 @@ impl Session {
                         }
                         None => None,
                     };
-                    pending.push(self.answer(&host, packet, carried, reply, stream, &release));
+                    pending
+                        .push(self.answer(&host, packet, carried, reply, stream, &release, None));
                 }
                 Event::Stream {
                     packet,
@@ -785,6 +913,7 @@ impl Session {
                         reply,
                         Some((pipe, slot)),
                         &release,
+                        None,
                     ));
                 }
             }
@@ -811,6 +940,7 @@ impl Session {
                         packet,
                         asynchronous: false,
                         reply,
+                        ..
                     }) => {
                         let result = match crate::protocol::Request::decode(&packet) {
                             Ok(crate::protocol::Request::ReferenceRelease { .. }) => {
@@ -824,7 +954,7 @@ impl Session {
                     }
                     Ok(Event::Done(result)) => {
                         if let Err(error) = result {
-                            failed.get_or_insert_with(|| failure(error));
+                            failed.get_or_insert_with(|| failure(error.text()));
                         }
                         break;
                     }
@@ -865,6 +995,7 @@ impl Session {
     /// counted, as long as it runs. If the caller's cancellation revoked the callback or its
     /// Store stopped, the call is only signalled, and stays counted by the kernel, as for a root
     /// cancellation.
+    #[allow(clippy::too_many_arguments)]
     fn answer<'a>(
         &'a self,
         host: &'a impl AsyncFn(&str, Carried, &Issued) -> Result<Reply>,
@@ -873,6 +1004,7 @@ impl Session {
         mut reply: oneshot::Sender<std::result::Result<String, String>>,
         stream: Option<(Arc<Mutex<Pipe>>, StreamSlot<'a>)>,
         release: &'a Release,
+        refused: Option<(u64, &'a RefCell<Refused>)>,
     ) -> futures::future::LocalBoxFuture<'a, ()> {
         async move {
             let issued = Issued::default();
@@ -906,6 +1038,9 @@ impl Session {
                 (Some(_), Some(_), text) | (None, None, text) | (_, _, text @ Err(_)) => text,
                 _ => Err(failure("the import's stream result differs from its call")),
             };
+            if let (Some((request, refused)), Err(error)) = (refused, &text) {
+                refused.borrow_mut().insert(request, error.clone());
+            }
             let text = encode(text, self.0.packet_bytes);
             let accepted = text.is_ok();
             if reply.send(text).is_err() || !accepted {
@@ -980,7 +1115,7 @@ fn publish_after_shutdown(
         // A command nobody awaits, such as a resource destruction or an environment release,
         // has no caller to receive its failure; report it rather than letting it pass silently.
         if events
-            .send_blocking(Event::Done(Err(error.clone())))
+            .send_blocking(Event::Done(Err(error.clone().into())))
             .is_err()
         {
             let _ = diagnostics.emit(
@@ -1004,8 +1139,9 @@ impl Drop for Count {
 }
 
 /// Parse guest output only after preserving boundary diagnostics.
-fn decode(result: std::result::Result<String, String>) -> Result<Value> {
-    serde_json::from_str(&result.map_err(failure)?).map_err(failure)
+fn decode(result: std::result::Result<String, Failed>) -> Result<Value> {
+    let text = result.map_err(Failed::error)?;
+    serde_json::from_str(&text).map_err(failure)
 }
 
 /// Close an event stream and drop its buffered reply senders so no request outlives its driver.
@@ -1030,6 +1166,36 @@ mod tests {
     use super::*;
     use crate::{Contract, Limits};
     use std::time::{Duration, Instant};
+
+    /// A callback answers one of its most recent refusals by request, once; an older one, or a
+    /// failure that names none, answers nothing.
+    #[test]
+    fn a_callback_keeps_only_its_most_recent_refusals() {
+        let mut refused = Refused::default();
+        let kept = Refused::KEPT as u64;
+        for request in 0..=kept {
+            refused.insert(
+                request,
+                tembra::Error::new(tembra::core::Code::Forbidden, "key", request.to_string()),
+            );
+        }
+        let host = |request| {
+            Err(Failed::Host {
+                request,
+                text: String::new(),
+            })
+        };
+        assert!(refused.answer(&host(0)).is_none());
+        assert_eq!(refused.answer(&host(1)).unwrap().message, "1");
+        assert!(refused.answer(&host(1)).is_none());
+        assert_eq!(
+            refused.answer(&host(kept)).unwrap().message,
+            kept.to_string()
+        );
+        assert!(refused.answer(&Err(Failed::Text("2".into()))).is_none());
+        assert!(refused.answer(&Ok("2".into())).is_none());
+        assert_eq!(refused.0.len(), Refused::KEPT - 2);
+    }
 
     #[test]
     fn callback_release_wakes_each_waiter_once_after_repeated_polls() {
@@ -1111,7 +1277,7 @@ mod tests {
             "quarantine preceded physical completion"
         );
         assert!(
-            matches!(observed.recv().unwrap(), Ok(Event::Done(Err(error))) if error == "quarantined")
+            matches!(observed.recv().unwrap(), Ok(Event::Done(Err(Failed::Text(error)))) if error == "quarantined")
         );
         observer.join().unwrap();
     }
@@ -1169,6 +1335,7 @@ mod tests {
         let (reply, mut answer) = oneshot::channel();
         queued
             .try_send(Event::Host {
+                id: request_id(),
                 packet: r#"{"operation":"reference.release","id":1}"#.into(),
                 asynchronous: false,
                 reply,

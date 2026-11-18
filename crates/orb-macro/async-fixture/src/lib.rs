@@ -1,5 +1,5 @@
 //! A fixed-contract async Orb whose interface and resource methods suspend on a real import.
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
 
 #[tembra::orb(
     package = "example:consumer@1.0.0",

@@ -8,13 +8,14 @@ mod artifact;
 mod authoring;
 mod codec;
 mod describe;
-#[cfg(feature = "authoring")]
 mod embedded;
 pub mod guest;
 mod hooks;
 mod implementation;
 mod lower;
 mod model;
+#[cfg(feature = "authoring")]
+mod module_contract;
 mod permissions;
 mod port;
 #[cfg(feature = "authoring")]
@@ -36,7 +37,6 @@ pub use artifact::{
 };
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
-#[cfg(feature = "authoring")]
 pub use embedded::EmbeddedManifest;
 pub use hooks::{ContributionBinding, HookBinding, HookComposition, HookPlan};
 pub use implementation::{
@@ -47,16 +47,27 @@ pub use model::{
     Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, Model, PreparedContract,
     ResourceIdentity, Ty,
 };
+#[cfg(feature = "authoring")]
+pub use module_contract::{ModuleContract, WrittenContract};
 pub use permissions::{
-    FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability, system_capability,
+    FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability, host_serves,
+    system_capability,
 };
 pub use port::envelope;
+#[cfg(feature = "authoring")]
+pub use prepare::check_value_type;
 pub use references::ReferenceBinding;
-pub use resource_profile::ResourceSignature;
+pub use resource_profile::{ResourceSignature, SignaturePart, SignatureReason, SignatureRefusal};
 pub use roles::ServicePolicy;
 pub use selection::OrbProvider;
 #[doc(hidden)]
-pub use standard_sources::WASI_SOURCES;
+pub use standard_sources::{WASI_SOURCES, bundled};
+/// The kernel's rules on what an Orb declares, which it checks when it installs one: re-exported
+/// for the `#[tembra::orb]` macro, which checks them at `cargo check`.
+#[cfg(feature = "authoring")]
+pub use tembra_core::{
+    RESERVED_MEMBERS, admits_linger, admits_principal, reserved_member, valid_version,
+};
 pub use validate::javascript_name;
 
 /// A diagnostic produced before an Orb enters the kernel.
@@ -90,6 +101,8 @@ mod artifact_tests;
 mod conformance_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod ingress_tests;
+#[cfg(all(test, feature = "authoring"))]
+mod module_contract_tests;
 #[cfg(test)]
 mod permission_tests;
 #[cfg(test)]

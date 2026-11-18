@@ -95,6 +95,30 @@ impl PreparedContract {
         self.convert(Form::Native, slot, arguments, value)
     }
 
+    /// Validate native arguments and spell them for the executor packet protocol, as `to_wire`
+    /// does. Arguments that do not match the WIT are the inner error, the caller's; a fault of
+    /// the contract, such as a slot it does not have, is the outer one.
+    pub fn arguments_to_wire(
+        &self,
+        slot: u32,
+        mut value: Value,
+    ) -> Result<Result<Value, Error>, Error> {
+        let slot = *self
+            .slots()
+            .get(slot as usize)
+            .ok_or_else(|| Error("unknown WIT method slot".into()))?;
+        let function = self.function(slot);
+        let parameters = self.data_parameters(slot, function);
+        if let Err(error) = self.check_arguments(Form::Native, &function.name, parameters, &value) {
+            return Ok(Err(error));
+        }
+        let values = value.as_array_mut().ok_or_else(checked)?;
+        for (parameter, value) in parameters.iter().zip(values) {
+            self.respell(parameter.ty, value)?;
+        }
+        Ok(Ok(value))
+    }
+
     /// Validate an executor-packet value and turn its WIT `u64`/`s64` decimal strings into the
     /// exact JSON numbers the native kernel holds. Nothing else changes.
     pub fn from_wire(&self, slot: u32, arguments: bool, value: Value) -> Result<Value, Error> {
@@ -349,7 +373,7 @@ impl PreparedContract {
                     if let Ty::Ref(id) = self.resolved(*inner)
                         && matches!(self.kind(id), Kind::Option(_))
                     {
-                        return Err(Error("nested options require a tagged option codec".into()));
+                        return Err(Error(crate::resource_profile::NESTED_OPTIONS.into()));
                     }
                     self.supported(*inner, depth + 1)
                 }

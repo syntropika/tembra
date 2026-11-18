@@ -1,0 +1,17 @@
+package example:counters@1.0.0;
+
+/// Counting objects: each key and principal selects an object with a count of its own.
+interface counter {
+  /// What an object has counted, under its key and the principal that acquired it.
+  record tally {
+    key: list<string>,
+    principal: string,
+    count: u32,
+  }
+
+  /// Add `amount` to the object's count and return the new count.
+  add: func(amount: u32) -> u32;
+
+  /// The object's tally.
+  read: async func() -> tally;
+}

@@ -6,11 +6,12 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
-#[tembra_orb_macro::orb(no_std, package = "example:ledger@1.0.0")]
+#[tembra::orb(no_std, package = "example:ledger@1.0.0")]
 mod ledger {
     pub mod pinned {
         /// The balance of one pinned ledger object, kept by the kernel.
         #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Balance {
             pub total: i64,
         }
@@ -31,6 +32,7 @@ mod ledger {
     pub mod lingering {
         /// The balance of one lingering ledger object, kept by the kernel.
         #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Balance {
             pub total: i64,
         }
@@ -51,6 +53,7 @@ mod ledger {
     pub mod passing {
         /// The balance of one passing ledger object, kept by the kernel.
         #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Balance {
             pub total: i64,
         }

@@ -20,12 +20,13 @@ struct Lowering<'a> {
 
 /// Prepare a resolved world once; the result is validated like any decoded artifact.
 /// `explicit` holds the world's own import keys; elaborated type-only dependencies are absent.
-/// `None` (unknown provenance) treats every import as explicit.
+/// `None` (unknown provenance) treats every import as explicit. Also answers the WIT definition
+/// each compact type index was lowered from, which the prepared contract does not keep.
 pub(crate) fn world(
     resolve: &Resolve,
     world: WorldId,
     explicit: Option<&std::collections::BTreeSet<String>>,
-) -> Result<PreparedContract, Error> {
+) -> Result<(PreparedContract, HashMap<TypeId, u32>), Error> {
     let selected = &resolve.worlds[world];
     let mut lowering = Lowering {
         resolve,
@@ -56,7 +57,7 @@ pub(crate) fn world(
     };
     let imports = side(&selected.imports, true)?;
     let exports = side(&selected.exports, false)?;
-    PreparedContract::new(Model {
+    let prepared = PreparedContract::new(Model {
         world: selected.name.clone(),
         package: selected
             .package
@@ -64,7 +65,30 @@ pub(crate) fn world(
         types: lowering.types,
         imports,
         exports,
-    })
+    })?;
+    Ok((prepared, lowering.ids))
+}
+
+/// Check one WIT type of `resolve` as the runtime checks each type of a signature before it
+/// installs an Orb ([`PreparedContract::check_value_profile`], and through the resource profile
+/// `cargo tembra build` checks): an option of an option, a map, a list of a fixed length and what
+/// is no data are refused. The `#[tembra::orb]` macro asks it of a consumed type it names, so the
+/// error comes at `cargo check`, from the same rule.
+pub fn check_value_type(resolve: &Resolve, ty: Type) -> Result<(), Error> {
+    let mut lowering = Lowering {
+        resolve,
+        types: Vec::new(),
+        ids: HashMap::new(),
+    };
+    let ty = lowering.ty(ty, 0)?;
+    let prepared = PreparedContract::new(Model {
+        world: "value".into(),
+        package: None,
+        types: lowering.types,
+        imports: Vec::new(),
+        exports: Vec::new(),
+    })?;
+    prepared.supported(ty, 0)
 }
 
 impl Lowering<'_> {

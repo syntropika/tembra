@@ -1,0 +1,5 @@
+error: a state is a struct with named fields
+ --> tests/ui/state_on_a_tuple_struct.rs:3:5
+  |
+3 |     #[state]
+  |     ^

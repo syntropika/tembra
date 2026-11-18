@@ -49,7 +49,7 @@ mod arguments;
 use crate::{
     Engine,
     abi::Operation,
-    worker::{Command, Event, Pipe, PipeConsumer, StreamCall, Terminal},
+    worker::{Command, Event, Failed, Pipe, PipeConsumer, StreamCall, Terminal},
 };
 use async_channel::Sender;
 use serde::Deserialize;
@@ -434,6 +434,7 @@ async fn check_context(events: &Sender<Event>) -> Result<(), String> {
     let (reply, receive) = oneshot::channel();
     events
         .try_send(Event::Host {
+            id: crate::worker::request_id(),
             packet: json!({"operation": "context.check"}).to_string(),
             asynchronous: false,
             reply,
@@ -546,7 +547,7 @@ impl Environments {
 /// call fails terminally.
 pub(crate) async fn run(
     engine: Engine,
-    component: Component,
+    component: Arc<Component>,
     wasi: (WasiCtxBuilder, bool),
     grants: Arc<crate::Grants>,
     layout: Layout,
@@ -580,7 +581,7 @@ pub(crate) async fn run(
 async fn live(
     (engine, component, wasi, grants, layout): (
         Engine,
-        Component,
+        Arc<Component>,
         (WasiCtxBuilder, bool),
         Arc<crate::Grants>,
         Layout,
@@ -716,12 +717,12 @@ async fn instantiate(
     if sockets {
         crate::worker::stream_adapter::instantiate(&mut store).await?;
     }
-    let instance = tokio::time::timeout(
+    let instance = crate::worker::within(
         std::time::Duration::from_millis(engine.limits.timeout_ms),
         linker.instantiate_async(&mut store, component),
     )
     .await
-    .map_err(|_| wasmtime::Error::msg("component initialization timed out"))??;
+    .ok_or_else(|| wasmtime::Error::msg("component initialization timed out"))??;
     let mut exports = BTreeMap::new();
     for export in &layout.exports {
         let service = Arc::<str>::from(export.service.as_str());
@@ -1173,6 +1174,7 @@ fn acquire_request(
         return Ok(receive);
     }
     if let Err(error) = authority.events.try_send(Event::Host {
+        id: crate::worker::request_id(),
         packet,
         asynchronous: true,
         reply,
@@ -1261,6 +1263,7 @@ fn request(
                 pipe,
             },
             None => Event::Host {
+                id: crate::worker::request_id(),
                 packet,
                 asynchronous: true,
                 reply,
@@ -1514,6 +1517,7 @@ impl Channel {
         let (reply, receive) = oneshot::channel();
         self.events
             .try_send(Event::Host {
+                id: crate::worker::request_id(),
                 packet,
                 asynchronous: false,
                 reply,
@@ -1572,6 +1576,7 @@ fn hook_request(
     authority
         .events
         .try_send(Event::Host {
+            id: crate::worker::request_id(),
             packet,
             asynchronous: true,
             reply,
@@ -1759,24 +1764,28 @@ async fn declaration(
     events: &Sender<Event>,
     packet: Value,
     limit: usize,
-) -> std::result::Result<Value, String> {
+) -> std::result::Result<Value, Failed> {
     let packet = packet.to_string();
     if packet.len() > limit {
         return Err("host packet limit exceeded".into());
     }
     let (reply, receive) = oneshot::channel();
+    let request = crate::worker::request_id();
     events
         .send(Event::Host {
+            id: request,
             packet,
             asynchronous: false,
             reply,
         })
         .await
         .map_err(|_| "declaration scope ended".to_owned())?;
+    // The host's refusal of this very request fails the declaration with it.
     let text = receive
         .await
-        .map_err(|_| "declaration scope ended".to_owned())??;
-    serde_json::from_str(&text).map_err(|error| error.to_string())
+        .map_err(|_| "declaration scope ended".to_owned())?
+        .map_err(|text| Failed::Host { request, text })?;
+    serde_json::from_str(&text).map_err(|error| error.to_string().into())
 }
 
 /// Serve one command. The outer error is terminal; the inner error refuses only this command.
@@ -1788,7 +1797,7 @@ async fn serve(
     environments: &mut Environments,
     groups: &Arc<Mutex<Groups>>,
     command: &mut Command,
-) -> wasmtime::Result<std::result::Result<String, String>> {
+) -> wasmtime::Result<std::result::Result<String, Failed>> {
     if !matches!(command.operation, Operation::Declare | Operation::Start) {
         return Ok(Err(
             "compiled components accept only declarations and calls".into(),
@@ -1796,7 +1805,7 @@ async fn serve(
     }
     let packet: Packet = match serde_json::from_str(&command.packet) {
         Ok(packet) => packet,
-        Err(error) => return Ok(Err(format!("malformed component command: {error}"))),
+        Err(error) => return Ok(Err(format!("malformed component command: {error}").into())),
     };
     let expected = match packet {
         Packet::Create { .. } | Packet::Validate { .. } => Operation::Declare,
@@ -1903,7 +1912,7 @@ async fn serve(
             // reads of the retained state and the log.
             let authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
-                Err(error) => return Ok(Err(error)),
+                Err(error) => return Ok(Err(error.into())),
             };
             let call = Call {
                 function,
@@ -1924,7 +1933,8 @@ async fn serve(
                 Some("err") => Err(verdict["val"]
                     .as_str()
                     .map(|message| format!("the state was refused: {message}"))
-                    .unwrap_or_else(|| "the state was refused".into())),
+                    .unwrap_or_else(|| "the state was refused".into())
+                    .into()),
                 _ => Err("the state validator answered no result".into()),
             })
         }
@@ -2007,7 +2017,7 @@ async fn serve(
             let target = target.clone();
             let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
-                Err(error) => return Ok(Err(error)),
+                Err(error) => return Ok(Err(error.into())),
             };
             authority.principal = admitted_principal(layout, command, limit).await;
             let call = Call {
@@ -2037,7 +2047,7 @@ async fn serve(
             }
             let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
-                Err(error) => return Ok(Err(error)),
+                Err(error) => return Ok(Err(error.into())),
             };
             authority.principal = admitted_principal(layout, command, limit).await;
             let call = Call {
@@ -2058,10 +2068,12 @@ async fn serve(
             };
             let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
-                Err(error) => return Ok(Err(error)),
+                Err(error) => return Ok(Err(error.into())),
             };
             authority.principal = admitted_principal(layout, command, limit).await;
-            ingress(engine, store, handler, call, authority, groups).await
+            Ok(ingress(engine, store, handler, call, authority, groups)
+                .await?
+                .map_err(Failed::Text))
         }
         Packet::Invoke { .. } | Packet::Contribute { .. } | Packet::Unsupported => Ok(Err(
             "compiled components have no guest callbacks of this kind".into(),
@@ -2122,19 +2134,25 @@ fn authority(
 
 /// A declaration refused by the host refuses only this object; a trap retires the Store.
 enum Failure {
-    Refused(String),
+    Refused(Failed),
     Trap(wasmtime::Error),
+}
+
+impl From<Failed> for Failure {
+    fn from(failed: Failed) -> Self {
+        Self::Refused(failed)
+    }
 }
 
 impl From<String> for Failure {
     fn from(message: String) -> Self {
-        Self::Refused(message)
+        Self::Refused(message.into())
     }
 }
 
 impl From<&str> for Failure {
     fn from(message: &str) -> Self {
-        Self::Refused(message.to_owned())
+        Self::Refused(message.into())
     }
 }
 
@@ -2417,7 +2435,7 @@ async fn invoke(
     arguments: &Value,
     authority: Authority,
     groups: &Arc<Mutex<Groups>>,
-) -> wasmtime::Result<std::result::Result<String, String>> {
+) -> wasmtime::Result<std::result::Result<String, Failed>> {
     let Call {
         function,
         roles,
@@ -2427,12 +2445,18 @@ async fn invoke(
         arguments: ownership,
     } = call;
     let ty = function.ty(&*store);
+    if ty.results().len() > 1 {
+        return Ok(Err("component function has more than one result".into()));
+    }
+    // Arguments that do not match the export's parameters are the caller's, as natively.
     let Some(args) = arguments.as_array() else {
-        return Ok(Err("component arguments require a tuple".into()));
+        return Ok(Err(arguments::mismatch(
+            "component arguments require a tuple",
+        )));
     };
     let lent = usize::from(roles.receiver.is_some());
-    if args.len() + lent != ty.params().len() || ty.results().len() > 1 {
-        return Ok(Err("component function arity differs".into()));
+    if args.len() + lent != ty.params().len() {
+        return Ok(Err(arguments::mismatch("component function arity differs")));
     }
     let mut lowered = Vec::with_capacity(ty.params().len());
     // The lent resource must still be held for this environment with exactly this type:
@@ -2449,7 +2473,7 @@ async fn invoke(
     }
     let prepared = match arguments::lower(store, &ty, args, lent, ownership)? {
         Ok(prepared) => prepared,
-        Err(error) => return Ok(Err(error)),
+        Err(failed) => return Ok(Err(failed)),
     };
     lowered.extend(prepared.values);
     let accepted = prepared.accepted;
@@ -2557,17 +2581,17 @@ async fn invoke(
             Some(value) if owned_results => {
                 keep(accessor, value, environment, engine.limits.packet_bytes).await?
             }
-            Some(value) => values::lift(value).map_err(|error| error.to_string()),
+            Some(value) => values::lift_result(value).map_err(Failed::lifted),
             None => Ok(Value::Null),
         };
         Ok::<_, wasmtime::Error>(value)
     });
-    let value = tokio::time::timeout(
-        std::time::Duration::from_millis(engine.limits.timeout_ms),
-        call,
-    )
-    .await
-    .map_err(|_| wasmtime::Error::msg("component call timed out"))???;
+    let timeout = std::time::Duration::from_millis(engine.limits.timeout_ms);
+    // A dependency's later deadline makes results after this one: a stream import's producer
+    // times out, its stream ends, and the importer answers.
+    let value = crate::worker::within(timeout, call)
+        .await
+        .ok_or_else(|| wasmtime::Error::msg("component call timed out"))???;
     let value = match value {
         Ok(value) => value,
         Err(error) => return Ok(Err(error)),
@@ -2631,10 +2655,10 @@ async fn keep(
     value: Val,
     environment: u64,
     packet_bytes: usize,
-) -> wasmtime::Result<std::result::Result<Value, String>> {
+) -> wasmtime::Result<std::result::Result<Value, Failed>> {
     let mut resources = Vec::new();
     values::resources(&value, &mut |resource| resources.push(resource));
-    let checked = values::lift_with(value.clone(), &mut |resource| {
+    let checked = values::lift_result_with(value.clone(), &mut |resource| {
         if !resource.owned() {
             return Err(crate::failure("a result cannot return a borrowed resource"));
         }
@@ -2642,7 +2666,7 @@ async fn keep(
     });
     let mut inserted = Vec::new();
     let lifted = checked.and_then(|_| {
-        values::lift_with(value, &mut |resource| {
+        values::lift_result_with(value, &mut |resource| {
             let instance = accessor
                 .with(|mut store| store.data_mut().instances.insert(environment, resource))
                 .map_err(crate::failure)?;
@@ -2669,7 +2693,7 @@ async fn keep(
                     resource.resource_drop_concurrent(accessor).await?;
                 }
             }
-            Ok(Err(error.to_string()))
+            Ok(Err(Failed::lifted(error)))
         }
     }
 }
@@ -2688,6 +2712,7 @@ async fn release_dropped(dropped: &Dropped, (events, scope): &(Sender<Event>, u6
         let packet = json!({"operation": "reference.release", "scope": scope, "id": slot});
         let sent = events
             .send(Event::Host {
+                id: crate::worker::request_id(),
                 packet: packet.to_string(),
                 asynchronous: false,
                 reply,
@@ -2707,12 +2732,13 @@ async fn release_dropped(dropped: &Dropped, (events, scope): &(Sender<Event>, u6
 
 /// Serve one incoming HTTP request as a staged call of the standard handler.
 ///
-/// The same rules as [`invoke`] apply: one `run_concurrent` under the call timeout, authority
-/// bound to the call's task group, the caller's cancellation ending its bodies, and completion
-/// only after physical settlement. The difference is the result: the response head is
-/// published on the call's own channel as soon as the guest returned it, while this Store keeps
-/// driving the guest's body producer. The call completes only when its task group has finished
-/// and the response body was delivered to its end, dropped by the application, or aborted.
+/// Most rules of [`invoke`] apply: one `run_concurrent` under the call timeout, authority bound
+/// to the call's task group, the caller's cancellation ending its bodies, completion only after
+/// physical settlement, and a call that settles after its deadline is a timeout, even before a
+/// late timer runs. The result differs: the response head is published on the call's own
+/// channel as soon as the guest returned it, while this Store keeps driving the guest's body
+/// producer. The call completes only when its task group has finished and the response body was
+/// delivered to its end, dropped by the application, or aborted.
 async fn ingress(
     engine: &Engine,
     store: &mut Store<State>,
@@ -2832,12 +2858,12 @@ async fn ingress(
         release_dropped(&dropped, &releases).await;
         Ok(refused)
     });
-    let outcome = tokio::time::timeout(
+    let outcome = crate::worker::within(
         std::time::Duration::from_millis(engine.limits.timeout_ms),
         call,
     )
     .await
-    .map_err(|_| wasmtime::Error::msg("component call timed out"))
+    .ok_or_else(|| wasmtime::Error::msg("component call timed out"))
     .and_then(|result| result.and_then(|result| result));
     // A terminal failure ends the response with an error before the Store, and the guest's
     // stream with it, is dropped: a truncated body never reads as complete.
@@ -2922,6 +2948,7 @@ mod tests {
                     packet,
                     asynchronous,
                     reply,
+                    ..
                 }) = receive.recv_blocking()
                 else {
                     panic!("expected a host request");

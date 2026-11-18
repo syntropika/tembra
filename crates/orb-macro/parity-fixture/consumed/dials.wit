@@ -1,0 +1,14 @@
+package example:dials@1.0.0;
+
+/// Dials another Orb keeps, one per object: each turn moves a dial on. Every function is
+/// asynchronous, so a native Orb imports the interface as a component does.
+interface dial {
+  /// Turn the dial on by `by` and return where it stands then.
+  turn: async func(by: u32) -> u64;
+
+  /// Where the dial stands.
+  position: async func() -> u64;
+
+  /// Where the dial stands, answered once the call is cancelled.
+  hold: async func() -> u64;
+}

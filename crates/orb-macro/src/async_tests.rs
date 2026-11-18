@@ -1,5 +1,5 @@
 //! Async forwarding preserves the fixed WIT rather than deriving a synchronous replacement.
-use super::{Options, expand};
+use super::{Options, expand, metadata::Metadata};
 use std::path::PathBuf;
 
 const CONTRACT: &str = "package example:events@1.0.0;
@@ -49,7 +49,13 @@ fn expanded(source: &str) -> syn::Result<String> {
         wit: Some(contract().display().to_string()),
         ..Options::default()
     };
-    expand(options, syn::parse_str(source).unwrap()).map(|tokens| tokens.to_string())
+    expand(
+        options,
+        syn::parse_str(source).unwrap(),
+        Ok(Metadata::named("events")),
+        None,
+    )
+    .map(|tokens| tokens.to_string())
 }
 
 #[test]

@@ -1,0 +1,19 @@
+package example:admission@1.0.0;
+
+/// Each contributor may change the admission or block it, in plan order.
+interface guard {
+  /// One admission.
+  record admission {
+    value: s32,
+    blocked: bool,
+  }
+
+  /// What a contributor answers: the admission's fields under another name, which the waterfall
+  /// accepts as the input's type.
+  record verdict {
+    value: s32,
+    blocked: bool,
+  }
+
+  apply: func(input: admission) -> verdict;
+}

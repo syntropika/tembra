@@ -61,6 +61,47 @@ pub fn system_capability(contract: &str) -> Option<SystemCapability> {
     Some(capability)
 }
 
+/// The grant of `Grants` a standard interface a component imports is checked against.
+enum Served {
+    /// The filesystem's types and preopens: a filesystem grant.
+    Filesystem,
+    /// The sockets' types and name lookup: a network grant.
+    Network,
+    /// The HTTP types: an HTTP grant, unless the component serves incoming HTTP, whose handler
+    /// takes and returns them.
+    HttpTypes,
+    /// The HTTP client: an HTTP grant.
+    HttpClient,
+    /// A process-local interface: its system capability.
+    System(SystemCapability),
+}
+
+/// What the standard interface `name` is checked against when a component imports it, or `None`
+/// when no host serves it as an import. Versions are ignored because the upstream linker also
+/// satisfies semver-compatible imports with the pinned implementation.
+fn served(name: &str) -> Option<Served> {
+    let interface = name
+        .split_once('@')
+        .map_or(name, |(interface, _)| interface);
+    Some(match interface {
+        "wasi:filesystem/types" | "wasi:filesystem/preopens" => Served::Filesystem,
+        "wasi:sockets/types" | "wasi:sockets/ip-name-lookup" => Served::Network,
+        "wasi:http/types" => Served::HttpTypes,
+        "wasi:http/client" => Served::HttpClient,
+        other => Served::System(system_capability(&format!("{other}@0.3.0"))?),
+    })
+}
+
+/// Whether a host serves the standard interface `name` as an import of a component, under the
+/// grant `Grants::check_component_import` requires for it: the clocks, the random sources, the
+/// CLI's interfaces, the filesystem's types and preopens, the sockets' types and name lookup and
+/// the HTTP types and client, which the pinned WASI runtime links. An interface a component
+/// exports instead, `wasi:http/handler` or `wasi:cli/run`, an unstable one or one of another
+/// package is served by no host. Versions are ignored, as the check ignores them.
+pub fn host_serves(name: &str) -> bool {
+    served(name).is_some()
+}
+
 /// An HTTP capability grants exact origins, independently of raw socket access.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -83,29 +124,24 @@ impl Grants {
     /// actually imports with at least one function. Checked against the binary, never against
     /// artifact metadata, so a forged type-only claim cannot unlock an ambient capability.
     /// Versions are ignored because the upstream linker also satisfies semver-compatible
-    /// imports with the pinned implementation.
+    /// imports with the pinned implementation; `host_serves` says which interfaces pass.
     ///
     /// `serves_http` states that the same binary exports the incoming HTTP handler. Its request
     /// and response types are then admitted without an outgoing grant; `wasi:http/client` never is.
     pub fn check_component_import(&self, name: &str, serves_http: bool) -> Result<()> {
-        let interface = name
-            .split_once('@')
-            .map_or(name, |(interface, _)| interface);
-        let granted = match interface {
-            "wasi:filesystem/types" | "wasi:filesystem/preopens" => !self.filesystem.is_empty(),
-            "wasi:sockets/types" | "wasi:sockets/ip-name-lookup" => !self.network.is_empty(),
-            "wasi:http/types" => serves_http || !self.http.is_empty(),
-            "wasi:http/client" => !self.http.is_empty(),
-            other => match system_capability(&format!("{other}@0.3.0")) {
-                Some(capability) => self.system.contains(&capability),
-                None => {
-                    return Err(Error::new(
-                        Code::Unsupported,
-                        "wasi_contract",
-                        format!("component imports unsupported standard interface {name}"),
-                    ));
-                }
-            },
+        let Some(served) = served(name) else {
+            return Err(Error::new(
+                Code::Unsupported,
+                "wasi_contract",
+                format!("component imports unsupported standard interface {name}"),
+            ));
+        };
+        let granted = match served {
+            Served::Filesystem => !self.filesystem.is_empty(),
+            Served::Network => !self.network.is_empty(),
+            Served::HttpTypes => serves_http || !self.http.is_empty(),
+            Served::HttpClient => !self.http.is_empty(),
+            Served::System(capability) => self.system.contains(&capability),
         };
         if granted {
             Ok(())

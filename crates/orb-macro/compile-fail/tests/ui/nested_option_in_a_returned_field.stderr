@@ -1,0 +1,5 @@
+error: `Book::last` returns `Option<Found>`, which the runtime refuses in a signature: nested options require a tagged option codec; use an enum of the module with a case for each in place of the option of an option
+  --> tests/ui/nested_option_in_a_returned_field.rs:11:26
+   |
+11 |         pub fn last() -> Option<Found> {
+   |                          ^^^^^^^^^^^^^

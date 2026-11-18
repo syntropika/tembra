@@ -8,6 +8,77 @@ import { DROP } from "./standard-codec.ts";
 import type { ExecutionScope, IngressDispatch, InterpreterPort } from "./types.ts";
 import type { IngressExchange } from "./http-ingress.ts";
 
+/** The guest's question about the refusal of the synchronous call that just failed. */
+const REFUSAL = '{"operation":"refusal"}';
+/** The prefix of the guest's naming of the refusal its callback fails with. */
+const REFUSED = '{"operation":"refused",';
+
+/**
+ * The host's refusals one callback's guest received, by the identity the guest names them by: the
+ * effect that delivered one, or the number this port gave a synchronous one, which the guest asks
+ * for at once. A callback that fails with one unchanged answers it, as the native executor does;
+ * the guest can name only a refusal of the same callback.
+ */
+class Refusals {
+  /** A guest rethrows a refusal it has just received, so only the most recent ones are kept. */
+  static readonly KEPT = 64;
+  readonly #requests = new Map<number, unknown>();
+  readonly #effects = new Map<number, unknown>();
+  #sequence = 0;
+  /** The synchronous request that failed last, if the host refused it. */
+  #last: number | undefined;
+  /** The refusal the guest named as its failure. */
+  named: { error: unknown } | undefined;
+
+  /** Keep one refusal, forgetting the oldest beyond the bound. */
+  static #keep(refusals: Map<number, unknown>, id: number, error: unknown): void {
+    refusals.set(id, error);
+    if (refusals.size > Refusals.KEPT) refusals.delete(refusals.keys().next().value!);
+  }
+
+  /** The host refused a synchronous request. */
+  sync(error: unknown): void {
+    const id = ++this.#sequence;
+    Refusals.#keep(this.#requests, id, error);
+    this.#last = id;
+  }
+
+  /** Another synchronous request was made. */
+  forget(): void {
+    this.#last = undefined;
+  }
+
+  /** The host refused an effect's request. */
+  effect(id: number, error: unknown): void {
+    Refusals.#keep(this.#effects, id, error);
+  }
+
+  /** Answer the guest's question about the synchronous request that just failed. */
+  question(): string {
+    const last = this.#last;
+    this.#last = undefined;
+    return last === undefined ? "null" : String(last);
+  }
+
+  /** Keep the refusal the guest names, if it is one of this callback's. */
+  name(packet: string): void {
+    let named: { effect?: unknown; request?: unknown } = {};
+    try {
+      named = JSON.parse(packet) as typeof named;
+    } catch {
+      // A malformed naming names nothing.
+    }
+    const [refusals, id] =
+      typeof named.effect === "number" && named.request === undefined
+        ? [this.#effects, named.effect]
+        : typeof named.request === "number" && named.effect === undefined
+          ? [this.#requests, named.request]
+          : [undefined, undefined];
+    this.named =
+      refusals && id !== undefined && refusals.has(id) ? { error: refusals.get(id) } : undefined;
+  }
+}
+
 /** Internal delivery journal; core ABI completion encoding ignores these host-owned identities. */
 interface Delivery extends Completion {
   readonly issued: readonly number[] | undefined;
@@ -24,6 +95,8 @@ export class BrowserPort implements InterpreterPort {
   #running = false;
   #closed = false;
   #poisoned = false;
+  /** The host's refusals of the active callback. */
+  #refusals = new Refusals();
   /** Retain per-installation I/O and logging independently of callback authority. */
   constructor(
     readonly timeout: number,
@@ -55,6 +128,7 @@ export class BrowserPort implements InterpreterPort {
   sync(packet: Uint8Array): Uint8Array;
   sync(packet: string | Uint8Array): string | Uint8Array {
     if (packet instanceof Uint8Array) {
+      this.#refusals.forget();
       // Standard calls exist only inside a callback; the revision's host owns their handles.
       if (!this.#scope || !this.standard) throw "No active host scope";
       try {
@@ -65,6 +139,13 @@ export class BrowserPort implements InterpreterPort {
         throw error instanceof Error ? error.message : String(error);
       }
     }
+    // The guest's question about a refusal, and its naming of the one it fails with.
+    if (packet === REFUSAL) return this.#refusals.question();
+    if (packet.startsWith(REFUSED)) {
+      this.#refusals.name(packet);
+      return "null";
+    }
+    this.#refusals.forget();
     try {
       const request = decodeHostRequest(this.bounded(packet));
       if (request.operation === "console") {
@@ -72,7 +153,14 @@ export class BrowserPort implements InterpreterPort {
         return "null";
       }
       if (!this.#scope) throw new Error("No active host scope");
-      return this.bounded(reply(this.#scope.sync(request)));
+      let value: unknown;
+      try {
+        value = this.#scope.sync(request);
+      } catch (error) {
+        this.#refusals.sync(error);
+        throw error;
+      }
+      return this.bounded(reply(value));
     } catch (error) {
       throw error instanceof Error ? error.message : String(error);
     }
@@ -87,7 +175,9 @@ export class BrowserPort implements InterpreterPort {
   private text(outcome: Outcome): string {
     this.#poisoned ||= outcome.interrupted;
     this.bounded(outcome.value);
-    if (!outcome.ok) throw new Error(outcome.value);
+    // A callback that failed with the host's refusal unchanged answers it.
+    if (!outcome.ok)
+      throw this.#refusals.named ? this.#refusals.named.error : new Error(outcome.value);
     return outcome.value;
   }
 
@@ -107,6 +197,7 @@ export class BrowserPort implements InterpreterPort {
       throw new Error("Interpreter is closed or busy");
     this.#running = true;
     this.#scope = scope;
+    this.#refusals = new Refusals();
   }
 
   /** Initialize one revision before issuing any guest execution scope. */
@@ -167,6 +258,7 @@ export class BrowserPort implements InterpreterPort {
   /** Wait between steps in the host, preserving Promise.race and concurrent effect completion. */
   async execute(packet: string, scope: ExecutionScope): Promise<string> {
     this.enter(scope);
+    const refusals = this.#refusals;
     const pending = new Map<number, Promise<Delivery>>();
     const ready: Delivery[] = [];
     let wake: (() => void) | undefined;
@@ -179,17 +271,37 @@ export class BrowserPort implements InterpreterPort {
     // Standard calls observe the caller's cancellation and end with this callback.
     const ended = new AbortController();
     const signal = scope.signal ? combinedSignal(scope.signal, ended.signal) : ended.signal;
-    const timer = setTimeout(() => {
-      this.#poisoned = true;
-      ended.abort();
-      scope.cancel();
-      rejectDeadline(new Error("Interpreter callback exceeded its wall time limit"));
-    }, this.timeout);
+    // The one timeout of this callback, which poisons the port when it first happens.
+    let timeout: Error | undefined;
+    const expired = () => {
+      if (!timeout) {
+        timeout = new Error("Interpreter callback exceeded its wall time limit");
+        this.#poisoned = true;
+        ended.abort();
+        scope.cancel();
+      }
+      return timeout;
+    };
+    const started = performance.now();
+    const timer = setTimeout(() => rejectDeadline(expired()), this.timeout);
+    // An outcome of a guest step after the deadline, a result or a failure, is a timeout too: a
+    // step holds the thread past it and runs the timer late.
+    const step = <V>(operation: () => V): V => {
+      let outcome: { value: V } | { error: unknown };
+      try {
+        outcome = { value: this.guard(operation) };
+      } catch (error) {
+        outcome = { error };
+      }
+      if (performance.now() - started > this.timeout) throw expired();
+      if ("error" in outcome) throw outcome.error;
+      return outcome.value;
+    };
     try {
       const input = this.bounded(packet);
-      let progress = this.guard(() => this.guest!.start(input));
+      let progress = step(() => this.guest!.start(input));
       while (!progress.outcome) {
-        if (this.#poisoned) throw new Error("Interpreter callback exceeded its wall time limit");
+        if (timeout) throw timeout;
         for (const effect of progress.effects) {
           if (pending.size >= 128 || pending.has(effect.id))
             throw new Error("Invalid interpreter effect queue");
@@ -199,7 +311,14 @@ export class BrowserPort implements InterpreterPort {
           const completed = (
             typeof packet === "string"
               ? Promise.resolve()
-                  .then(() => scope.async(decodeAsyncHostRequest(this.bounded(packet))))
+                  .then(() => decodeAsyncHostRequest(this.bounded(packet)))
+                  .then((request) =>
+                    scope.async(request).catch((error: unknown) => {
+                      // The guest may fail with this refusal, by its effect's id.
+                      refusals.effect(effect.id, error);
+                      throw error;
+                    }),
+                  )
                   .then((value) => this.bounded(reply(value)))
               : Promise.resolve().then(async () => {
                   if (!this.standard) throw new Error("No standard WASI host");
@@ -243,10 +362,10 @@ export class BrowserPort implements InterpreterPort {
           if (!response.ok)
             this.standard?.discard({ issued: response.issued ?? [], reads: response.reads });
         }
-        progress = this.guard(() => this.guest!.resume(completed));
+        progress = step(() => this.guest!.resume(completed));
       }
       finished = true;
-      if (this.#poisoned) throw new Error("Interpreter callback exceeded its wall time limit");
+      if (timeout) throw timeout;
       return this.text(progress.outcome);
     } finally {
       clearTimeout(timer);

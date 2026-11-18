@@ -1,0 +1,20 @@
+package example:shelves@1.0.0;
+
+/// A shelf of books, the contract shared by whoever keeps one.
+interface shelf {
+  /// What a book is about.
+  enum topic {
+    fiction,
+    science,
+  }
+
+  /// One book of the shelf.
+  record book {
+    title: string,
+    pages: u32,
+    topic: topic,
+  }
+
+  /// Put a book on the shelf and return how many books it holds.
+  shelve: func(book: book) -> u32;
+}

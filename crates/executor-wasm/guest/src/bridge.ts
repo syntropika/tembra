@@ -10,6 +10,39 @@
   /** Waiters for the moment no host operation of this callback is pending. */
   let idle: (() => void)[] = [];
   let sequence = 0;
+  /**
+   * Each refusal of the host this heap received, by the identity the executor knows it by: the
+   * effect that delivered it, or the synchronous request it refused. A callback that fails with
+   * one unchanged names it, and the executor answers that refusal. A guest can name only a
+   * refusal the host sent it in that callback.
+   */
+  const refusals = new WeakMap<object, { effect: number } | { request: number }>();
+  const hostSync = globalThis.__hostSync;
+  globalThis.__hostSync = (packet: string) => {
+    try {
+      return hostSync(packet);
+    } catch (error) {
+      if (typeof error === "object" && error !== null) {
+        try {
+          // Asked at once: the executor answers about the call that just failed.
+          const request: unknown = JSON.parse(hostSync('{"operation":"refusal"}'));
+          if (typeof request === "number") refusals.set(error, { request });
+        } catch {
+          // A host that keeps no refusals names none.
+        }
+      }
+      throw error;
+    }
+  };
+  globalThis.__tembraNameRefusal = (error: unknown) => {
+    const refusal = typeof error === "object" && error !== null ? refusals.get(error) : undefined;
+    if (!refusal) return;
+    try {
+      hostSync(JSON.stringify({ operation: "refused", ...refusal }));
+    } catch {
+      // Naming never replaces the callback's own failure.
+    }
+  };
   function settle(): void {
     if (pending.size) return;
     const waiters = idle;
@@ -32,7 +65,11 @@
     if (!operation) throw new Error("unknown or completed effect");
     pending.delete(id);
     if (ok) operation.resolve(value);
-    else operation.reject(new Error(String(value)));
+    else {
+      const error = new Error(String(value));
+      refusals.set(error, { effect: id });
+      operation.reject(error);
+    }
     settle();
   };
   globalThis.__tembraStopEffects = () => {
