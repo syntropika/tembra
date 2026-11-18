@@ -118,6 +118,12 @@ wit-bindgen = {{ version = "=0.63.0", default-features = false, features = ["mac
 "#
     );
     std::fs::write(dir.join("Cargo.toml"), manifest).unwrap();
+    // The crate starts from a lockfile of the repository, as the tests of `commands.rs` do: a run
+    // resolves nothing from the registry, and a release published or yanked since cannot change
+    // its result. The runtime fixture of the macro depends on the same facade and `wit-bindgen`.
+    let lockfile =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/runtime-fixture/Cargo.lock");
+    std::fs::copy(lockfile, dir.join("Cargo.lock")).unwrap();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src").join("lib.rs"), CALCULATOR).unwrap();
     build(Some(dir.join("Cargo.toml")), false, None).unwrap();
