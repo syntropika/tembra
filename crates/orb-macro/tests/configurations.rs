@@ -106,6 +106,27 @@ fn a_freestanding_guest_builds_for_wasm32_whatever_links_std() {
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
+/// A `no_std` guest whose `crate = ".."` names no Rust identifier reports the macro's refusal
+/// alone, natively and for wasm32: its runtime prelude names no facade the build cannot resolve,
+/// and still brings the panic handler a freestanding crate needs.
+#[test]
+#[ignore = "runs cargo on a fixture: just test-configurations"]
+fn a_refused_facade_name_reports_the_refusal_alone() {
+    let manifest = fixture("refused-facade/Cargo.toml");
+    for target in [&[][..], &["--target", "wasm32-unknown-unknown"]] {
+        let errors = cargo(&manifest, &[&["build", "--lib"][..], target].concat())
+            .expect_err("the macro refuses the attribute");
+        assert!(
+            errors.contains("`crate` names the facade dependency as the crate's code writes it, a Rust identifier"),
+            "{target:?}\n{errors}"
+        );
+        assert!(
+            errors.contains("due to 1 previous error"),
+            "{target:?}\n{errors}"
+        );
+    }
+}
+
 /// A manifest in TOML 1.1 syntax, with a trailing comma in an inline table, which Cargo reads:
 /// the macro reads it too, for the Orb's name in `orb()`, so the crate builds natively.
 #[test]

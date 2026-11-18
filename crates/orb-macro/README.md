@@ -1667,7 +1667,8 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    goes through the facade's hidden `__freestanding!`, which drops it when the facade links `std`,
    through `host` or `contracts`, on wasm32 too: std brings its own. When the macro
    refuses the module of a `no_std` guest, the prelude comes with its error, which is then the
-   only one the compiler reports;
+   only one the compiler reports; when it refuses a `crate = ".."` that names no Rust identifier,
+   the prelude writes its panic handler without the facade, whose name it does not know;
 4. `generate!({ inline: WIT, world, generate_all, runtime_path })`, the official `wit-bindgen`
    macro, called through the facade's re-export of the version whose rules the macro follows,
    with the bindings' runtime reached there too, and the WIT
