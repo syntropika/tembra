@@ -14,6 +14,8 @@ import {
   type HandleCodec,
 } from "../src/interpreter/standard-codec.ts";
 import type { ExecutionScope } from "../src/interpreter/types.ts";
+import { TembraError } from "../src/error.ts";
+import { Code } from "../src/bridge/identifiers.ts";
 
 /** Control physical completion independently of the caller's observation. */
 function deferred<T>() {
@@ -422,14 +424,102 @@ test("a guest failure before the callback's deadline keeps its own error", async
   await port.close();
 });
 
-test("the guest's question about a refusal and its naming of one answer null, without a scope", () => {
+/** The refusal a dependency answers, with its code. */
+function bridgeClosed(): TembraError {
+  return new TembraError({
+    code: Code.Forbidden,
+    reason: "bridge_closed",
+    message: "the bridge refuses",
+  });
+}
+const failed = (value: string) => ({
+  outcome: { ok: false, value, interrupted: false },
+  effects: [],
+});
+const WAIT = JSON.stringify({ operation: "wait", milliseconds: 1 });
+const ADDRESS = '{"operation":"address"}';
+
+test("a callback that fails with an asynchronous refusal unchanged answers that refusal", async () => {
+  const refusal = bridgeClosed();
+  let named = "";
   const port = new BrowserPort(
     10000,
     async () => {},
     () => {},
   );
-  expect(port.sync('{"operation":"refusal"}')).toBe("null");
-  expect(port.sync('{"operation":"refused","effect":1}')).toBe("null");
-  expect(port.sync('{"operation":"refused","request":7}')).toBe("null");
-  expect(() => port.sync('{"operation":"address"}')).toThrow("No active host scope");
+  port.guest = guest({
+    start: () => ({ effects: [{ id: 1, packet: WAIT }] }),
+    resume: (completed) => {
+      expect(completed[0]?.ok).toBe(false);
+      // The guest runtime names the refusal it rethrows by its effect's id.
+      if (named) port.sync(named);
+      return failed(String(completed[0]?.value));
+    },
+  });
+  const refused = scope({ async: () => Promise.reject(refusal) });
+  named = '{"operation":"refused","effect":1}';
+  await expect(port.execute("{}", refused)).rejects.toBe(refusal);
+  // Its own error with the same text answers that text only.
+  named = "";
+  const forged = await port.execute("{}", refused).catch((error: unknown) => error);
+  expect(forged).not.toBe(refusal);
+  expect(String(forged)).toContain("the bridge refuses");
+  await port.close();
+});
+
+test("a callback that fails with a synchronous refusal unchanged answers that refusal", async () => {
+  const refusal = bridgeClosed();
+  const port = new BrowserPort(
+    10000,
+    async () => {},
+    () => {},
+  );
+  port.guest = guest({
+    start: () => {
+      expect(() => port.sync(ADDRESS)).toThrow("the bridge refuses");
+      // Asked at once, the port names the request it refused.
+      const request = port.sync('{"operation":"refusal"}');
+      expect(port.sync('{"operation":"refusal"}')).toBe("null");
+      port.sync(`{"operation":"refused","request":${request}}`);
+      return failed("forbidden/bridge_closed: the bridge refuses");
+    },
+  });
+  const refused = scope({
+    sync: () => {
+      throw refusal;
+    },
+  });
+  await expect(port.execute("{}", refused)).rejects.toBe(refusal);
+  await port.close();
+});
+
+test("a callback names only a refusal it received itself", async () => {
+  const refusal = bridgeClosed();
+  let calls = 0;
+  const port = new BrowserPort(
+    10000,
+    async () => {},
+    () => {},
+  );
+  port.guest = guest({
+    start: () => {
+      if (++calls === 1) {
+        expect(() => port.sync(ADDRESS)).toThrow("the bridge refuses");
+        port.sync('{"operation":"refusal"}');
+        return { outcome: { ok: true, value: "0", interrupted: false }, effects: [] };
+      }
+      // The refusal of the first callback, and a request never refused.
+      port.sync('{"operation":"refused","request":1}');
+      return failed("forbidden/bridge_closed: the bridge refuses");
+    },
+  });
+  const refused = scope({
+    sync: () => {
+      throw refusal;
+    },
+  });
+  expect(await port.execute("{}", refused)).toBe("0");
+  const stale = await port.execute("{}", refused).catch((error: unknown) => error);
+  expect(stale).not.toBe(refusal);
+  await port.close();
 });

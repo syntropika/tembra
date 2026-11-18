@@ -111,3 +111,116 @@ fn forged_stream_imports_leave_data_ports_usable_after_physical_completion() {
         assert_eq!(engine.resources(), 0);
     }
 }
+
+const RETHROW_WIT: &str = r#"
+package tembra-test:port-rethrow;
+interface probe {
+    later: async func(mode: string) -> u32;
+    now: func(mode: string) -> u32;
+}
+world orb { export probe; }
+"#;
+
+// Each method fails with the embedding's refusal of its host request: unchanged, or as a new
+// error with the same text.
+const RETHROW_SOURCE: &str = r#"
+const fail = (mode, error) => { throw mode === "forged" ? new Error(error.message) : error; };
+globalThis.__tembraOrb = { services: { probe: { methods: {
+    async later(environment, context, mode) {
+        try { await tembra.wait(1); } catch (error) { fail(mode, error); }
+        return 0;
+    },
+    now(environment, context, mode) {
+        try { __hostSync('{"operation":"orb"}'); } catch (error) { fail(mode, error); }
+        return 0;
+    },
+} } } };
+"#;
+
+/// A source Orb served through a platform port that fails with the embedding's refusal of its host
+/// request unchanged, synchronous or asynchronous, answers that refusal's code, as through the
+/// native facade; one that throws its own error with the same text answers the executor's.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn a_rethrown_refusal_keeps_its_code_through_a_platform_port() {
+    let interpreter = std::fs::read(
+        std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE is required"),
+    )
+    .unwrap();
+    let contract = Contract::from_source("port-rethrow.wit", RETHROW_WIT, Some("orb")).unwrap();
+    let artifact = tembra_contracts::Artifact::decode(
+        &contract
+            .source_artifact(RETHROW_SOURCE, "port-rethrow", 1)
+            .unwrap(),
+    )
+    .unwrap();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&interpreter)
+        .unwrap();
+    let port = engine
+        .open_port(
+            &artifact,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+    for packet in [
+        json!({"kind":"create", "environment":1, "service":null}),
+        json!({"kind":"create", "environment":2, "service":"probe"}),
+    ] {
+        port.declare(packet, |_, _| panic!("the probe declares no imports"))
+            .unwrap();
+    }
+    for (method, mode, expected) in [
+        (
+            "later",
+            "rethrown",
+            (tembra::Code::Forbidden, "bridge_closed"),
+        ),
+        (
+            "now",
+            "rethrown",
+            (tembra::Code::Forbidden, "bridge_closed"),
+        ),
+        (
+            "later",
+            "forged",
+            (tembra::Code::Unavailable, "wasm_executor"),
+        ),
+        (
+            "now",
+            "forged",
+            (tembra::Code::Unavailable, "wasm_executor"),
+        ),
+    ] {
+        let function = contract
+            .bind("tembra-test:port-rethrow/probe", method, true)
+            .unwrap();
+        let packet = json!({"kind":"invoke", "environment":2, "function":function, "args":[mode]});
+        let (ticket, events) = port.begin(packet.to_string()).unwrap();
+        let result = loop {
+            match events.receive().unwrap() {
+                PortEvent::Host { reply, .. } => {
+                    reply.complete(Err(tembra::Error::new(
+                        tembra::Code::Forbidden,
+                        "bridge_closed",
+                        "the bridge refuses",
+                    )));
+                }
+                PortEvent::Complete(result) => break result,
+                PortEvent::Ingress(_) => panic!("no incoming HTTP exchange"),
+            }
+        };
+        ticket.finish().unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            expected,
+            "{method} {mode}: {error}"
+        );
+    }
+    port.release(2);
+    port.release(1);
+}

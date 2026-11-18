@@ -13,7 +13,6 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
     rc::Rc,
     sync::{Mutex, mpsc},
     thread,
@@ -99,6 +98,37 @@ impl From<String> for Failed {
 impl From<&str> for Failed {
     fn from(text: &str) -> Self {
         Self::Text(text.to_owned())
+    }
+}
+
+/// The host's refusals of one callback's requests, by request id, which a callback that fails with
+/// one unchanged answers.
+#[derive(Default)]
+pub(crate) struct Refused(std::collections::VecDeque<(u64, tembra::Error)>);
+
+impl Refused {
+    /// A guest rethrows a refusal it has just received: only the most recent ones are kept, so a
+    /// guest that makes refused requests in a loop does not grow this without bound.
+    pub(crate) const KEPT: usize = 64;
+
+    /// Keep the host's refusal of the request `request`.
+    pub(crate) fn insert(&mut self, request: u64, error: tembra::Error) {
+        if self.0.len() == Self::KEPT {
+            self.0.pop_front();
+        }
+        self.0.push_back((request, error));
+    }
+
+    /// The refusal a failure names, if this callback still keeps it.
+    pub(crate) fn answer(
+        &mut self,
+        failed: &std::result::Result<String, Failed>,
+    ) -> Option<tembra::Error> {
+        let Err(Failed::Host { request, .. }) = failed else {
+            return None;
+        };
+        let index = self.0.iter().position(|(id, _)| id == request)?;
+        self.0.remove(index).map(|(_, error)| error)
     }
 }
 
@@ -665,7 +695,7 @@ impl Session {
         };
         // The host's refusals in this declaration, by request. A worker that fails with one
         // unchanged keeps its code, as a native declaration does, such as `invalid/state_version`.
-        let mut refused: HashMap<u64, tembra::Error> = HashMap::new();
+        let mut refused = Refused::default();
         loop {
             match events.recv_blocking().map_err(failure)? {
                 // Carrier events exist only on platform ingress exchanges.
@@ -673,9 +703,7 @@ impl Session {
                 Event::Done(result) => {
                     self.0.io.scope().end_callback();
                     guard.completed = true;
-                    if let Err(Failed::Host { request, .. }) = &result
-                        && let Some(error) = refused.remove(request)
-                    {
+                    if let Some(error) = refused.answer(&result) {
                         return Err(error);
                     }
                     return decode(result);
@@ -761,7 +789,7 @@ impl Session {
         let streams = Cell::new(0_usize);
         // The host's refusals in this callback, by request: a callback that fails with one
         // unchanged answers it, as a native one does.
-        let refused = RefCell::new(HashMap::new());
+        let refused = RefCell::new(Refused::default());
         let release = Release::default();
         let mut pending = FuturesUnordered::new();
         let mut revoked = false;
@@ -820,9 +848,7 @@ impl Session {
                     let cleanup = self.finish_cleanups(&host).await;
                     guard.completed = true;
                     cleanup?;
-                    if let Err(Failed::Host { request, .. }) = &result
-                        && let Some(error) = refused.borrow_mut().remove(request)
-                    {
+                    if let Some(error) = refused.borrow_mut().answer(&result) {
                         return Err(error);
                     }
                     return decode(result);
@@ -978,7 +1004,7 @@ impl Session {
         mut reply: oneshot::Sender<std::result::Result<String, String>>,
         stream: Option<(Arc<Mutex<Pipe>>, StreamSlot<'a>)>,
         release: &'a Release,
-        refused: Option<(u64, &'a RefCell<HashMap<u64, tembra::Error>>)>,
+        refused: Option<(u64, &'a RefCell<Refused>)>,
     ) -> futures::future::LocalBoxFuture<'a, ()> {
         async move {
             let issued = Issued::default();

@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -277,6 +277,7 @@ impl InterpreterPort {
                 done,
                 packet_bytes: self.packet_bytes,
                 scope: self.session.scope(),
+                refused: Arc::default(),
             },
         )
     }
@@ -328,6 +329,9 @@ pub struct PortEvents {
     packet_bytes: usize,
     /// The callback's epoch ends here, before the embedding awaits pending host requests.
     scope: crate::io::CallbackScope,
+    /// The embedding's refusals of this exchange's requests: a callback that fails with one
+    /// unchanged answers it, as through the native facade.
+    refused: Arc<Mutex<worker::Refused>>,
 }
 impl PortEvents {
     /// Revoke pending requests when the embedding JavaScript runtime is invalidated.
@@ -359,24 +363,27 @@ impl PortEvents {
     fn event(&self, event: Event) -> Option<PortEvent> {
         match event {
             Event::Host {
+                id,
                 packet,
                 asynchronous,
                 reply,
-                ..
             } => Some(PortEvent::Host {
                 packet,
                 asynchronous,
                 reply: PortReply {
                     reply,
                     limit: self.packet_bytes,
+                    refused: (id, self.refused.clone()),
                 },
             }),
             Event::Done(result) => {
                 // End this callback's epoch before the embedding drains its pending requests.
                 self.scope.end_callback();
                 self.done.store(true, Ordering::Release);
-                // A refusal the worker made keeps its code, as the native facade answers it.
-                let result = result.map_err(worker::Failed::error);
+                // A refusal the worker made keeps its code, and a callback that failed with the
+                // embedding's refusal answers it, as the native facade does.
+                let named = self.refused.lock().expect("refusals").answer(&result);
+                let result = result.map_err(|failed| named.unwrap_or_else(|| failed.error()));
                 Some(PortEvent::Complete(result))
             }
             Event::Ingress(event) => Some(PortEvent::Ingress(event)),
@@ -411,10 +418,19 @@ impl Drop for PortEvents {
 pub struct PortReply {
     reply: tokio::sync::oneshot::Sender<std::result::Result<String, String>>,
     limit: usize,
+    /// The request's id and its exchange's refusals, which keep a refusal of this request.
+    refused: (u64, Arc<Mutex<worker::Refused>>),
 }
 impl PortReply {
     /// Publish to the original observer. A rejected delivery leaves ownership with the host.
     pub fn complete(self, result: Result<String>) -> bool {
+        if let Err(error) = &result {
+            let (request, refused) = &self.refused;
+            refused
+                .lock()
+                .expect("refusals")
+                .insert(*request, error.clone());
+        }
         self.reply.send(worker::encode(result, self.limit)).is_ok()
     }
 }
