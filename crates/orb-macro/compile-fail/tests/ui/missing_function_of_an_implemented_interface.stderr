@@ -1,0 +1,23 @@
+error[E0046]: not all trait items implemented, missing: `total`
+ --> tests/ui/missing_function_of_an_implemented_interface.rs:7:16
+  |
+1 | / #[tembra::orb(
+2 | |     package = "example:keeping@1.0.0",
+3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters"
+4 | | )]
+  | |__- `total` from trait
+...
+7 |       pub struct Keeper;
+  |                  ^^^^^^ missing `total` in implementation
+
+error[E0046]: not all trait items implemented, missing: `position`
+  --> tests/ui/missing_function_of_an_implemented_interface.rs:16:16
+   |
+ 1 | / #[tembra::orb(
+ 2 | |     package = "example:keeping@1.0.0",
+ 3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters"
+ 4 | | )]
+   | |__- `position` from trait
+...
+16 |       pub struct Cursor;
+   |                  ^^^^^^ missing `position` in implementation

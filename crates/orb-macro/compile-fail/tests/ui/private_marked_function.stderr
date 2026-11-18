@@ -1,0 +1,8 @@
+error[E0624]: associated function `open` is private
+  --> tests/ui/private_marked_function.rs:11:16
+   |
+11 |             fn open() -> Self {
+   |             ---^^^^----------
+   |             |  |
+   |             |  private associated function
+   |             private associated function defined here

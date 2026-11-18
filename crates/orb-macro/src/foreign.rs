@@ -28,9 +28,8 @@ use crate::{
     Candidate, Contribution, Declared, Newtype, Service, Shape, ShapeKind, State, WitResource,
     hook_path, keyed, resource_params, wasi, wit,
 };
-use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet};
-use syn::{Ident, Item, LitStr, Type, ext::IdentExt, spanned::Spanned};
+use syn::{Ident, Item, LitStr, Type, spanned::Spanned};
 use tembra_contracts::guest;
 
 /// How the world holds a consumed interface, which decides what a derived interface names through
@@ -108,23 +107,12 @@ pub(crate) struct Named<'m, 't> {
     pub ident: &'t Ident,
     pub ty: &'t Type,
     pub in_option: bool,
-    /// Whether the path leads into the bindings' own module of the interface's import,
-    /// `self::example::counters::counter::Tally`, rather than through the module the Orb module
-    /// re-exports: the import's copy of the type, whatever that module holds.
-    pub through_import: bool,
-    /// Where the `use` declarations of the modules the path passes lead it, when they do, for the
-    /// errors: "`example::counters::counter::Tally` of the Orb module" for `counter::Tally` after
-    /// `use super::example::counters::counter;`.
-    pub led: Option<String>,
 }
 
 /// Where a type path leads, read as far as `Modules::leads` follows it: what is left of the path,
-/// whether a `use` declaration led it there and the walk stopped in the Orb module, and the module
-/// of the Orb it stopped in, by scope, none once it left the Orb module.
+/// and the module of the Orb it stopped in, by scope, none once it left the Orb module.
 struct Leads {
     segments: Vec<Ident>,
-    used: bool,
-    rooted: bool,
     scope: Option<usize>,
 }
 
@@ -140,21 +128,17 @@ enum Reached<'m, 't> {
 impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
     /// interface imported by key under its view's, and with `context`, the attribute's option, the
-    /// kernel's context interface under `context`. `kernel` says whether a state or a resource
-    /// makes the world import the kernel's interfaces, `package` is the Orb's package, `imports`
+    /// kernel's context interface under `context`. `imports`
     /// are the attribute's literals, read as identities already; `paths` are the Orb's own modules
-    /// and `uses` what each imports, by scope; `own` are the names the Orb module's items take
-    /// where a module takes its name (`own_names`). Another interface under a name already taken is
-    /// an error on it, naming both, and so is a second role of an interface, or one role twice,
-    /// which the world cannot hold, an import of the kernel's context interface beside the option,
-    /// and a plain import of an interface the module implements, which would make the world a
-    /// hook's. An item of the Orb module under the name of a re-exported module, or of a module the
-    /// bindings declare there, is an error on the item, naming both.
+    /// and `uses` what each imports, by scope. Another interface under a name already taken is an
+    /// error on it, naming both, and so is a second role of an interface, or one role twice, which
+    /// the world cannot hold, an import of the kernel's context interface beside the option, and a
+    /// plain import of an interface the module implements, which would make the world a hook's. An
+    /// item of the Orb module under the name of a re-exported module, or of a module the bindings
+    /// declare there, is left to rustc, which reports the name defined twice on the item.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         context: bool,
-        kernel: bool,
-        package: &str,
         imports: &[LitStr],
         keyed: &[String],
         services: &[Service],
@@ -162,7 +146,6 @@ impl Modules {
         declared: &[Declared],
         paths: &[Vec<Ident>],
         uses: &[crate::Uses],
-        own: &[(Ident, &str)],
     ) -> syn::Result<Self> {
         let mut modules = BTreeMap::new();
         // The option keeps no span: its name is taken first, so the error falls on the interface
@@ -279,75 +262,6 @@ impl Modules {
                 ),
             };
             return Err(syn::Error::new(span, message));
-        }
-        // The Orb module holds its items beside the modules it re-exports: one of its own names
-        // taken by a re-exported module would be defined twice, `r#ledger` as `ledger`. The option
-        // keeps no span, so the error falls on the item for every re-export.
-        for (ident, kind) in own {
-            if let Some(reexported) = modules.get(&ident.unraw().to_string()) {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    format!(
-                        "`{ident}` is the name of the Orb module's own {kind} and of the module it re-exports for {}; rename its own {kind}",
-                        reexported.described()
-                    ),
-                ));
-            }
-        }
-        // The bindings declare in the Orb module `exports`, the module of the interfaces the world
-        // exports, and the module of each namespace of the interfaces it imports itself: those the
-        // attribute imports, the consumed hooks, the views and the derived hooks, interfaces of the
-        // Orb's package, and the kernel's for the `context` option, a state or a resource. An
-        // interface the world imports because one of those `use`s it, which the macro does not
-        // read here, may bring another namespace, which the compiler judges.
-        let namespace = |identity: &str| {
-            crate::rust_ident(crate::Identity::of(identity).namespace)
-                .unraw()
-                .to_string()
-        };
-        let mut namespaces: BTreeSet<String> = imports
-            .iter()
-            .map(|literal| namespace(&literal.value()))
-            .chain(
-                contributions
-                    .iter()
-                    .map(|contribution| namespace(&contribution.hook)),
-            )
-            .chain(
-                declared
-                    .iter()
-                    .filter(|declaration| declaration.input.is_none())
-                    .map(|declaration| namespace(&declaration.hook)),
-            )
-            .collect();
-        if !keyed.is_empty()
-            || declared
-                .iter()
-                .any(|declaration| declaration.input.is_some())
-        {
-            namespaces.insert(namespace(package));
-        }
-        if context || kernel {
-            namespaces.insert(namespace(guest::CONTEXT));
-        }
-        let exporting = !services.is_empty() || !contributions.is_empty() || !declared.is_empty();
-        for (ident, kind) in own {
-            let name = ident.unraw().to_string();
-            let holding = if name == "exports" && exporting {
-                "the interfaces the world exports".to_owned()
-            } else if namespaces.contains(&name) {
-                format!(
-                    "the namespace `{name}`, which holds the interfaces the world imports from it"
-                )
-            } else {
-                continue;
-            };
-            return Err(syn::Error::new(
-                ident.span(),
-                format!(
-                    "`{ident}` is the name of the Orb module's own {kind} and of the bindings' module of {holding}; rename its own {kind}"
-                ),
-            ));
         }
         Ok(Self {
             reexported: modules,
@@ -482,40 +396,12 @@ impl Modules {
         if interface.role == Role::Context {
             return None;
         }
-        // The bindings put an interface's import in `namespace::package::interface` and its export
-        // under `exports`: a path that leads through the namespace and the package, not under
-        // `exports`, is the import module's, `self::example::counters::counter::Tally`, or
-        // `counter::Tally` after `use super::example::counters::counter;`.
-        let identity = crate::Identity::of(&interface.identity);
-        let leads = self.leads(&path.path, scope);
-        let through_import = matches!(
-            leads.segments.as_slice(),
-            [before @ .., namespace, package, _, _]
-                if *namespace == crate::rust_ident(identity.namespace)
-                    && *package == crate::rust_ident(identity.package)
-                    && before.last().is_none_or(|exports| exports != "exports")
-        );
-        let led = leads.used.then(|| {
-            let reached = leads
-                .segments
-                .iter()
-                .map(Ident::to_string)
-                .collect::<Vec<_>>()
-                .join("::");
-            if leads.rooted {
-                format!("`{reached}` of the Orb module")
-            } else {
-                format!("`{reached}`")
-            }
-        });
         Some(Named {
             interface,
             module,
             ident: &item.ident,
             ty,
             in_option: false,
-            through_import,
-            led,
         })
     }
 
@@ -532,8 +418,6 @@ impl Modules {
                 .iter()
                 .map(|segment| segment.ident.clone())
                 .collect(),
-            used: false,
-            rooted: false,
             scope: None,
         };
         if path.leading_colon.is_some() {
@@ -572,7 +456,6 @@ impl Modules {
                     continue;
                 }
                 leads.segments = bound.segments.iter().cloned().chain(rest).collect();
-                leads.used = true;
                 continue;
             }
             let mut child = self.paths[at].clone();
@@ -583,14 +466,10 @@ impl Modules {
                 continue;
             }
             match crate::through_globs(&first, at, &self.uses, &self.paths) {
-                crate::Globbed::In(module) => {
-                    scope = Some(module);
-                    leads.used = true;
-                }
+                crate::Globbed::In(module) => scope = Some(module),
                 crate::Globbed::Outside | crate::Globbed::Nowhere => break,
             }
         }
-        leads.rooted = scope == Some(0);
         leads.scope = scope;
         leads
     }
@@ -739,65 +618,6 @@ impl Modules {
     }
 }
 
-/// The names the items of the Orb module take in the type namespace, where a module the Orb module
-/// re-exports takes its own, each with what the item is, for the errors: its sub-modules, types and
-/// traits, its `extern crate`s, and what a `use` imports with `self` (`self_imports`). A plain
-/// `use` may import a function, which takes its name in the value namespace and compiles beside
-/// such a module, and an item under `#[cfg(..)]` is gone where its configuration is off: the
-/// compiler judges those.
-pub(crate) fn own_names(items: &[Item]) -> Vec<(Ident, &'static str)> {
-    let mut names = Vec::new();
-    for item in items {
-        let (attrs, bound) = match item {
-            Item::Mod(item) => (&item.attrs, vec![(item.ident.clone(), "module")]),
-            Item::Struct(item) => (&item.attrs, vec![(item.ident.clone(), "struct")]),
-            Item::Enum(item) => (&item.attrs, vec![(item.ident.clone(), "enum")]),
-            Item::Union(item) => (&item.attrs, vec![(item.ident.clone(), "union")]),
-            Item::Type(item) => (&item.attrs, vec![(item.ident.clone(), "type alias")]),
-            Item::Trait(item) => (&item.attrs, vec![(item.ident.clone(), "trait")]),
-            Item::TraitAlias(item) => (&item.attrs, vec![(item.ident.clone(), "trait alias")]),
-            Item::ExternCrate(item) => {
-                let ident = item
-                    .rename
-                    .as_ref()
-                    .map_or(&item.ident, |(_, rename)| rename);
-                (&item.attrs, vec![(ident.clone(), "`extern crate`")])
-            }
-            Item::Use(item) => {
-                let mut imported = Vec::new();
-                self_imports(&item.tree, None, &mut imported);
-                let bound = imported.into_iter().map(|ident| (ident, "import"));
-                (&item.attrs, bound.collect())
-            }
-            _ => continue,
-        };
-        if !attrs
-            .iter()
-            .any(|attribute| crate::conditional(&attribute.meta))
-        {
-            names.extend(bound.into_iter().filter(|(ident, _)| ident != "_"));
-        }
-    }
-    names
-}
-
-/// Each name a `use` tree binds with `self`, `crate::util::ledger::{self}` or `{self as ledger}`,
-/// which imports from the type namespace alone, whatever the path leads to. `parent` is the name
-/// before the tree in the path.
-fn self_imports(tree: &syn::UseTree, parent: Option<&Ident>, out: &mut Vec<Ident>) {
-    match tree {
-        syn::UseTree::Path(path) => self_imports(&path.tree, Some(&path.ident), out),
-        syn::UseTree::Name(name) if name.ident == "self" => out.extend(parent.cloned()),
-        syn::UseTree::Rename(rename) if rename.ident == "self" => out.push(rename.rename.clone()),
-        syn::UseTree::Group(group) => {
-            for tree in &group.items {
-                self_imports(tree, parent, out);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// The types of a struct's fields, or of the payloads of an enum's cases.
 fn item_types(item: &Item) -> Vec<&Type> {
     match item {
@@ -917,14 +737,12 @@ impl Place<'_> {
 }
 
 /// What the uses of the consumed interfaces are read from: the consumed modules and the packages
-/// the expansion parses, the views of the interfaces imported by key, the module's services,
-/// resources, contributions and declared hooks, the types that enter the WIT with the interface
-/// defining each, and the states with the module types that stay out of the WIT, which a state's
-/// fields may reach.
+/// the expansion parses, the module's services, resources, contributions and declared hooks, the
+/// types that enter the WIT with the interface defining each, and the states with the module types
+/// that stay out of the WIT, which a state's fields may reach.
 pub(crate) struct Reach<'a> {
     pub modules: &'a Modules,
     pub parsed: &'a wit::Parsed,
-    pub views: &'a [keyed::View],
     pub services: &'a [Service],
     pub resources: &'a [WitResource],
     pub contributions: &'a [Contribution],
@@ -947,7 +765,6 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
     let Reach {
         modules,
         parsed,
-        views,
         services,
         resources,
         contributions,
@@ -1056,47 +873,20 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
     for (named, place) in &found {
         let items = &defined[&named.interface.identity];
         // A view's module holds its resource, named after the interface, and re-exports the types
-        // the view uses, whatever else the interface defines.
-        if named.interface.role == Role::Keyed {
-            if *named.ident == view_object(&named.interface.identity) {
-                return Err(syn::Error::new(
-                    named.ty.span(),
-                    format!(
-                        "{} `{}`, an object of {}: such an object belongs to the call that acquired it, so a derived interface takes and returns none",
-                        place.subject(),
-                        named.ident,
-                        named.interface.described()
-                    ),
-                ));
-            }
-            let used = &views
-                .iter()
-                .find(|view| view.target == named.interface.identity)
-                .expect("a view of each interface imported by key")
-                .used;
-            if !used
-                .iter()
-                .any(|name| crate::type_ident(name) == *named.ident)
-            {
-                let listed = if used.is_empty() {
-                    "and they name none".to_owned()
-                } else {
-                    used.iter()
-                        .map(|name| format!("`{}`", crate::type_ident(name)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                return Err(syn::Error::new(
-                    named.ty.span(),
-                    format!(
-                        "{} `{}`, which names no type of the view `{}`: the view of {}, uses only the types the interface's functions name, {listed}",
-                        place.subject(),
-                        named.ident,
-                        named.module,
-                        named.interface.described()
-                    ),
-                ));
-            }
+        // the view uses, whatever else the interface defines: rustc reports another name on the
+        // path.
+        if named.interface.role == Role::Keyed
+            && *named.ident == view_object(&named.interface.identity)
+        {
+            return Err(syn::Error::new(
+                named.ty.span(),
+                format!(
+                    "{} `{}`, an object of {}: such an object belongs to the call that acquired it, so a derived interface takes and returns none",
+                    place.subject(),
+                    named.ident,
+                    named.interface.described()
+                ),
+            ));
         }
         let Some(definition) = items.get(named.ident) else {
             return Err(syn::Error::new(
@@ -1279,28 +1069,9 @@ fn checked<'a>(
     // A path into the bindings' module of the import of an interface the world exports names the
     // import's copy of its types, as the view of its keyed import does, while a derived interface,
     // exported, takes the copy of the export, which the module the Orb module re-exports for an
-    // implemented interface and a contributed hook names; a declared hook's module is the import's
-    // too, which its rule refuses below. The two copies are one type where the export holds none
-    // of its own, for a type the interface `use`s from an interface the world only imports.
-    if named.through_import
-        && definition.copied
-        && let Some(takes) = match interface.role {
-            Role::Implemented => Some("an implemented interface"),
-            Role::Contributed => Some("a hook"),
-            _ => None,
-        }
-    {
-        let module = named.module;
-        let written = named.ty.to_token_stream().to_string().replace(' ', "");
-        let led = named
-            .led
-            .as_ref()
-            .map(|led| format!(", a `use` leading it to {led}"))
-            .unwrap_or_default();
-        return refuse(format!(
-            "{what} of {of}, through the bindings' module of its import: a derived interface takes the types of {takes} from its export, as `{module}::{ident}` names them; `{written}` is the import's{led}"
-        ));
-    }
+    // implemented interface and a contributed hook names: rustc reports the mismatch on the
+    // author's signature. A declared hook's module is the import's too, which its rule refuses
+    // below.
     // The `run` of a hook the module declares, for the errors.
     let run = || {
         declared
@@ -1312,25 +1083,18 @@ fn checked<'a>(
     // The view of an interface the world exports, one the module implements or a hook it
     // contributes to or declares, names the import's copy of the interface's types, while a
     // derived interface, exported, takes the copy of its export, which the implemented interface's
-    // or the contributed hook's module names; a declared hook's module names the import's too. The
-    // two copies are one type where the export holds none of its own.
+    // or the contributed hook's module names, so rustc reports the mismatch on the author's
+    // signature; a declared hook's module names the import's too, so no path names the export's.
+    // The two copies are one type where the export holds none of its own.
     if interface.role == Role::Keyed
         && definition.copied
-        && let Some((module, role)) = modules.exporting(&interface.identity)
+        && let Some((module, Role::Declared)) = modules.exporting(&interface.identity)
     {
         let view = named.module;
-        return match role {
-            Role::Implemented => refuse(format!(
-                "{what} of {of} and implements: a derived interface takes the types of an implemented interface from its export, as `{module}::{ident}` names them; `{view}::{ident}` is the import's"
-            )),
-            Role::Contributed => refuse(format!(
-                "{what} of {of} and contributes to: a derived interface takes the types of a hook from its export, as `{module}::{ident}` names them; `{view}::{ident}` is the import's"
-            )),
-            _ => refuse(format!(
-                "{what} of {of} and declares: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{view}::{ident}`, `{module}::{ident}` and {} are the import's; use a type of the module",
-                run()
-            )),
-        };
+        return refuse(format!(
+            "{what} of {of} and declares: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{view}::{ident}`, `{module}::{ident}` and {} are the import's; use a type of the module",
+            run()
+        ));
     }
     // A WASI interface's type or resource, named through the WASI interface's module or through
     // a consumed interface that `use`s it: the runtime carries neither between Orbs.

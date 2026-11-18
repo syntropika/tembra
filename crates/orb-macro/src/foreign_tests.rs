@@ -401,9 +401,9 @@ fn a_derived_signature_names_a_keyed_imports_types_through_its_view() {
     );
 }
 
-/// A view's module re-exports only the types the interface's functions name: a type of the
-/// interface reached only through a field of one of them is no type of the view, the error listing
-/// those that are, and a type of the interface named like the view's resource is the view's object.
+/// A view's module re-exports only the types the interface's functions name; a type of the
+/// interface reached only through a field of one of them is no type of the view, which rustc reports
+/// on the path, and a type of the interface named like the view's resource is the view's object.
 #[test]
 fn a_derived_signature_names_only_the_types_a_view_uses() {
     let dir = consumed(
@@ -439,14 +439,6 @@ interface counter {
         resolved(&module, &dir).contains("  total: func(tally: tally) -> u32;\n"),
         "{}",
         wit(&module)
-    );
-    let error = refused(
-        keyed(),
-        &routing("pub fn total(count: counter_ref::Count) -> u32 { 0 }"),
-    );
-    assert!(
-        error.contains("`Routing::total` takes `Count`, which names no type of the view `counter_ref`: the view of the interface example:counters/counter@1.0.0, which this module imports by key, uses only the types the interface's functions name, `Tally`"),
-        "{error}"
     );
     let error = refused(
         keyed(),
@@ -545,15 +537,6 @@ fn a_derived_signature_names_an_implemented_interfaces_and_a_hooks_types() {
     let error = refused("pub fn give() -> Option<book::Cursor> { None }");
     assert!(
         error.contains("`Report::give` returns `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0: the runtime returns a resource only from the interface that defines it"),
-        "{error}"
-    );
-    // The world imports a contributed hook itself, so the bindings' import module of the hook
-    // names the import's copy of its types, which the derived interface does not take.
-    let error = refused(
-        "pub fn judged(admission: self::example::ledger::guard::Admission) -> bool { admission.blocked }",
-    );
-    assert!(
-        error.contains("`Report::judged` takes `Admission`, a record of the hook example:ledger/guard@1.0.0, which this module contributes to, through the bindings' module of its import: a derived interface takes the types of a hook from its export, as `guard::Admission` names them; `self::example::ledger::guard::Admission` is the import's"),
         "{error}"
     );
 }
@@ -809,7 +792,8 @@ fn a_declared_hooks_types_stay_out_of_a_derived_signature() {
 /// A hook the module contributes to or declares is exported by the world, as an implemented
 /// interface is, so the view of its keyed import names the import's copy of the hook's types,
 /// which a derived interface, exported, does not take: a derived signature names a contributed
-/// hook's types through the hook's module, the export's copy, and none of a declared hook's.
+/// hook's types through the hook's module, the export's copy, rustc reporting the view's on the
+/// signature, and none of a declared hook's.
 #[test]
 fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
     let dir = consumed("hooked-views", LEDGER);
@@ -829,14 +813,6 @@ fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
     ] {
         assert!(generated.contains(reexport), "{reexport}\n{generated}");
     }
-    let error = refused(
-        keyed("example:ledger/guard@1.0.0"),
-        &keeper("pub fn judged(admission: guard_ref::Admission) -> bool { admission.blocked }"),
-    );
-    assert!(
-        error.contains("`Report::judged` takes `Admission`, a record of the interface example:ledger/guard@1.0.0, which this module imports by key and contributes to: a derived interface takes the types of a hook from its export, as `guard::Admission` names them; `guard_ref::Admission` is the import's"),
-        "{error}"
-    );
     // A declaration beside the view of its hook: the Orb module re-exports the hook's import.
     let gatekeeper = |admit: &str| {
         format!(
@@ -889,7 +865,8 @@ interface gate {
 /// in the hook's export: the bindings alias the hook's import and export, and the view of its
 /// keyed import, to the type of that import, so the bindings' module of the hook's import and the
 /// view name the very type a derived interface takes, and a derived signature names it through
-/// either. A type the hook defines itself has two copies, and the import's is refused.
+/// either. A type the hook defines itself has two copies, and rustc reports the import's on the
+/// signature.
 #[test]
 fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
     let dir = consumed("shared-types", SHARED);
@@ -923,16 +900,6 @@ fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    let error = refused(
-        keyed("example:ledger/guard@1.0.0"),
-        &keeper(
-            "pub fn judged(verdict: self::example::ledger::guard::Verdict) -> bool { verdict.blocked }",
-        ),
-    );
-    assert!(
-        error.contains("`Report::judged` takes `Verdict`, a record of the hook example:ledger/guard@1.0.0, which this module contributes to, through the bindings' module of its import: a derived interface takes the types of a hook from its export, as `guard::Verdict` names them; `self::example::ledger::guard::Verdict` is the import's"),
-        "{error}"
-    );
     // The view of a hook the module declares names the type the hook's import and export alias.
     let module = expanded(
         keyed("example:ledger/gate@1.0.0"),
@@ -1090,256 +1057,6 @@ fn one_interface_in_two_roles_is_refused() {
             let (alone, module) = orb(&imports, &items);
             expanded(alone, &module);
         }
-    }
-}
-
-/// The Orb module re-exports a module for each consumed interface beside its own items, and a
-/// module takes its name in the type namespace: an item of the Orb module there under the same
-/// name, raw or not, a module, a type, an `extern crate` or what a `use` imports with `self`, is an
-/// error on it naming both, beside the `context` option too. A plain `use` may import a function,
-/// which takes its name in the value namespace, and an item under `#[cfg(..)]` is gone where its
-/// configuration is off: the compiler judges those, so they expand, as does a function of that
-/// name and each module without the item.
-#[test]
-fn an_item_named_like_a_reexported_module_is_refused() {
-    let dir = consumed("own-names", LEDGER);
-    let orb = |context: bool, imports: &[&str], items: &str| {
-        let module = format!(
-            "mod keeping {{
-                #[service]
-                pub struct Report;
-                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
-                {items}
-            }}"
-        );
-        let options = Options {
-            context,
-            ..options("example:keeping@1.0.0", Some(&dir), imports)
-        };
-        (options, module)
-    };
-    let book = ["example:ledger/book@1.0.0"];
-    let imported = "the module it re-exports for the imported interface example:ledger/book@1.0.0";
-    let contribution = "#[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
-        pub fn admit(input: guard::Admission) -> guard::Admission { input }";
-    // The option, the imports, the items besides the one named like a re-export, that one, and
-    // the error on it.
-    for (context, imports, items, item, message) in [
-        (
-            true,
-            &[][..],
-            "",
-            "mod context {}",
-            "`context` is the name of the Orb module's own module and of the module it re-exports for the kernel's interface tembra:guest/context@1.0.0, which the `context` option imports; rename its own module".to_owned(),
-        ),
-        (
-            false,
-            &book[..],
-            "",
-            "mod book {}",
-            format!("`book` is the name of the Orb module's own module and of {imported}; rename its own module"),
-        ),
-        (
-            false,
-            &book[..],
-            "",
-            "mod r#book {}",
-            format!("`r#book` is the name of the Orb module's own module and of {imported}; rename its own module"),
-        ),
-        (
-            false,
-            &book[..],
-            "",
-            "use crate::util::book::{self, Entry};",
-            format!("`book` is the name of the Orb module's own import and of {imported}; rename its own import"),
-        ),
-        (
-            false,
-            &book[..],
-            "",
-            "extern crate book;",
-            format!("`book` is the name of the Orb module's own `extern crate` and of {imported}; rename its own `extern crate`"),
-        ),
-        (
-            false,
-            &[][..],
-            contribution,
-            "pub struct guard;",
-            "`guard` is the name of the Orb module's own struct and of the module it re-exports for the hook example:ledger/guard@1.0.0, which this module contributes to; rename its own struct".to_owned(),
-        ),
-    ] {
-        let (options, module) = orb(context, imports, &format!("{items}\n{item}"));
-        let error = refused(options, &module);
-        assert!(error.contains(&message), "{item}\n{error}");
-        let (options, module) = orb(context, imports, items);
-        expanded(options, &module);
-    }
-    for item in [
-        "use crate::util::book;",
-        "#[cfg(test)] mod book {}",
-        "pub fn book() -> u32 { 0 }",
-    ] {
-        let (options, module) = orb(false, &book, item);
-        expanded(options, &module);
-    }
-}
-
-/// The bindings declare in the Orb module `exports`, the module of the interfaces the world
-/// exports, and a module for each namespace of the interfaces it imports: `example` for an
-/// imported example:ledger/book@1.0.0 or a hook of that package, the Orb's own for a view or a
-/// hook it derives, `wasi` for a WASI interface, and `tembra` for the kernel's, which a state or the
-/// `context` option imports. An item of the Orb module under one of those names would be defined
-/// twice, and is an error on it naming both. A namespace the world imports nothing from has no
-/// module, that of an interface the module implements, which the world exports only, or of the
-/// Orb's own package without a view or a derived hook, so an item of its name expands, as does each
-/// module without the item.
-#[test]
-fn an_item_named_like_a_bindings_module_is_refused() {
-    let dir = consumed("bindings-names", LEDGER);
-    let orb = |context: bool, imports: &[&str], keyed: &[&str], items: &str| {
-        let module = format!(
-            "mod keeping {{
-                #[service]
-                pub struct Report;
-                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
-                {items}
-            }}"
-        );
-        let options = Options {
-            context,
-            keyed: keyed.iter().map(|identity| literal(identity)).collect(),
-            ..options("other:keeping@1.0.0", Some(&dir), imports)
-        };
-        (options, module)
-    };
-    let namespace = |name: &str, kind: &str| {
-        format!(
-            "`{name}` is the name of the Orb module's own {kind} and of the bindings' module of the namespace `{}`, which holds the interfaces the world imports from it; rename its own {kind}",
-            name.trim_start_matches("r#")
-        )
-    };
-    let book = ["example:ledger/book@1.0.0"];
-    let contribution = "#[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
-        pub fn admit(input: guard::Admission) -> guard::Admission { input }";
-    let declaration = "#[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
-        pub struct Gate;";
-    let derived = "#[hook(composition = waterfall, input = Admission)]
-        pub struct Gate;
-        pub struct Admission { pub value: i32 }";
-    let state = "#[state] pub struct Balance { pub total: i64 }";
-    // The option, the imports, the keyed imports, the items besides the one named like a module of
-    // the bindings, that one, and the error on it.
-    for (context, imports, keyed, items, item, message) in [
-        (
-            false,
-            &[][..],
-            &[][..],
-            "",
-            "pub mod exports { pub fn csv() -> u32 { 0 } }",
-            "`exports` is the name of the Orb module's own module and of the bindings' module of the interfaces the world exports; rename its own module".to_owned(),
-        ),
-        (
-            false,
-            &book[..],
-            &[][..],
-            "",
-            "pub mod example {}",
-            namespace("example", "module"),
-        ),
-        (
-            false,
-            &[][..],
-            &[][..],
-            contribution,
-            "pub struct example;",
-            namespace("example", "struct"),
-        ),
-        (
-            false,
-            &[][..],
-            &[][..],
-            declaration,
-            "extern crate example;",
-            namespace("example", "`extern crate`"),
-        ),
-        (
-            false,
-            &["wasi:random/random@0.3.0"][..],
-            &[][..],
-            "",
-            "mod r#wasi {}",
-            namespace("r#wasi", "module"),
-        ),
-        (
-            false,
-            &[][..],
-            &["example:ledger/guard@1.0.0"][..],
-            "",
-            "pub enum other {}",
-            namespace("other", "enum"),
-        ),
-        (
-            false,
-            &[][..],
-            &[][..],
-            derived,
-            "pub trait other {}",
-            namespace("other", "trait"),
-        ),
-        (
-            true,
-            &[][..],
-            &[][..],
-            "",
-            "pub type tembra = u32;",
-            namespace("tembra", "type alias"),
-        ),
-        (
-            false,
-            &[][..],
-            &[][..],
-            state,
-            "use crate::util::tembra::{self};",
-            namespace("tembra", "import"),
-        ),
-    ] {
-        let (options, module) = orb(context, imports, keyed, &format!("{items}\n{item}"));
-        let error = refused(options, &module);
-        assert!(error.contains(&message), "{item}\n{error}");
-        let (options, module) = orb(context, imports, keyed, items);
-        expanded(options, &module);
-    }
-    let implemented = "#[service(\"example:ledger/book@1.0.0\")]
-        pub struct Keeper;
-        impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
-        #[wit_resource(service = Keeper)]
-        pub struct Cursor;
-        impl Cursor {
-            #[constructor]
-            pub fn new() -> Self { Cursor }
-        }
-        pub mod example {}";
-    for (imports, items) in [
-        (
-            &[][..],
-            "pub mod example {} pub mod other {} pub mod wasi {} pub mod tembra {}",
-        ),
-        (&[][..], implemented),
-        (
-            &book[..],
-            "use crate::util::exports; use crate::util::example;",
-        ),
-        (
-            &book[..],
-            "pub fn exports() -> u32 { 0 } pub fn example() -> u32 { 0 }",
-        ),
-        (
-            &book[..],
-            "#[cfg(test)] mod exports {} #[cfg(test)] mod example {}",
-        ),
-    ] {
-        let (options, module) = orb(false, imports, &[], items);
-        expanded(options, &module);
     }
 }
 

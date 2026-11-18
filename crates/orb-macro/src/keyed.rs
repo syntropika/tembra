@@ -20,9 +20,6 @@ use wit_parser::{FunctionKind, Resolve, Type, TypeDefKind, TypeOwner};
 /// The acquisition function of every view.
 const GET: &str = "get";
 
-/// The methods `wit-bindgen` gives every imported resource, the view's included, for its handle.
-const HANDLE_METHODS: [&str; 3] = ["handle", "take_handle", "from_handle"];
-
 /// How the attribute writes a keyed import, for the errors.
 const USAGE: &str = "an interface imported by key is written import(\"ns:name/interface@version\", keyed); import = \"ns:name/interface@version\" reaches the provider's main object";
 
@@ -34,9 +31,6 @@ pub(crate) struct View {
     pub name: String,
     /// The view's WIT: an interface of the Orb's package, with its documentation.
     pub text: String,
-    /// The provider interface's types the view `use`s, by their WIT names: those its functions
-    /// name, the only ones the view's module re-exports.
-    pub used: BTreeSet<String>,
 }
 
 /// Read the parenthesized form of the attribute's `import` option,
@@ -121,14 +115,9 @@ pub(crate) fn views(
         if let Some(clash) = clash {
             return Err(syn::Error::new(literal.span(), clash));
         }
-        let (text, used) = view_text(resolve, dir.path(), &target, &name)
+        let text = view_text(resolve, dir.path(), &target, &name)
             .map_err(|message| syn::Error::new(literal.span(), message))?;
-        views.push(View {
-            target,
-            name,
-            text,
-            used,
-        });
+        views.push(View { target, name, text });
     }
     Ok(views)
 }
@@ -142,13 +131,8 @@ pub(crate) fn view_name(target: &str) -> String {
 /// The view's WIT: the provider interface's types its functions name, `use`d from it; a resource
 /// of the provider interface's name whose methods are the interface's functions, each `async`
 /// exactly when the function is, with its documentation; and `get`, the acquisition the kernel
-/// answers with the object of a key or the reason it refused it. With it, the names it `use`s.
-fn view_text(
-    resolve: &Resolve,
-    dir: &Path,
-    target: &str,
-    name: &str,
-) -> Result<(String, BTreeSet<String>), String> {
+/// answers with the object of a key or the reason it refused it.
+fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<String, String> {
     let interface =
         crate::wit::interface(resolve, dir, target).map_err(|error| error.to_string())?;
     let resource = interface.name.clone().unwrap_or_default();
@@ -174,13 +158,6 @@ fn view_text(
                 ));
             }
         };
-        let method = crate::rust_ident(&function.name).to_string();
-        if HANDLE_METHODS.contains(&method.as_str()) {
-            return Err(format!(
-                "{target} cannot be imported by key: `{}` would be the method `{method}` of the objects a keyed import reaches, which their bindings define already for the object's handle",
-                function.name
-            ));
-        }
         // A method takes its object as `self`, and WIT tells names apart by neither case nor
         // dashes: `SELF` is `self` too.
         if let Some(param) = function
@@ -276,7 +253,7 @@ fn view_text(
         escaped(&resource)
     ));
     text.push_str("}\n");
-    Ok((text, spelling.used))
+    Ok(text)
 }
 
 /// Whether a type of an interface is a resource, defined there or `use`d from another interface.

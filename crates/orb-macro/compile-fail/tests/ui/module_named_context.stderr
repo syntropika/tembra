@@ -1,0 +1,18 @@
+error[E0428]: the name `context` is defined multiple times
+  --> tests/ui/module_named_context.rs:12:9
+   |
+ 1 | #[tembra::orb(package = "example:keeping@1.0.0", context)]
+   | ---------------------------------------------------------- previous definition of the module `context` here
+...
+12 |     mod context {}
+   |         ^^^^^^^ `context` redefined here
+   |
+   = note: `context` must be defined only once in the type namespace of this module
+
+error[E0425]: cannot find function `__scoped` in module `self::context`
+ --> tests/ui/module_named_context.rs:1:1
+  |
+1 | #[tembra::orb(package = "example:keeping@1.0.0", context)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `self::context`
+  |
+  = note: this error originates in the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)

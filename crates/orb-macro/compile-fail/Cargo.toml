@@ -11,7 +11,19 @@ description = "Compile-fail cases of the macro's errors: each case is a file und
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
 serde.workspace = true
 serde_json.workspace = true
-wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+# The features of the native fixture's: `async` for an async method or an import by key, and
+# `bitflags` for a consumed flags type.
+wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+  "macros",
+  "realloc",
+  "async",
+  "bitflags",
+] }
+
+# As the native fixture: the native side links the runtime, with `hooks`, so the cases check the
+# code it writes, `orb()` and the clients, as well as the component's.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tembra = { path = "../../tembra", default-features = false, features = ["macros", "host", "hooks"] }
 
 [dev-dependencies]
 trybuild = "1"

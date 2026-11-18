@@ -1,0 +1,64 @@
+error[E0053]: method `relayed` has an incompatible type for trait
+  --> tests/ui/import_copy_of_an_implemented_type.rs:23:30
+   |
+23 |         pub fn relayed(last: counter_ref::Tally) -> u32 {
+   |                              ^^^^^^^^^^^^^^^^^^ expected `Tally`, found `proxy::example::counters::counter::Tally`
+   |
+note: type in trait
+  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+   |
+ 1 | / #[tembra::orb(
+ 2 | |     package = "example:router@1.0.0",
+ 3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+ 4 | |     import("example:counters/counter@1.0.0", keyed)
+ 5 | | )]
+   | |__^
+   = note: expected signature `fn(exports::example::counters::counter::Tally) -> u32`
+              found signature `fn(proxy::example::counters::counter::Tally) -> u32`
+   = note: this error originates in the macro `::tembra::__wit_bindgen::generate` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: change the parameter type to match the trait
+   |
+23 -         pub fn relayed(last: counter_ref::Tally) -> u32 {
+23 +         pub fn relayed(last: exports::example::counters::counter::Tally) -> u32 {
+   |
+
+error[E0308]: `?` operator has incompatible types
+ --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+  |
+1 | / #[tembra::orb(
+2 | |     package = "example:router@1.0.0",
+3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+4 | |     import("example:counters/counter@1.0.0", keyed)
+5 | | )]
+  | |__^ expected `proxy::example::counters::counter::Tally`, found `Tally`
+  |
+  = note: `?` operator cannot convert from `exports::example::counters::counter::Tally` to `proxy::example::counters::counter::Tally`
+  = note: `Tally` and `proxy::example::counters::counter::Tally` have similar names, but are actually distinct types
+note: `Tally` is defined in module `crate::proxy::exports::example::counters::counter` of the current crate
+ --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+  |
+1 | / #[tembra::orb(
+2 | |     package = "example:router@1.0.0",
+3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+4 | |     import("example:counters/counter@1.0.0", keyed)
+5 | | )]
+  | |__^
+note: `proxy::example::counters::counter::Tally` is defined in module `crate::proxy::example::counters::counter` of the current crate
+ --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+  |
+1 | / #[tembra::orb(
+2 | |     package = "example:router@1.0.0",
+3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+4 | |     import("example:counters/counter@1.0.0", keyed)
+5 | | )]
+  | |__^
+note: return type inferred to be `proxy::example::counters::counter::Tally` here
+ --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+  |
+1 | / #[tembra::orb(
+2 | |     package = "example:router@1.0.0",
+3 | |     wit = "../../../../crates/orb-macro/compile-fail/wit/counters",
+4 | |     import("example:counters/counter@1.0.0", keyed)
+5 | | )]
+  | |__^
+  = note: this error originates in the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)

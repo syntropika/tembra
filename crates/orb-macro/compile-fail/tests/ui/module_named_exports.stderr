@@ -1,0 +1,18 @@
+error[E0428]: the name `exports` is defined multiple times
+  --> tests/ui/module_named_exports.rs:12:5
+   |
+ 1 | #[tembra::orb(package = "example:keeping@1.0.0")]
+   | ------------------------------------------------- previous definition of the module `exports` here
+...
+12 |     pub mod exports {}
+   |     ^^^^^^^^^^^^^^^ `exports` redefined here
+   |
+   = note: `exports` must be defined only once in the type namespace of this module
+
+error[E0433]: cannot find `example` in `exports`
+ --> tests/ui/module_named_exports.rs:1:1
+  |
+1 | #[tembra::orb(package = "example:keeping@1.0.0")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ could not find `example` in `exports`
+  |
+  = note: this error originates in the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)

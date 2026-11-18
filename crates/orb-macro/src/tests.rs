@@ -1044,7 +1044,8 @@ const KEEPER: &str = "mod keeper {
 }";
 
 /// An implemented interface is exported by its identity, never derived, and its generated module
-/// is re-exported under its name; the `impl` has exactly the interface's functions.
+/// is re-exported under its name; the `impl` has the interface's functions the service has, and
+/// a function of the service the interface lacks is refused.
 #[test]
 fn a_service_may_implement_a_consumed_interface() {
     let dir = consumed("keeper", LEDGER_WIT);
@@ -1068,11 +1069,17 @@ fn a_service_may_implement_a_consumed_interface() {
         generated.contains("fn add (entry : exports :: example :: ledger :: book :: Entry) -> u32 { Keeper :: add (entry) }"),
         "{generated}"
     );
-    let error = refused_with(
+    // A function the service lacks is left out of the `impl`, for rustc to report on the service.
+    let lacking = orb_with(
         options("example:keeper@1.0.0", Some(&dir)),
         &KEEPER.replace("pub fn total() -> i64 { 0 }", ""),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        !tokens(&lacking).contains("fn total"),
+        "{}",
+        tokens(&lacking)
     );
-    assert!(error.contains("has no `pub fn total`"), "{error}");
     let error = refused_with(
         options("example:keeper@1.0.0", Some(&dir)),
         &KEEPER.replace(
@@ -2322,9 +2329,10 @@ fn a_struct_of_bool_fields_is_a_record() {
     );
 }
 
-/// What else the Orb module names in a sub-module, a state and its fields, a root resource and its
-/// marked functions, and a WIT resource of a service of the Orb module, is visible to it through
-/// every module between them.
+/// What else the Orb module names in a sub-module, a state, a root resource and its marked
+/// functions, and a WIT resource of a service of the Orb module, expands when it is visible to the
+/// Orb module through every module between them. One the Orb module cannot see is left to rustc,
+/// whose error falls on the author's item (the compile-fail cases).
 #[test]
 fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
     let module = |inner: &str, item: &str| {
@@ -2341,36 +2349,14 @@ fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
             }}"
         )
     };
-    for (item, hidden, refused_item) in [
-        (
-            "#[state] VIS struct Balance { VIS total: i64 }",
-            Some(
-                "`Balance` is a state of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, which builds and reads it",
-            ),
-            "`Balance` is a state of a sub-module: make the struct and its fields visible to the Orb module, `pub` or `pub(crate)`, which builds and reads it",
-        ),
-        (
-            "#[resource] VIS struct Counts { pub seen: u32 }
+    for item in [
+        "#[state] VIS struct Balance { VIS total: i64 }",
+        "#[resource] VIS struct Counts { pub seen: u32 }
             impl Counts { #[open] pub fn open() -> Self { Counts { seen: 0 } } }",
-            Some(
-                "`Counts` is a resource of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, which opens and closes it",
-            ),
-            "`Counts` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, which opens and closes it",
-        ),
-        (
-            "#[resource] pub struct Counts { pub seen: u32 }
+        "#[resource] pub struct Counts { pub seen: u32 }
             impl Counts { #[open] VIS fn open() -> Self { Counts { seen: 0 } } }",
-            None,
-            "#[open] on a function of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, which calls it",
-        ),
-        (
-            "#[wit_resource] VIS struct Pen { pub ink: u32 }
+        "#[wit_resource] VIS struct Pen { pub ink: u32 }
             impl Pen { pub fn ink(&self) -> u32 { self.ink } }",
-            Some(
-                "`Pen` is a resource of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, whose service `Passing` hands it out",
-            ),
-            "`Pen` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, whose services hand it out",
-        ),
     ] {
         let item = |vis: &str| item.replace("VIS", vis);
         expanded("example:ledger@1.0.0", &module("pub", &item("pub")));
@@ -2378,18 +2364,12 @@ fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
             "example:ledger@1.0.0",
             &module("pub(super)", &item("pub(crate)")),
         );
-        let error = refused("example:ledger@1.0.0", &module("pub", &item("pub(super)")));
-        assert!(error.contains(refused_item), "{error}");
-        if let Some(hidden) = hidden {
-            let error = refused("example:ledger@1.0.0", &module("", &item("pub")));
-            assert!(error.contains(hidden), "{error}");
-        }
     }
 }
 
 /// The bindings name a WIT resource from its service's module, so a module between the resource
 /// and the Orb module may stay hidden from the Orb module when the service sits inside it; a module
-/// the service's module cannot see is refused, naming the visibility it needs there.
+/// the service's module cannot see is left to rustc, whose error falls on the module.
 #[test]
 fn a_wit_resource_is_named_from_its_service_module() {
     const PEN: &str = "#[wit_resource(service = Walker)]
@@ -2453,11 +2433,6 @@ fn a_wit_resource_is_named_from_its_service_module() {
             }}"
         )
     };
-    let error = refused("example:walk@1.0.0", &above(""));
-    assert!(
-        error.contains("`Pen` is a resource of a sub-module the module `a` cannot see: make the module `c` visible to the module `a`, `pub` or `pub(super)`, whose service `Walker` hands it out"),
-        "{error}"
-    );
     let generated = tokens(&expanded("example:walk@1.0.0", &above("pub(super)")));
     assert!(
         generated.contains("type Pen = super :: a :: b :: c :: Pen ;"),
@@ -6796,28 +6771,6 @@ fn sub_modules_are_refused_when_ill_formed() {
     let error = refused(
         "example:ledger@1.0.0",
         &LEDGER.replace(
-            "        #[state]\n        pub struct Balance { pub total: i64 }\n        #[service]",
-            "        #[state]\n        pub struct Balance { total: i64 }\n        #[service]",
-        ),
-    );
-    assert!(
-        error.contains("make the struct and its fields visible to the Orb module"),
-        "{error}"
-    );
-    let error = refused(
-        "example:ledger@1.0.0",
-        &LEDGER.replace(
-            "        impl Passing {",
-            "        impl Balance { #[validate] fn check(&self) -> Result<(), String> { Ok(()) } }\n        impl Passing {",
-        ),
-    );
-    assert!(
-        error.contains("#[validate] on a function of a sub-module: make it visible"),
-        "{error}"
-    );
-    let error = refused(
-        "example:ledger@1.0.0",
-        &LEDGER.replace(
             "pub fn add(amount: i64) -> i64 { Balance::update(|balance| balance.total += amount).total }",
             "pub fn add(amount: i64) -> Balance { Balance::update(|balance| balance.total += amount) }",
         ),
@@ -9556,10 +9509,6 @@ fn inputs_are_refused_when_ill_formed() {
             "#[inputs] pub struct Lent<T> { pub a: T }",
             "`Lent` is the argument of `orb(..)`: it takes no generic parameter",
         ),
-        (
-            "mod host { #[inputs] struct Lent { pub a: u32 } }",
-            "`Lent` is the inputs of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, whose `orb(..)` takes it",
-        ),
     ] {
         let error = refused(PACKAGE, &format!("mod book {{ {items} {service} }}"));
         assert_eq!(error, message, "{items}");
@@ -9933,10 +9882,6 @@ fn a_root_is_refused_when_ill_formed() {
                 root.replace(" -> tembra::Result<u32> { todo!() }", " {}")
             ),
             shape,
-        ),
-        (
-            format!("{inputs} mod shared {{ {root} }}"),
-            "#[root] on a function of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, which calls it",
         ),
         (
             format!("{inputs} pub struct Shared; impl Shared {{ {root} }}"),

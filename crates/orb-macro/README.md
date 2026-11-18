@@ -648,8 +648,8 @@ The objects of a view carry data: an interface with a resource, or a function ta
 returning a resource handle, a stream or a future, is not imported by key, nor one with a function
 carrying data the runtime refuses in a signature, an option of an option, a map or a list of a
 fixed length. Nor is an interface with a function `handle`, `take-handle` or `from-handle`, which
-every object's bindings define for its handle, or with a parameter `self`, which names a method's
-object. A plain import of the
+every object's bindings define for its handle, the compiler reporting the name defined twice, or
+with a parameter `self`, which names a method's object. A plain import of the
 same interface may stand next to the keyed one, re-exported under the interface's name. An
 interface the module implements may be imported by key, and only so: a proxy serving the interface
 reaches the objects of other providers through the view, and a plain import of it is an error on
@@ -659,10 +659,11 @@ so the elaborated world imports the interface it exports, for the types alone, w
 build` and the kernel tell from a hook, an interface the world imports itself. A derived signature
 names such an interface's types through the implemented interface's module, `counter::Tally`, the
 copy of the export the derived interface takes; the view's `counter_ref::Tally` is the import's,
-which the view's methods take and return, and the macro refuses it in a derived signature. So does
-a view of a hook the module contributes to or declares beside the keyed import, an interface the
-world exports too: a derived signature names a contributed hook's types through the hook's module,
-`guard::Admission`, and none of a declared hook's. A type such an interface `use`s from an
+which the view's methods take and return, and the compiler reports it in a derived signature as a
+type other than the one the derived interface takes. So for a view of a hook the module
+contributes to or declares beside the keyed import, an interface the world exports too: a derived
+signature names a contributed hook's types through the hook's module, `guard::Admission`, and the
+macro refuses those of a declared hook. A type such an interface `use`s from an
 interface the world only imports has no copy of its own: the import, the export and the view all
 name that interface's type, so a derived signature names it through the view and through the
 interface's module alike, a declared hook's included. The
@@ -999,13 +1000,14 @@ to the one service of the Orb. A service's methods are the `pub fn` of the `impl
 module, and a marked function goes in the module of its struct. The bridges the macro generates for
 an item go in the item's module, so the author's types and functions resolve where they were
 written: a WIT resource's bridge, for a derived or an implemented interface, sits next to its struct
-and calls its `#[constructor]` whatever its visibility. What the Orb module itself reaches, a state
-and its fields, a root resource, a WIT resource, a state's `#[validate]` function and a root
+and calls its `#[constructor]` whatever its visibility. What the Orb module itself reaches, a state,
+a root resource, a WIT resource, the `#[inputs]` struct, a state's `#[validate]` function and a root
 resource's `#[open]` and `#[close]` functions, is visible to the Orb module: `pub` or `pub(crate)`
 at any depth, `pub(super)` one level down only. The macro names such an item through every module
 of its path, from the Orb module, and a WIT resource from its service's module, so each of those
 modules is visible there too: a WIT resource may sit below a private module that also holds its
-service. A `pub use` re-exporting the item past a module hidden there does not help. Natively, a
+service. A `pub use` re-exporting the item past a module hidden there does not help. The compiler
+reports an item or a module that is not visible, on the author's line. Natively, a
 WIT resource's `#[constructor]` and static functions are methods of its service's client, written
 in the resource's module: a resource with one sees that client, so its service and each module of
 the service's path are visible to the resource's module, at least `pub(crate)` where it sits

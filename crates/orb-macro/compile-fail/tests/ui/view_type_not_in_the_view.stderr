@@ -1,0 +1,9 @@
+error[E0425]: cannot find type `Count` in module `counter_ref`
+  --> tests/ui/view_type_not_in_the_view.rs:11:42
+   |
+11 |         pub fn total(count: counter_ref::Count) -> u32 {
+   |                                          ^^^^^ not found in `counter_ref`
+   |
+   = help: consider importing one of these items:
+           crate::router::example::counters::counter::Count
+           crate::router::exports::example::router::routing::Count

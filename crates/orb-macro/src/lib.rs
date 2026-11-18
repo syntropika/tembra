@@ -796,7 +796,11 @@ impl Module {
                 let (outer, inner) = placed(&self.attrs);
                 let vis = &self.vis;
                 let unsafety = &self.unsafety;
-                quote! { #(#outer)* #vis #unsafety mod #ident { #(#inner)* #body } }
+                // The author's span, so that rustc's error on a module the generated code cannot
+                // see shows where the author declares it.
+                quote_spanned! { ident.span() =>
+                    #(#outer)* #vis #unsafety mod #ident { #(#inner)* #body }
+                }
             }
             None => body,
         }
@@ -985,61 +989,6 @@ fn reach(vis: &Visibility) -> usize {
     }
 }
 
-/// Whether an item declared `depth` modules below the Orb module is visible to it: `pub` and
-/// `pub(crate)` at any depth, `pub(super)` one level down. Every item of the Orb module itself is.
-fn reaches_root(vis: &Visibility, depth: usize) -> bool {
-    reach(vis) >= depth
-}
-
-/// The visibilities that make an item visible `levels` modules above the one declaring it, for the
-/// errors: `pub(super)` reaches one level up only.
-fn reaching(levels: usize) -> &'static str {
-    if levels == 1 {
-        "`pub` or `pub(super)`"
-    } else {
-        "`pub` or `pub(crate)`"
-    }
-}
-
-/// Refuse an item of the module at `path` when a module of the path is hidden from the module at
-/// `from`, which names the item through every one of them; `seen_from` says where each module of
-/// the path is visible. `what` the item is and `why` that module names it, for the error.
-fn check_seen(
-    path: &[Ident],
-    seen_from: &[usize],
-    from: &[Ident],
-    ident: &Ident,
-    what: &str,
-    why: &str,
-) -> syn::Result<()> {
-    let Some(position) = seen_from
-        .iter()
-        .position(|&depth| !from.starts_with(&path[..depth]))
-    else {
-        return Ok(());
-    };
-    // The hidden module, declared `position` modules below the Orb module, is visible to `from`
-    // once it is visible in the deepest module above both.
-    let shared = from
-        .iter()
-        .zip(path)
-        .take_while(|(named, declared)| named == declared)
-        .count();
-    let viewer = if from.is_empty() {
-        "the Orb module".to_owned()
-    } else {
-        format!("the module {}", describe(from))
-    };
-    Err(syn::Error::new(
-        ident.span(),
-        format!(
-            "`{ident}` is {what} of a sub-module {viewer} cannot see: make the module `{}` visible to {viewer}, {}, {why}",
-            path[position],
-            reaching(position - shared)
-        ),
-    ))
-}
-
 /// Why the native side cannot build an Orb whose WIT resource `resource`, with a constructor or a
 /// static function, sits in the module at `from`, when that module cannot name the native client
 /// of its service, `service`, declared in the module at `path`, where `seen_from` says each module
@@ -1172,19 +1121,6 @@ impl Scan {
                             "calls its functions",
                             false,
                         )?;
-                        // The Orb module's exports take the struct as a type of theirs; the
-                        // modules of its path are checked from its service's module, which names
-                        // it through them, once the service is known.
-                        if !reaches_root(&s.vis, depth) {
-                            return Err(syn::Error::new(
-                                s.ident.span(),
-                                format!(
-                                    "`{}` is a resource of a sub-module: make it visible to the Orb module, {}, whose services hand it out",
-                                    s.ident,
-                                    reaching(depth)
-                                ),
-                            ));
-                        }
                         let mut resource = wit_resource(&s, &attribute)?;
                         resource.scope = scope;
                         self.wit_resources.push(resource);
@@ -1196,25 +1132,6 @@ impl Scan {
                             &s.ident,
                             "opens and closes it",
                             false,
-                        )?;
-                        let why = "which opens and closes it";
-                        if !reaches_root(&s.vis, depth) {
-                            return Err(syn::Error::new(
-                                s.ident.span(),
-                                format!(
-                                    "`{}` is a resource of a sub-module: make it visible to the Orb module, {}, {why}",
-                                    s.ident,
-                                    reaching(depth)
-                                ),
-                            ));
-                        }
-                        check_seen(
-                            &self.modules[scope],
-                            &self.seen_from[scope],
-                            &[],
-                            &s.ident,
-                            "a resource",
-                            why,
                         )?;
                         let mut resource = resource(&s, &attribute)?;
                         resource.scope = scope;
@@ -1232,32 +1149,6 @@ impl Scan {
                             &s.ident,
                             "builds and reads it",
                             false,
-                        )?;
-                        let why = "which builds and reads it";
-                        let fields_visible = match &s.fields {
-                            Fields::Named(fields) => fields
-                                .named
-                                .iter()
-                                .all(|field| reaches_root(&field.vis, depth)),
-                            _ => true,
-                        };
-                        if !reaches_root(&s.vis, depth) || !fields_visible {
-                            return Err(syn::Error::new(
-                                s.ident.span(),
-                                format!(
-                                    "`{}` is a state of a sub-module: make the struct and its fields visible to the Orb module, {}, {why}",
-                                    s.ident,
-                                    reaching(depth)
-                                ),
-                            ));
-                        }
-                        check_seen(
-                            &self.modules[scope],
-                            &self.seen_from[scope],
-                            &[],
-                            &s.ident,
-                            "a state",
-                            why,
                         )?;
                         let mut state = state(&s, &attribute)?;
                         state.scope = scope;
@@ -1333,21 +1224,6 @@ impl Scan {
                         let Some((marker, span)) = carried.pop() else {
                             continue;
                         };
-                        // The Orb module calls a state's rule and a root resource's functions; a
-                        // WIT resource's constructor is called from its own module's bridge, and a
-                        // service's create and local methods from its own module's registration.
-                        if !matches!(marker, Marker::Constructor | Marker::Create | Marker::Local)
-                            && !reaches_root(&function.vis, depth)
-                        {
-                            return Err(syn::Error::new(
-                                span,
-                                format!(
-                                    "#[{}] on a function of a sub-module: make it visible to the Orb module, {}, which calls it",
-                                    marker.name(),
-                                    reaching(depth)
-                                ),
-                            ));
-                        }
                         let self_ty = match &*i.self_ty {
                             Type::Path(path) => path.path.get_ident().cloned(),
                             _ => None,
@@ -1517,16 +1393,6 @@ impl Scan {
                 format!("`{ident}` is the argument of `orb(..)`: it takes no generic parameter"),
             ));
         }
-        let depth = self.modules[scope].len();
-        if !reaches_root(&item.vis, depth) {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!(
-                    "`{ident}` is the inputs of a sub-module: make it visible to the Orb module, {}, whose `orb(..)` takes it",
-                    reaching(depth)
-                ),
-            ));
-        }
         self.inputs = Some(Inputs {
             ident: ident.clone(),
             scope,
@@ -1555,16 +1421,6 @@ impl Scan {
                 format!(
                     "`{}` and `{ident}` are both marked #[root]; an Orb has one, its create",
                     first.ident
-                ),
-            ));
-        }
-        let depth = self.modules[scope].len();
-        if !reaches_root(&function.vis, depth) {
-            return Err(syn::Error::new(
-                attribute.span(),
-                format!(
-                    "#[root] on a function of a sub-module: make it visible to the Orb module, {}, which calls it",
-                    reaching(depth)
                 ),
             ));
         }
@@ -1925,9 +1781,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             "the module needs a body { ... }",
         ));
     };
-    // The names the Orb module's own items take beside the modules it re-exports.
-    let own_names = foreign::own_names(&items);
-
     // Read the module and its sub-modules: marked services, hooks, states and resources,
     // candidate types, and everything else to copy through unchanged.
     let mut scan = Scan {
@@ -2489,14 +2342,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             resource.ident.span(),
             "name the service whose interface defines this resource, #[wit_resource(service = Name)], or put the resource in the service's sub-module",
         )?;
-        check_seen(
-            &modules[resource.scope],
-            &seen_from[resource.scope],
-            &modules[owner.scope],
-            &resource.ident,
-            "a resource",
-            &format!("whose service `{}` hands it out", owner.ident),
-        )?;
         resource.service = Some(owner.ident.clone());
     }
     // The modules the Orb module re-exports for the consumed interfaces name the consumed types and
@@ -2527,8 +2372,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         .collect();
     let consumed_modules = foreign::Modules::new(
         options.context,
-        !states.is_empty() || !resources.is_empty(),
-        &package,
         &options.imports,
         &keyed_imports,
         &services,
@@ -2536,7 +2379,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &declared,
         &modules,
         &uses,
-        &own_names,
     )?
     .with_newtypes(&newtypes);
     for candidate in &mut candidates {
@@ -2785,7 +2627,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     let foreign = foreign::foreign(foreign::Reach {
         modules: &consumed_modules,
         parsed: &parsed,
-        views: &views,
         services: &services,
         resources: &wit_resources,
         contributions: &contributions,
@@ -3035,24 +2876,11 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                     ),
                 ));
             }
-            if implementing(&service.functions, &function.name)?.is_none() {
-                return Err(syn::Error::new(
-                    service.ident.span(),
-                    format!(
-                        "`{}` implements {identity} but has no `pub fn {}`",
-                        service.ident,
-                        rust_ident(&function.name)
-                    ),
-                ));
+            // A missing one is left to rustc, which reports the bridge's `impl` lacking it on
+            // the service.
+            if let Some(own) = implementing(&service.functions, &function.name)? {
+                check_async(own, function)?;
             }
-        }
-        for function in &interface.functions {
-            let own = service
-                .functions
-                .iter()
-                .find(|own| wit::kebab(&own.ident) == function.name)
-                .expect("implemented function checked above");
-            check_async(own, function)?;
         }
         for own in &service.functions {
             if !interface
@@ -3083,48 +2911,28 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 ));
             };
             let ident = &implementation.ident;
-            match (&resource.constructor, &implementation.constructor) {
-                (Some(_), None) => {
-                    return Err(syn::Error::new(
-                        implementation.ident.span(),
-                        format!(
-                            "`{ident}` implements the resource `{}` of {identity} but none of its functions is marked #[constructor]",
-                            resource.name
-                        ),
-                    ));
-                }
-                (
-                    None,
-                    Some(Constructor {
-                        ident: constructor, ..
-                    }),
-                ) => {
-                    return Err(syn::Error::new(
-                        constructor.span(),
-                        format!(
-                            "`{ident}::{constructor}` is marked #[constructor], but the resource `{}` of {identity} has no constructor; the interface is fixed by its WIT",
-                            resource.name
-                        ),
-                    ));
-                }
-                _ => {}
+            // A missing constructor or function is left to rustc, which reports the bridge's
+            // `impl` lacking it on the struct.
+            if let (
+                None,
+                Some(Constructor {
+                    ident: constructor, ..
+                }),
+            ) = (&resource.constructor, &implementation.constructor)
+            {
+                return Err(syn::Error::new(
+                    constructor.span(),
+                    format!(
+                        "`{ident}::{constructor}` is marked #[constructor], but the resource `{}` of {identity} has no constructor; the interface is fixed by its WIT",
+                        resource.name
+                    ),
+                ));
             }
             let own = implementation.methods.iter().chain(&implementation.statics);
             for function in resource.methods.iter().chain(&resource.statics) {
                 // The WIT fixes whether each one is asynchronous.
-                let authored = implementing(own.clone(), &function.name)?;
-                if let Some(authored) = authored {
+                if let Some(authored) = implementing(own.clone(), &function.name)? {
                     check_async(authored, function)?;
-                }
-                if authored.is_none() {
-                    return Err(syn::Error::new(
-                        implementation.ident.span(),
-                        format!(
-                            "`{ident}` implements the resource `{}` of {identity} but has no `pub fn {}`",
-                            resource.name,
-                            rust_ident(&function.name)
-                        ),
-                    ));
                 }
             }
         }
@@ -5003,9 +4811,10 @@ fn implemented_service(
             members
                 .push(quote! { #asynchronous fn #name(#receiver #(#params),*) #result { #body } });
         }
+        // The author's span, so that rustc's error on a function the struct lacks falls on it.
         implementations.push((
             implementation.scope,
-            quote! {
+            quote_spanned! { ident.span() =>
                 impl #local_module::#guest for #ident {
                     #constructor
                     #(#members)*
@@ -5013,7 +4822,8 @@ fn implemented_service(
             },
         ));
     }
-    let bridge = quote! {
+    // The service's span, so that rustc's error on a function it lacks falls on it.
+    let bridge = quote_spanned! { target.span() =>
         impl #module::Guest for #root __TembraExports {
             #(#owned)*
             #(#functions)*
