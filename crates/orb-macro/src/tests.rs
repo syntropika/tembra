@@ -5176,10 +5176,11 @@ fn a_name_resolves_in_the_module_that_writes_it_first() {
 }
 
 /// A type of any shape takes its name in the module declaring it before a resource of another
-/// module: a tuple struct, a unit struct, a type alias or a union named like the resource is
-/// refused as a type of the module that cannot enter the WIT, whichever interface the resource
-/// belongs to. An alias whose path ends in its own name stands for that path, as a `use` of it
-/// does, so an alias of the resource is the resource.
+/// module: a unit struct, a type alias or a union named like the resource is refused as a type of
+/// the module that cannot enter the WIT, whichever interface the resource belongs to, and a tuple
+/// struct of one field is a newtype of the module, which crosses as its field. An alias whose path
+/// ends in its own name stands for that path, as a `use` of it does, so an alias of the resource
+/// is the resource.
 #[test]
 fn a_type_the_module_declares_takes_its_name_before_a_resource() {
     let desk = |declared: &str, owner: &str| {
@@ -5202,8 +5203,17 @@ fn a_type_the_module_declares_takes_its_name_before_a_resource() {
             }}"
         )
     };
+    for owner in ["Sessions", "Tickets"] {
+        let text = resolved(&expanded(
+            "example:desk@1.0.0",
+            &desk("pub struct Token(pub u32);", owner),
+        ));
+        assert!(
+            text.contains("  check: func(token: u32) -> u32;\n"),
+            "a resource of `{owner}`\n{text}"
+        );
+    }
     for declared in [
-        "pub struct Token(pub u32);",
         "pub struct Token;",
         "pub type Token = u32;",
         "pub union Token { pub id: u32 }",
@@ -5303,10 +5313,11 @@ fn a_path_into_another_module_names_its_type_there() {
 }
 
 /// A type the module declares takes its name there wherever the module writes it, as in Rust: a
-/// tuple struct named like another module's record, in a parameter or in a record's field, is
+/// unit struct named like another module's record, in a parameter or in a record's field, is
 /// refused as a type of the module that cannot enter the WIT, not read as that record, and so is
-/// one in a field named like another module's resource. A module that declares no type of the
-/// name, importing it, still takes the other module's type.
+/// one in a field named like another module's resource; a tuple struct of one field so named is
+/// the module's newtype, which crosses as its field. A module that declares no type of the name,
+/// importing it, still takes the other module's type.
 #[test]
 fn a_type_the_module_declares_takes_its_name_before_another_modules_record() {
     let desk = |tickets: &str, shelves: &str| {
@@ -5336,8 +5347,14 @@ fn a_type_the_module_declares_takes_its_name_before_another_modules_record() {
     for (uses, shelves) in [(parameter, record), (field, record), (field, resource)] {
         let error = refused(
             "example:desk@1.0.0",
-            &desk(&format!("pub struct Token(pub u32);\n{uses}"), shelves),
+            &desk(&format!("pub struct Token;\n{uses}"), shelves),
         );
+        let text = resolved(&expanded(
+            "example:desk@1.0.0",
+            &desk(&format!("pub struct Token(pub u64);\n{uses}"), shelves),
+        ));
+        assert!(text.contains("u64"), "{uses}\n{shelves}\n{text}");
+        assert!(!text.contains("record token"), "{uses}\n{shelves}\n{text}");
         assert!(
             error.contains("`Token` is used by a service method or a hook but is not a struct or enum of this module"),
             "{uses}\n{shelves}: {error}"
@@ -5430,6 +5447,33 @@ fn books(uses: &str, signature: &str) -> String {
             }}
         }}"
     )
+}
+
+/// A newtype is the one its name resolves to, whatever another module declares of the name: `a`'s
+/// tuple struct `Id` crosses as its field beside `b`'s record `Id`, which stays out of the WIT, and
+/// so does a second newtype `Id` of `c`, each read through to its own field.
+#[test]
+fn a_newtype_is_the_one_its_name_resolves_to() {
+    let text = resolved(&expanded(
+        "example:desk@1.0.0",
+        "mod desk {
+            pub mod a { pub struct Id(pub String); }
+            pub mod b { pub struct Id { pub n: u32 } }
+            pub mod c {
+                pub struct Id(pub u64);
+                #[service]
+                pub struct Tickets;
+                impl Tickets {
+                    pub fn check(id: super::a::Id, serial: Id) -> bool { true }
+                }
+            }
+        }",
+    ));
+    assert!(
+        text.contains("  check: func(id: string, serial: u64) -> bool;\n"),
+        "{text}"
+    );
+    assert!(!text.contains("record id"), "{text}");
 }
 
 /// A contract type's name resolves as rustc resolves it inside the Orb module, whatever another

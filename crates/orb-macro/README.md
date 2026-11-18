@@ -205,8 +205,9 @@ the error's message (see [Using the Orb natively](#using-the-orb-natively)). A c
 such channel: it could refuse an argument before its method runs only by trapping, which would
 retire its revision for every caller until a reload. So a component reads a newtype through
 `From`, and a newtype that only a refusing `TryFrom` makes is native only: a component build of
-the module fails, with an error that names the newtype and says why. A tuple struct of a name
-another type of the Orb takes stays ordinary Rust, read by that name as before. A newtype holding a
+the module fails, with an error that names the newtype and says why. A newtype is the one its
+name resolves to, as any contract type's, whatever another module declares of the name. A newtype
+holding a
 resource is a compile error; a newtype beside a resource in one parameter or result, and a newtype
 in a derived hook's input, cross as its field there too.
 

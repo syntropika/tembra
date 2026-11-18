@@ -2328,25 +2328,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         .iter()
         .map(|import| wit_identity(import, "an interface imported by key", true))
         .collect::<syn::Result<Vec<String>>>()?;
-    // A newtype is read through to its field, as the WIT spells it, by its name, as the types of
-    // the module are: one whose name another type of the Orb takes stays ordinary Rust.
-    let newtypes: Vec<Newtype> = newtypes
-        .iter()
-        .filter(|newtype| {
-            let ident = &newtype.ident;
-            newtypes
-                .iter()
-                .filter(|other| other.ident == *ident)
-                .count()
-                == 1
-                && !candidates.iter().any(|candidate| candidate.ident == *ident)
-                && !wit_resources
-                    .iter()
-                    .any(|resource| resource.ident == *ident)
-                && !resources.iter().any(|resource| resource.ident == *ident)
-        })
-        .cloned()
-        .collect();
     let consumed_modules = foreign::Modules::new(
         options.context,
         &options.imports,
@@ -4494,14 +4475,16 @@ fn named_newtypes(
             }
         }
     }
-    let mut named: BTreeMap<String, &Ident> = BTreeMap::new();
+    // Each newtype by its name and its module, which the name resolves to (`Modules::newtype`).
+    let mut named: BTreeMap<(String, usize), &Ident> = BTreeMap::new();
     let mut next = 0;
     while let Some(&(newtype, interface)) = pending.get(next) {
         next += 1;
-        if named.contains_key(&newtype.ident.to_string()) {
+        let key = (newtype.ident.to_string(), newtype.scope);
+        if named.contains_key(&key) {
             continue;
         }
-        named.insert(newtype.ident.to_string(), interface);
+        named.insert(key, interface);
         for inner in modules.newtypes_in(&newtype.inner, newtype.scope) {
             pending.push((inner, interface));
         }
@@ -4509,7 +4492,7 @@ fn named_newtypes(
     newtypes
         .iter()
         .filter_map(|newtype| {
-            let interface = named.get(&newtype.ident.to_string())?;
+            let interface = named.get(&(newtype.ident.to_string(), newtype.scope))?;
             Some((newtype.clone(), (*interface).clone()))
         })
         .collect()
