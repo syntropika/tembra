@@ -1077,7 +1077,9 @@ service. A `pub use` re-exporting the item past a module hidden there does not h
 WIT resource's `#[constructor]` and static functions are methods of its service's client, written
 in the resource's module: a resource with one sees that client, so its service and each module of
 the service's path are visible to the resource's module, at least `pub(crate)` where it sits
-elsewhere, or the macro refuses the Orb, naming them. A resource with neither has no such rule. As
+elsewhere. Otherwise the module still builds, as a component and natively, and its `orb()` answers
+an error naming them, so only a host that installs the Orb fails. A resource with neither has no
+such rule. As
 for the other visibility rules, the macro counts a `pub(in ..)` path from `crate` as visible
 everywhere and leaves it to the compiler, which then reports the module or the service the
 resource's module cannot see. A name that

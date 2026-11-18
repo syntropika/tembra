@@ -1054,21 +1054,23 @@ fn check_seen(
     ))
 }
 
-/// Refuse a WIT resource with a constructor or a static function, `resource`, of the module at
-/// `from`, when that module cannot name the native client of its service, `service`, declared in
-/// the module at `path`, where `seen_from` says each module of the path is visible: the native side
-/// writes those functions on the client, in the resource's module. The error names the module of
-/// the path and the service to make visible to it. Writing the calls in the service's module
-/// instead would name the parameter types from there, and raising a visibility would change the
-/// author's code. A `pub(in crate::..)` module or service counts as visible everywhere, as `reach`
-/// leaves it to the compiler, which reports one the resource's module cannot see.
+/// Why the native side cannot build an Orb whose WIT resource `resource`, with a constructor or a
+/// static function, sits in the module at `from`, when that module cannot name the native client
+/// of its service, `service`, declared in the module at `path`, where `seen_from` says each module
+/// of the path is visible: the native side writes those functions on the client, in the resource's
+/// module. The message names the module of the path and the service to make visible to it; the
+/// Orb's `orb()` answers it, and a component build, which needs no client, is never refused for
+/// it. Writing the calls in the service's module instead would name the parameter types from
+/// there, and raising a visibility would change the author's code. A `pub(in crate::..)` module or
+/// service counts as visible everywhere, as `reach` leaves it to the compiler, which reports one
+/// the resource's module cannot see.
 fn client_seen(
     service: &Service,
     path: &[Ident],
     seen_from: &[usize],
     from: &[Ident],
     resource: &Ident,
-) -> syn::Result<()> {
+) -> Result<(), String> {
     let module = seen_from
         .iter()
         .position(|&depth| !from.starts_with(&path[..depth]))
@@ -1085,13 +1087,10 @@ fn client_seen(
     } else {
         format!("the module {}", describe(from))
     };
-    Err(syn::Error::new(
-        resource.span(),
-        format!(
-            "`{resource}` has a constructor or a static function, which a native build writes on the client of its service `{}` in {viewer}, which cannot see it: make {} visible to {viewer}, at least `pub(crate)`",
-            service.ident,
-            hidden.join(" and ")
-        ),
+    Err(format!(
+        "`{resource}` has a constructor or a static function, which a native build writes on the client of its service `{}` in {viewer}, which cannot see it: make {} visible to {viewer}, at least `pub(crate)`",
+        service.ident,
+        hidden.join(" and ")
     ))
 }
 
@@ -1780,6 +1779,9 @@ struct Analysis {
     ident: Ident,
     /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
     modules: Vec<Vec<Ident>>,
+    /// Where each module of each module's path is visible, by scope, as the scan found it: the
+    /// depth of the module of the path it is visible in, and so in every module below that one.
+    seen_from: Vec<Vec<usize>>,
     /// The Orb module and its sub-modules with the author's items that stay theirs: the types
     /// that stay out of the WIT, with the serde derives a state needs of them, the flags that
     /// enter it, with the functions the bindings call on them, and the types the macro converts,
@@ -2521,15 +2523,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             "a resource",
             &format!("whose service `{}` hands it out", owner.ident),
         )?;
-        if resource.constructor.is_some() || !resource.statics.is_empty() {
-            client_seen(
-                owner,
-                &modules[owner.scope],
-                &seen_from[owner.scope],
-                &modules[resource.scope],
-                &resource.ident,
-            )?;
-        }
         resource.service = Some(owner.ident.clone());
     }
     // The modules the Orb module re-exports for the consumed interfaces name the consumed types and
@@ -3263,6 +3256,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         vis: module.vis,
         ident: module.ident,
         modules,
+        seen_from,
         tree,
         services,
         wit_resources,

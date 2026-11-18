@@ -2710,8 +2710,9 @@ fn a_wit_resource_is_named_from_its_service_module() {
 
 /// A WIT resource beside its service, in a module that cannot name the service's client: without
 /// a constructor or a static function, the native side writes nothing of the client there, and the
-/// Orb expands; with one, which the native side writes on the client there, the macro refuses the
-/// Orb, naming the module and the service to make visible, and expands once they are `pub(crate)`.
+/// Orb expands; with one, which the native side writes on the client there, the Orb expands too,
+/// for a component, and natively writes no client there: its `orb()` answers the error naming the
+/// module and the service to make visible. Once they are `pub(crate)`, the native side writes it.
 #[test]
 fn a_resource_whose_module_cannot_see_the_client_has_no_constructor() {
     let module = |nest: &str, service: &str, functions: &str| {
@@ -2748,13 +2749,13 @@ fn a_resource_whose_module_cannot_see_the_client_has_no_constructor() {
         ("", "", "the module `nest` and the service `Tokens`"),
     ] {
         for functions in [constructor, made] {
-            let error = refused(package, &module(nest, service, functions));
-            assert_eq!(
-                error,
-                format!(
-                    "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `tags`, which cannot see it: make {hidden} visible to the module `tags`, at least `pub(crate)`"
-                ),
+            // The module expands, for a component as it is; natively, `orb()` answers why.
+            let refused = expanded(package, &module(nest, service, functions));
+            let message = format!(
+                "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `tags`, which cannot see it: make {hidden} visible to the module `tags`, at least `pub(crate)`"
             );
+            assert_eq!(native(&refused, &[]), unsupported(&message));
+            assert!(native(&refused, &["tags"]).is_empty());
         }
     }
     let visible = expanded(package, &module("pub(crate)", "pub(crate)", constructor));
@@ -2766,8 +2767,8 @@ fn a_resource_whose_module_cannot_see_the_client_has_no_constructor() {
 }
 
 /// Where 1.2's rule stops: a `pub(super)` service seen from a sibling under the same parent, and a
-/// resource in the parent of the service's private module, see the client and expand; a private
-/// service seen from that parent is refused, naming the service.
+/// resource in the parent of the service's private module, see the client and expand; for a private
+/// service seen from that parent, natively, `orb()` answers the error naming the service.
 #[test]
 fn a_resource_sees_the_client_of_a_service_its_parent_holds() {
     let constructor = "#[constructor] pub fn new(n: u32) -> Token { Token { n } }";
@@ -2824,8 +2825,10 @@ fn a_resource_sees_the_client_of_a_service_its_parent_holds() {
         "{den}"
     );
     assert_eq!(
-        refused(package, &parent("")),
-        "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `den`, which cannot see it: make the service `Tokens` visible to the module `den`, at least `pub(crate)`"
+        native(&expanded(package, &parent("")), &[]),
+        unsupported(
+            "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `den`, which cannot see it: make the service `Tokens` visible to the module `den`, at least `pub(crate)`"
+        )
     );
 }
 

@@ -19,6 +19,8 @@
 //! root two private modules down, and a service whose method is named `clone`, as a method of `Rc`.
 //! `burrow` and `warren` hold a service in a module below `den` and its WIT resource in `tags`:
 //! private, for a resource without a constructor, and `pub(crate)`, for one with a constructor.
+//! `sett` holds that layout private with a constructor: it compiles, and its `orb()` answers an
+//! error naming the module to make visible.
 //! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
@@ -2013,6 +2015,50 @@ pub mod warren {
             }
 
             /// The token's number.
+            pub fn number(&self) -> u32 {
+                self.n
+            }
+        }
+    }
+}
+
+/// The layout of `burrow`, with a constructor on the resource: the native side would write it on
+/// the client of `Tokens`, in `tags`, which cannot see the private module `nest`. The module builds
+/// as a component and natively all the same, and its `orb()` answers an error naming the module.
+#[tembra::orb(package = "example:sett@1.0.0")]
+pub mod sett {
+    pub mod den {
+        mod nest {
+            use super::super::tags::Token;
+
+            /// Hands out tokens, from a module only `den` can name.
+            #[service]
+            pub struct Tokens;
+
+            impl Tokens {
+                /// A token numbered `n`.
+                pub fn open(n: u32) -> Token {
+                    Token::new(n)
+                }
+            }
+        }
+    }
+
+    pub mod tags {
+        /// A numbered token, which `Tokens` hands out.
+        #[wit_resource(service = Tokens)]
+        pub struct Token {
+            n: u32,
+        }
+
+        impl Token {
+            /// A token numbered `n`: the resource's constructor.
+            #[constructor]
+            pub fn new(n: u32) -> Token {
+                Token { n }
+            }
+
+            /// The token's number, in the sett.
             pub fn number(&self) -> u32 {
                 self.n
             }
