@@ -176,7 +176,7 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
                 function.name
             ),
             Carried::Unsupported(problem) => format!(
-                "{target} cannot be imported by key: `{}` carries {problem}, which the runtime refuses in a signature",
+                "{target} cannot be imported by key: `{}` carries {problem}",
                 function.name
             ),
         };
@@ -330,7 +330,7 @@ impl Spelling<'_> {
                     }
                     if let Some(problem) = unsupported(self.resolve, ty) {
                         return Err(Carried::Unsupported(format!(
-                            "{problem} in the type `{type_name}`"
+                            "the type `{type_name}`, which the runtime refuses in a signature: {problem}"
                         )));
                     }
                     self.used.insert(type_name.clone());
@@ -361,7 +361,7 @@ impl Spelling<'_> {
                         return Err(match no_data(self.resolve, ty) {
                             Some(problem) => Carried::NoData(problem.to_owned()),
                             None => match unsupported(self.resolve, ty) {
-                                Some(problem) => Carried::Unsupported(problem.to_owned()),
+                                Some(problem) => Carried::Unsupported(refused(&problem)),
                                 None => Carried::NoData("a type without a name".to_owned()),
                             },
                         });
@@ -370,12 +370,17 @@ impl Spelling<'_> {
                 // What the runtime refuses of the type itself, its parts spelled: an option of an
                 // option.
                 if let Some(problem) = unsupported(self.resolve, ty) {
-                    return Err(Carried::Unsupported(problem.to_owned()));
+                    return Err(Carried::Unsupported(refused(&problem)));
                 }
                 spelled
             }
         })
     }
+}
+
+/// A type without a name the runtime refuses in a signature, for the errors.
+fn refused(problem: &str) -> String {
+    format!("a type the runtime refuses in a signature: {problem}")
 }
 
 /// What a type holds anywhere that is no data, if anything, as `no_data_itself` finds it in each

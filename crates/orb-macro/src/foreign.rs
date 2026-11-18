@@ -5,9 +5,9 @@
 //! `#[service("example:ledger/book@1.0.0")]`, `guard::Admission` for a hook the module contributes
 //! to. So does a field or a case of a record or a variant of the module that enters the WIT, and a
 //! parameter names the handle of an imported interface's resource the same way, `texts::Builder`,
-//! itself or in a record or a variant of the module that no derived function returns, as the
-//! runtime moves such a handle anywhere into an argument but returns a resource only from the
-//! interface that defines it.
+//! itself or in a record or a variant of the module. Where the runtime carries a resource, into an
+//! argument but out of a result only from the interface that defines it, is tembra-contracts' rule,
+//! which the expansion checks of the derived WIT afterwards.
 //! The derived interface `use`s each name from the interface that defines it, so its bindings name
 //! the type the author's code holds: a value crosses as it is, with no copy and no conversion.
 //!
@@ -36,8 +36,8 @@ use tembra_contracts::guest;
 /// the interface's module.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
-    /// Another Orb's interface, imported: its types, and its resources' handles as parameters,
-    /// alone or in the records and variants of the module that no derived function returns.
+    /// Another Orb's interface, imported: its types, and its resources' handles, alone or in the
+    /// records and variants of the module.
     Imported,
     /// Another Orb's interface, imported by key, whose view the Orb module re-exports: the
     /// interface's types the view uses, but not the view's objects.
@@ -98,8 +98,7 @@ pub(crate) struct Modules {
 }
 
 /// A name a type path reaches through a consumed interface's module, `greeting::Entry`: the
-/// interface, the module's name, the name and the path itself, for the errors, and whether the
-/// path is the value of an `Option`, `Option<greeting::Entry>`.
+/// interface, the module's name, the name and the path itself, for the errors.
 #[derive(Clone)]
 pub(crate) struct Named<'m, 't> {
     pub interface: &'m Reexported,
@@ -107,7 +106,6 @@ pub(crate) struct Named<'m, 't> {
     /// The type's name in the interface, which a `use` may have imported under another.
     pub ident: Ident,
     pub ty: &'t Type,
-    pub in_option: bool,
 }
 
 /// Where a type path leads once `Modules::resolve` stops following it: what is left of the path.
@@ -441,7 +439,6 @@ impl Modules {
             module,
             ident,
             ty,
-            in_option: false,
         })
     }
 
@@ -669,25 +666,19 @@ impl Modules {
     }
 
     /// Walk a type written in the module `scope`: itself, then the type parameters of a path and
-    /// the elements of a tuple. Each name a consumed interface's module reaches is reported, with
-    /// whether it is the value of an `Option`, which `in_option` says of the type itself, and not
-    /// looked into; so is the name of every other path, before its type parameters, with the
+    /// the elements of a tuple. Each name a consumed interface's module reaches is reported, and
+    /// not looked into; so is the name of every other path, before its type parameters, with the
     /// module of the Orb it resolves in (`resolve`): the type's own name in the module declaring
     /// it, or the writing module for a name of a crate's, such as `Vec`. A name declared outside
     /// the Orb module, or one the macro refuses to follow, is reported with why. A type with a WIT
     /// spelling of its own is not a name of the module: free JSON is not looked into, and a
     /// newtype, which the WIT spells as its field, is walked as its field, in the newtype's
     /// module, once.
-    fn walk<'m, 't>(
-        &'m self,
-        ty: &'t Type,
-        scope: usize,
-        in_option: bool,
-        visit: &mut impl FnMut(Reached<'m, 't>),
-    ) where
+    fn walk<'m, 't>(&'m self, ty: &'t Type, scope: usize, visit: &mut impl FnMut(Reached<'m, 't>))
+    where
         'm: 't,
     {
-        self.walk_within(ty, scope, in_option, visit, &mut Vec::new());
+        self.walk_within(ty, scope, visit, &mut Vec::new());
     }
 
     /// `walk`, inside the fields of the newtypes `within`, which are not read again.
@@ -695,14 +686,13 @@ impl Modules {
         &'m self,
         ty: &'t Type,
         scope: usize,
-        in_option: bool,
         visit: &mut impl FnMut(Reached<'m, 't>),
         within: &mut Vec<&'m Ident>,
     ) where
         'm: 't,
     {
         if let Some(named) = self.named(ty, scope) {
-            visit(Reached::Consumed(Named { in_option, ..named }));
+            visit(Reached::Consumed(named));
             return;
         }
         if wit::free_json(ty) {
@@ -711,7 +701,7 @@ impl Modules {
         if let Some(newtype) = self.newtype(ty, scope) {
             if !within.contains(&&newtype.ident) {
                 within.push(&newtype.ident);
-                self.walk_within(&newtype.inner, newtype.scope, in_option, visit, within);
+                self.walk_within(&newtype.inner, newtype.scope, visit, within);
                 within.pop();
             }
             return;
@@ -759,14 +749,14 @@ impl Modules {
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
                         if let syn::GenericArgument::Type(ty) = argument {
-                            self.walk_within(ty, scope, segment.ident == "Option", visit, within);
+                            self.walk_within(ty, scope, visit, within);
                         }
                     }
                 }
             }
             Type::Tuple(tuple) => {
                 for element in &tuple.elems {
-                    self.walk_within(element, scope, false, visit, within);
+                    self.walk_within(element, scope, visit, within);
                 }
             }
             _ => {}
@@ -791,7 +781,7 @@ impl Modules {
     /// the macro cannot follow anywhere when `unfollowed`.
     fn refused(&self, ty: &Type, scope: usize, unfollowed: bool) -> syn::Result<()> {
         let mut refused = None;
-        self.walk(ty, scope, false, &mut |reached| {
+        self.walk(ty, scope, &mut |reached| {
             if let Reached::Refused(error, anywhere) = reached
                 && (anywhere || !unfollowed)
             {
@@ -810,8 +800,7 @@ impl Modules {
     }
 
     /// Each name a type written in the module `scope` reaches through a consumed interface's
-    /// module: itself, or inside the type parameters of a path and the elements of a tuple, each
-    /// with whether it is the value of an `Option`.
+    /// module: itself, or inside the type parameters of a path and the elements of a tuple.
     pub(crate) fn named_in<'m, 't>(
         &'m self,
         ty: &'t Type,
@@ -820,7 +809,7 @@ impl Modules {
     ) where
         'm: 't,
     {
-        self.walk(ty, scope, false, &mut |reached| {
+        self.walk(ty, scope, &mut |reached| {
             if let Reached::Consumed(named) = reached {
                 out.push(named);
             }
@@ -841,7 +830,7 @@ impl Modules {
     /// the module a path leads into, `sessions` for `super::sessions::Token` written in `tickets`,
     /// or the writing module for a bare name, where the name resolves as in Rust.
     pub(crate) fn references_in(&self, ty: &Type, scope: usize, out: &mut Vec<(Ident, usize)>) {
-        self.walk(ty, scope, false, &mut |reached| {
+        self.walk(ty, scope, &mut |reached| {
             if let Reached::Module(ident, module) = reached
                 && !wit::BUILTIN.contains(&ident.to_string().as_str())
             {
@@ -957,11 +946,10 @@ enum Place<'a> {
         interface: &'a Ident,
     },
     /// A field or a case of `shape`, a type of the module that the interface of the service
-    /// `interface` defines, and the derived function whose result reaches `shape`, if one does.
+    /// `interface` defines.
     Field {
         shape: &'a Ident,
         interface: &'a Ident,
-        returned: Option<Returning<'a>>,
     },
     /// The input of the derived hook `hook`, or a field or a case of the type `via` it reaches.
     Input {
@@ -973,15 +961,6 @@ enum Place<'a> {
         state: &'a Ident,
         via: Option<Ident>,
     },
-}
-
-/// A derived function whose result reaches a type of the module: its name, its result type, where
-/// the error points, and the type of the module the result names, which holds the reached type.
-#[derive(Clone, Copy)]
-struct Returning<'a> {
-    function: &'a str,
-    result: &'a Type,
-    via: &'a Ident,
 }
 
 impl Place<'_> {
@@ -1026,8 +1005,8 @@ pub(crate) struct Reach<'a> {
 /// once every item a consumed interface's module names is checked where it is named. A derived
 /// function, a constructor and a type of the module that enters the WIT name the data types of an
 /// interface imported, plainly or by key, or implemented, or of a hook the module contributes to,
-/// and a parameter the handles of an imported interface's resources, itself or in a type of the
-/// module that no derived function returns; a derived hook's input names none; a state names the
+/// and the handles of their resources, which tembra-contracts' check of the derived WIT refuses
+/// where the runtime does not carry them; a derived hook's input names none; a state names the
 /// data types that `serde` can write. Nothing is read from the consumed packages when nothing
 /// names them.
 pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Foreign>>> {
@@ -1066,7 +1045,6 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         .iter()
         .filter(|declaration| declaration.input.is_some())
         .collect();
-    let returned = returned(&functions, shapes, modules);
     for shape in shapes {
         let Some(interface) = placement.get(&shape.ident.to_string()) else {
             continue;
@@ -1080,9 +1058,6 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             None => Place::Field {
                 shape: &shape.ident,
                 interface,
-                returned: returned
-                    .get(&(shape.ident.to_string(), shape.scope))
-                    .copied(),
             },
         };
         for ty in shape_types(shape) {
@@ -1218,59 +1193,6 @@ fn found_in<'a, 'p>(
     found.extend(named.into_iter().map(|named| (named, place.clone())));
 }
 
-/// The types of the module the results of the derived functions reach, by name and by the module
-/// declaring each, with the first function returning it: the types a result names, itself or
-/// inside its containers, and those their fields and cases reach in turn, as the runtime looks
-/// into a result. A name resolves to the type of the module that declares it
-/// (`Modules::references_in`).
-fn returned<'f>(
-    functions: &'f [resource_params::Derived<'f>],
-    shapes: &'f [Shape],
-    modules: &Modules,
-) -> BTreeMap<(String, usize), Returning<'f>> {
-    let mut returned: BTreeMap<(String, usize), Returning<'f>> = BTreeMap::new();
-    for function in functions {
-        let Some(result) = function.result else {
-            continue;
-        };
-        let mut named = Vec::new();
-        modules.references_in(result, function.scope, &mut named);
-        let mut pending: Vec<(Ident, usize, Option<&'f Ident>)> = named
-            .into_iter()
-            .map(|(ident, scope)| (ident, scope, None))
-            .collect();
-        while let Some((ident, scope, via)) = pending.pop() {
-            let named = shapes
-                .iter()
-                .filter(|shape| shape.ident == ident)
-                .map(|shape| (shape.scope, shape));
-            let Some(shape) = crate::declared_in(named, scope) else {
-                continue;
-            };
-            let key = (ident.to_string(), shape.scope);
-            if returned.contains_key(&key) {
-                continue;
-            }
-            let via = via.unwrap_or(&shape.ident);
-            returned.insert(
-                key,
-                Returning {
-                    function: &function.name,
-                    result,
-                    via,
-                },
-            );
-            pending.extend(
-                shape
-                    .references
-                    .iter()
-                    .map(|(reference, scope)| (reference.clone(), *scope, Some(via))),
-            );
-        }
-    }
-    returned
-}
-
 /// Check one item a consumed interface's module names where it is named, and return the service
 /// whose derived interface `use`s it, if one does. `dependency` is an interface the world exports
 /// that the consumed interface depends on, if there is one.
@@ -1329,10 +1251,10 @@ fn checked<'a>(
             "{what} of {of}: a derived hook's input holds the types of the module, not those of a consumed interface"
         ));
     }
-    let (interface_of, returned) = match place {
-        Place::Param { interface, .. } => (*interface, false),
-        Place::Result { interface, .. } => (*interface, true),
-        Place::Field { interface, .. } => (*interface, false),
+    let interface_of = match place {
+        Place::Param { interface, .. }
+        | Place::Result { interface, .. }
+        | Place::Field { interface, .. } => *interface,
         Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
     };
     // A path into the bindings' module of the import of an interface the world exports names the
@@ -1404,44 +1326,12 @@ fn checked<'a>(
                 run()
             ))
         }
-        // The runtime moves an owned handle of an imported interface anywhere into an argument,
-        // in a record or a variant of the module too, and returns a resource only from the
-        // interface that defines it, wherever the result holds it.
-        (Role::Imported, wit::Kind::Resource) => match place {
-            Place::Param { .. } | Place::Field { returned: None, .. } => Ok(Some(interface_of)),
-            Place::Result { .. } => refuse(format!(
-                "{what} of {of}: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle but returns none"
-            )),
-            Place::Field {
-                returned: Some(returning),
-                ..
-            } => {
-                let Returning {
-                    function,
-                    result,
-                    via,
-                } = returning;
-                Err(syn::Error::new(
-                    result.span(),
-                    format!(
-                        "`{function}` returns `{via}`, which holds `{ident}`, {what} of {of}: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none"
-                    ),
-                ))
-            }
-            Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
-        },
-        (Role::Implemented | Role::Contributed | Role::Declared, wit::Kind::Resource)
-            if returned =>
-        {
-            refuse(format!(
-                "{what} of {of}: the runtime returns a resource only from the interface that defines it"
-            ))
-        }
-        (Role::Implemented | Role::Contributed | Role::Declared, wit::Kind::Resource) => {
-            refuse(format!(
-                "{what} of {of}: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"
-            ))
-        }
+        // Where the runtime carries the handle is tembra-contracts' check of the derived WIT,
+        // `check_profile`'s.
+        (
+            Role::Imported | Role::Implemented | Role::Contributed | Role::Declared,
+            wit::Kind::Resource,
+        ) => Ok(Some(interface_of)),
         (Role::Keyed, wit::Kind::Resource) => refuse(format!(
             "{what} of {of}: the objects of a view carry data, so an interface with a resource is not imported by key"
         )),
@@ -1461,10 +1351,7 @@ fn checked<'a>(
                 ..
             },
         ) => refuse(format!(
-            "{what} of {of} that holds {problem}, which the runtime refuses in a signature"
-        )),
-        (_, wit::Kind::Type { option: true, .. }) if named.in_option => refuse(format!(
-            "{what} of {of}, in an `Option`, and `{ident}` is an option itself: an option of an option, which the runtime refuses in a signature; use an enum of the module with a case for each"
+            "{what} of {of}, which the runtime refuses in a signature: {problem}"
         )),
         (_, wit::Kind::Type { .. }) => Ok(Some(interface_of)),
     }

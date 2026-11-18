@@ -54,6 +54,8 @@ pub use permissions::{
     system_capability,
 };
 pub use port::envelope;
+#[cfg(feature = "authoring")]
+pub use prepare::check_value_type;
 pub use references::ReferenceBinding;
 pub use resource_profile::ResourceSignature;
 pub use roles::ServicePolicy;

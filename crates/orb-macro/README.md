@@ -827,12 +827,9 @@ the type that names it:
   the interface's functions name, the error listing those;
 - a type that holds a resource handle, a stream or a future anywhere: a derived interface takes the
   consumed types that carry data only;
-- a type that holds an option of an option, a map or a list of a fixed length anywhere, and an
-  `Option` of a type that is an option, `Option<catalog::Opt>` for a `type opt = option<u32>`, all
-  of which the runtime refuses in a signature;
-- a resource of the interface, but an imported interface's handle taken as a parameter, alone or in
-  an option, a result, a list or a tuple ([taking a resource](#taking-a-resource)), and an object
-  of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
+- a type that holds an option of an option, a map or a list of a fixed length anywhere, which the
+  runtime refuses in a signature;
+- an object of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
 - a type of a hook the module declares from a consumed package, whose `run` speaks the import's
   types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook)), but
   one the hook `use`s from an interface the world only imports, which both name;
@@ -855,6 +852,14 @@ the type that names it:
   one, which the bindings generate without `serde`'s derives;
 - a type, a resource or a function of the module named like a consumed type in a derived interface
   that knows both, since an interface's types and functions share one namespace.
+
+A derived function whose signature the runtime refuses is a compile error on the function, from the
+check of tembra-contracts that `cargo tembra build` runs on the component too: an `Option` of a
+consumed type that is an option, `Option<catalog::Opt>` for a `type opt = option<u32>`, which is an
+option of an option, and a resource the function cannot carry, an implemented interface's resource
+anywhere, or an imported interface's handle in its result, alone or in a type of the module; an
+imported interface's handle taken as a parameter, alone or in an option, a result, a list, a tuple
+or a type of the module, is carried ([taking a resource](#taking-a-resource)).
 
 The runtime fixture's `readings` service takes and returns the record of an imported interface, and
 its `library` service the records of an interface it implements; see
@@ -1725,8 +1730,8 @@ the version whose rules the macro follows, and the generated code reaches it the
   requires a dedicated interpreter value adapter"). No `stream` or `future`. `()` is nothing only
   as a function's result or a side of a `Result`, which WIT then leaves out: `Result<T, ()>` is
   `result<t>`, `Result<(), E>` is `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has
-  no equivalent, use `bool`. `Option<Option<T>>` is refused, an option of an option, which the
-  runtime refuses in a signature: use an enum of the module with a case for each.
+  no equivalent, use `bool`. A function carrying `Option<Option<T>>`, an option of an option, is
+  refused, as the runtime refuses it in a signature: use an enum of the module with a case for each.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it. A state is a
   struct of the module, which holds a consumed package's records as they are but is none of them.
 - A type that enters the WIT is replaced by the type the bindings generate, which takes the

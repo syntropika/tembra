@@ -19,6 +19,11 @@ use syn::{Ident, Type, spanned::Spanned};
 /// it is written in, by scope.
 pub(crate) struct Derived<'a> {
     pub name: String,
+    /// The function's name in the WIT: `[constructor]<resource>`, `[method]<resource>.<name>` and
+    /// `[static]<resource>.<name>` for a resource's.
+    pub wit_name: String,
+    /// Where the function is written, for the errors.
+    pub span: proc_macro2::Span,
     pub interface: &'a Ident,
     pub params: &'a [(Ident, Type, String)],
     pub result: Option<&'a Type>,
@@ -32,14 +37,19 @@ pub(crate) fn derived<'a>(
     resources: &'a [WitResource],
 ) -> Vec<Derived<'a>> {
     let mut functions = Vec::new();
-    let entry =
-        |owner: &Ident, interface: &'a Ident, function: &'a Function, scope: usize| Derived {
-            name: format!("{owner}::{}", function.ident),
-            interface,
-            params: &function.params,
-            result: function.result.as_ref().map(|(ty, _)| ty),
-            scope,
-        };
+    let entry = |owner: &Ident,
+                 interface: &'a Ident,
+                 function: &'a Function,
+                 wit_name: String,
+                 scope: usize| Derived {
+        name: format!("{owner}::{}", function.ident),
+        wit_name,
+        span: function.ident.span(),
+        interface,
+        params: &function.params,
+        result: function.result.as_ref().map(|(ty, _)| ty),
+        scope,
+    };
     for service in services
         .iter()
         .filter(|service| service.implements.is_none())
@@ -49,6 +59,7 @@ pub(crate) fn derived<'a>(
                 &service.ident,
                 &service.ident,
                 function,
+                wit::kebab(&function.ident),
                 service.scope,
             ));
         }
@@ -58,12 +69,24 @@ pub(crate) fn derived<'a>(
         .filter(|resource| !resource.implemented(services))
     {
         let interface = resource.service.as_ref().expect("resolved owner");
-        for function in resource.methods.iter().chain(&resource.statics) {
-            functions.push(entry(&resource.ident, interface, function, resource.scope));
+        let name = wit::kebab(&resource.ident);
+        for (kind, written) in [("method", &resource.methods), ("static", &resource.statics)] {
+            for function in written {
+                let wit_name = format!("[{kind}]{name}.{}", wit::kebab(&function.ident));
+                functions.push(entry(
+                    &resource.ident,
+                    interface,
+                    function,
+                    wit_name,
+                    resource.scope,
+                ));
+            }
         }
         if let Some(Constructor { ident, params }) = &resource.constructor {
             functions.push(Derived {
                 name: format!("{}::{ident}", resource.ident),
+                wit_name: format!("[constructor]{name}"),
+                span: ident.span(),
                 interface,
                 params,
                 result: None,

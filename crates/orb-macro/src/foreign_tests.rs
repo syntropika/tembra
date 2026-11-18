@@ -563,12 +563,12 @@ fn a_derived_signature_names_an_implemented_interfaces_and_a_hooks_types() {
     };
     let error = refused("pub fn take(cursor: book::Cursor) -> u32 { 0 }");
     assert!(
-        error.contains("`Report::take` takes `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"),
+        error.contains("`Report::take` has a signature the runtime refuses: a foreign owned argument requires its defining Orb import"),
         "{error}"
     );
     let error = refused("pub fn give() -> Option<book::Cursor> { None }");
     assert!(
-        error.contains("`Report::give` returns `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0: the runtime returns a resource only from the interface that defines it"),
+        error.contains("`Report::give` has a signature the runtime refuses: resource functions require their defining interface"),
         "{error}"
     );
 }
@@ -670,15 +670,15 @@ interface catalog {
     for (functions, message) in [
         (
             "pub fn update(pending: catalog::Pending) -> u32 { 0 }",
-            "`Shopping::update` takes `Pending`, a record of the imported interface example:shop/catalog@1.0.0 that holds an option of an option, which the runtime refuses in a signature",
+            "`Shopping::update` takes `Pending`, a record of the imported interface example:shop/catalog@1.0.0, which the runtime refuses in a signature: nested options require a tagged option codec",
         ),
         (
             "pub fn index() -> Option<catalog::Index> { None }",
-            "`Shopping::index` returns `Index`, a record of the imported interface example:shop/catalog@1.0.0 that holds a map, which the runtime refuses in a signature",
+            "`Shopping::index` returns `Index`, a record of the imported interface example:shop/catalog@1.0.0, which the runtime refuses in a signature: map requires a dedicated interpreter value adapter",
         ),
         (
             "pub fn corners(corners: Vec<catalog::Corners>) -> u32 { 0 }",
-            "`Shopping::corners` takes `Corners`, a type of the imported interface example:shop/catalog@1.0.0 that holds a list of a fixed length, which the runtime refuses in a signature",
+            "`Shopping::corners` takes `Corners`, a type of the imported interface example:shop/catalog@1.0.0, which the runtime refuses in a signature: fixed-length list requires a dedicated interpreter value adapter",
         ),
     ] {
         let error = refused(shopping(&dir), &shopper(functions));
@@ -741,39 +741,30 @@ interface counter {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    let nested = "an option of an option, which the runtime refuses in a signature; use an enum of the module with a case for each";
     for (items, functions, message) in [
         (
             "",
             "pub fn find() -> Option<catalog::Opt> { None }",
-            format!(
-                "`Shopping::find` returns `Opt`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Opt` is an option itself: {nested}"
-            ),
+            "`Shopping::find` has a signature the runtime refuses: nested options require a tagged option codec",
         ),
         (
             "",
             "pub fn find(again: Vec<Option<catalog::Again>>) -> u32 { 0 }",
-            format!(
-                "`Shopping::find` takes `Again`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Again` is an option itself: {nested}"
-            ),
+            "`Shopping::find` has a signature the runtime refuses: nested options require a tagged option codec",
         ),
         (
             "",
             "pub fn find() -> Option<counter_ref::Maybe> { None }",
-            format!(
-                "`Shopping::find` returns `Maybe`, a type of the interface example:shop/counter@1.0.0, which this module imports by key, in an `Option`, and `Maybe` is an option itself: {nested}"
-            ),
+            "`Shopping::find` has a signature the runtime refuses: nested options require a tagged option codec",
         ),
         (
             "pub struct Found { pub at: Option<catalog::Opt> }",
             "pub fn last() -> Found { todo!() }",
-            format!(
-                "`Found` holds `Opt`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Opt` is an option itself: {nested}"
-            ),
+            "`Shopping::last` has a signature the runtime refuses: nested options require a tagged option codec",
         ),
     ] {
         let error = refused(options(), &shopper(items, functions));
-        assert!(error.contains(&message), "{functions}\n{error}");
+        assert!(error.contains(message), "{functions}\n{error}");
     }
 }
 
@@ -1209,14 +1200,14 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
             "`Shopping::hold` takes `Slot`, a record of the imported interface example:shop/catalog@1.0.0 that holds a resource handle: a derived interface names the consumed types that carry data only",
         ),
         (
-            "pub fn bag(bag: Bag) -> u32 { 0 } pub fn pack() -> Bag { todo!() }",
+            "pub fn take(bag: Bag) -> u32 { 0 } pub fn pack() -> Bag { todo!() }",
             "pub struct Bag { pub cart: catalog::Cart }",
-            "`Shopping::pack` returns `Bag`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
+            "`Shopping::pack` has a signature the runtime refuses: resource functions require their defining interface",
         ),
         (
             "pub fn next() -> Vec<Choice> { todo!() }",
             "pub enum Choice { Cart(catalog::Cart), Nothing }",
-            "`Shopping::next` returns `Choice`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
+            "`Shopping::next` has a signature the runtime refuses: resource functions require their defining interface",
         ),
         (
             "pub fn open() -> Tally { Tally }",
@@ -1224,12 +1215,12 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
             #[wit_resource(service = Shopping)]
             pub struct Tally;
             impl Tally { pub fn drain(&self) -> Bag { todo!() } }",
-            "`Tally::drain` returns `Bag`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
+            "`Tally::drain` has a signature the runtime refuses: resource functions require their defining interface",
         ),
         (
             "pub fn last() -> Option<Receipt> { None }",
             "pub struct Bag { pub cart: catalog::Cart } pub struct Receipt { pub bag: Bag }",
-            "`Shopping::last` returns `Receipt`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
+            "`Shopping::last` has a signature the runtime refuses: resource functions require their defining interface",
         ),
         (
             "pub fn order() { Ordered::run(Order { item: todo!() }) }",

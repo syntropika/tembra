@@ -688,3 +688,68 @@ fn a_contract_read_from_wit_names_its_types_outside_the_describe_graph_and_the_a
         serde_json::from_str(&first.request(r#"{"kind":"describe"}"#)).unwrap();
     assert_eq!(described["ok"], graph);
 }
+
+/// `check_value_type` is the value profile's rule on one type, which the `#[tembra::orb]` macro
+/// asks of a consumed type it names: what a signature may carry is accepted, and an option of an
+/// option, through an alias too, a map and a list of a fixed length are refused, each as the
+/// resource profile `cargo tembra build` checks refuses an exported signature holding it, and so
+/// is a handle, which is no data.
+#[test]
+fn one_type_is_checked_as_a_signature_is() {
+    const TYPES: &str = "use things.{thing};
+        type maybe = option<u32>;
+        record fine { name: string, tags: list<option<u8>>, pair: tuple<s64, char> }
+        record twice { value: option<maybe> }
+        record keyed { value: map<string, u32> }
+        record fixed { value: list<u8, 4> }
+        record owned { value: thing }";
+    let mut resolve = wit_parser::Resolve::default();
+    resolve
+        .push_str(
+            "values.wit",
+            &format!(
+                "package test:values@1.0.0; interface things {{ resource thing; }} \
+                 interface types {{ {TYPES} }}"
+            ),
+        )
+        .unwrap();
+    let interface = resolve
+        .interfaces
+        .iter()
+        .find(|(_, interface)| interface.name.as_deref() == Some("types"))
+        .map(|(_, interface)| interface)
+        .unwrap();
+    let checked =
+        |name: &str| check_value_type(&resolve, wit_parser::Type::Id(interface.types[name]));
+    assert_eq!(checked("fine"), Ok(()));
+    for (name, refused) in [
+        ("twice", "nested options require a tagged option codec"),
+        (
+            "keyed",
+            "map requires a dedicated interpreter value adapter",
+        ),
+        (
+            "fixed",
+            "fixed-length list requires a dedicated interpreter value adapter",
+        ),
+    ] {
+        assert_eq!(checked(name), Err(Error(refused.into())), "{name}");
+        let source = format!(
+            "package test:values@1.0.0; interface things {{ resource thing; }}
+            interface types {{ {TYPES} take: func(value: {name}); }}
+            world app {{ export types; }}"
+        );
+        let contract = Contract::from_source("values.wit", &source, Some("app")).unwrap();
+        assert_eq!(
+            contract.check_resource_profile(),
+            Err(Error(refused.into())),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        checked("owned"),
+        Err(Error(
+            "own requires a dedicated interpreter value adapter".into()
+        ))
+    );
+}

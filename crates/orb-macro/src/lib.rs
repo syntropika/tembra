@@ -1695,6 +1695,7 @@ fn expand(
     let analysis = analyze(options, module)?;
     let native = native::emit(&analysis, metadata.as_ref());
     let component = component(&analysis, &native.nested, &native.served)?;
+    check_profile(&analysis)?;
     let native = native.root;
     // Last, once both sides accepted the module: the signature of each service, from the WIT.
     let signatures = signatures(&analysis)?;
@@ -3439,6 +3440,79 @@ fn component(
     })
 }
 
+/// Refuse a derived function whose signature the runtime does not carry, as tembra-contracts'
+/// resource profile says it, which `cargo tembra build` checks of the component: the derived WIT,
+/// resolved as a contract, checks each function of a derived interface and the callback of each
+/// derived hook, and an error falls on the function or the hook. The profile holds the rules on
+/// what a signature carries, such as an option of an option, and on the resources it moves: a
+/// derived function takes owned resources of its own interface or of an interface the world
+/// imports, and returns resources of its own interface only.
+fn check_profile(analysis: &Analysis) -> syn::Result<()> {
+    // Each derived function, by its interface's identity and its WIT name, with what the errors
+    // call it and where: a derived hook's callback, `apply`, is the hook's.
+    let functions: Vec<(String, String, String, Span)> =
+        resource_params::derived(&analysis.services, &analysis.wit_resources)
+            .into_iter()
+            .map(|function| {
+                (
+                    identity(&analysis.package, &wit::kebab(function.interface)),
+                    function.wit_name,
+                    format!("`{}`", function.name),
+                    function.span,
+                )
+            })
+            .chain(
+                analysis
+                    .declared
+                    .iter()
+                    .filter(|declaration| declaration.input.is_some())
+                    .map(|declaration| {
+                        (
+                            declaration.hook.clone(),
+                            "apply".to_owned(),
+                            format!("the callback of the hook `{}`", declaration.ident),
+                            declaration.ident.span(),
+                        )
+                    }),
+            )
+            .collect();
+    if functions.is_empty() {
+        return Ok(());
+    }
+    let contract = resolved(analysis)?;
+    for (identity, wit_name, name, span) in functions {
+        let refused = |error: tembra_contracts::Error| {
+            syn::Error::new(
+                span,
+                format!("{name} has a signature the runtime refuses: {error}"),
+            )
+        };
+        let slot = contract.bind(&identity, &wit_name, true).map_err(refused)?;
+        contract.resource_signature(slot).map_err(refused)?;
+    }
+    Ok(())
+}
+
+/// The derived WIT, resolved as a contract with the consumed packages the way `cargo tembra build`
+/// reads it.
+fn resolved(analysis: &Analysis) -> syn::Result<tembra_contracts::Contract> {
+    // The world as the WIT text names it, escaped when the module's name is a WIT keyword.
+    let file = format!("{}.wit", analysis.world);
+    let world = wit::escaped(&analysis.world);
+    match &analysis.wit_dir {
+        Some(dir) => {
+            tembra_contracts::Contract::from_source_in(dir, &file, &analysis.wit, Some(&world))
+        }
+        None => tembra_contracts::Contract::from_source(&file, &analysis.wit, Some(&world)),
+    }
+    .map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("the derived WIT does not resolve as a contract: {error}"),
+        )
+    })
+}
+
 /// The signature of each service's interface, as the kernel computes it when it installs a
 /// provider: the derived WIT, resolved as a contract with the consumed packages the way
 /// `cargo tembra build` reads it, gives a service of the interface the digest `plan` gives it. A
@@ -3448,25 +3522,14 @@ fn component(
 fn signatures(analysis: &Analysis) -> syn::Result<Vec<proc_macro2::TokenStream>> {
     let Analysis {
         package,
-        world,
         services,
         wit_resources,
-        wit_dir,
-        wit,
         ..
     } = analysis;
     if services.is_empty() {
         return Ok(Vec::new());
     }
-    // The world as the WIT text names it, escaped when the module's name is a WIT keyword.
-    let file = format!("{world}.wit");
-    let world = wit::escaped(world);
-    let signatures = match wit_dir {
-        Some(dir) => tembra_contracts::Contract::from_source_in(dir, &file, wit, Some(&world)),
-        None => tembra_contracts::Contract::from_source(&file, wit, Some(&world)),
-    }
-    .and_then(|contract| contract.service_signatures())
-    .map_err(|error| {
+    let signatures = resolved(analysis)?.service_signatures().map_err(|error| {
         syn::Error::new(
             Span::call_site(),
             format!("the derived WIT does not resolve as a contract: {error}"),

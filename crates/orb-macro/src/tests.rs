@@ -857,9 +857,10 @@ fn a_side_of_a_result_that_carries_nothing_is_left_out() {
     }
 }
 
-/// WIT spells an option of an option, but the runtime refuses it in a signature: `Option<Option<T>>`
-/// is refused where it is written, in a function and in a field of a type that enters the WIT,
-/// while an option of another type expands.
+/// WIT spells an option of an option, but the runtime refuses it in a signature, as
+/// tembra-contracts' resource profile says: a function whose signature holds `Option<Option<T>>`,
+/// itself or in a field of a type that enters the WIT, is refused on the function, while an option
+/// of another type expands.
 #[test]
 fn an_option_of_an_option_is_refused() {
     let module = |result: &str, field: &str| {
@@ -882,13 +883,15 @@ fn an_option_of_an_option_is_refused() {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    for (result, field) in [
-        ("Option<Option<u32>>", "Option<u32>"),
-        ("Option<u32>", "Option<Option<u32>>"),
+    for (result, field, function) in [
+        ("Option<Option<u32>>", "Option<u32>", "find"),
+        ("Option<u32>", "Option<Option<u32>>", "last"),
     ] {
         let error = refused(PACKAGE, &module(result, field));
         assert!(
-            error.contains("`Option<Option<T>>` is an option of an option, which the runtime refuses in a signature: use an enum of the module with a case for each"),
+            error.contains(&format!(
+                "`Ledger::{function}` has a signature the runtime refuses: nested options require a tagged option codec"
+            )),
             "{result}, {field}: {error}"
         );
     }
@@ -2236,7 +2239,7 @@ fn a_derived_function_takes_an_imported_handle() {
         }",
     );
     assert!(
-        error.contains("`Spelling::begin` returns `Builder`, a resource of the imported interface example:text/texts@1.0.0: the runtime returns a resource only from the interface that defines it"),
+        error.contains("`Spelling::begin` has a signature the runtime refuses: resource functions require their defining interface"),
         "{error}"
     );
     let error = refused(
@@ -8679,27 +8682,35 @@ fn a_type_of_an_implemented_interface_gets_its_codec_from_the_wit() {
 
 /// A nested option is refused wherever a method reaches it, in its own types too, for both
 /// targets: the boundary's JSON writes `None` and `Some(None)` alike, as `null`, which is why the
-/// runtime refuses it in a signature, and the macro refuses it where it is written, so the native
-/// side never sees one.
+/// runtime refuses it in a signature, and the macro refuses the method as tembra-contracts' check
+/// of the derived WIT says, so the native side never sees one.
 #[test]
 fn a_nested_option_is_refused_wherever_a_method_reaches_it() {
-    for (items, function) in [
-        ("", "pub fn add(count: Option<Option<u32>>) -> u32 { 0 }"),
+    for (items, function, name) in [
+        (
+            "",
+            "pub fn add(count: Option<Option<u32>>) -> u32 { 0 }",
+            "add",
+        ),
         (
             "",
             "pub fn list() -> Vec<Option<Option<String>>> { Vec::new() }",
+            "list",
         ),
         (
             "pub struct Entry { pub count: Option<Option<u32>> }",
             "pub fn add(entry: Entry) -> u32 { 0 }",
+            "add",
         ),
         (
             "pub enum Shape { Dot, Line(Option<Option<u32>>) }",
             "pub fn draw(shape: Shape) {}",
+            "draw",
         ),
         (
             "pub enum Shape { Dot, Line { length: (u32, Option<Option<u32>>) } }",
             "pub fn draw(shape: Shape) {}",
+            "draw",
         ),
     ] {
         let error = refused(
@@ -8709,10 +8720,40 @@ fn a_nested_option_is_refused_wherever_a_method_reaches_it() {
             ),
         );
         assert!(
-            error.contains("`Option<Option<T>>` is an option of an option, which the runtime refuses in a signature: use an enum of the module with a case for each"),
+            error.contains(&format!(
+                "`Ledger::{name}` has a signature the runtime refuses: nested options require a tagged option codec"
+            )),
             "{items} {function}: {error}"
         );
     }
+}
+
+/// A derived hook's callback carries its input, which the runtime checks as it checks a derived
+/// function: a nested option in the input, itself or in a type it reaches, refuses the hook, and
+/// the same hook with a plain option expands.
+#[test]
+fn a_nested_option_in_a_derived_hooks_input_is_refused() {
+    let module = |at: &str| {
+        format!(
+            "mod book {{
+                #[hook(composition = series, input = Order)]
+                pub struct Ordered;
+                pub struct Order {{ pub at: {at} }}
+                #[service]
+                pub struct Ledger;
+                impl Ledger {{ pub fn order() {{ Ordered::run(Order {{ at: None }}) }} }}
+            }}"
+        )
+    };
+    let text = wit(&expanded(PACKAGE, &module("Option<u32>")));
+    assert!(text.contains("  apply: func(input: order);\n"), "{text}");
+    let error = refused(PACKAGE, &module("Option<Option<u32>>"));
+    assert!(
+        error.contains(
+            "the callback of the hook `Ordered` has a signature the runtime refuses: nested options require a tagged option codec"
+        ),
+        "{error}"
+    );
 }
 
 /// Free JSON, `serde_json::Value` by its path, is a WIT `string` that holds its JSON text. The

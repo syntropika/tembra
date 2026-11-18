@@ -283,22 +283,22 @@ fn an_interface_without_a_view_is_refused() {
         (
             "nested",
             "maybe: func() -> option<option<u32>>;",
-            "`maybe` carries an option of an option, which the runtime refuses in a signature",
+            "`maybe` carries a type the runtime refuses in a signature: nested options require a tagged option codec",
         ),
         (
             "map",
             "index: func(entries: map<string, u32>) -> u32;",
-            "`index` carries a map, which the runtime refuses in a signature",
+            "`index` carries a type the runtime refuses in a signature: map requires a dedicated interpreter value adapter",
         ),
         (
             "fixed",
             "corners: func() -> list<u32, 4>;",
-            "`corners` carries a list of a fixed length, which the runtime refuses in a signature",
+            "`corners` carries a type the runtime refuses in a signature: fixed-length list requires a dedicated interpreter value adapter",
         ),
         (
             "nested-held",
             "record found { at: option<option<u32>> } find: func() -> found;",
-            "`find` carries an option of an option in the type `found`, which the runtime refuses in a signature",
+            "`find` carries the type `found`, which the runtime refuses in a signature: nested options require a tagged option codec",
         ),
         ("empty", "record tally { count: u32 }", "has no function"),
         // A resource no function names: the kernel binds an interface with a resource as
