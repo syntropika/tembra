@@ -66,8 +66,7 @@ pub use standard_sources::{WASI_SOURCES, bundled};
 /// for the `#[tembra::orb]` macro, which checks them at `cargo check`.
 #[cfg(feature = "authoring")]
 pub use tembra_core::{
-    HOST_PRINCIPAL, RESERVED_MEMBERS, admits_linger, admits_principal, reserved_member,
-    valid_version,
+    RESERVED_MEMBERS, admits_linger, admits_principal, reserved_member, valid_version,
 };
 pub use validate::javascript_name;
 

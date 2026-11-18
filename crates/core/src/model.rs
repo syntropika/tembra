@@ -65,7 +65,7 @@ pub fn admits_principal(lifetime: Lifetime, principal: &str) -> bool {
 
 /// Whether the kernel admits an object of `lifetime` at `address`: a host-lifetime object lives
 /// at the key `main` of the host principal (`admits_principal`).
-pub fn admits_address(lifetime: Lifetime, address: &Address) -> bool {
+pub(crate) fn admits_address(lifetime: Lifetime, address: &Address) -> bool {
     !matches!(lifetime, Lifetime::Host)
         || (address.key == ["main"] && admits_principal(lifetime, &address.principal))
 }
@@ -324,4 +324,25 @@ pub struct Migration {
     pub expected_revision: u64,
     pub value: Id,
     pub state_version: Version,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_host_lifetime_object_lives_at_main_of_the_host() {
+        let address = |key: &str, principal: &str| Address {
+            service: "ledger".into(),
+            key: vec![key.into()],
+            principal: principal.into(),
+        };
+        assert!(admits_address(Lifetime::Host, &address("main", "host")));
+        assert!(!admits_address(Lifetime::Host, &address("other", "host")));
+        assert!(!admits_address(Lifetime::Host, &address("main", "alice")));
+        assert!(admits_address(
+            Lifetime::Referenced,
+            &address("other", "alice")
+        ));
+    }
 }
