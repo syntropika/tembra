@@ -6,7 +6,8 @@
 //! Each module of the Orb serves one feature of that test's list. `imports` turns the dials of
 //! another Orb, through the plain import and the view of the import by key; `cancellation` stops
 //! awaiting a call of the plain import; `ledger` keeps a state; `tallies` issues WIT resources;
-//! and `checks` takes and returns what the boundary checks. A new scenario is a module here, or a
+//! `checks` takes and returns what the boundary checks; and `names` names the types of `checks`
+//! through a `use` with `as` and an alias. A new scenario is a module here, or a
 //! function of one, and a row of the test's list. The Orb holds nothing a native host refuses by
 //! design, a hook declaration, a synchronous import or a WASI import, and nothing native only.
 
@@ -347,6 +348,33 @@ pub mod parity {
                 } else {
                     Err(format!("{value} is odd"))
                 }
+            }
+        }
+    }
+
+    /// Names the types of `checks` as rustc resolves them: through a `use` that renames the type
+    /// and through an alias that is only a path, which the WIT spells `point` and `colour`.
+    pub mod names {
+        use super::checks::Point as Spot;
+
+        /// The colour of `checks`, under another name.
+        pub type Hue = super::checks::Colour;
+
+        #[service]
+        pub struct Names;
+
+        impl Names {
+            /// The point mirrored through the origin.
+            pub fn mirrored(spot: Spot) -> Spot {
+                Spot {
+                    x: -spot.x,
+                    y: -spot.y,
+                }
+            }
+
+            /// Whether the colour is red.
+            pub fn red(hue: Hue) -> bool {
+                matches!(hue, Hue::Red)
             }
         }
     }

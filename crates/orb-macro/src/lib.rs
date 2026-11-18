@@ -854,12 +854,14 @@ struct Scan {
 /// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
 /// the paths it imports by glob, `use path::*;`: what the macro follows to name a derive the
 /// author writes in that module from another module, the bindings'. With the names of the items
-/// the module declares, which the bindings' module does not reach.
+/// the module declares, which the bindings' module does not reach, and its type aliases, by name,
+/// which a contract type's name is followed through (`foreign::Modules`).
 #[derive(Clone, Default)]
 struct Uses {
     names: BTreeMap<String, Named>,
     globs: Vec<Named>,
     items: BTreeSet<String>,
+    aliases: BTreeMap<String, syn::ItemType>,
 }
 
 /// A path as a list of names, from the crates when `global`, as `::serde::Serialize` is, and
@@ -956,7 +958,10 @@ impl Uses {
             Item::Struct(item) => &item.ident,
             Item::Trait(item) => &item.ident,
             Item::TraitAlias(item) => &item.ident,
-            Item::Type(item) => &item.ident,
+            Item::Type(item) => {
+                self.aliases.insert(item.ident.to_string(), item.clone());
+                &item.ident
+            }
             Item::Union(item) => &item.ident,
             _ => return,
         };
@@ -1821,7 +1826,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         mut candidates,
         mut services,
         contributions,
-        declared,
+        mut declared,
         mut states,
         mut resources,
         mut wit_resources,
@@ -2411,7 +2416,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     };
     // The callback of a contributed hook, or of a declared one named from a consumed package, is
     // read from that package; a hook derived from `input = Type` needs no directory.
-    let consumed_hooks: Vec<&String> = hooks
+    let consumed_hooks: Vec<String> = hooks
         .keys()
         .chain(
             declarations
@@ -2419,10 +2424,11 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 .filter(|(_, declaration)| declaration.input.is_none())
                 .map(|(hook, _)| hook),
         )
+        .cloned()
         .collect();
     let callbacks = match (parsed.dir(), consumed_hooks.is_empty()) {
         (_, true) => Default::default(),
-        (Some(dir), false) => wit::callbacks(dir, consumed_hooks.iter().copied())?,
+        (Some(dir), false) => wit::callbacks(dir, consumed_hooks.iter())?,
         (None, false) => {
             return Err(syn::Error::new(
                 Span::call_site(),
@@ -2830,7 +2836,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &wit_resources,
         &declared,
         &shapes,
-        &own_types,
         &consumed_modules,
     )?;
     // The data types of the implemented interfaces, of the imported ones and of the hooks the
@@ -2961,25 +2966,29 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             ));
         }
     }
-    // The functions were spelled before the newtypes were known: one naming a newtype is spelled
-    // again, with the newtype as its field's type.
+    // The functions and a derived hook's input were spelled by the names they write, before the
+    // newtypes and the modules were known: each is spelled again, a newtype as its field's type
+    // and a name a `use` or an alias stands for by the type's own.
+    for declaration in &mut declared {
+        if let Some((ty, spelling)) = &mut declaration.input {
+            *spelling = consumed_modules.spelled(ty, declaration.scope)?;
+        }
+    }
     for service in &mut services {
         for function in &mut service.functions {
-            spell_newtypes(function, service.scope, &consumed_modules)?;
+            spell_names(function, service.scope, &consumed_modules)?;
         }
     }
     for resource in &mut wit_resources {
         for function in resource.methods.iter_mut().chain(&mut resource.statics) {
-            spell_newtypes(function, resource.scope, &consumed_modules)?;
+            spell_names(function, resource.scope, &consumed_modules)?;
         }
         for (_, ty, spelling) in resource
             .constructor
             .iter_mut()
             .flat_map(|constructor| &mut constructor.params)
         {
-            if consumed_modules.holds_newtype(ty, resource.scope) {
-                *spelling = consumed_modules.spelled(ty, resource.scope)?;
-            }
+            *spelling = consumed_modules.spelled(ty, resource.scope)?;
         }
     }
     let (wit, used) = wit::render(
@@ -2994,7 +3003,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             foreign: &foreign,
             modules: &consumed_modules,
         },
-        consumed_hooks.iter().copied(),
+        consumed_hooks.iter(),
         &imports,
         &views,
         wit::Kernel {
@@ -3884,32 +3893,6 @@ fn names_state(
             == 1
 }
 
-/// The module, as a path from the Orb module, in which a type path written in the module `from`
-/// names its type: `self::` stays, `super::` goes up, any other segment goes down a sub-module.
-/// `None` for a path that leaves the Orb module. `foreign::Modules` reads a path so, by its text
-/// alone; `type_module` follows the Orb's modules' `use`s as well.
-fn module_of(path: &syn::Path, from: &[Ident]) -> Option<Vec<Ident>> {
-    if path.leading_colon.is_some() {
-        return None;
-    }
-    let mut module = from.to_vec();
-    let segments: Vec<&Ident> = path.segments.iter().map(|segment| &segment.ident).collect();
-    let (_, prefix) = segments.split_last()?;
-    for segment in prefix {
-        if *segment == "self" {
-            continue;
-        }
-        if *segment == "super" {
-            module.pop()?;
-        } else if *segment == "crate" || *segment == "Self" {
-            return None;
-        } else {
-            module.push((*segment).clone());
-        }
-    }
-    Some(module)
-}
-
 /// The module, by scope, in which a type path written in the module `scope` names its type, with
 /// the type's name there: the module declares the type, or binds nothing of the name, so a glob
 /// import from a module the macro does not read, or the prelude, brings it, and the name is placed
@@ -4193,9 +4176,10 @@ fn typed_params(function: &syn::ImplItemFn) -> syn::Result<Vec<(Ident, Type, Str
     Ok(params)
 }
 
-/// Spell again each parameter and the result of a function written in the module `scope` that
-/// names a newtype `modules` reads, which the WIT spells as its field's type.
-fn spell_newtypes(
+/// Spell again each parameter and the result of a function written in the module `scope` as
+/// `modules` resolves their names: a newtype as its field's type, a name a `use` or an alias
+/// stands for by the type's own, `entry` for `Item` after `use model::Entry as Item;`.
+fn spell_names(
     function: &mut Function,
     scope: usize,
     modules: &foreign::Modules,
@@ -4209,9 +4193,7 @@ fn spell_newtypes(
         .iter_mut()
         .map(|(_, ty, spelling)| (ty, spelling));
     for (ty, spelling) in params.chain(result) {
-        if modules.holds_newtype(ty, scope) {
-            *spelling = modules.spelled(ty, scope)?;
-        }
+        *spelling = modules.spelled(ty, scope)?;
     }
     Ok(())
 }
@@ -4832,31 +4814,25 @@ fn implemented_service(
     Ok((bridge, implementations))
 }
 
-/// The type a name written in the module `scope` names among `named`, the types of the Orb that
-/// take the name, each with the module declaring it: that module's own, else the only one in the
-/// Orb; none of two in other modules, which the name does not tell apart.
-fn own_or_only<T>(named: impl IntoIterator<Item = (usize, T)>, scope: usize) -> Option<T> {
-    let mut named: Vec<(usize, T)> = named.into_iter().collect();
-    let index = match named.iter().position(|(module, _)| *module == scope) {
-        Some(own) => own,
-        None if named.len() == 1 => 0,
-        None => return None,
-    };
-    Some(named.swap_remove(index).1)
+/// The type a name resolved in the module `scope` names among `named`, the types of the Orb that
+/// take the name, each with the module declaring it: the one that module declares
+/// (`foreign::Modules::references_in`), none when it declares none.
+fn declared_in<T>(named: impl IntoIterator<Item = (usize, T)>, scope: usize) -> Option<T> {
+    named
+        .into_iter()
+        .find(|(module, _)| *module == scope)
+        .map(|(_, named)| named)
 }
 
 /// Keep, in module order, the candidate types that a derived service's method, a derived
 /// resource's function or a derived hook's input reaches; the others, with their shapes, go back
 /// to their modules as ordinary Rust. The resources of an implemented interface reach nothing:
 /// their functions speak the consumed package's types, whatever the module's own are called. A
-/// name resolves by `own_or_only` in the module its path names it in, the one a path leads into,
-/// `super::sessions::Token`, or the one writing a bare name (`Modules::references_in`), in a
-/// signature as in a record's field (`Candidate::references`): to the type
-/// of that module, a resource included, else to the only resource of that name, else to the only
-/// type of that name in the Orb; two of other modules are ambiguous, a type the module does not
-/// declare is an error, and a resource is a type of its own. A type of any shape the module
-/// declares, one of `types`, keeps the name from the resources and the types of other modules
-/// wherever the module writes it, in a signature or in a field, as in Rust. What a consumed
+/// name resolves as rustc resolves it, in a signature as in a record's field
+/// (`Modules::references_in`, `Candidate::references`), to the type of the module that declares
+/// it, a resource included, which is a type of its own; a name that resolves to no struct or enum
+/// of the module, a type of another shape among `types` or none, is an error, and so is a name the
+/// macro does not follow (`Modules::resolved`), each with how to write it. What a consumed
 /// interface's module names, a type or a handle, is no type of the module.
 fn reachable(
     candidates: Vec<Candidate>,
@@ -4876,67 +4852,69 @@ fn reachable(
     }
     let mut pending: Vec<(Ident, usize)> = Vec::new();
     let mention = |ty: &Type, scope: usize, pending: &mut Vec<(Ident, usize)>| {
+        modules.resolved(ty, scope)?;
         modules.references_in(ty, scope, pending);
+        Ok::<(), syn::Error>(())
     };
     for function in resource_params::derived(services, resources) {
         for (_, ty, _) in function.params {
-            mention(ty, function.scope, &mut pending);
+            mention(ty, function.scope, &mut pending)?;
         }
         if let Some(ty) = function.result {
-            mention(ty, function.scope, &mut pending);
+            mention(ty, function.scope, &mut pending)?;
         }
     }
     for (input, scope) in hook_inputs {
-        mention(input, *scope, &mut pending);
+        mention(input, *scope, &mut pending)?;
     }
     let mut kept = BTreeSet::new();
     while let Some((ident, scope)) = pending.pop() {
         let indexes = declared
             .get(&ident.to_string())
             .map_or(&[][..], Vec::as_slice);
-        let declares = types
-            .iter()
-            .any(|(module, name)| *module == scope && *name == ident);
-        if resource_params::resource_named(&ident, scope, resources, declares).is_some() {
+        if resource_params::resource_named(&ident, scope, resources).is_some() {
             continue;
         }
-        // Resources take the name here only when several of other modules do: the name tells
-        // them apart no more than several candidates.
-        let shared = !declares && resources.iter().any(|resource| resource.ident == ident);
         let named = indexes
             .iter()
             .map(|&index| (candidates[index].scope, index));
-        // A type the module declares keeps the name from the candidates of other modules too, so
-        // one that is no candidate is an error, as a type the module does not declare is.
-        let index = match own_or_only(named, scope)
-            .filter(|&index| candidates[index].scope == scope || !declares)
-        {
-            Some(index) if !shared => index,
-            None if declares || (indexes.is_empty() && !shared) => {
-                // Free JSON imported by `use` reads as a type of the module: it is free JSON only
-                // by its path.
-                let hint = if ident == "Value" {
-                    "; for free JSON, write it by its path, `serde_json::Value`"
-                } else {
-                    ""
-                };
-                return Err(syn::Error::new(
-                    ident.span(),
-                    format!(
-                        "`{ident}` is used by a service method or a hook but is not a struct or enum of this module{hint}"
-                    ),
-                ));
-            }
-            _ => {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    format!(
-                        "`{ident}` is declared in several modules of the Orb; a module uses its own `{ident}`, or the types take different names"
-                    ),
-                ));
-            }
+        let Some(index) = declared_in(named, scope) else {
+            let declares = types
+                .iter()
+                .any(|(module, name)| *module == scope && *name == ident);
+            // A type of that name another module declares, which a `use` imports by name.
+            let elsewhere = indexes
+                .iter()
+                .map(|&index| candidates[index].scope)
+                .chain(
+                    resources
+                        .iter()
+                        .filter(|resource| resource.ident == ident)
+                        .map(|resource| resource.scope),
+                )
+                .next();
+            // Free JSON imported by `use` reads as a type of the module: it is free JSON only by
+            // its path.
+            let hint = match elsewhere {
+                _ if ident == "Value" => {
+                    "; for free JSON, write it by its path, `serde_json::Value`".to_owned()
+                }
+                Some(module) if !declares => format!(
+                    "; `{ident}` is declared in {}, which this module names through its path or a `use` of it, `use {}::{ident};`",
+                    describe(modules.path(module)),
+                    modules.path_to(scope, module)
+                ),
+                _ => String::new(),
+            };
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` is used by a service method or a hook but is not a struct or enum of this module{hint}"
+                ),
+            ));
         };
         if kept.insert(index) {
+            modules.item_resolved(&candidates[index].item, candidates[index].scope)?;
             pending.extend(candidates[index].references.iter().cloned());
         }
     }
@@ -7329,7 +7307,7 @@ fn carried_attributes(
 
 /// The types, among those that stay out of the WIT, that serde serializes: each state that stays
 /// out, and every type of the module its fields reach, directly or through other such types. A
-/// name resolves by `own_or_only`; one that resolves to a type entering the WIT stops there,
+/// name resolves to the type of the module that declares it (`declared_in`); one that resolves to a type entering the WIT stops there,
 /// because that type is generated with serde's derives, and one the module does not declare is
 /// the author's to serialize.
 fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> BTreeSet<usize> {
@@ -7357,7 +7335,7 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
                     .filter(|(_, candidate)| candidate.ident == name)
                     .map(|(index, candidate)| (candidate.scope, Some(index))),
             );
-        if let Some(Some(index)) = own_or_only(named, scope)
+        if let Some(Some(index)) = declared_in(named, scope)
             && serialized.insert(index)
         {
             pending.extend(unreached[index].references.iter().cloned());
@@ -7901,6 +7879,9 @@ fn holds_list(
     match ty {
         Type::Path(path) => path.path.segments.last().is_some_and(|segment| {
             let name = segment.ident.to_string();
+            let resolved = modules
+                .module_type(ty, scope)
+                .is_some_and(|(ident, _)| holding.contains(&ident.to_string()));
             let arguments = match &segment.arguments {
                 syn::PathArguments::AngleBracketed(arguments) => arguments
                     .args
@@ -7908,7 +7889,7 @@ fn holds_list(
                     .any(|argument| matches!(argument, syn::GenericArgument::Type(ty) if holds_list(ty, holding, (modules, scope)))),
                 _ => false,
             };
-            name == "String" || name == "Vec" || holding.contains(&name) || arguments
+            name == "String" || name == "Vec" || resolved || arguments
         }),
         Type::Tuple(tuple) => tuple
             .elems
@@ -8106,8 +8087,8 @@ fn convert(
 }
 
 /// The author's type, written in the module `scope`, as the import side of the bindings spells it:
-/// a type of the module that a hook reaches lives in `module` there, free JSON is a string, a
-/// newtype its field, everything else keeps its spelling.
+/// a type of the module that a hook reaches, by the name `modules` resolves it to, lives in
+/// `module` there, free JSON is a string, a newtype its field, everything else keeps its spelling.
 fn respell(
     ty: &Type,
     hook_shapes: &BTreeSet<String>,
@@ -8132,8 +8113,11 @@ fn respell(
                 return quote! { #ty };
             };
             let ident = &last.ident;
-            if prefix.is_empty() && hook_shapes.contains(&ident.to_string()) {
-                let generated = type_ident(&wit::kebab(ident));
+            if let Some((resolved, _)) = modules.module_type(ty, scope)
+                && last.arguments.is_none()
+                && hook_shapes.contains(&resolved.to_string())
+            {
+                let generated = type_ident(&wit::kebab(&resolved));
                 return quote! { #module::#generated };
             }
             let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else {

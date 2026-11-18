@@ -1019,10 +1019,23 @@ everywhere and leaves it to the compiler, which then reports the module or the s
 resource's module cannot see. A name that
 enters the WIT is one across the modules, because the package has one namespace: the services, the
 hooks, the resources and the types a method or a hook mentions; a state that stays out of the WIT
-may repeat its name module by module, as `Balance` does, and a module's own name wins when a method
-mentions it. The modules the macro re-exports in the Orb module, `context`, an imported interface, a
-hook declared from a consumed package, are reached from a sub-module through `super::`. See
+may repeat its name module by module, as `Balance` does. The modules the macro re-exports in the Orb
+module, `context`, an imported interface, a hook declared from a consumed package, are reached from
+a sub-module through `super::`. See
 [rust-orb-service-lifetime](../../examples/rust-orb-service-lifetime/README.md).
+
+A type that a signature, a hook's input or a field of a type entering the WIT names resolves as
+rustc resolves it inside the Orb module, whatever another module declares of the name: a type the
+writing module declares, a path through the Orb's modules, `self::model::Entry` or
+`super::model::Entry`, a name a `use` imports, with `as`, in a group or through a sub-module's
+`pub use`, and an alias that is only a path, `type Item = super::model::Entry;`. The WIT names the
+type by its own name, `entry` for `Item` after `use super::model::Entry as Item;`. A consumed
+interface's type resolves through its module, `greeting::Entry`, or through a `use` of it,
+`use super::greeting::Entry;`. The macro does not follow a glob import, `use super::model::*;`, a
+path from `crate::`, an alias that is more than a path, `type Entries = Vec<Entry>;`, or a type
+declared outside the Orb module: each is a compile error saying how to name the type instead. A
+name the module neither declares nor imports is an error too, naming the module that declares the
+type and the `use` to write, since the macro does not pick a type by its name alone.
 
 ## Using the Orb natively
 

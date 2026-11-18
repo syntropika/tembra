@@ -91,8 +91,8 @@ pub(crate) struct Modules {
     reexported: BTreeMap<String, Reexported>,
     /// The path of each module of the Orb from the Orb module, by scope; scope 0 is the Orb module.
     paths: Vec<Vec<Ident>>,
-    /// The newtypes of the module, by name.
-    newtypes: BTreeMap<String, Newtype>,
+    /// The newtypes of the module.
+    newtypes: Vec<Newtype>,
     /// What each module of the Orb imports, by scope, which a path written there is read through.
     uses: Vec<crate::Uses>,
 }
@@ -104,25 +104,42 @@ pub(crate) struct Modules {
 pub(crate) struct Named<'m, 't> {
     pub interface: &'m Reexported,
     pub module: &'m str,
-    pub ident: &'t Ident,
+    /// The type's name in the interface, which a `use` may have imported under another.
+    pub ident: Ident,
     pub ty: &'t Type,
     pub in_option: bool,
 }
 
-/// Where a type path leads, read as far as `Modules::leads` follows it: what is left of the path,
-/// and the module of the Orb it stopped in, by scope, none once it left the Orb module.
+/// Where a type path leads once `Modules::resolve` stops following it: what is left of the path.
 struct Leads {
     segments: Vec<Ident>,
-    scope: Option<usize>,
 }
 
-/// What a walk through a type reaches: a name through a consumed interface's module, or the last
-/// name of another path, `Vec` and `Entry` in `Vec<Entry>`, which may name a type of the module,
-/// with the module of the Orb the path names it in, by scope: the one the path leads into,
-/// `super::sessions::Token`, or the one writing it.
+/// Where a type path written in a module of the Orb leads, as rustc resolves it there
+/// (`Modules::resolve`).
+enum Resolution {
+    /// The name `ident` in the module of the Orb `scope`, which declares a type of the name, or
+    /// declares and imports nothing of it.
+    Module(Ident, usize),
+    /// A path the macro follows no further: into a module it does not read, a crate's, a
+    /// consumed interface's or the bindings'.
+    Stopped(Leads),
+    /// A form the macro does not follow, a glob import or a path through `crate::`, with how to
+    /// write the name.
+    Refused(String),
+    /// An alias that is more than a path, which a contract type cannot name, with how to write it.
+    Composite(String),
+}
+
+/// What a walk through a type reaches: a name through a consumed interface's module, the name of
+/// a type of the module, with the module of the Orb it resolves in, by scope (`Modules::resolve`),
+/// `Vec` and `Entry` in `Vec<Entry>`, or a name the macro refuses to follow, with why and whether
+/// the macro cannot follow it anywhere, as it cannot a glob import or a `crate::` path, rather than
+/// only to a contract type, an alias that is more than a path or a type outside the Orb module.
 enum Reached<'m, 't> {
     Consumed(Named<'m, 't>),
-    Module(&'t Ident, usize),
+    Module(Ident, usize),
+    Refused(syn::Error, bool),
 }
 
 impl Modules {
@@ -266,34 +283,33 @@ impl Modules {
         Ok(Self {
             reexported: modules,
             paths: paths.to_vec(),
-            newtypes: BTreeMap::new(),
+            newtypes: Vec::new(),
             uses: uses.to_vec(),
         })
     }
 
-    /// The same modules, with the newtypes of the module, each read by its name.
+    /// The same modules, with the newtypes of the module.
     pub(crate) fn with_newtypes(mut self, newtypes: &[Newtype]) -> Self {
-        self.newtypes = newtypes
-            .iter()
-            .map(|newtype| (newtype.ident.to_string(), newtype.clone()))
-            .collect();
+        self.newtypes = newtypes.to_vec();
         self
     }
 
-    /// The newtype a type written in the module `scope` names, when it names one: a path ending in
-    /// the newtype's name, without type parameters, that no consumed interface's module reaches.
+    /// The newtype a type written in the module `scope` names, when it names one: a path without
+    /// type parameters that resolves to the newtype (`resolve`).
     pub(crate) fn newtype(&self, ty: &Type, scope: usize) -> Option<&Newtype> {
         let Type::Path(path) = ty else {
             return None;
         };
         let last = path.path.segments.last()?;
-        if path.qself.is_some()
-            || !matches!(last.arguments, syn::PathArguments::None)
-            || self.named(ty, scope).is_some()
-        {
+        if path.qself.is_some() || !matches!(last.arguments, syn::PathArguments::None) {
             return None;
         }
-        self.newtypes.get(&last.ident.to_string())
+        let Resolution::Module(ident, module) = self.resolve(&path.path, scope) else {
+            return None;
+        };
+        self.newtypes
+            .iter()
+            .find(|newtype| newtype.ident == ident && newtype.scope == module)
     }
 
     /// The newtypes a type written in the module `scope` names: itself, or inside the type
@@ -329,6 +345,11 @@ impl Modules {
         !self.newtypes_in(ty, scope).is_empty()
     }
 
+    /// The path of the module `scope` from the Orb module.
+    pub(crate) fn path(&self, scope: usize) -> &[Ident] {
+        &self.paths[scope]
+    }
+
     /// How many modules the module `scope` is below the Orb module.
     pub(crate) fn depth(&self, scope: usize) -> usize {
         self.paths[scope].len()
@@ -353,7 +374,7 @@ impl Modules {
     fn spelled_within(&self, ty: &Type, scope: usize, within: &[&Ident]) -> syn::Result<String> {
         wit::wit_type_with(ty, &|named| {
             let Some(newtype) = self.newtype(named, scope) else {
-                return Ok(None);
+                return Ok(self.wit_name(named, scope));
             };
             if within.contains(&&newtype.ident) {
                 return Err(syn::Error::new(
@@ -371,118 +392,253 @@ impl Modules {
         })
     }
 
+    /// The WIT name of a type written in the module `scope`, by the name of the type it resolves
+    /// to, `entry` for `Item` after `use model::Entry as Item;`: a type of the module or of a
+    /// consumed interface. `None` for a name the macro does not resolve.
+    fn wit_name(&self, ty: &Type, scope: usize) -> Option<String> {
+        let ident = match self.named(ty, scope) {
+            Some(named) => named.ident,
+            None => {
+                let Type::Path(path) = ty else {
+                    return None;
+                };
+                let Resolution::Module(ident, _) = self.resolve(&path.path, scope) else {
+                    return None;
+                };
+                ident
+            }
+        };
+        Some(wit::escaped(&wit::kebab(&ident)))
+    }
+
     /// The name a type reaches through a consumed interface's module, when it is such a path:
-    /// `greeting::Entry`, or any path ending so, written in the module `scope`. A path that leads
-    /// into a module of the Orb names a type of the module, whatever that module is called: the
-    /// author's `greeting::Banner` next to a `mod greeting` of their own resolves there first. The
-    /// kernel's context module reaches none.
+    /// `greeting::Entry`, any path ending so, or a name a `use` or an alias leads there, written
+    /// in the module `scope` (`resolve`). A path that leads into a module of the Orb names a type
+    /// of the module, whatever that module is called: the author's `greeting::Banner` next to a
+    /// `mod greeting` of their own resolves there first. The kernel's context module reaches none.
     pub(crate) fn named<'m, 't>(&'m self, ty: &'t Type, scope: usize) -> Option<Named<'m, 't>> {
         let Type::Path(path) = ty else {
             return None;
         };
-        let segments: Vec<&syn::PathSegment> = path.path.segments.iter().collect();
-        let [.., module, item] = segments.as_slice() else {
+        let written = path.path.segments.last()?;
+        if path.qself.is_some() || !matches!(written.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let Resolution::Stopped(leads) = self.resolve(&path.path, scope) else {
             return None;
         };
-        if path.qself.is_some() || !matches!(item.arguments, syn::PathArguments::None) {
+        let [.., module, item] = leads.segments.as_slice() else {
             return None;
-        }
-        if let Some(own) = crate::module_of(&path.path, &self.paths[scope])
-            && self.paths.contains(&own)
-        {
-            return None;
-        }
-        let (module, interface) = self.reexported.get_key_value(&module.ident.to_string())?;
+        };
+        let (module, interface) = self.reexported.get_key_value(&module.to_string())?;
         if interface.role == Role::Context {
             return None;
         }
+        let mut ident = item.clone();
+        ident.set_span(written.ident.span());
         Some(Named {
             interface,
             module,
-            ident: &item.ident,
+            ident,
             ty,
             in_option: false,
         })
     }
 
-    /// Where a type path written in the module `scope` leads, read as far as the macro follows
-    /// it: through `self::`, `super::` and the sub-modules of the Orb, the names the `use`
-    /// declarations of each module it passes bind, and the glob imports from the Orb's modules
-    /// that bind them. It stops at the type's own name, at a crate, `crate::` or a module above
-    /// the Orb module, and at a name nothing it reads binds, such as the modules the bindings
-    /// declare in the Orb module, where what is left is the path from the module it stopped in.
-    fn leads(&self, path: &syn::Path, scope: usize) -> Leads {
-        let mut leads = Leads {
-            segments: path
-                .segments
-                .iter()
-                .map(|segment| segment.ident.clone())
-                .collect(),
-            scope: None,
+    /// The type of the Orb's modules a type written in the module `scope` names, by its own name
+    /// and the module declaring it, when its path resolves to one (`resolve`): `Entry` of `model`
+    /// for `Item` after `use super::model::Entry as Item;`.
+    pub(crate) fn module_type(&self, ty: &Type, scope: usize) -> Option<(Ident, usize)> {
+        let Type::Path(path) = ty else {
+            return None;
         };
-        if path.leading_colon.is_some() {
-            return leads;
+        if path.qself.is_some() {
+            return None;
         }
-        let mut scope = Some(scope);
+        match self.resolve(&path.path, scope) {
+            Resolution::Module(ident, module) => Some((ident, module)),
+            Resolution::Stopped(_) | Resolution::Refused(_) | Resolution::Composite(_) => None,
+        }
+    }
+
+    /// Where a type path written in the module `scope` leads, as rustc resolves it inside the Orb
+    /// module: through `self::`, `super::` and the sub-modules of the Orb, the names the `use`
+    /// declarations of each module it passes bind, with `as` and in groups, a sub-module's
+    /// `pub use` included, and the aliases that are only a path, `type Item = model::Entry;`, to
+    /// the type's own name in the module that declares it, or to a module that declares nothing
+    /// of the name. It stops at a crate or a module above the Orb module, and at a name nothing it
+    /// reads binds, such as the modules the bindings declare in the Orb module and the consumed
+    /// interfaces' modules the Orb module re-exports. A glob import, a path through `crate::` and
+    /// an alias that is more than a path are refused, each with how to write the name.
+    fn resolve(&self, path: &syn::Path, scope: usize) -> Resolution {
+        self.resolve_within(path, scope, 0)
+    }
+
+    /// `resolve`, `depth` aliases deep: aliases naming one another in a circle would never end.
+    fn resolve_within(&self, path: &syn::Path, scope: usize, depth: usize) -> Resolution {
+        let mut segments: Vec<Ident> = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.clone())
+            .collect();
+        let outside = |segments: Vec<Ident>| Resolution::Stopped(Leads { segments });
+        if path.leading_colon.is_some() {
+            return outside(segments);
+        }
+        let written = path.segments.last().map(|segment| &segment.ident);
+        let mut at = scope;
         // Each step consumes a name or replaces one by what a declaration binds it to;
         // declarations binding one another in a circle would never end.
         for _ in 0..64 {
-            let (Some(at), [first, rest @ ..]) = (scope, leads.segments.as_slice()) else {
+            let Some((first, rest)) = segments.split_first() else {
                 break;
             };
-            if rest.is_empty() {
-                break;
-            }
             let (first, rest) = (first.clone(), rest.to_vec());
-            if first == "self" {
-                leads.segments = rest;
-                continue;
-            }
-            if first == "super" {
-                scope = crate::parent(at, &self.paths);
-                if scope.is_some() {
-                    leads.segments = rest;
+            let name = first.to_string();
+            let uses = &self.uses[at];
+            if rest.is_empty() {
+                if let Some(alias) = uses.aliases.get(&name) {
+                    return self.aliased(alias, at, depth);
                 }
+                if uses.items.contains(&name) {
+                    return Resolution::Module(first, at);
+                }
+            }
+            if first == "self" && !rest.is_empty() {
+                segments = rest;
                 continue;
             }
-            if first == "crate" || first == "Self" {
-                scope = None;
+            if first == "super" && !rest.is_empty() {
+                let Some(parent) = crate::parent(at, &self.paths) else {
+                    return outside(segments);
+                };
+                at = parent;
+                segments = rest;
                 continue;
             }
-            if let Some(bound) = self.uses[at].names.get(&first.to_string()) {
+            if first == "crate" {
+                let written = written.map_or_else(String::new, Ident::to_string);
+                return Resolution::Refused(format!(
+                    "`{written}` is named through `crate::`, which the macro cannot place in the Orb module; name it from this module, through `self::`, `super::` or a `use` of the Orb's modules, `use super::model::{written};`"
+                ));
+            }
+            if first == "Self" {
+                return outside(segments);
+            }
+            if let Some(bound) = uses.names.get(&name) {
                 // `use name;` brings the crate `name` into scope.
                 if bound.global || (bound.segments.len() == 1 && bound.segments[0] == first) {
-                    scope = None;
-                    continue;
+                    return outside(bound.segments.iter().cloned().chain(rest).collect());
                 }
-                leads.segments = bound.segments.iter().cloned().chain(rest).collect();
+                segments = bound.segments.iter().cloned().chain(rest).collect();
                 continue;
+            }
+            if rest.is_empty() {
+                if !wit::BUILTIN.contains(&name.as_str())
+                    && let crate::Globbed::In(module) =
+                        crate::through_globs(&first, at, &self.uses, &self.paths)
+                {
+                    return Resolution::Refused(self.globbed(&first, at, module));
+                }
+                return Resolution::Module(first, at);
             }
             let mut child = self.paths[at].clone();
             child.push(first.clone());
             if let Some(index) = self.paths.iter().position(|module| *module == child) {
-                scope = Some(index);
-                leads.segments = rest;
+                at = index;
+                segments = rest;
                 continue;
             }
-            match crate::through_globs(&first, at, &self.uses, &self.paths) {
-                crate::Globbed::In(module) => scope = Some(module),
-                crate::Globbed::Outside | crate::Globbed::Nowhere => break,
+            if let crate::Globbed::In(module) =
+                crate::through_globs(&first, at, &self.uses, &self.paths)
+            {
+                return Resolution::Refused(self.globbed(&first, at, module));
             }
+            break;
         }
-        leads.scope = scope;
-        leads
+        Resolution::Stopped(Leads { segments })
+    }
+
+    /// Where the alias `alias` of the module `scope` leads (`resolve`): an alias that is only a
+    /// path, without type parameters, to the type it names, a type of the Orb's modules or of a
+    /// consumed interface; to itself, a type of the module, when its path names neither, as
+    /// `type Token = u32;` does. One that is more than a path is refused.
+    fn aliased(&self, alias: &syn::ItemType, scope: usize, depth: usize) -> Resolution {
+        let ident = &alias.ident;
+        let Type::Path(target) = &*alias.ty else {
+            return more_than_a_path(alias);
+        };
+        if !alias.generics.params.is_empty()
+            || target.qself.is_some()
+            || target
+                .path
+                .segments
+                .iter()
+                .any(|segment| !segment.arguments.is_none())
+        {
+            return more_than_a_path(alias);
+        }
+        if depth >= 64 {
+            return Resolution::Module(ident.clone(), scope);
+        }
+        match self.resolve_within(&target.path, scope, depth + 1) {
+            Resolution::Module(name, module)
+                if self.uses[module].items.contains(&name.to_string()) =>
+            {
+                Resolution::Module(name, module)
+            }
+            Resolution::Stopped(leads)
+                if matches!(
+                    leads.segments.as_slice(),
+                    [.., module, _] if self.reexported.contains_key(&module.to_string())
+                ) =>
+            {
+                Resolution::Stopped(leads)
+            }
+            Resolution::Refused(why) => Resolution::Refused(why),
+            Resolution::Composite(why) => Resolution::Composite(why),
+            _ => Resolution::Module(ident.clone(), scope),
+        }
+    }
+
+    /// Why `name`, written in the module `scope`, is not followed through the glob import that
+    /// brings it from the module `module`, with the `use` that imports it by name.
+    fn globbed(&self, name: &Ident, scope: usize, module: usize) -> String {
+        format!(
+            "`{name}` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `use {}::{name};`",
+            self.path_to(scope, module)
+        )
+    }
+
+    /// The path from the module `from` to the module `to`, both by scope, as a `use` written in
+    /// `from` spells it: `super::model`, `self::model`, `super`.
+    pub(crate) fn path_to(&self, from: usize, to: usize) -> String {
+        let (from, to) = (&self.paths[from], &self.paths[to]);
+        let shared = from
+            .iter()
+            .zip(to)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let up = from.len() - shared;
+        let mut segments: Vec<String> = if up == 0 {
+            vec!["self".to_owned()]
+        } else {
+            vec!["super".to_owned(); up]
+        };
+        segments.extend(to[shared..].iter().map(Ident::to_string));
+        segments.join("::")
     }
 
     /// Walk a type written in the module `scope`: itself, then the type parameters of a path and
     /// the elements of a tuple. Each name a consumed interface's module reaches is reported, with
     /// whether it is the value of an `Option`, which `in_option` says of the type itself, and not
-    /// looked into; so is the last name of every other path, before its type parameters, with the
-    /// module of the Orb the path leads into down to the name (`leads`), through `self::`,
-    /// `super::`, the sub-modules and the modules the `use` declarations bind, or the writing
-    /// module for a bare name or a path the macro cannot follow so. A type with a WIT spelling of
-    /// its own is not a name of the module: free JSON is not looked into, and a newtype, which the
-    /// WIT spells as its field, is walked as its field, in the newtype's module, once.
+    /// looked into; so is the name of every other path, before its type parameters, with the
+    /// module of the Orb it resolves in (`resolve`): the type's own name in the module declaring
+    /// it, or the writing module for a name of a crate's, such as `Vec`. A name declared outside
+    /// the Orb module, or one the macro refuses to follow, is reported with why. A type with a WIT
+    /// spelling of its own is not a name of the module: free JSON is not looked into, and a
+    /// newtype, which the WIT spells as its field, is walked as its field, in the newtype's
+    /// module, once.
     fn walk<'m, 't>(
         &'m self,
         ty: &'t Type,
@@ -526,12 +682,41 @@ impl Modules {
                 let Some(segment) = path.path.segments.last() else {
                     return;
                 };
-                let leads = self.leads(&path.path, scope);
-                let module = match (leads.scope, leads.segments.as_slice()) {
-                    (Some(module), [_]) => module,
-                    _ => scope,
-                };
-                visit(Reached::Module(&segment.ident, module));
+                let builtin = wit::BUILTIN.contains(&segment.ident.to_string().as_str());
+                match self.resolve(&path.path, scope) {
+                    Resolution::Module(mut ident, module) => {
+                        ident.set_span(segment.ident.span());
+                        visit(Reached::Module(ident, module));
+                    }
+                    Resolution::Stopped(_) if builtin => {
+                        visit(Reached::Module(segment.ident.clone(), scope));
+                    }
+                    Resolution::Stopped(_) => {
+                        let ident = &segment.ident;
+                        // Free JSON imported by `use` reads as such a name: it is free JSON only
+                        // by its path.
+                        let hint = if ident == "Value" {
+                            "; for free JSON, write it by its path, `serde_json::Value`"
+                        } else {
+                            ""
+                        };
+                        visit(Reached::Refused(
+                            syn::Error::new_spanned(
+                                path,
+                                format!(
+                                    "`{ident}` is declared outside the Orb module, or in a module the macro does not read: a contract type is declared inside the Orb module, or is a consumed interface's type, named through its module, `greeting::Entry`, or a `use` of it{hint}"
+                                ),
+                            ),
+                            false,
+                        ));
+                    }
+                    Resolution::Refused(why) => {
+                        visit(Reached::Refused(syn::Error::new_spanned(path, why), true));
+                    }
+                    Resolution::Composite(why) => {
+                        visit(Reached::Refused(syn::Error::new_spanned(path, why), false));
+                    }
+                }
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
                         if let syn::GenericArgument::Type(ty) = argument {
@@ -547,6 +732,42 @@ impl Modules {
             }
             _ => {}
         }
+    }
+
+    /// Refuse a type written in the module `scope` that names, itself or inside its type
+    /// parameters and tuples, a type the macro does not follow (`resolve`): through a glob
+    /// import, `crate::` or an alias that is more than a path, or declared outside the Orb module.
+    pub(crate) fn resolved(&self, ty: &Type, scope: usize) -> syn::Result<()> {
+        self.refused(ty, scope, false)
+    }
+
+    /// Refuse a type written in the module `scope` that names a type through a form the macro
+    /// cannot follow anywhere, a glob import or `crate::`, as in a state's fields, which may hold
+    /// any type, but whose module types the macro follows to what they hold.
+    fn followed(&self, ty: &Type, scope: usize) -> syn::Result<()> {
+        self.refused(ty, scope, true)
+    }
+
+    /// The first refusal of a type written in the module `scope` (`resolved`), only of the forms
+    /// the macro cannot follow anywhere when `unfollowed`.
+    fn refused(&self, ty: &Type, scope: usize, unfollowed: bool) -> syn::Result<()> {
+        let mut refused = None;
+        self.walk(ty, scope, false, &mut |reached| {
+            if let Reached::Refused(error, anywhere) = reached
+                && (anywhere || !unfollowed)
+            {
+                refused.get_or_insert(error);
+            }
+        });
+        refused.map_or(Ok(()), Err)
+    }
+
+    /// `resolved`, for each type the fields of a struct or the payloads of an enum's cases hold,
+    /// the item declared in the module `scope`.
+    pub(crate) fn item_resolved(&self, item: &Item, scope: usize) -> syn::Result<()> {
+        item_types(item)
+            .into_iter()
+            .try_for_each(|ty| self.resolved(ty, scope))
     }
 
     /// Each name a type written in the module `scope` reaches through a consumed interface's
@@ -585,7 +806,7 @@ impl Modules {
             if let Reached::Module(ident, module) = reached
                 && !wit::BUILTIN.contains(&ident.to_string().as_str())
             {
-                out.push((ident.clone(), module));
+                out.push((ident, module));
             }
         });
     }
@@ -616,6 +837,15 @@ impl Modules {
         }
         references
     }
+}
+
+/// Why the alias `alias`, more than a path, does not name a contract type.
+fn more_than_a_path(alias: &syn::ItemType) -> Resolution {
+    let ident = &alias.ident;
+    let ty = quote::ToTokens::to_token_stream(&alias.ty).to_string();
+    Resolution::Composite(format!(
+        "`{ident}` is an alias of `{ty}`, which is more than a path: the macro follows an alias of a contract type only when it names the type by its path, `type {ident} = model::Entry;`; write `{ty}` where `{ident}` stands"
+    ))
 }
 
 /// The types of a struct's fields, or of the payloads of an enum's cases.
@@ -829,7 +1059,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         found_in(modules, input, hook.scope, place, &mut found);
     }
     for state in states {
-        for (ty, via, scope) in state_types(state, shapes, unreached, modules) {
+        for (ty, via, scope) in state_types(state, shapes, unreached, modules)? {
             let place = Place::State {
                 state: &state.ident,
                 via: via.cloned(),
@@ -876,7 +1106,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         // the view uses, whatever else the interface defines: rustc reports another name on the
         // path.
         if named.interface.role == Role::Keyed
-            && *named.ident == view_object(&named.interface.identity)
+            && named.ident == view_object(&named.interface.identity)
         {
             return Err(syn::Error::new(
                 named.ty.span(),
@@ -888,7 +1118,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
                 ),
             ));
         }
-        let Some(definition) = items.get(named.ident) else {
+        let Some(definition) = items.get(&named.ident) else {
             return Err(syn::Error::new(
                 named.ty.span(),
                 format!(
@@ -922,7 +1152,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             }
         };
         let names = &mut uses[index].names;
-        if !names.iter().any(|(_, known)| known == named.ident) {
+        if !names.iter().any(|(_, known)| *known == named.ident) {
             names.push((definition.name.clone(), named.ident.clone()));
         }
     }
@@ -952,8 +1182,8 @@ fn found_in<'a, 'p>(
 /// The types of the module the results of the derived functions reach, by name and by the module
 /// declaring each, with the first function returning it: the types a result names, itself or
 /// inside its containers, and those their fields and cases reach in turn, as the runtime looks
-/// into a result. A name resolves by `own_or_only`: to the type of the module naming it, else to
-/// the only type of that name in the Orb.
+/// into a result. A name resolves to the type of the module that declares it
+/// (`Modules::references_in`).
 fn returned<'f>(
     functions: &'f [resource_params::Derived<'f>],
     shapes: &'f [Shape],
@@ -965,17 +1195,17 @@ fn returned<'f>(
             continue;
         };
         let mut named = Vec::new();
-        modules.references(result, function.scope, &mut named);
+        modules.references_in(result, function.scope, &mut named);
         let mut pending: Vec<(Ident, usize, Option<&'f Ident>)> = named
             .into_iter()
-            .map(|ident| (ident, function.scope, None))
+            .map(|(ident, scope)| (ident, scope, None))
             .collect();
         while let Some((ident, scope, via)) = pending.pop() {
             let named = shapes
                 .iter()
                 .filter(|shape| shape.ident == ident)
                 .map(|shape| (shape.scope, shape));
-            let Some(shape) = crate::own_or_only(named, scope) else {
+            let Some(shape) = crate::declared_in(named, scope) else {
                 continue;
             };
             let key = (ident.to_string(), shape.scope);
@@ -1014,7 +1244,7 @@ fn checked<'a>(
     modules: &Modules,
 ) -> syn::Result<Option<&'a Ident>> {
     let subject = place.subject();
-    let ident = named.ident;
+    let ident = &named.ident;
     let interface = named.interface;
     let of = interface.described();
     let refuse = |reason: String| -> syn::Result<Option<&'a Ident>> {
@@ -1203,14 +1433,15 @@ fn checked<'a>(
 
 /// The types of a state's fields and of the module types they reach, each once, with the module
 /// type that holds it, `None` for the state's own fields, and the module the holder is declared
-/// in. A name resolves as `serialized` resolves it, by `own_or_only`: to the type of the module
-/// naming it, else to the one type of that name in the Orb.
+/// in. A name resolves as `serialized` resolves it, to the type of the module that declares it; one
+/// the macro cannot follow, through a glob import or `crate::`, is an error, as the state's derives
+/// need what it holds (`Modules::followed`).
 fn state_types<'a>(
     state: &State,
     shapes: &'a [Shape],
     unreached: &'a [Candidate],
     modules: &Modules,
-) -> Vec<(&'a Type, Option<&'a Ident>, usize)> {
+) -> syn::Result<Vec<(&'a Type, Option<&'a Ident>, usize)>> {
     // Each type of the module, by its name and its module, with the types it holds.
     let declared: Vec<(&'a Ident, usize, Vec<&'a Type>)> = shapes
         .iter()
@@ -1228,7 +1459,7 @@ fn state_types<'a>(
             .iter()
             .filter(|(ident, _, _)| *ident == name)
             .map(|entry| (entry.1, entry));
-        crate::own_or_only(named, scope)
+        crate::declared_in(named, scope)
     };
     let mut types = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1242,15 +1473,16 @@ fn state_types<'a>(
         }
         let via = (!own).then_some(*ident);
         for ty in held {
+            modules.followed(ty, *scope)?;
             types.push((*ty, via, *scope));
             let mut references = Vec::new();
-            modules.references(ty, *scope, &mut references);
+            modules.references_in(ty, *scope, &mut references);
             pending.extend(
                 references
                     .into_iter()
-                    .map(|reference| (reference, *scope, false)),
+                    .map(|(reference, scope)| (reference, scope, false)),
             );
         }
     }
-    types
+    Ok(types)
 }

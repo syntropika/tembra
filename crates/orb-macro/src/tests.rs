@@ -6276,6 +6276,94 @@ fn a_declared_hook_is_derived_from_its_input() {
     );
 }
 
+/// A derived hook's input resolves as a signature's name does: through a renaming `use`, a
+/// path-only alias and a path into another module, the WIT and the import side of the bindings
+/// name the type by its own name, and a list it holds crosses to the import by reference.
+#[test]
+fn a_derived_hooks_input_resolves_as_a_signatures_name() {
+    for (uses, input) in [
+        ("use super::model::Entry as Admission;", "Admission"),
+        ("pub type Admission = super::model::Entry;", "Admission"),
+        ("", "super::model::Entry"),
+    ] {
+        let module = expanded(
+            "example:gate@1.0.0",
+            &format!(
+                "mod gate {{
+                    pub mod model {{ pub struct Entry {{ pub value: i32, pub notes: Vec<String> }} }}
+                    pub mod hooks {{
+                        {uses}
+                        #[hook(composition = waterfall, input = {input})]
+                        pub struct Guard;
+                        #[service]
+                        pub struct Admissions;
+                        impl Admissions {{ pub fn count() -> u32 {{ 0 }} }}
+                    }}
+                }}"
+            ),
+        );
+        let text = resolved(&module);
+        for expected in [
+            "  record entry {\n    value: s32,\n    notes: list<string>,\n  }\n",
+            "  apply: func(input: entry) -> entry;\n",
+        ] {
+            assert!(text.contains(expected), "{uses}\n{expected}\n{text}");
+        }
+        let generated = tokens(&module);
+        for expected in [
+            "let input : super :: example :: gate :: guard :: Entry = :: core :: convert :: Into :: into (input) ;",
+            "let answer = super :: example :: gate :: guard :: apply (& input) ;",
+        ] {
+            assert!(
+                generated.contains(expected),
+                "{uses}\n{expected}\n{generated}"
+            );
+        }
+    }
+}
+
+/// A state's fields and the module types they reach name their types through forms the macro
+/// follows: a glob import or a `crate::` path there is refused with how to name the type, as the
+/// macro gives the types a state reaches what serde needs, and the `use` by name expands.
+#[test]
+fn a_state_names_its_types_through_forms_the_macro_follows() {
+    let ledger = |uses: &str, field: &str| {
+        format!(
+            "mod ledger {{
+                pub mod model {{ pub struct Entry {{ pub id: u32 }} }}
+                pub mod pinned {{
+                    {uses}
+                    #[state]
+                    #[derive(Default, serde::Serialize, serde::Deserialize)]
+                    pub struct Balance {{ pub entries: {field} }}
+                    #[service]
+                    pub struct Pinned;
+                    impl Pinned {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
+            }}"
+        )
+    };
+    for (uses, field, message) in [
+        (
+            "use super::model::*;",
+            "Vec<Entry>",
+            "`Entry` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `use super::model::Entry;`",
+        ),
+        (
+            "",
+            "Vec<crate::ledger::model::Entry>",
+            "`Entry` is named through `crate::`, which the macro cannot place in the Orb module",
+        ),
+    ] {
+        let error = refused("example:ledger@1.0.0", &ledger(uses, field));
+        assert!(error.contains(message), "{field}\n{error}");
+    }
+    expanded(
+        "example:ledger@1.0.0",
+        &ledger("use super::model::Entry;", "Vec<Entry>"),
+    );
+}
+
 /// The composition shapes the callback: a series hook returns nothing, a bail hook an option.
 #[test]
 fn a_derived_hook_follows_its_composition() {
@@ -7009,11 +7097,12 @@ fn a_type_the_module_declares_takes_its_name_before_another_modules_record() {
     }
 }
 
-/// Two resources of one name in other modules are as ambiguous as two records: a function of a
-/// third module taking that name is refused, whichever of the two the module imports, and expands
-/// once one of them takes another name.
+/// A `use` names one of two resources of one name in other modules, as in Rust: a function of a
+/// third module taking the name takes the resource the `use` imports, and a record of that name
+/// in another module stays out of the WIT. Two resources of one name that both enter the WIT are
+/// refused for sharing a WIT name, not for the name the module writes.
 #[test]
-fn two_resources_of_one_name_in_other_modules_are_ambiguous() {
+fn a_use_names_one_of_two_types_of_one_name() {
     let desk = |second: &str| {
         format!(
             "mod desk {{
@@ -7023,9 +7112,7 @@ fn two_resources_of_one_name_in_other_modules_are_ambiguous() {
                     impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
                 }}
                 pub mod b {{
-                    #[wit_resource(service = Tickets)]
-                    pub struct {second};
-                    impl {second} {{ pub fn id(&self) -> u32 {{ 1 }} }}
+                    {second}
                 }}
                 pub mod c {{
                     use super::a::Token;
@@ -7036,12 +7123,175 @@ fn two_resources_of_one_name_in_other_modules_are_ambiguous() {
             }}"
         )
     };
-    let error = refused("example:desk@1.0.0", &desk("Token"));
+    let text = resolved(&expanded(
+        "example:desk@1.0.0",
+        &desk("pub struct Token { pub id: u32, pub kept: bool }"),
+    ));
+    for expected in [
+        "  resource token {\n",
+        "  check: func(token: token) -> u32;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    assert!(!text.contains("record token"), "{text}");
+    let error = refused(
+        "example:desk@1.0.0",
+        &desk(
+            "#[wit_resource(service = Tickets)]
+            pub struct Token;
+            impl Token { pub fn id(&self) -> u32 { 1 } }",
+        ),
+    );
     assert!(
-        error.contains("`Token` is declared in several modules of the Orb; a module uses its own `Token`, or the types take different names"),
+        error.contains("`Token` is declared in `a` and in `b`; a name that enters the WIT is one across the Orb module"),
         "{error}"
     );
-    expanded("example:desk@1.0.0", &desk("Pass"));
+}
+
+/// The Orb of the forms a contract type's name takes: `model` declares `Entry` and `Shelf`, and
+/// `api` names them as `uses` and `signature` write them.
+fn books(uses: &str, signature: &str) -> String {
+    format!(
+        "mod books {{
+            pub mod model {{
+                pub struct Entry {{ pub id: u32 }}
+                pub enum Shelf {{ Top, Bottom }}
+            }}
+            pub mod other {{
+                pub struct Entry {{ pub name: String, pub pages: u32 }}
+            }}
+            pub mod api {{
+                {uses}
+                #[service]
+                pub struct Library;
+                impl Library {{ {signature} }}
+            }}
+        }}"
+    )
+}
+
+/// A contract type's name resolves as rustc resolves it inside the Orb module, whatever another
+/// module declares of the name: a `use` of the type, with `as`, in a group, through a sub-module's
+/// `pub use`, an alias that is only a path, and a path into the module. The WIT names the type by
+/// its own name, `entry` for `Item` after `use super::model::Entry as Item;`, and takes the type of
+/// the module the name leads to, not `other`'s `Entry`.
+#[test]
+fn a_contract_types_name_resolves_as_rustc_resolves_it() {
+    let entry = "  record entry {\n    id: u32,\n  }\n";
+    for (uses, signature) in [
+        (
+            "use super::model::Entry;",
+            "pub fn first(shelf: super::model::Shelf) -> Entry { todo!() }",
+        ),
+        (
+            "use super::model::Entry as Item;",
+            "pub fn first(shelf: super::model::Shelf) -> Item { todo!() }",
+        ),
+        (
+            "use super::model::{Entry as Item, Shelf};",
+            "pub fn first(shelf: Shelf) -> Item { todo!() }",
+        ),
+        (
+            "use super::{model::{self, Shelf as Rack}};",
+            "pub fn first(shelf: Rack) -> model::Entry { todo!() }",
+        ),
+        (
+            "pub type Item = super::model::Entry; type Rack = self::Place; use super::model::Shelf as Place;",
+            "pub fn first(shelf: Rack) -> Item { todo!() }",
+        ),
+        (
+            "use self::reexported::{Entry, Shelf}; pub mod reexported { pub use super::super::model::{Entry, Shelf}; }",
+            "pub fn first(shelf: Shelf) -> Entry { todo!() }",
+        ),
+    ] {
+        let text = resolved(&expanded("example:books@1.0.0", &books(uses, signature)));
+        for expected in [
+            entry,
+            "  enum shelf {\n    top,\n    bottom,\n  }\n",
+            "  first: func(shelf: shelf) -> entry;\n",
+        ] {
+            assert!(text.contains(expected), "{uses}\n{expected}\n{text}");
+        }
+        assert!(!text.contains("pages"), "{uses}\n{text}");
+    }
+    // In a record's field as in a signature.
+    let text = resolved(&expanded(
+        "example:books@1.0.0",
+        &books(
+            "use super::model::Entry as Item; pub struct Stack { pub top: Item }",
+            "pub fn pile() -> Stack { todo!() }",
+        ),
+    ));
+    for expected in [entry, "  record stack {\n    top: entry,\n  }\n"] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
+/// A name the macro does not follow to a contract type is refused, with how to write it: a glob
+/// import, in a signature or a record's field, a path or a `use` through `crate::`, an alias that is
+/// more than a path, a type declared outside the Orb module, and a name the module neither declares
+/// nor imports, though another module declares it. The module that imports the type by name
+/// expands.
+#[test]
+fn a_contract_type_the_macro_does_not_follow_is_refused_with_how_to_name_it() {
+    for (uses, signature, message) in [
+        (
+            "use super::model::*;",
+            "pub fn first() -> Entry { todo!() }",
+            "`Entry` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `use super::model::Entry;`",
+        ),
+        (
+            "use super::*;",
+            "pub fn first() -> model::Entry { todo!() }",
+            "`model` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `use super::model;`",
+        ),
+        (
+            "use super::model::*; pub struct Stack { pub top: Entry }",
+            "pub fn pile() -> Stack { todo!() }",
+            "`Entry` comes into this module through a glob import",
+        ),
+        (
+            "",
+            "pub fn first() -> crate::books::model::Entry { todo!() }",
+            "`Entry` is named through `crate::`, which the macro cannot place in the Orb module; name it from this module, through `self::`, `super::` or a `use` of the Orb's modules, `use super::model::Entry;`",
+        ),
+        (
+            "use crate::books::model::Entry;",
+            "pub fn first() -> Entry { todo!() }",
+            "is named through `crate::`, which the macro cannot place in the Orb module",
+        ),
+        (
+            "pub type Entries = Vec<super::model::Entry>;",
+            "pub fn all() -> Entries { todo!() }",
+            "`Entries` is an alias of `Vec < super :: model :: Entry >`, which is more than a path: the macro follows an alias of a contract type only when it names the type by its path, `type Entries = model::Entry;`; write `Vec < super :: model :: Entry >` where `Entries` stands",
+        ),
+        (
+            "use elsewhere::Entry;",
+            "pub fn first() -> Entry { todo!() }",
+            "`Entry` is declared outside the Orb module, or in a module the macro does not read: a contract type is declared inside the Orb module, or is a consumed interface's type, named through its module, `greeting::Entry`, or a `use` of it",
+        ),
+        (
+            "",
+            "pub fn first() -> Entry { todo!() }",
+            "`Entry` is used by a service method or a hook but is not a struct or enum of this module; `Entry` is declared in `model`, which this module names through its path or a `use` of it, `use super::model::Entry;`",
+        ),
+    ] {
+        let error = refused("example:books@1.0.0", &books(uses, signature));
+        assert!(error.contains(message), "{uses} {signature}\n{error}");
+        let fixed = uses
+            .replace("use super::model::*;", "use super::model::Entry;")
+            .replace("use super::*;", "use super::model;")
+            .replace("use crate::books::", "use super::")
+            .replace("use elsewhere::", "use super::model::")
+            .replace("Vec<super::model::Entry>", "super::model::Entry");
+        let fixed = if uses.is_empty() {
+            "use super::model::Entry;".to_owned()
+        } else {
+            fixed
+        };
+        let signature = signature.replace("crate::books::model::Entry", "Entry");
+        expanded("example:books@1.0.0", &books(&fixed, &signature));
+    }
 }
 
 /// Documentation over several lines, a block comment or a `#[doc]` string, is carried line by
@@ -9073,7 +9323,7 @@ fn free_json_is_a_string_that_holds_its_text() {
             impl Ledger { pub fn read(document: Value) {} }
         }",
     );
-    let message = "`Value` is used by a service method or a hook but is not a struct or enum of this module; for free JSON, write it by its path, `serde_json::Value`";
+    let message = "`Value` is declared outside the Orb module, or in a module the macro does not read: a contract type is declared inside the Orb module, or is a consumed interface's type, named through its module, `greeting::Entry`, or a `use` of it; for free JSON, write it by its path, `serde_json::Value`";
     assert!(error.contains(message), "{message}\n{error}");
 }
 

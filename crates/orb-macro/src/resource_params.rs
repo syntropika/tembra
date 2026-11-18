@@ -7,7 +7,7 @@
 //! `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
 use crate::{
     At, Constructor, Declared, Function, Handles, Service, Shape, Towards, WitResource,
-    bindings_names, convert, foreign::Modules, handles_of, mentions, own_or_only, rebuild, wit,
+    bindings_names, convert, declared_in, foreign::Modules, handles_of, mentions, rebuild, wit,
     with_handles,
 };
 use quote::quote;
@@ -74,20 +74,16 @@ pub(crate) fn derived<'a>(
     functions
 }
 
-/// The resource a name written in the module `scope` resolves to, by `own_or_only`: that module's
-/// own resource of the name, none when that module declares another type of the name, of any
-/// shape, as `declares` says, else the only resource of the name in the Orb.
+/// The resource a name resolved in the module `scope` names: that module's own resource of the
+/// name (`Modules::references_in`).
 pub(crate) fn resource_named<'a>(
     ident: &Ident,
     scope: usize,
     resources: &'a [WitResource],
-    declares: bool,
 ) -> Option<&'a WitResource> {
-    let named = resources
+    resources
         .iter()
-        .filter(|resource| resource.ident == *ident)
-        .map(|resource| (resource.scope, resource));
-    own_or_only(named, scope).filter(|resource| resource.scope == scope || !declares)
+        .find(|resource| resource.ident == *ident && resource.scope == scope)
 }
 
 /// Refuse, once the types that enter the WIT are known, a resource of the module the runtime would
@@ -103,13 +99,12 @@ pub(crate) fn check_reached(
     resources: &[WitResource],
     declared: &[Declared],
     shapes: &[Shape],
-    types: &[(usize, Ident)],
     modules: &Modules,
 ) -> syn::Result<()> {
     let functions = derived(services, resources);
     for function in &functions {
         for (_, ty, _) in function.params {
-            for (resource, via) in held(ty, function.scope, shapes, resources, types, modules) {
+            for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
                 if let Some(owner) = foreign_owner(services, resource, function.interface) {
                     return Err(taking_error(function, ty, resource, via, owner));
                 }
@@ -120,7 +115,7 @@ pub(crate) fn check_reached(
         let Some(ty) = function.result else {
             continue;
         };
-        for (resource, via) in held(ty, function.scope, shapes, resources, types, modules) {
+        for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
             let Some(owner) = foreign_owner(services, resource, function.interface) else {
                 continue;
             };
@@ -144,7 +139,7 @@ pub(crate) fn check_reached(
             continue;
         };
         if let Some((resource, via)) =
-            held(ty, declaration.scope, shapes, resources, types, modules).first()
+            held(ty, declaration.scope, shapes, resources, modules).first()
         {
             let holds = match via {
                 Some(via) => format!("`{via}`, which holds the resource `{}`", resource.ident),
@@ -223,16 +218,13 @@ fn taking_error(
 /// Each resource of the module a type written in the module `scope` holds, with the record or
 /// variant of the module that holds it, if one does: the resource itself or inside options,
 /// results, lists and tuples, or in the fields and cases of the records and variants the type
-/// reaches, followed by name as the WIT names them, each name resolved first in the module its
-/// path names it in, the one a path leads into or the one writing a bare name
-/// (`Modules::references_in`), where a type of any shape among `types` keeps it from the resources
-/// of other modules.
+/// reaches, followed by name as the WIT names them, each name resolved to the type of the module
+/// that declares it (`Modules::references_in`).
 fn held<'a>(
     ty: &Type,
     scope: usize,
     shapes: &'a [Shape],
     resources: &'a [WitResource],
-    types: &[(usize, Ident)],
     modules: &Modules,
 ) -> Vec<(&'a WitResource, Option<&'a Ident>)> {
     let mut mentioned = Vec::new();
@@ -248,14 +240,11 @@ fn held<'a>(
             .iter()
             .filter(|shape| shape.ident == ident)
             .map(|shape| (shape.scope, shape));
-        let declares = types
-            .iter()
-            .any(|(module, name)| *module == scope && *name == ident);
-        if let Some(resource) = resource_named(&ident, scope, resources, declares) {
+        if let Some(resource) = resource_named(&ident, scope, resources) {
             if seen.insert((ident.to_string(), resource.scope)) {
                 held.push((resource, via));
             }
-        } else if let Some(shape) = own_or_only(named, scope)
+        } else if let Some(shape) = declared_in(named, scope)
             && seen.insert((ident.to_string(), shape.scope))
         {
             let via = via.or(Some(&shape.ident));

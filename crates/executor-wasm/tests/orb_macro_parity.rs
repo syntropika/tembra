@@ -330,6 +330,16 @@ fn scenarios() -> Vec<Scenario> {
         ),
         row(
             ErrorCodes,
+            "a type named through a renaming `use` or an alias reads and answers as the type itself",
+            vec![
+                Call("names", "mirrored", json!([{ "x": 1, "y": -2 }])),
+                Call("names", "red", json!(["red"])),
+                Call("names", "red", json!(["green"])),
+                Call("names", "red", json!(["purple"])),
+            ],
+        ),
+        row(
+            ErrorCodes,
             "a call of a function the interface does not have fails",
             vec![Call("checks", "subtract", json!([2, 1]))],
         ),

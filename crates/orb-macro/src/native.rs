@@ -2532,7 +2532,7 @@ fn kind<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>,
                 ("Vec" | "Option" | "Result", _) => Err(uncovered(
                     "a container without its types; such types are not supported natively yet",
                 )),
-                _ => named(ty, &segment.ident, scope, analysis),
+                _ => named(ty, scope, analysis),
             }
         }
         _ => Err(uncovered(
@@ -2562,13 +2562,10 @@ fn argument<'a>(
 
 /// The kind of a type of the module or of a consumed interface: a type that enters the WIT from
 /// the module, a newtype and a type of an interface the module implements read and write their
-/// own JSON, and a resource is issued; the others are refused, saying what they are.
-fn named<'a>(
-    ty: &'a Type,
-    ident: &Ident,
-    scope: usize,
-    analysis: &Analysis,
-) -> Result<Kind<'a>, Uncovered<'a>> {
+/// own JSON, and a resource is issued; the others are refused, saying what they are. A name of the
+/// module is the type it resolves to (`Modules::module_type`).
+fn named<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>, Uncovered<'a>> {
+    let declared = analysis.consumed_modules.module_type(ty, scope);
     let reason = if let Some(named) = analysis.consumed_modules.named(ty, scope) {
         let identity = &named.interface.identity;
         // A type of an interface the module implements or imports, by name or by key, or of a hook
@@ -2577,7 +2574,7 @@ fn named<'a>(
             named.interface.role,
             Role::Implemented | Role::Imported | Role::Keyed | Role::Contributed
         )
-        .then(|| analysis.consumed_types.named(identity, named.ident))
+        .then(|| analysis.consumed_types.named(identity, &named.ident))
         .flatten();
         match defined {
             Some(defined) => {
@@ -2598,15 +2595,20 @@ fn named<'a>(
                 "a type of the consumed interface {identity}; consumed types are not supported natively yet"
             ),
         }
-    } else if analysis.shapes.iter().any(|shape| shape.ident == *ident)
-        || analysis.consumed_modules.newtype(ty, scope).is_some()
+    } else if declared.as_ref().is_some_and(|(ident, module)| {
+        analysis
+            .shapes
+            .iter()
+            .any(|shape| shape.ident == *ident && shape.scope == *module)
+    }) || analysis.consumed_modules.newtype(ty, scope).is_some()
     {
         return Ok(Kind::Named(Cow::Borrowed(ty)));
-    } else if let Some(resource) = analysis
-        .wit_resources
-        .iter()
-        .find(|resource| resource.ident == *ident)
-    {
+    } else if let Some(resource) = declared.as_ref().and_then(|(ident, module)| {
+        analysis
+            .wit_resources
+            .iter()
+            .find(|resource| resource.ident == *ident && resource.scope == *module)
+    }) {
         return Ok(Kind::Resource {
             ty,
             handle: handle_path(resource, scope, analysis),

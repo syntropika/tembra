@@ -148,6 +148,38 @@ fn a_derived_signature_names_an_imported_interfaces_types() {
     }
 }
 
+/// A consumed interface's type resolves through a `use` of it as through its module: in the Orb
+/// module and in a sub-module, renamed with `as`, in a group and through an alias that is only a
+/// path. The derived interface `use`s each by its WIT name, whatever name the module writes.
+#[test]
+fn a_consumed_type_resolves_through_a_use_of_it() {
+    let dir = consumed("used", SHOP);
+    let module = expanded(
+        shopping(&dir),
+        "mod shopper {
+            use catalog::Item;
+            pub mod till {
+                use super::catalog::{Size as Measure, Status};
+                pub type Tag = super::catalog::Label;
+                #[service]
+                pub struct Till;
+                impl Till {
+                    pub fn price(item: super::Item) -> u32 { item.price }
+                    pub fn fit(size: Measure, status: Option<Status>) -> Tag { todo!() }
+                }
+            }
+        }",
+    );
+    let text = resolved(&module, &dir);
+    for expected in [
+        "interface till {\n  use example:shop/catalog@1.0.0.{item, size, status, label};\n",
+        "  price: func(item: item) -> u32;\n",
+        "  fit: func(size: size, status: option<status>) -> label;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
 /// A record or a variant of the module holds the handle of an imported interface's resource where
 /// only parameters reach it, of a service's functions and of a resource's constructor and methods
 /// alike, as the runtime moves such a handle anywhere into an argument: the interface defining the
