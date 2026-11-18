@@ -328,7 +328,7 @@ enum ShapeKind {
 /// the WIT as a record of their own, `<enum>-<case>`, the case's payload there.
 enum Payload {
     None,
-    Unnamed(Type),
+    Unnamed(Box<Type>),
     Named(Vec<(Ident, Type)>),
 }
 
@@ -337,7 +337,7 @@ impl Payload {
     fn types(&self) -> Vec<&Type> {
         match self {
             Payload::None => Vec::new(),
-            Payload::Unnamed(ty) => vec![ty],
+            Payload::Unnamed(ty) => vec![ty.as_ref()],
             Payload::Named(fields) => fields.iter().map(|(_, ty)| ty).collect(),
         }
     }
@@ -3253,14 +3253,18 @@ fn component(
 /// Refuse a derived function whose signature the runtime does not carry, as tembra-contracts'
 /// resource profile says it, which `cargo tembra build` checks of the component: the derived WIT,
 /// resolved as a contract, checks each function of a derived interface and the callback of each
-/// derived hook, and an error falls on the function or the hook. The profile holds the rules on
-/// what a signature carries, such as an option of an option, and on the resources it moves: a
-/// derived function takes owned resources of its own interface or of an interface the world
-/// imports, and returns resources of its own interface only.
+/// derived hook. An error falls on the parameter or the result the profile refuses, names its type
+/// and the remedy the guide gives, and else on the function or the hook. The profile holds the
+/// rules on what a signature carries, such as an option of an option, and on the resources it
+/// moves: a derived function takes owned resources of its own interface or of an interface the
+/// world imports, and returns resources of its own interface only.
 fn check_profile(analysis: &Analysis, contract: &tembra_contracts::Contract) -> syn::Result<()> {
+    use tembra_contracts::SignaturePart;
     // Each derived function, by its interface's identity and its WIT name, with what the errors
-    // call it and where: a derived hook's callback, `apply`, is the hook's.
-    let functions: Vec<(String, String, String, Span)> =
+    // call it and where, and its parameters and result: a derived hook's callback, `apply`, is
+    // the hook's, which has neither.
+    type Written<'a> = Option<(&'a [(Ident, Type, String)], Option<&'a Type>)>;
+    let functions: Vec<(String, String, String, Span, Written<'_>)> =
         resource_params::derived(&analysis.services, &analysis.wit_resources)
             .into_iter()
             .map(|function| {
@@ -3269,6 +3273,7 @@ fn check_profile(analysis: &Analysis, contract: &tembra_contracts::Contract) -> 
                     function.wit_name,
                     format!("`{}`", function.name),
                     function.span,
+                    Some((function.params, function.result)),
                 )
             })
             .chain(
@@ -3282,11 +3287,12 @@ fn check_profile(analysis: &Analysis, contract: &tembra_contracts::Contract) -> 
                             "apply".to_owned(),
                             format!("the callback of the hook `{}`", declaration.ident),
                             declaration.ident.span(),
+                            None,
                         )
                     }),
             )
             .collect();
-    for (identity, wit_name, name, span) in functions {
+    for (identity, wit_name, name, span, written) in functions {
         let refused = |error: tembra_contracts::Error| {
             syn::Error::new(
                 span,
@@ -3294,7 +3300,38 @@ fn check_profile(analysis: &Analysis, contract: &tembra_contracts::Contract) -> 
             )
         };
         let slot = contract.bind(&identity, &wit_name, true).map_err(refused)?;
-        contract.resource_signature(slot).map_err(refused)?;
+        let Err((part, error)) = contract.check_signature(slot) else {
+            continue;
+        };
+        let at = match (part, written) {
+            (Some(SignaturePart::Parameter(index)), Some((params, _))) => {
+                params.get(index).map(|(_, ty, _)| ("takes", ty))
+            }
+            (Some(SignaturePart::Result), Some((_, result))) => result.map(|ty| ("returns", ty)),
+            _ => None,
+        };
+        let Some((verb, ty)) = at else {
+            return Err(refused(error));
+        };
+        let remedy = match error.0.as_str() {
+            "nested options require a tagged option codec" => {
+                "; use an enum of the module with a case for each in place of the option of an option"
+            }
+            "resource functions require their defining interface" => {
+                "; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none"
+            }
+            "a foreign owned argument requires its defining Orb import" => {
+                "; a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"
+            }
+            _ => "",
+        };
+        return Err(syn::Error::new(
+            ty.span(),
+            format!(
+                "{name} {verb} `{}`, which the runtime refuses in a signature: {error}{remedy}",
+                native::spelled(ty)
+            ),
+        ));
     }
     Ok(())
 }

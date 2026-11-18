@@ -1977,7 +1977,7 @@ pub(crate) fn enumeration(
                 ));
                 cases.push((
                     variant.ident.clone(),
-                    Payload::Unnamed(fields.unnamed[0].ty.clone()),
+                    Payload::Unnamed(Box::new(fields.unnamed[0].ty.clone())),
                 ));
             }
             Fields::Named(fields) if !fields.named.is_empty() => {

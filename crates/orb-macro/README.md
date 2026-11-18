@@ -867,8 +867,9 @@ the type that names it:
 - a type, a resource or a function of the module named like a consumed type in a derived interface
   that knows both, since an interface's types and functions share one namespace.
 
-A derived function whose signature the runtime refuses is a compile error on the function, from the
-check of tembra-contracts that `cargo tembra build` runs on the component too: an `Option` of a
+A derived function whose signature the runtime refuses is a compile error on the parameter or the
+result that carries what it refuses, which names its type, the runtime's reason and the remedy, from
+the check of tembra-contracts that `cargo tembra build` runs on the component too: an `Option` of a
 consumed type that is an option, `Option<catalog::Opt>` for a `type opt = option<u32>`, which is an
 option of an option, and a resource the function cannot carry, an implemented interface's resource
 anywhere, or an imported interface's handle in its result, alone or in a type of the module; an
@@ -1855,8 +1856,9 @@ the version whose rules the macro follows, and the generated code reaches it the
   as a function's result or a side of a `Result`, which WIT then leaves out: `Result<T, ()>` is
   `result<t>`, `Result<(), E>` is `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has
   no equivalent, use `bool`. A function carrying `Option<Option<T>>`, an option of an option, is
-  refused on the function, as the runtime refuses it in a signature, with an error that says so and
-  names no remedy: write an enum of the module with a case for each in its place.
+  refused on the parameter or the result that holds it, itself or in a type of the module, as the
+  runtime refuses it in a signature: write an enum of the module with a case for each in its place,
+  as the error says.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it. A state is a
   struct of the module, which holds a consumed package's records as they are but is none of them.
 - A record, an enum or a variant that enters the WIT stays the author's type, with its derives,

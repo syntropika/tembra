@@ -23,6 +23,15 @@ pub struct ResourceSignature<'a> {
     pub stream_result: bool,
 }
 
+/// The part of a function's signature the resource profile refuses
+/// ([`PreparedContract::check_signature`]): a parameter, by its index after the receiver, or the
+/// result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignaturePart {
+    Parameter(usize),
+    Result,
+}
+
 impl PreparedContract {
     /// Encode the data part of a capability call. Implicit `self` travels separately as a
     /// host-issued loan; each owned result position names a payload-local attachment index.
@@ -160,14 +169,29 @@ impl PreparedContract {
     /// This does not open an execution path or admit a capability. Data-only transports must
     /// still use `check_value_profile` before installation.
     pub fn resource_signature(&self, slot: u32) -> Result<ResourceSignature<'_>, Error> {
+        self.signature_parts(slot).map_err(|(_, error)| error)
+    }
+
+    /// Check a bound function as `resource_signature` does, and say which part of it the profile
+    /// refuses: a parameter, by its index after the receiver, or the result; none for a fault of
+    /// the function itself, its kind or its receiver. The `#[tembra::orb]` macro puts its error
+    /// on that part.
+    pub fn check_signature(&self, slot: u32) -> Result<(), (Option<SignaturePart>, Error)> {
+        self.signature_parts(slot).map(drop)
+    }
+
+    fn signature_parts(
+        &self,
+        slot: u32,
+    ) -> Result<ResourceSignature<'_>, (Option<SignaturePart>, Error)> {
         let slot = *self
             .slots()
             .get(slot as usize)
-            .ok_or_else(|| Error("unknown WIT method slot".into()))?;
+            .ok_or_else(|| (None, Error("unknown WIT method slot".into())))?;
         let Item::Interface(interface) = &self.side(slot.exports)[slot.entry as usize].item else {
             unreachable!("slots address interface functions")
         };
-        self.resource_function(interface, self.function(slot))
+        self.function_parts(interface, self.function(slot))
     }
 
     fn resource_interface(&self, interface: &Interface) -> Result<(), Error> {
@@ -195,10 +219,50 @@ impl PreparedContract {
         interface: &Interface,
         function: &Function,
     ) -> Result<ResourceSignature<'_>, Error> {
-        let mut signature = ResourceSignature::default();
+        self.function_parts(interface, function)
+            .map_err(|(_, error)| error)
+    }
+
+    /// Check a function's kind and receiver, then each parameter, then the result, and say which
+    /// part a refusal falls on.
+    fn function_parts(
+        &self,
+        interface: &Interface,
+        function: &Function,
+    ) -> Result<ResourceSignature<'_>, (Option<SignaturePart>, Error)> {
+        let mut signature = ResourceSignature {
+            receiver: self
+                .receiver(interface, function)
+                .map_err(|error| (None, error))?,
+            ..ResourceSignature::default()
+        };
+        for (index, parameter) in function
+            .params
+            .iter()
+            .skip(usize::from(signature.receiver.is_some()))
+            .enumerate()
+        {
+            signature.owned_arguments |= self
+                .resource_value_type(interface, parameter.ty, 0, true)
+                .map_err(|error| (Some(SignaturePart::Parameter(index)), error))?;
+        }
+        (signature.owned_results, signature.stream_result) = self
+            .result_profile(interface, function)
+            .map_err(|error| (Some(SignaturePart::Result), error))?;
+        Ok(signature)
+    }
+
+    /// The resource a method borrows as `self`, once the function's kind and its resource are
+    /// checked.
+    fn receiver(
+        &self,
+        interface: &Interface,
+        function: &Function,
+    ) -> Result<Option<&ResourceIdentity>, Error> {
+        let mut receiver = None;
         match function.kind {
             FunctionKind::Method(resource) | FunctionKind::AsyncMethod(resource) => {
-                signature.receiver = Some(self.defined_resource(interface, resource)?);
+                receiver = Some(self.defined_resource(interface, resource)?);
                 let Some(first) = function.params.first() else {
                     return Err(Error(
                         "resource method requires its implicit self borrow".into(),
@@ -228,14 +292,17 @@ impl PreparedContract {
                 ));
             }
         }
-        for parameter in function
-            .params
-            .iter()
-            .skip(usize::from(signature.receiver.is_some()))
-        {
-            signature.owned_arguments |=
-                self.resource_value_type(interface, parameter.ty, 0, true)?;
-        }
+        Ok(receiver)
+    }
+
+    /// Whether a function's result holds owned resources, and whether it is a whole byte stream.
+    fn result_profile(
+        &self,
+        interface: &Interface,
+        function: &Function,
+    ) -> Result<(bool, bool), Error> {
+        let mut owned_results = false;
+        let mut stream_result = false;
         if let Some(result) = function.result {
             if self.byte_stream(result) {
                 if !matches!(function.kind, FunctionKind::AsyncFreestanding) {
@@ -245,19 +312,19 @@ impl PreparedContract {
                             .into(),
                     ));
                 }
-                signature.stream_result = true;
+                stream_result = true;
             } else if let Ty::Ref(ty) = self.resolved(result)
                 && let Kind::Own(resource) = self.kind(ty)
             {
                 self.defined_resource(interface, *resource)?;
-                signature.owned_results = true;
+                owned_results = true;
                 if let FunctionKind::Constructor(declared) = function.kind
                     && self.resolved(Ty::Ref(declared)) != self.resolved(Ty::Ref(*resource))
                 {
                     return Err(Error("constructor returns another resource type".into()));
                 }
             } else {
-                signature.owned_results = self.resource_value_type(interface, result, 0, false)?;
+                owned_results = self.resource_value_type(interface, result, 0, false)?;
             }
         }
         if matches!(function.kind, FunctionKind::Constructor(_))
@@ -267,7 +334,7 @@ impl PreparedContract {
                 "resource constructor must return its owned resource".into(),
             ));
         }
-        Ok(signature)
+        Ok((owned_results, stream_result))
     }
 
     /// Validate a capability value recursively, while preserving nominal resource identity.

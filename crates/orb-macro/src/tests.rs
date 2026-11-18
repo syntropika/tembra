@@ -72,6 +72,18 @@ pub(crate) fn refused_with(options: Options, module: &str) -> String {
     }
 }
 
+/// The message of the module's refusal and the source text the error falls on, which the tests
+/// read through proc-macro2's span locations.
+pub(crate) fn refused_on(options: Options, module: &str) -> (String, String) {
+    match orb_with(options, module) {
+        Err(error) => (
+            error.to_string(),
+            error.span().source_text().unwrap_or_default(),
+        ),
+        Ok(_) => panic!("the module was accepted"),
+    }
+}
+
 fn items(module: &ItemMod) -> &[Item] {
     &module.content.as_ref().expect("a body").1
 }
@@ -892,8 +904,8 @@ fn a_side_of_a_result_that_carries_nothing_is_left_out() {
 
 /// WIT spells an option of an option, but the runtime refuses it in a signature, as
 /// tembra-contracts' resource profile says: a function whose signature holds `Option<Option<T>>`,
-/// itself or in a field of a type that enters the WIT, is refused on the function, while an option
-/// of another type expands.
+/// itself or in a field of a type that enters the WIT, is refused on the parameter or the result
+/// that holds it, with the remedy, while an option of another type expands.
 #[test]
 fn an_option_of_an_option_is_refused() {
     let module = |result: &str, field: &str| {
@@ -916,14 +928,20 @@ fn an_option_of_an_option_is_refused() {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    for (result, field, function) in [
-        ("Option<Option<u32>>", "Option<u32>", "find"),
-        ("Option<u32>", "Option<Option<u32>>", "last"),
+    for (result, field, function, on) in [
+        (
+            "Option<Option<u32>>",
+            "Option<u32>",
+            "find",
+            "Option<Option<u32>>",
+        ),
+        ("Option<u32>", "Option<Option<u32>>", "last", "Found"),
     ] {
-        let error = refused(PACKAGE, &module(result, field));
+        let (error, at) = refused_on(options(PACKAGE, None), &module(result, field));
+        assert_eq!(at, on, "{error}");
         assert!(
             error.contains(&format!(
-                "`Ledger::{function}` has a signature the runtime refuses: nested options require a tagged option codec"
+                "`Ledger::{function}` returns `{on}`, which the runtime refuses in a signature: nested options require a tagged option codec; use an enum of the module with a case for each in place of the option of an option"
             )),
             "{result}, {field}: {error}"
         );
@@ -2349,7 +2367,7 @@ fn a_derived_function_takes_an_imported_handle() {
         }",
     );
     assert!(
-        error.contains("`Spelling::begin` has a signature the runtime refuses: resource functions require their defining interface"),
+        error.contains("`Spelling::begin` returns `Option<texts::Builder>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none"),
         "{error}"
     );
     let error = refused(
@@ -7604,27 +7622,27 @@ fn a_nested_option_is_refused_wherever_a_method_reaches_it() {
         (
             "",
             "pub fn add(count: Option<Option<u32>>) -> u32 { 0 }",
-            "add",
+            "add` takes `Option<Option<u32>>",
         ),
         (
             "",
             "pub fn list() -> Vec<Option<Option<String>>> { Vec::new() }",
-            "list",
+            "list` returns `Vec<Option<Option<String>>>",
         ),
         (
             "pub struct Entry { pub count: Option<Option<u32>> }",
             "pub fn add(entry: Entry) -> u32 { 0 }",
-            "add",
+            "add` takes `Entry",
         ),
         (
             "pub enum Shape { Dot, Line(Option<Option<u32>>) }",
             "pub fn draw(shape: Shape) {}",
-            "draw",
+            "draw` takes `Shape",
         ),
         (
             "pub enum Shape { Dot, Line { length: (u32, Option<Option<u32>>) } }",
             "pub fn draw(shape: Shape) {}",
-            "draw",
+            "draw` takes `Shape",
         ),
     ] {
         let error = refused(
@@ -7635,7 +7653,7 @@ fn a_nested_option_is_refused_wherever_a_method_reaches_it() {
         );
         assert!(
             error.contains(&format!(
-                "`Ledger::{name}` has a signature the runtime refuses: nested options require a tagged option codec"
+                "`Ledger::{name}`, which the runtime refuses in a signature: nested options require a tagged option codec; use an enum of the module with a case for each in place of the option of an option"
             )),
             "{items} {function}: {error}"
         );

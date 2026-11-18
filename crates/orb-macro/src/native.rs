@@ -2396,7 +2396,7 @@ fn codec(
 }
 
 /// A type as the author wrote it, for the errors: `Vec<Point>`.
-fn spelled(ty: &Type) -> String {
+pub(crate) fn spelled(ty: &Type) -> String {
     quote!(#ty).to_string().replace(' ', "").replace(',', ", ")
 }
 

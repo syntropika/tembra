@@ -3,7 +3,8 @@
 //! what is refused where.
 use super::Options;
 use super::tests::{
-    expanded_with as expanded, literal, refused_with as refused, resolved_with, tokens, wit,
+    expanded_with as expanded, literal, refused_on, refused_with as refused, resolved_with, tokens,
+    wit,
 };
 use std::path::{Path, PathBuf};
 use syn::ItemMod;
@@ -565,12 +566,12 @@ fn a_derived_signature_names_an_implemented_interfaces_and_a_hooks_types() {
     };
     let error = refused("pub fn take(cursor: book::Cursor) -> u32 { 0 }");
     assert!(
-        error.contains("`Report::take` has a signature the runtime refuses: a foreign owned argument requires its defining Orb import"),
+        error.contains("`Report::take` takes `book::Cursor`, which the runtime refuses in a signature: a foreign owned argument requires its defining Orb import; a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"),
         "{error}"
     );
     let error = refused("pub fn give() -> Option<book::Cursor> { None }");
     assert!(
-        error.contains("`Report::give` has a signature the runtime refuses: resource functions require their defining interface"),
+        error.contains("`Report::give` returns `Option<book::Cursor>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none"),
         "{error}"
     );
 }
@@ -743,30 +744,38 @@ interface counter {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    for (items, functions, message) in [
+    for (items, functions, function, on) in [
         (
             "",
             "pub fn find() -> Option<catalog::Opt> { None }",
-            "`Shopping::find` has a signature the runtime refuses: nested options require a tagged option codec",
+            "`Shopping::find` returns",
+            "Option<catalog::Opt>",
         ),
         (
             "",
             "pub fn find(again: Vec<Option<catalog::Again>>) -> u32 { 0 }",
-            "`Shopping::find` has a signature the runtime refuses: nested options require a tagged option codec",
+            "`Shopping::find` takes",
+            "Vec<Option<catalog::Again>>",
         ),
         (
             "",
             "pub fn find() -> Option<counter_ref::Maybe> { None }",
-            "`Shopping::find` has a signature the runtime refuses: nested options require a tagged option codec",
+            "`Shopping::find` returns",
+            "Option<counter_ref::Maybe>",
         ),
         (
             "pub struct Found { pub at: Option<catalog::Opt> }",
             "pub fn last() -> Found { todo!() }",
-            "`Shopping::last` has a signature the runtime refuses: nested options require a tagged option codec",
+            "`Shopping::last` returns",
+            "Found",
         ),
     ] {
-        let error = refused(options(), &shopper(items, functions));
-        assert!(error.contains(message), "{functions}\n{error}");
+        let (error, at) = refused_on(options(), &shopper(items, functions));
+        assert_eq!(at, on, "{functions}\n{error}");
+        let message = format!(
+            "{function} `{on}`, which the runtime refuses in a signature: nested options require a tagged option codec; use an enum of the module with a case for each in place of the option of an option"
+        );
+        assert!(error.contains(&message), "{functions}\n{error}");
     }
 }
 
@@ -1204,12 +1213,12 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
         (
             "pub fn take(bag: Bag) -> u32 { 0 } pub fn pack() -> Bag { todo!() }",
             "pub struct Bag { pub cart: catalog::Cart }",
-            "`Shopping::pack` has a signature the runtime refuses: resource functions require their defining interface",
+            "`Shopping::pack` returns `Bag`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn next() -> Vec<Choice> { todo!() }",
             "pub enum Choice { Cart(catalog::Cart), Nothing }",
-            "`Shopping::next` has a signature the runtime refuses: resource functions require their defining interface",
+            "`Shopping::next` returns `Vec<Choice>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn open() -> Tally { Tally }",
@@ -1217,12 +1226,12 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
             #[wit_resource(service = Shopping)]
             pub struct Tally;
             impl Tally { pub fn drain(&self) -> Bag { todo!() } }",
-            "`Tally::drain` has a signature the runtime refuses: resource functions require their defining interface",
+            "`Tally::drain` returns `Bag`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn last() -> Option<Receipt> { None }",
             "pub struct Bag { pub cart: catalog::Cart } pub struct Receipt { pub bag: Bag }",
-            "`Shopping::last` has a signature the runtime refuses: resource functions require their defining interface",
+            "`Shopping::last` returns `Option<Receipt>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn order() { Ordered::run(Order { item: todo!() }) }",
@@ -1246,6 +1255,15 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
         let error = refused(shopping(&dir), &service(functions, items));
         assert!(error.contains(message), "{functions}\n{error}");
     }
+    // A resource of another interface in a result falls on the result as written.
+    let (_, at) = refused_on(
+        shopping(&dir),
+        &service(
+            "pub fn last() -> Option<Receipt> { None }",
+            "pub struct Bag { pub cart: catalog::Cart } pub struct Receipt { pub bag: Bag }",
+        ),
+    );
+    assert_eq!(at, "Option<Receipt>");
     let error = refused(
         options(
             "example:clock@1.0.0",
