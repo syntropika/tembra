@@ -34,10 +34,7 @@ pub(super) fn lower(
     let mut used = BTreeSet::new();
     let mut physical = BTreeSet::new();
     for ((_, ty), value) in ty.params().skip(lent).zip(args) {
-        // A refused attachment is the executor's; data that does not lower is the caller's.
-        let mut attachment = false;
         let checked = values::lower_with(ty, value, &mut |expected, value| {
-            attachment = true;
             let index =
                 slot(value).ok_or_else(|| crate::failure("owned argument names no attachment"))?;
             if !used.insert(index) {
@@ -77,12 +74,15 @@ pub(super) fn lower(
                     }
                 }
             }
-            attachment = false;
             Ok(Val::Bool(false))
         });
+        // Data that does not lower is the caller's; a refused attachment or a limit of the
+        // executor is the executor's.
         match checked {
-            Err(error) if attachment => return Ok(Err(error.to_string().into())),
-            Err(error) => return Ok(Err(mismatch(error.message))),
+            Err(error) if error.code == tembra::core::Code::Invalid => {
+                return Ok(Err(Failed::Coded(error)));
+            }
+            Err(error) => return Ok(Err(error.to_string().into())),
             Ok(_) => {}
         }
     }

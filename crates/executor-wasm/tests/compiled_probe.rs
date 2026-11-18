@@ -382,18 +382,35 @@ fn an_infinite_import_argument_is_not_a_result_refusal() {
     assert_eq!(engine.instances(), 0);
 }
 
-/// A component whose `ratio` divides its arguments, so `ratio(1, 0)` returns an infinite float.
+/// A component whose `ratio` divides its arguments, so `ratio(1, 0)` returns an infinite float,
+/// and whose other functions read a parameter of each kind the lowering checks by name or length.
 const RATIO_WIT: &str = r#"package example:ratio@1.0.0;
-interface checks { ratio: func(a: f64, b: f64) -> f64; }
+interface checks {
+  enum color { red, green }
+  record point { x: s32, y: s32 }
+  flags mode { on, dim }
+  ratio: func(a: f64, b: f64) -> f64;
+  named: func(c: color) -> u32;
+  shifted: func(p: point) -> s32;
+  flipped: func(m: mode) -> u32;
+  code: func(c: char) -> u32;
+}
 world provider { export checks; }"#;
 
 const RATIO_MODULE: &str = r#"(module
   (func (export "example:ratio/checks@1.0.0#ratio") (param f64 f64) (result f64)
-    local.get 0 local.get 1 f64.div))"#;
+    local.get 0 local.get 1 f64.div)
+  (func (export "example:ratio/checks@1.0.0#named") (param i32) (result i32) local.get 0)
+  (func (export "example:ratio/checks@1.0.0#shifted") (param i32 i32) (result i32)
+    local.get 0 local.get 1 i32.add)
+  (func (export "example:ratio/checks@1.0.0#flipped") (param i32) (result i32) local.get 0)
+  (func (export "example:ratio/checks@1.0.0#code") (param i32) (result i32) local.get 0))"#;
 
 /// A compiled Orb served through a platform port answers the codes a native host answers: a result
 /// the portable profile cannot carry is `invalid/result`, and arguments that do not match the
-/// function's parameters are `invalid/arguments`. Neither retires the Store.
+/// function's parameters are `invalid/arguments`, an unknown enum name, a record or flags with
+/// another field and a string of two characters for a `char` included. Neither retires the Store,
+/// and a fault of the packet stays the executor's.
 #[test]
 fn a_platform_port_answers_the_native_codes() {
     use tembra_executor_wasm::PortEvent;
@@ -420,12 +437,14 @@ fn a_platform_port_answers_the_native_codes() {
         |_, _| panic!("the provider declares no imports"),
     )
     .unwrap();
-    let ratio = artifact
-        .contract
-        .bind("example:ratio/checks@1.0.0", "ratio", true)
-        .unwrap();
-    let call = |args: Value| {
-        let packet = json!({"kind":"invoke", "environment":1, "function":ratio, "args":args});
+    let slot = |name: &str| {
+        artifact
+            .contract
+            .bind("example:ratio/checks@1.0.0", name, true)
+            .unwrap()
+    };
+    let invoke = |environment: u32, function: &str, args: Value| {
+        let packet = json!({"kind":"invoke", "environment":environment, "function":slot(function), "args":args});
         let (ticket, events) = port.begin(packet.to_string()).unwrap();
         let PortEvent::Complete(result) = events.receive().unwrap() else {
             panic!("the provider calls no imports")
@@ -433,25 +452,56 @@ fn a_platform_port_answers_the_native_codes() {
         ticket.finish().unwrap();
         result
     };
-    for (args, reason) in [
-        (json!([1, 0]), "result"),
-        (json!([0, 0]), "result"),
-        (json!(["one", 1]), "arguments"),
-        (json!([1]), "arguments"),
-        (json!([1, 2, 3]), "arguments"),
-        (json!(null), "arguments"),
+    let call = |function: &str, args: Value| invoke(1, function, args);
+    for (function, args, reason) in [
+        ("ratio", json!([1, 0]), "result"),
+        ("ratio", json!([0, 0]), "result"),
+        ("ratio", json!(["one", 1]), "arguments"),
+        ("ratio", json!([1]), "arguments"),
+        ("ratio", json!([1, 2, 3]), "arguments"),
+        ("ratio", json!(null), "arguments"),
+        ("named", json!(["purple"]), "arguments"),
+        ("shifted", json!([{ "x": 1, "y": 2, "z": 3 }]), "arguments"),
+        ("shifted", json!([[1, 2]]), "arguments"),
+        (
+            "flipped",
+            json!([{ "on": true, "bright": true }]),
+            "arguments",
+        ),
+        ("flipped", json!([{ "on": 1 }]), "arguments"),
+        ("flipped", json!([true]), "arguments"),
+        ("code", json!(["ab"]), "arguments"),
+        ("code", json!([""]), "arguments"),
     ] {
-        let error = call(args.clone()).unwrap_err();
+        let error = call(function, args.clone()).unwrap_err();
         assert_eq!(
             (error.code, error.reason.as_str()),
             (tembra::Code::Invalid, reason),
-            "{args}: {error}"
+            "{function}{args}: {error}"
         );
     }
+    // An environment the packet names but nobody declared is the executor's fault.
+    let error = invoke(9, "ratio", json!([1, 4])).unwrap_err();
     assert_eq!(
-        serde_json::from_str::<Value>(&call(json!([1, 4])).unwrap()).unwrap(),
-        json!(0.25)
+        (error.code, error.reason.as_str()),
+        (tembra::Code::Unavailable, "wasm_executor"),
+        "{error}"
     );
+    for (function, args, value) in [
+        ("ratio", json!([1, 4]), json!(0.25)),
+        ("named", json!(["green"]), json!(1)),
+        ("shifted", json!([{ "x": 1, "y": 2 }]), json!(3)),
+        ("flipped", json!([{ "on": true, "dim": false }]), json!(1)),
+        ("flipped", json!([{}]), json!(0)),
+        ("code", json!(["\u{e9}"]), json!(233)),
+    ] {
+        let answer = call(function, args.clone()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&answer).unwrap(),
+            value,
+            "{function}{args}"
+        );
+    }
 }
 
 /// A monotonic clock whose reading holds the Store's thread for a second, as a busy machine can.

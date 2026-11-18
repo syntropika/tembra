@@ -13,12 +13,19 @@ pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
 }
 
 /// Lower resources through an issuer-checked callback while reusing the ordinary data codec.
+/// A value that differs from the component's type is refused with `invalid/arguments`, so that
+/// its caller can tell it from a limit of the executor, which keeps `unavailable/wasm_executor`.
 pub(super) fn lower_with(
     ty: Type,
     value: &Value,
     resource: &mut impl FnMut(ResourceType, &Value) -> Result<Val>,
 ) -> Result<Val> {
-    let invalid = || failure("portable value differs from the component ABI type");
+    let invalid = || {
+        tembra::Error::invalid(
+            tembra::core::Reason::Arguments,
+            "portable value differs from the component ABI type",
+        )
+    };
     Ok(match ty {
         Type::Bool => Val::Bool(value.as_bool().ok_or_else(invalid)?),
         Type::S8 => Val::S8(
@@ -63,12 +70,13 @@ pub(super) fn lower_with(
         Type::U64 => Val::U64(wide(value).ok_or_else(invalid)?),
         Type::Float32 => Val::Float32(value.as_f64().ok_or_else(invalid)? as f32),
         Type::Float64 => Val::Float64(value.as_f64().ok_or_else(invalid)?),
-        Type::Char => Val::Char(
-            value
-                .as_str()
-                .and_then(|v| v.chars().next())
-                .ok_or_else(invalid)?,
-        ),
+        Type::Char => {
+            let mut chars = value.as_str().ok_or_else(invalid)?.chars();
+            match (chars.next(), chars.next()) {
+                (Some(char), None) => Val::Char(char),
+                _ => return Err(invalid()),
+            }
+        }
         Type::String => Val::String(value.as_str().ok_or_else(invalid)?.into()),
         Type::List(list) => Val::List(
             value
@@ -78,17 +86,28 @@ pub(super) fn lower_with(
                 .map(|value| lower_with(list.ty(), value, resource))
                 .collect::<Result<_>>()?,
         ),
-        Type::Record(record) => Val::Record(
-            record
-                .fields()
-                .map(|field| {
-                    Ok((
-                        field.name.into(),
-                        lower_with(field.ty, &value[javascript_name(field.name)], resource)?,
-                    ))
-                })
-                .collect::<Result<_>>()?,
-        ),
+        Type::Record(record) => {
+            // A record names exactly its own fields.
+            let fields = value.as_object().ok_or_else(invalid)?;
+            if fields.keys().any(|key| {
+                !record
+                    .fields()
+                    .any(|field| javascript_name(field.name) == *key)
+            }) {
+                return Err(invalid());
+            }
+            Val::Record(
+                record
+                    .fields()
+                    .map(|field| {
+                        Ok((
+                            field.name.into(),
+                            lower_with(field.ty, &value[javascript_name(field.name)], resource)?,
+                        ))
+                    })
+                    .collect::<Result<_>>()?,
+            )
+        }
         Type::Tuple(tuple) => Val::Tuple(
             tuple
                 .types()
@@ -125,14 +144,28 @@ pub(super) fn lower_with(
                 _ => return Err(invalid()),
             })
         }
-        Type::Enum(_) => Val::Enum(value.as_str().ok_or_else(invalid)?.into()),
-        Type::Flags(flags) => Val::Flags(
-            flags
-                .names()
-                .filter(|name| value[javascript_name(name)] == true)
-                .map(str::to_owned)
-                .collect(),
-        ),
+        Type::Enum(cases) => {
+            let name = value.as_str().ok_or_else(invalid)?;
+            if !cases.names().any(|case| case == name) {
+                return Err(invalid());
+            }
+            Val::Enum(name.into())
+        }
+        // Flags name only their own flags, each with a boolean.
+        Type::Flags(flags) => {
+            let set = value.as_object().ok_or_else(invalid)?;
+            let mut on = Vec::new();
+            for (key, value) in set {
+                let name = flags
+                    .names()
+                    .find(|name| javascript_name(name) == *key)
+                    .ok_or_else(invalid)?;
+                if value.as_bool().ok_or_else(invalid)? {
+                    on.push(name.to_owned());
+                }
+            }
+            Val::Flags(on)
+        }
         Type::Own(ty) => resource(ty, value)?,
         _ => {
             return Err(failure(
