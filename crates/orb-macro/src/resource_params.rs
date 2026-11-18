@@ -6,8 +6,8 @@
 //! that defines it; it refuses at installation an Orb whose function takes a borrowed one,
 //! `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
 use crate::{
-    Constructor, Declared, Function, Handles, Service, Shape, Towards, WitResource, convert,
-    converted_reason, foreign::Modules, handles_of, mentions, own_or_only, rebuild, wit,
+    At, Constructor, Declared, Function, Handles, Service, Shape, Towards, WitResource,
+    bindings_names, convert, foreign::Modules, handles_of, mentions, own_or_only, rebuild, wit,
     with_handles,
 };
 use quote::quote;
@@ -270,81 +270,6 @@ fn held<'a>(
     held
 }
 
-/// Refuse, once the types that enter the WIT are known, a parameter or a result of a derived
-/// function that holds both a resource and a type the macro converts, the enum with a case with
-/// named fields, free JSON, a newtype or a type holding one: the bridge converts such a type
-/// between the author's and the bindings', through `From`, as JSON text or as the newtype's field,
-/// which carries no handle, and wraps or takes back a resource where the author's type is the
-/// bindings' own.
-pub(crate) fn check_converted(
-    services: &[Service],
-    resources: &[WitResource],
-    shapes: &[Shape],
-    converted: &BTreeMap<String, Ident>,
-    types: &[(usize, Ident)],
-    modules: &Modules,
-) -> syn::Result<()> {
-    for function in derived(services, resources) {
-        let params = function.params.iter().map(|(_, ty, _)| (ty, "takes"));
-        for (ty, verb) in params.chain(function.result.map(|ty| (ty, "returns"))) {
-            if wit::holds_free_json(ty)
-                && let Some((resource, _)) =
-                    held(ty, function.scope, shapes, resources, types, modules).first()
-            {
-                return Err(syn::Error::new(
-                    ty.span(),
-                    format!(
-                        "`{}` {verb} `{}`, which holds the resource `{}` and free JSON, `serde_json::Value`: the macro converts free JSON between the author's value and the bindings' text, and converts no resource; keep the resource apart from the JSON",
-                        function.name,
-                        quote!(#ty),
-                        resource.ident,
-                    ),
-                ));
-            }
-            if let Some(newtype) = modules.newtypes_in(ty, function.scope).first()
-                && let Some((resource, _)) =
-                    held(ty, function.scope, shapes, resources, types, modules).first()
-            {
-                return Err(syn::Error::new(
-                    ty.span(),
-                    format!(
-                        "`{}` {verb} `{}`, which holds the resource `{}` and the newtype `{}`: the macro converts a newtype between the author's struct and the bindings' type of its field, and converts no resource; keep the resource apart from the newtype",
-                        function.name,
-                        quote!(#ty),
-                        resource.ident,
-                        newtype.ident,
-                    ),
-                ));
-            }
-            let mut mentioned = Vec::new();
-            modules.references(ty, function.scope, &mut mentioned);
-            let Some(shape) = mentioned.iter().find_map(|name| {
-                shapes
-                    .iter()
-                    .find(|shape| shape.ident == *name && converted.contains_key(&name.to_string()))
-            }) else {
-                continue;
-            };
-            if let Some((resource, _)) =
-                held(ty, function.scope, shapes, resources, types, modules).first()
-            {
-                return Err(syn::Error::new(
-                    ty.span(),
-                    format!(
-                        "`{}` {verb} `{}`, which holds the resource `{}` and `{}`, {}: the macro converts such a type between the author's and the bindings', and converts no resource; give the case an unnamed payload, a record of the module, or keep the resource apart from the type",
-                        function.name,
-                        quote!(#ty),
-                        resource.ident,
-                        shape.ident,
-                        converted_reason(shape, shapes)
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The parameters of a derived function's bridge and the arguments it calls the author's function
 /// with, the function written in the module `scope`: a parameter holding a resource of the module
 /// is the bindings' handle type there, and each handle is taken back into the author's value,
@@ -363,15 +288,22 @@ pub(crate) fn bridged(
         .iter()
         .map(|(ident, ty, _)| {
             if mentions(ty, scope, converted, modules) {
-                let spelled = with_handles(ty, scope, converted, module, modules);
+                let spelled = with_handles(
+                    ty,
+                    scope,
+                    &bindings_names(resources, converted),
+                    module,
+                    modules,
+                );
+                let at = At {
+                    modules,
+                    scope,
+                    resources,
+                    module,
+                };
                 return (
                     quote! { #ident: #spelled },
-                    convert(
-                        ty,
-                        quote! { #ident },
-                        Towards::Author,
-                        Some((modules, scope)),
-                    ),
+                    convert(ty, quote! { #ident }, Towards::Author, Some(at)),
                 );
             }
             match handles_of(ty, scope, resources, modules) {
@@ -390,6 +322,9 @@ pub(crate) fn bridged(
 
 /// An expression taking each handle `handles` places in `value` back into the author's value, its
 /// type inferred from the author's parameter, and rebuilding the containers around it.
-fn taken(handles: &Handles, value: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+pub(crate) fn taken(
+    handles: &Handles,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     rebuild(handles, value, &|_, value| quote! { #value.into_inner() })
 }

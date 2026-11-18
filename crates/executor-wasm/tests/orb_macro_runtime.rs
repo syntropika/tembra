@@ -11,7 +11,7 @@ use std::{
 use tembra::{
     Context, Host, Orb, Reference, Service,
     core::Code,
-    portable::{Capability, Issued, Nominal, Owned, Payload},
+    portable::{Capability, Delivered, Issued, Nominal, Owned, Payload},
 };
 use tembra_contracts::ModuleContract;
 use tembra_executor_wasm::{
@@ -852,8 +852,9 @@ fn count(pool: &mut LocalPool, host: &Host, name: &str) {
 }
 
 /// Drive the tallies of the Orb `name`: each owned tally passed to `close`, to `close-all` in a
-/// list and an option, or to another tally's `absorb` leaves the caller and the provider's handle
-/// table, and the guest drops the value it took back.
+/// list and an option, to another tally's `absorb`, or to `settle` in the record of a case with
+/// named fields, which `open` returns it in, leaves the caller and the provider's handle table,
+/// and the guest drops the value it took back.
 fn tally(pool: &mut LocalPool, host: &Host, engine: &Engine, name: &str) {
     /// Run one operation under a fresh root of `alice`.
     fn root<T: 'static>(
@@ -921,6 +922,37 @@ fn tally(pool: &mut LocalPool, host: &Host, engine: &Engine, name: &str) {
     });
     assert_eq!(total, json!(30), "{name}");
     assert_eq!(dropped(pool), json!(6), "{name}");
+    assert_eq!(engine.resources(), 0, "{name}");
+
+    // A case with named fields holds a tally: the record of the case carries its handle, out and
+    // back in, and an opening without one carries none.
+    let opened = {
+        let tallies = tallies.clone();
+        root(pool, host, async move |context| {
+            tallies
+                .call_portable::<_, Delivered>(&context, "open", (7_u32,))
+                .await
+        })
+    };
+    assert_eq!(
+        opened.value,
+        json!({"tag": "opened", "val": {"tally": 0, "at": 7}}),
+        "{name}"
+    );
+    assert_eq!(engine.resources(), 1, "{name}");
+    let mut payload = Payload::data(json!([opened.value]));
+    for owned in opened.owned {
+        payload.attach_argument(owned).unwrap();
+    }
+    assert_eq!(call(pool, "settle", payload), json!(7), "{name}");
+    assert_eq!(engine.resources(), 0, "{name}");
+    assert_eq!(dropped(pool), json!(7), "{name}");
+    let refused = call(pool, "open", Payload::data(json!([2000])));
+    assert_eq!(
+        refused,
+        json!({"tag": "refused", "val": {"reason": "above a thousand"}}),
+        "{name}"
+    );
     assert_eq!(engine.resources(), 0, "{name}");
     tallies.release().unwrap();
 }
@@ -2054,13 +2086,14 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
 }
 
 /// Hook declarations of each composition, in a component build, std and freestanding: the module
-/// `gatehouse` of the `hooks` feature declares a series and a bail from their input, and the
-/// waterfall of a consumed package by its identity, which the component's roles name with their
-/// compositions. Native contributions answer them in plan order: every contribution to the series
-/// sees each visit, the first answer of the bail gives the room, and each contribution to the
-/// waterfall changes the admission in turn. Without contributions, the series ends, the bail
-/// answers nothing and the waterfall hands its input back. Natively, the module compiles, and its
-/// `orb()` refuses the declarations, which only a component serves.
+/// `gatehouse` of the `hooks` feature declares a series, whose input holds a newtype, and a bail
+/// from their input, and the waterfall of a consumed package by its identity, which the
+/// component's roles name with their compositions. Native contributions answer them in plan order:
+/// every contribution to the series sees each visit, its newtype as its field, the first answer of
+/// the bail gives the room, and each contribution to the waterfall changes the admission in turn.
+/// Without contributions, the series ends, the bail answers nothing and the waterfall hands its
+/// input back. Natively, the module compiles, and its `orb()` refuses the declarations, which only
+/// a component serves.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
 fn hooks_a_component_declares_compose_their_contributions() {

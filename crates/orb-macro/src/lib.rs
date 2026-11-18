@@ -2941,7 +2941,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         !states.is_empty(),
     )?;
     // A type the macro converts stays the author's too; the component writes its conversions.
-    check_converted_hooks(&shapes, &converted, &declared, &consumed_modules)?;
     keep_converted(
         &shapes,
         &converted,
@@ -3033,14 +3032,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &wit_resources,
         &declared,
         &shapes,
-        &own_types,
-        &consumed_modules,
-    )?;
-    resource_params::check_converted(
-        &services,
-        &wit_resources,
-        &shapes,
-        &converted,
         &own_types,
         &consumed_modules,
     )?;
@@ -3381,15 +3372,34 @@ fn component(
             #(#[allow(unused_imports)] use #paths as _;)*
         });
     }
+    // The bindings' handle type of each WIT resource, by the author's name of its struct.
+    let handle_types: BTreeMap<String, Ident> = wit_resources
+        .iter()
+        .map(|resource| {
+            let handle = type_ident(&wit::kebab(&resource.ident));
+            (resource.ident.to_string(), handle)
+        })
+        .collect();
+    // The hook whose interface defines the types the derived hooks' inputs reach.
+    let defining = declared
+        .iter()
+        .find(|declaration| declaration.input.is_some())
+        .map(|declaration| hook_path(&declaration.hook));
+    // What a derived hook's `run` converts: the types the macro converts and the newtypes; and the
+    // module types holding a string or a list, which the hook's import takes by reference.
+    let converting = (converted, consumed_modules);
+    let holding = holding_lists(shapes, consumed_modules);
     // A type the macro converts, the author's as the analysis left it, gets its conversions to
-    // and from the bindings' type, next to it.
+    // and from the bindings' type, next to it, and to and from the import's copy too where a
+    // derived hook's input reaches it.
     converted_conversions(
         shapes,
         converted,
-        placement,
+        (placement, &handle_types),
         (&ns_ident, &name_ident),
         &mut tree,
         (modules, consumed_modules),
+        (&hook_shapes, defining.as_ref()),
     );
     // A newtype the WIT spells as its field crosses as that field, through the trait `NEWTYPE`,
     // implemented next to it, where the field is visible.
@@ -3405,14 +3415,6 @@ fn component(
         ));
     }
     let newtype_trait = (!newtypes.is_empty()).then(newtype_trait);
-    // The bindings' handle type of each WIT resource, by the author's name of its struct.
-    let handle_types: BTreeMap<String, Ident> = wit_resources
-        .iter()
-        .map(|resource| {
-            let handle = type_ident(&wit::kebab(&resource.ident));
-            (resource.ident.to_string(), handle)
-        })
-        .collect();
     // A derived service's bridge forwards each function, named as the bindings name it, to the
     // author's; a resource a parameter holds is taken back from the bindings' handle type, one the
     // result holds is wrapped into it, and the resources of the service's interface are the
@@ -3633,7 +3635,7 @@ fn component(
     };
     // Signatures spelled from a consumed WIT name strings and lists from `alloc`, which a module
     // may not name: the alias goes in every module that holds such a signature, and so do the
-    // bridges spelling free JSON as the bindings' string of its text.
+    // bridges spelling free JSON as the bindings' string of its text, a derived hook's included.
     // The resources of an implemented interface are bridged in their own modules.
     let holds_json = |function: &Function| {
         function
@@ -3650,7 +3652,6 @@ fn component(
         .collect();
     let alloc_scopes: BTreeSet<usize> = declared
         .iter()
-        .filter(|declaration| declaration.input.is_none())
         .map(|declaration| declaration.scope)
         .chain(
             services
@@ -3707,11 +3708,6 @@ fn component(
     }
     // The hooks: the export the contract requires and `run`, in the declaring module; the
     // conversions between the two sides of the derived hooks' types, once, in the Orb module.
-    let holding = holding_lists(shapes);
-    let defining = declared
-        .iter()
-        .find(|declaration| declaration.input.is_some())
-        .map(|declaration| hook_path(&declaration.hook));
     for declaration in declared {
         let depth = modules[declaration.scope].len();
         let code = declaration_code(
@@ -3720,6 +3716,7 @@ fn component(
             &hook_shapes,
             &holding,
             defining.as_ref(),
+            converting,
             depth,
         )?;
         tree.at(declaration.scope).generated.push(code);
@@ -3727,7 +3724,7 @@ fn component(
     let conversions = defining.as_ref().map(|path| {
         conversions(
             shapes,
-            &hook_shapes,
+            (&hook_shapes, converted),
             &export_module(0, path),
             &import_module(0, path),
         )
@@ -4536,13 +4533,25 @@ fn derived_result(
         return (quote! {}, call);
     };
     // A result holding a type the macro converts is spelled with the bindings' type in its
-    // place, as one holding a resource is with the handle type, and converted part by part; it
-    // holds no resource, as `resource_params::check_converted` makes sure.
+    // place, and each resource beside it with the handle type, and converted part by part, each
+    // resource wrapped.
     if mentions(ty, scope, converted, modules) {
-        let spelled = with_handles(ty, scope, converted, module, modules);
+        let spelled = with_handles(
+            ty,
+            scope,
+            &bindings_names(resources, converted),
+            module,
+            modules,
+        );
+        let at = At {
+            modules,
+            scope,
+            resources,
+            module,
+        };
         return (
             quote! { -> #spelled },
-            convert(ty, call, Towards::Bindings, Some((modules, scope))),
+            convert(ty, call, Towards::Bindings, Some(at)),
         );
     }
     match handles_of(ty, scope, resources, modules) {
@@ -4552,6 +4561,20 @@ fn derived_result(
         }
         None => (quote! { -> #ty }, call),
     }
+}
+
+/// The bindings' name of each type of the module whose place a bridge spells with the bindings'
+/// type: each resource's handle type, `resources`, and each type the macro converts, `converted`,
+/// by the author's name.
+pub(crate) fn bindings_names(
+    resources: &BTreeMap<String, Ident>,
+    converted: &BTreeMap<String, Ident>,
+) -> BTreeMap<String, Ident> {
+    resources
+        .iter()
+        .chain(converted)
+        .map(|(name, generated)| (name.clone(), generated.clone()))
+        .collect()
 }
 
 /// Where a value holds owned resources, which a bridge wraps into the bindings' handle types: a
@@ -7903,13 +7926,15 @@ fn declaration(
 /// The code of one declared hook, for the module declaring it: the export the contract requires,
 /// which traps because the contributions answer the hook, and `run` on the author's struct, which
 /// calls the matching import so the kernel runs the plan. A derived hook's `run` speaks the
-/// module's own types and converts them to and from the import side of the bindings.
+/// module's own types and converts them to and from the import side of the bindings, those the
+/// macro converts, `converted`, and the newtypes `modules` reads included.
 fn declaration_code(
     declaration: &Declared,
     callbacks: &BTreeMap<String, wit::Callback>,
     hook_shapes: &BTreeSet<String>,
     holding: &BTreeSet<String>,
     defining: Option<&[Ident; 3]>,
+    (converted, modules): (&BTreeMap<String, Ident>, &foreign::Modules),
     depth: usize,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let path = hook_path(&declaration.hook);
@@ -7917,13 +7942,16 @@ fn declaration_code(
     let export = export_module(depth, &path);
     let import = import_module(depth, &path);
     if let Some((input, _)) = &declaration.input {
-        let import_types = import_module(depth, defining.expect("a derived hook defines types"));
+        let defining = defining.expect("a derived hook defines types");
         return Ok(derived_hook_code(
             declaration,
             input,
-            hook_shapes,
-            holding,
-            &import_types,
+            (hook_shapes, holding),
+            (
+                &export_module(depth, defining),
+                &import_module(depth, defining),
+            ),
+            (converted, modules),
             depth,
         ));
     }
@@ -8019,13 +8047,15 @@ fn lent(passed: &wit::Passed, value: proc_macro2::TokenStream) -> proc_macro2::T
 /// The code of a hook derived from `input = Type`: the export the contract requires, which traps
 /// because the contributions answer the hook, and `run` on the author's struct, which converts
 /// the module's types to the import side of the bindings, calls the hook's import so the kernel
-/// runs the plan, and converts the composed result back.
+/// runs the plan, and converts the composed result back. The export takes the types the macro
+/// converts, `converted`, as the bindings' copies of `export_types`, as a service's bridge does,
+/// and `run` converts them, and the newtypes `modules` reads, to and from `import_types`.
 fn derived_hook_code(
     declaration: &Declared,
     input: &Type,
-    hook_shapes: &BTreeSet<String>,
-    holding: &BTreeSet<String>,
-    import_types: &proc_macro2::TokenStream,
+    (hook_shapes, holding): (&BTreeSet<String>, &BTreeSet<String>),
+    (export_types, import_types): (&proc_macro2::TokenStream, &proc_macro2::TokenStream),
+    (converted, modules): (&BTreeMap<String, Ident>, &foreign::Modules),
     depth: usize,
 ) -> proc_macro2::TokenStream {
     let path = hook_path(&declaration.hook);
@@ -8033,17 +8063,29 @@ fn derived_hook_code(
     let export = export_module(depth, &path);
     let import = import_module(depth, &path);
     let ident = &declaration.ident;
-    let import_input = respell(input, hook_shapes, import_types);
-    let (result, settle) = match declaration.composition {
-        Composition::Series => (quote! {}, None),
+    let scope = declaration.scope;
+    let export_input = with_handles(input, scope, converted, export_types, modules);
+    let import_input = respell(input, hook_shapes, import_types, (modules, scope));
+    // A hook's input holds no resource: `resource_params::check_reached` refuses one.
+    let resources = BTreeMap::new();
+    let at = Some(At {
+        modules,
+        scope,
+        resources: &resources,
+        module: import_types,
+    });
+    let (result, exported, settle) = match declaration.composition {
+        Composition::Series => (quote! {}, quote! {}, None),
         Composition::Waterfall => (
             quote! { -> #input },
-            Some(convert(input, quote! { answer }, Towards::Author, None)),
+            quote! { -> #export_input },
+            Some(convert(input, quote! { answer }, Towards::Author, at)),
         ),
         Composition::Bail => {
-            let item = convert(input, quote! { item }, Towards::Author, None);
+            let item = convert(input, quote! { item }, Towards::Author, at);
             (
                 quote! { -> ::core::option::Option<#input> },
+                quote! { -> ::core::option::Option<#export_input> },
                 Some(quote! { answer.map(|item| #item) }),
             )
         }
@@ -8056,10 +8098,10 @@ fn derived_hook_code(
         " Run the hook `{}`: the kernel calls its contributions in plan order and returns the composed result.",
         declaration.hook
     );
-    let converted = convert(input, quote! { input }, Towards::Bindings, None);
+    let converted = convert(input, quote! { input }, Towards::Bindings, at);
     // A string, a list, or a module type that holds one anywhere crosses to an import by
     // reference, as the bindings take them.
-    let by_reference = holds_list(input, holding);
+    let by_reference = holds_list(input, holding, (modules, scope));
     let argument = if by_reference {
         quote! { &input }
     } else {
@@ -8072,7 +8114,7 @@ fn derived_hook_code(
     };
     quote! {
         impl #export::Guest for #root __TembraExports {
-            fn apply(_input: #input) #result {
+            fn apply(_input: #export_input) #exported {
                 ::core::panic!(#message)
             }
         }
@@ -8087,15 +8129,15 @@ fn derived_hook_code(
 }
 
 /// The module types whose values hold a string or a list anywhere, in their fields or payloads,
-/// directly or through other module types.
-fn holding_lists(shapes: &[Shape]) -> BTreeSet<String> {
+/// directly or through other module types and the newtypes `modules` reads.
+fn holding_lists(shapes: &[Shape], modules: &foreign::Modules) -> BTreeSet<String> {
     let mut holding = BTreeSet::new();
     loop {
         let known = holding.len();
         for shape in shapes {
             if foreign::shape_types(shape)
                 .iter()
-                .any(|ty| holds_list(ty, &holding))
+                .any(|ty| holds_list(ty, &holding, (modules, shape.scope)))
             {
                 holding.insert(shape.ident.to_string());
             }
@@ -8106,9 +8148,20 @@ fn holding_lists(shapes: &[Shape]) -> BTreeSet<String> {
     }
 }
 
-/// Whether a type of the module holds a string or a list: it is one, its type parameters or its
-/// tuple elements hold one, or it is a module type of `holding`.
-fn holds_list(ty: &Type, holding: &BTreeSet<String>) -> bool {
+/// Whether a type of the module, written in the module `scope`, holds a string or a list: it is
+/// one, free JSON, which the bindings hold as its text, or a newtype whose field holds one, its
+/// type parameters or its tuple elements hold one, or it is a module type of `holding`.
+fn holds_list(
+    ty: &Type,
+    holding: &BTreeSet<String>,
+    (modules, scope): (&foreign::Modules, usize),
+) -> bool {
+    if wit::free_json(ty) {
+        return true;
+    }
+    if let Some(newtype) = modules.newtype(ty, scope) {
+        return holds_list(&newtype.inner, holding, (modules, newtype.scope));
+    }
     match ty {
         Type::Path(path) => path.path.segments.last().is_some_and(|segment| {
             let name = segment.ident.to_string();
@@ -8116,31 +8169,39 @@ fn holds_list(ty: &Type, holding: &BTreeSet<String>) -> bool {
                 syn::PathArguments::AngleBracketed(arguments) => arguments
                     .args
                     .iter()
-                    .any(|argument| matches!(argument, syn::GenericArgument::Type(ty) if holds_list(ty, holding))),
+                    .any(|argument| matches!(argument, syn::GenericArgument::Type(ty) if holds_list(ty, holding, (modules, scope)))),
                 _ => false,
             };
             name == "String" || name == "Vec" || holding.contains(&name) || arguments
         }),
-        Type::Tuple(tuple) => tuple.elems.iter().any(|ty| holds_list(ty, holding)),
+        Type::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .any(|ty| holds_list(ty, holding, (modules, scope))),
         _ => false,
     }
 }
 
 /// `From` in both directions between the two sides of the bindings for each type a derived hook
-/// reaches: the export side, which the module's functions use, and the import side, which the
-/// typed entry to the plan uses. The two are distinct Rust types of one WIT definition.
+/// reaches, `hook_shapes`, but those the macro converts, `converted`, which stay the author's:
+/// the export side, which the module's functions use, and the import side, which the typed entry
+/// to the plan uses. The two are distinct Rust types of one WIT definition.
 fn conversions(
     shapes: &[Shape],
-    hook_shapes: &BTreeSet<String>,
+    (hook_shapes, converted): (&BTreeSet<String>, &BTreeMap<String, Ident>),
     export: &proc_macro2::TokenStream,
     import: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let impls = shapes
         .iter()
-        .filter(|shape| hook_shapes.contains(&shape.ident.to_string()))
+        .filter(|shape| {
+            let name = shape.ident.to_string();
+            hook_shapes.contains(&name) && !converted.contains_key(&name)
+        })
         .map(|shape| {
             // The bindings' name of the type, on both sides. Both are the bindings', between which
-            // only the module's types convert: a derived hook's input holds no free JSON.
+            // only the module's types convert: a type holding free JSON, a newtype or a case with
+            // named fields is one the macro converts.
             let ident = type_ident(&wit::kebab(&shape.ident));
             let body = |from: &proc_macro2::TokenStream| match &shape.kind {
                 ShapeKind::Record(fields) => {
@@ -8164,7 +8225,7 @@ fn conversions(
                         }
                         Payload::None => quote! { #from::#ident::#case => Self::#case },
                         Payload::Named(_) => {
-                            unreachable!("a derived hook reaches no case with named fields")
+                            unreachable!("an enum with a case with named fields is converted")
                         }
                     });
                     quote! { match value { #(#arms,)* } }
@@ -8195,27 +8256,48 @@ enum Towards {
     Author,
 }
 
+/// Where a conversion is written: the modules, the module's scope, which the newtypes and the
+/// resources are read in, and the resources of the module, by the author's name of the struct,
+/// each with the name of its handle type in `module`, the bindings' module of the other side.
+#[derive(Clone, Copy)]
+struct At<'a> {
+    modules: &'a foreign::Modules,
+    scope: usize,
+    resources: &'a BTreeMap<String, Ident>,
+    module: &'a proc_macro2::TokenStream,
+}
+
 /// An expression converting `value`, of the author's type `ty` on one side of the bindings, to the
 /// other side, `towards`: containers are rebuilt element by element, free JSON is written as its
-/// text or read from it, a newtype goes through the trait it implements, `NEWTYPE`, and everything
-/// else goes through `Into`, the identity for scalars and strings, the generated `From` for the
-/// module's types. A text that holds no JSON traps, as a component does when it cannot answer:
-/// only a native Orb has an error channel for it; a component reads a newtype through `From`, which
-/// refuses no value. `at` is where the conversion is written, the modules and the module's scope,
-/// for the newtypes, which a hook's types never hold.
+/// text or read from it, a newtype goes through the trait it implements, `NEWTYPE`, an own
+/// resource is wrapped into its handle type or taken back from it, and everything else goes
+/// through `Into`, the identity for scalars and strings, the generated `From` for the module's
+/// types. A text that holds no JSON traps, as a component does when it cannot answer: only a
+/// native Orb has an error channel for it; a component reads a newtype through `From`, which
+/// refuses no value. `at` is where the conversion is written, for the newtypes and the resources,
+/// which the bindings' two copies of a hook's types never hold.
 fn convert(
     ty: &Type,
     value: proc_macro2::TokenStream,
     towards: Towards,
-    at: Option<(&foreign::Modules, usize)>,
+    at: Option<At<'_>>,
 ) -> proc_macro2::TokenStream {
-    if let Some((modules, scope)) = at
-        && modules.newtype(ty, scope).is_some()
+    if let Some(at) = at
+        && at.modules.newtype(ty, at.scope).is_some()
     {
-        let newtype = modules.newtype_trait(scope);
+        let newtype = at.modules.newtype_trait(at.scope);
         return match towards {
             Towards::Bindings => quote! { <#ty as #newtype>::__tembra_into_bindings(#value) },
             Towards::Author => quote! { <#ty as #newtype>::__tembra_from_bindings(#value) },
+        };
+    }
+    if let Some(at) = at
+        && let Some(handles @ Handles::Resource(_)) =
+            handles_of(ty, at.scope, at.resources, at.modules)
+    {
+        return match towards {
+            Towards::Bindings => wrap(&handles, value, at.module),
+            Towards::Author => resource_params::taken(&handles, value),
         };
     }
     if let (true, Type::Path(path)) = (wit::free_json(ty), ty) {
@@ -8288,13 +8370,26 @@ fn convert(
     }
 }
 
-/// The author's type as the import side of the bindings spells it: a type of the module that a
-/// hook reaches lives in `module` there, everything else keeps its spelling.
+/// The author's type, written in the module `scope`, as the import side of the bindings spells it:
+/// a type of the module that a hook reaches lives in `module` there, free JSON is a string, a
+/// newtype its field, everything else keeps its spelling.
 fn respell(
     ty: &Type,
     hook_shapes: &BTreeSet<String>,
     module: &proc_macro2::TokenStream,
+    (modules, scope): (&foreign::Modules, usize),
 ) -> proc_macro2::TokenStream {
+    if wit::free_json(ty) {
+        return quote! { __tembra_alloc::string::String };
+    }
+    if let Some(newtype) = modules.newtype(ty, scope) {
+        return respell(
+            &newtype.inner,
+            hook_shapes,
+            module,
+            (modules, newtype.scope),
+        );
+    }
     match ty {
         Type::Path(path) => {
             let segments: Vec<&syn::PathSegment> = path.path.segments.iter().collect();
@@ -8312,7 +8407,9 @@ fn respell(
             let leading = &path.path.leading_colon;
             let prefix = prefix.iter().map(|segment| quote! { #segment:: });
             let arguments = arguments.args.iter().map(|argument| match argument {
-                syn::GenericArgument::Type(ty) => respell(ty, hook_shapes, module),
+                syn::GenericArgument::Type(ty) => {
+                    respell(ty, hook_shapes, module, (modules, scope))
+                }
                 other => quote! { #other },
             });
             quote! { #leading #(#prefix)* #ident<#(#arguments),*> }
@@ -8321,7 +8418,7 @@ fn respell(
             let elements = tuple
                 .elems
                 .iter()
-                .map(|ty| respell(ty, hook_shapes, module));
+                .map(|ty| respell(ty, hook_shapes, module, (modules, scope)));
             quote! { (#(#elements,)*) }
         }
         _ => quote! { #ty },
@@ -8390,37 +8487,6 @@ fn holds_newtype(shape: &Shape, modules: &foreign::Modules) -> bool {
         .any(|ty| modules.holds_newtype(ty, shape.scope))
 }
 
-/// Why a type is one the macro converts, for the errors, after the type's name and a comma: it is
-/// an enum with a case with named fields, or it holds one, free JSON or a newtype, itself or
-/// through the other types of the module, `shapes`, it names.
-pub(crate) fn converted_reason(shape: &Shape, shapes: &[Shape]) -> &'static str {
-    if has_named_case(shape) {
-        return "an enum with a case with named fields";
-    }
-    let mut pending = vec![shape];
-    let mut seen = BTreeSet::new();
-    let mut json = false;
-    while let Some(held) = pending.pop() {
-        if !seen.insert(held.ident.to_string()) {
-            continue;
-        }
-        if has_named_case(held) {
-            return "which holds an enum with a case with named fields";
-        }
-        json |= holds_json(held);
-        pending.extend(
-            held.references
-                .iter()
-                .filter_map(|(name, _)| shapes.iter().find(|shape| shape.ident == *name)),
-        );
-    }
-    if json {
-        "which holds free JSON, `serde_json::Value`"
-    } else {
-        "which holds a newtype, a tuple struct of one field"
-    }
-}
-
 /// Whether a type written in the module `scope` names a type the macro converts, free JSON or a
 /// newtype, itself or inside its type parameters and tuples.
 pub(crate) fn mentions(
@@ -8478,75 +8544,6 @@ fn wit_named(item: &Item) -> syn::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Refuse a type the macro converts that a derived hook's input reaches: the conversions go to
-/// the bindings' type of a service's export, and a hook's input has two types in the bindings,
-/// its export's and its import's.
-fn check_converted_hooks(
-    shapes: &[Shape],
-    converted: &BTreeMap<String, Ident>,
-    declared: &[Declared],
-    modules: &foreign::Modules,
-) -> syn::Result<()> {
-    // A hook reaching a type holding such an enum reaches the enum too, through its fields.
-    let reached = wit::hook_shapes(shapes, declared, modules);
-    let shape = shapes.iter().find(|shape| {
-        let name = shape.ident.to_string();
-        converted.contains_key(&name) && has_named_case(shape) && reached.contains(&name)
-    });
-    if let Some(shape) = shape {
-        return Err(syn::Error::new(
-            shape.ident.span(),
-            format!(
-                "`{}` is an enum with a case with named fields that a derived hook's input reaches: the macro converts such an enum, and every type holding it, to the bindings' type of a service's interface, and a hook's input has two in the bindings, its export's and its import's; give the case an unnamed payload, a record of the module, or keep the enum out of the hook's input",
-                shape.ident
-            ),
-        ));
-    }
-    // Free JSON is converted the same way, in the input itself or in a type it reaches.
-    let input = declared.iter().find_map(|declaration| {
-        let (ty, _) = declaration.input.as_ref()?;
-        wit::holds_free_json(ty).then_some(ty.span())
-    });
-    let holder = shapes.iter().find(|shape| {
-        let name = shape.ident.to_string();
-        converted.contains_key(&name) && holds_json(shape) && reached.contains(&name)
-    });
-    if let Some(span) = input.or(holder.map(|shape| shape.ident.span())) {
-        return Err(syn::Error::new(
-            span,
-            "a derived hook's input holds free JSON, `serde_json::Value`: the macro converts free JSON, and every type holding it, to the text the bindings of a service's interface hold, and a hook's input has two types in the bindings, its export's and its import's; keep the JSON out of the hook's input",
-        ));
-    }
-    // And a newtype, in the input itself or in a type it reaches.
-    let input = declared.iter().find_map(|declaration| {
-        let (ty, _) = declaration.input.as_ref()?;
-        let newtype = modules
-            .newtypes_in(ty, declaration.scope)
-            .into_iter()
-            .next()?;
-        Some((ty.span(), newtype))
-    });
-    let holder = shapes.iter().find_map(|shape| {
-        if !reached.contains(&shape.ident.to_string()) {
-            return None;
-        }
-        let newtype = foreign::shape_types(shape)
-            .into_iter()
-            .find_map(|ty| modules.newtypes_in(ty, shape.scope).into_iter().next())?;
-        Some((shape.ident.span(), newtype))
-    });
-    match input.or(holder) {
-        Some((span, newtype)) => Err(syn::Error::new(
-            span,
-            format!(
-                "a derived hook's input holds the newtype `{}`: the macro converts a newtype, and every type holding it, to the type of its field the bindings of a service's interface hold, and a hook's input has two types in the bindings, its export's and its import's; keep the newtype out of the hook's input",
-                newtype.ident
-            ),
-        )),
-        None => Ok(()),
-    }
 }
 
 /// The types the macro converts that serde serializes, by name: each one that is a state, each one
@@ -8645,16 +8642,20 @@ fn keep_converted(
 /// a variant case by case, a case with named fields into the bindings' tuple case around the
 /// record of the case; each part goes through `Into`, the identity for a scalar, a string, a
 /// generated type and a consumed package's type, and the generated `From` for a type the macro
-/// converts, inside lists, options, results and tuples too, and a newtype `consumed` reads through
-/// its trait. The bindings name a field or a case from its WIT name, so each side keeps its own
-/// names.
+/// converts, inside lists, options, results and tuples too, a newtype `consumed` reads through
+/// its trait, and an own resource of `resources`, by the author's name of the struct, through its
+/// handle type. The bindings name a field or a case from its WIT name, so each side keeps its own
+/// names. A type a derived hook's input reaches, of `hook_shapes`, has a second copy in the
+/// bindings, the import's of the hook that defines it, `defining`, which it converts to and from
+/// the same way.
 fn converted_conversions(
     shapes: &[Shape],
     converted: &BTreeMap<String, Ident>,
-    placement: &BTreeMap<String, Ident>,
+    (placement, resources): (&BTreeMap<String, Ident>, &BTreeMap<String, Ident>),
     (ns, package): (&Ident, &Ident),
     tree: &mut Module,
     (modules, consumed): (&[Vec<Ident>], &foreign::Modules),
+    (hook_shapes, defining): (&BTreeSet<String>, Option<&[Ident; 3]>),
 ) {
     for shape in shapes
         .iter()
@@ -8662,90 +8663,103 @@ fn converted_conversions(
     {
         let ident = &shape.ident;
         let name = ident.to_string();
-        let at = Some((consumed, shape.scope));
-        let module = tree.at(shape.scope);
-        let root = supers(modules[shape.scope].len());
+        let depth = modules[shape.scope].len();
+        let root = supers(depth);
         let interface = rust_ident(&wit::kebab(&placement[&name]));
-        let bindings = quote! { #root exports::#ns::#package::#interface };
+        let export = quote! { #root exports::#ns::#package::#interface };
+        let import = defining
+            .filter(|_| hook_shapes.contains(&name))
+            .map(|defining| import_module(depth, defining));
         let generated = &converted[&name];
-        let (outward, inward) = match &shape.kind {
-            ShapeKind::Record(fields) => {
-                let outward = fields.iter().map(|(field, ty)| {
-                    let named = rust_ident(&wit::kebab(field));
-                    let value = convert(ty, quote! { value.#field }, Towards::Bindings, at);
-                    quote! { #named: #value }
-                });
-                let inward = fields.iter().map(|(field, ty)| {
-                    let named = rust_ident(&wit::kebab(field));
-                    let value = convert(ty, quote! { value.#named }, Towards::Author, at);
-                    quote! { #field: #value }
-                });
-                (
-                    quote! { Self { #(#outward),* } },
-                    quote! { Self { #(#inward),* } },
-                )
-            }
-            ShapeKind::Variant(cases) => {
-                let outward = cases.iter().map(|(case, payload)| {
-                    let named = camel_ident(&wit::kebab(case));
-                    match payload {
-                        Payload::None => quote! { #ident::#case => Self::#named },
-                        Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item }, Towards::Bindings, at);
-                            quote! { #ident::#case(item) => Self::#named(#item) }
-                        }
-                        Payload::Named(fields) => {
-                            let record = type_ident(&wit::case_record(ident, case));
-                            let names = fields.iter().map(|(field, _)| field);
-                            let values = fields.iter().map(|(field, ty)| {
-                                let named = rust_ident(&wit::kebab(field));
-                                let value = convert(ty, quote! { #field }, Towards::Bindings, at);
-                                quote! { #named: #value }
-                            });
-                            quote! {
-                                #ident::#case { #(#names),* } => Self::#named(#bindings::#record { #(#values),* })
+        for bindings in std::iter::once(export).chain(import) {
+            let at = Some(At {
+                modules: consumed,
+                scope: shape.scope,
+                resources,
+                module: &bindings,
+            });
+            let (outward, inward) = match &shape.kind {
+                ShapeKind::Record(fields) => {
+                    let outward = fields.iter().map(|(field, ty)| {
+                        let named = rust_ident(&wit::kebab(field));
+                        let value = convert(ty, quote! { value.#field }, Towards::Bindings, at);
+                        quote! { #named: #value }
+                    });
+                    let inward = fields.iter().map(|(field, ty)| {
+                        let named = rust_ident(&wit::kebab(field));
+                        let value = convert(ty, quote! { value.#named }, Towards::Author, at);
+                        quote! { #field: #value }
+                    });
+                    (
+                        quote! { Self { #(#outward),* } },
+                        quote! { Self { #(#inward),* } },
+                    )
+                }
+                ShapeKind::Variant(cases) => {
+                    let outward = cases.iter().map(|(case, payload)| {
+                        let named = camel_ident(&wit::kebab(case));
+                        match payload {
+                            Payload::None => quote! { #ident::#case => Self::#named },
+                            Payload::Unnamed(ty) => {
+                                let item = convert(ty, quote! { item }, Towards::Bindings, at);
+                                quote! { #ident::#case(item) => Self::#named(#item) }
+                            }
+                            Payload::Named(fields) => {
+                                let record = type_ident(&wit::case_record(ident, case));
+                                let names = fields.iter().map(|(field, _)| field);
+                                let values = fields.iter().map(|(field, ty)| {
+                                    let named = rust_ident(&wit::kebab(field));
+                                    let value =
+                                        convert(ty, quote! { #field }, Towards::Bindings, at);
+                                    quote! { #named: #value }
+                                });
+                                quote! {
+                                    #ident::#case { #(#names),* } => Self::#named(#bindings::#record { #(#values),* })
+                                }
                             }
                         }
-                    }
-                });
-                let inward = cases.iter().map(|(case, payload)| {
-                    let named = camel_ident(&wit::kebab(case));
-                    match payload {
-                        Payload::None => quote! { #bindings::#generated::#named => Self::#case },
-                        Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item }, Towards::Author, at);
-                            quote! { #bindings::#generated::#named(item) => Self::#case(#item) }
-                        }
-                        Payload::Named(fields) => {
-                            let values = fields.iter().map(|(field, ty)| {
-                                let named = rust_ident(&wit::kebab(field));
-                                let value =
-                                    convert(ty, quote! { item.#named }, Towards::Author, at);
-                                quote! { #field: #value }
-                            });
-                            quote! {
-                                #bindings::#generated::#named(item) => Self::#case { #(#values),* }
+                    });
+                    let inward = cases.iter().map(|(case, payload)| {
+                        let named = camel_ident(&wit::kebab(case));
+                        match payload {
+                            Payload::None => {
+                                quote! { #bindings::#generated::#named => Self::#case }
+                            }
+                            Payload::Unnamed(ty) => {
+                                let item = convert(ty, quote! { item }, Towards::Author, at);
+                                quote! { #bindings::#generated::#named(item) => Self::#case(#item) }
+                            }
+                            Payload::Named(fields) => {
+                                let values = fields.iter().map(|(field, ty)| {
+                                    let named = rust_ident(&wit::kebab(field));
+                                    let value =
+                                        convert(ty, quote! { item.#named }, Towards::Author, at);
+                                    quote! { #field: #value }
+                                });
+                                quote! {
+                                    #bindings::#generated::#named(item) => Self::#case { #(#values),* }
+                                }
                             }
                         }
-                    }
-                });
-                (
-                    quote! { match value { #(#outward,)* } },
-                    quote! { match value { #(#inward,)* } },
-                )
-            }
-            ShapeKind::Enum(_) | ShapeKind::Flags(_) => {
-                unreachable!("an enum and a flags hold no type of the module")
-            }
-        };
-        module.generated.push(quote! {
-            impl ::core::convert::From<#ident> for #bindings::#generated {
-                fn from(value: #ident) -> Self { #outward }
-            }
-            impl ::core::convert::From<#bindings::#generated> for #ident {
-                fn from(value: #bindings::#generated) -> Self { #inward }
-            }
-        });
+                    });
+                    (
+                        quote! { match value { #(#outward,)* } },
+                        quote! { match value { #(#inward,)* } },
+                    )
+                }
+                ShapeKind::Enum(_) | ShapeKind::Flags(_) => {
+                    unreachable!("an enum and a flags hold no type of the module")
+                }
+            };
+            tree.at(shape.scope).generated.push(quote! {
+                impl ::core::convert::From<#ident> for #bindings::#generated {
+                    fn from(value: #ident) -> Self { #outward }
+                }
+                impl ::core::convert::From<#bindings::#generated> for #ident {
+                    fn from(value: #bindings::#generated) -> Self { #inward }
+                }
+            });
+        }
     }
 }
 
@@ -8824,7 +8838,14 @@ fn newtype_conversions(
         inner,
         scope,
     } = newtype;
-    let at = Some((modules, *scope));
+    // A newtype holds no resource: the analysis refuses one.
+    let resources = BTreeMap::new();
+    let at = Some(At {
+        modules,
+        scope: *scope,
+        resources: &resources,
+        module,
+    });
     let bindings = with_handles(inner, *scope, converted, module, modules);
     let read = convert(inner, quote! { value }, Towards::Author, at);
     let written = convert(inner, quote! { self.0 }, Towards::Bindings, at);

@@ -453,7 +453,14 @@ pub(crate) fn render<'a>(
             .iter()
             .find(|hook| &hook.ident == interface.ident)
         {
-            let (_, spelling) = hook.input.as_ref().expect("a derived hook");
+            // An input naming a newtype is spelled with the newtype as its field's type, which
+            // the newtypes of the module, known after the hook was read, give.
+            let (ty, spelling) = hook.input.as_ref().expect("a derived hook");
+            let spelling = if modules.holds_newtype(ty, hook.scope) {
+                &modules.spelled(ty, hook.scope)?
+            } else {
+                spelling
+            };
             let result = match hook.composition {
                 Composition::Series => String::new(),
                 Composition::Waterfall => format!(" -> {spelling}"),

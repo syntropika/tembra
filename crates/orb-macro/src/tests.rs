@@ -4626,9 +4626,8 @@ fn a_converted_type_is_converted_in_its_own_module() {
 }
 
 /// What a type the macro converts cannot do is refused: a case with named fields but none of
-/// them, a type or a function whose WIT name is the record's, a derived hook's input reaching the
-/// enum, and a function taking or returning a resource with such a type, alone or in a container;
-/// a case with two unnamed payloads stays refused.
+/// them, and a type or a function whose WIT name is the record's; a case with two unnamed payloads
+/// stays refused.
 #[test]
 fn what_a_converted_type_cannot_be_is_refused() {
     let module = |types: &str, methods: &str| {
@@ -4641,7 +4640,6 @@ fn what_a_converted_type_cannot_be_is_refused() {
             }}"
         )
     };
-    let draft = "#[wit_resource] pub struct Draft; impl Draft { #[constructor] pub fn new() -> Self { Draft } }";
     for (types, methods, message) in [
         (
             "pub enum Outcome { Accepted, Refused {} }".to_owned(),
@@ -4663,36 +4661,99 @@ fn what_a_converted_type_cannot_be_is_refused() {
             "pub fn decide() -> Outcome { todo!() } pub fn outcome_refused() -> u32 { 0 }",
             "the record of the case `Outcome::Refused` and `Reviews::outcome_refused` are both `outcome-refused` in the interface `reviews`",
         ),
-        (
-            "pub enum Outcome { Accepted, Refused { reason: String } }
-            pub struct Decision { pub outcome: Outcome }
-            #[hook(composition = waterfall, input = Decision)]
-            pub struct Vetting;"
-                .to_owned(),
-            "pub fn decide() -> u32 { 0 }",
-            "`Outcome` is an enum with a case with named fields that a derived hook's input reaches",
-        ),
-        (
-            format!("pub enum Outcome {{ Accepted, Refused {{ reason: String }} }} {draft}"),
-            "pub fn open(outcome: Outcome) -> Result<Draft, Outcome> { todo!() }",
-            "`Reviews::open` returns `Result < Draft , Outcome >`, which holds the resource `Draft` and `Outcome`, an enum with a case with named fields: the macro converts such a type between the author's and the bindings', and converts no resource; give the case an unnamed payload, a record of the module, or keep the resource apart from the type",
-        ),
-        (
-            format!("pub enum Outcome {{ Accepted, Opened {{ draft: Draft }} }} {draft}"),
-            "pub fn open() -> Outcome { todo!() }",
-            "`Reviews::open` returns `Outcome`, which holds the resource `Draft` and `Outcome`, an enum with a case with named fields",
-        ),
-        (
-            format!(
-                "pub enum Outcome {{ Accepted, Refused {{ reason: String }} }} pub struct Decision {{ pub outcome: Outcome }} {draft}"
-            ),
-            "pub fn open(decision: Decision, draft: (Draft, Decision)) -> u32 { 0 }",
-            "`Reviews::open` takes `(Draft , Decision)`, which holds the resource `Draft` and `Decision`, which holds an enum with a case with named fields",
-        ),
     ] {
         let error = refused("example:review@1.0.0", &module(&types, methods));
         assert!(error.contains(message), "{types} {methods}: {error}");
     }
+}
+
+/// A type the macro converts carries the resources it holds: its conversions wrap each into the
+/// bindings' handle type and take it back, inside the record of a case with named fields too, and
+/// a bridge spells a resource beside such a type with the handle type. A derived hook's input
+/// reaching such a type converts the author's type to and from both copies of the bindings: its
+/// export takes the export's copy, as a service's bridge does, and `run` converts to and from the
+/// import's, which no conversion between the two copies replaces. Natively, the record of a case
+/// holding a resource stays component-only.
+#[test]
+fn a_converted_type_carries_its_resources_and_reaches_a_derived_hook() {
+    let draft = "#[wit_resource] pub struct Draft; impl Draft { #[constructor] pub fn new() -> Self { Draft } }";
+    let module = expanded(
+        "example:review@1.0.0",
+        &format!(
+            "mod review {{
+                pub enum Outcome {{ Accepted, Opened {{ draft: Draft }} }}
+                pub enum Verdict {{ Accepted, Refused {{ reason: String }} }}
+                pub struct Decision {{ pub verdict: Verdict }}
+                {draft}
+                #[service]
+                pub struct Reviews;
+                impl Reviews {{
+                    pub fn open() -> Outcome {{ todo!() }}
+                    pub fn reopen(outcome: Outcome) -> Result<Draft, Verdict> {{ todo!() }}
+                    pub fn pair(draft: (Draft, Decision)) -> u32 {{ 0 }}
+                }}
+                #[hook(composition = waterfall, input = Decision)]
+                pub struct Vetting;
+            }}"
+        ),
+    );
+    let generated = tokens(&module);
+    let reviews = "exports :: example :: review :: reviews";
+    let export = "exports :: example :: review :: vetting";
+    let import = "self :: example :: review :: vetting";
+    let into = ":: core :: convert :: Into :: into";
+    for expected in [
+        format!(
+            "Outcome :: Opened {{ draft }} => Self :: Opened ({reviews} :: OutcomeOpened {{ draft : {reviews} :: Draft :: new (draft) }})"
+        ),
+        format!(
+            "{reviews} :: Outcome :: Opened (item) => Self :: Opened {{ draft : item . draft . into_inner () }}"
+        ),
+        format!("fn open () -> {reviews} :: Outcome {{ {into} (Reviews :: open ()) }}"),
+        format!(
+            "fn reopen (outcome : {reviews} :: Outcome) -> Result < {reviews} :: Draft , {reviews} :: Verdict > {{ match Reviews :: reopen ({into} (outcome)) {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok ({reviews} :: Draft :: new (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err ({into} (item)) , }} }}"
+        ),
+        format!(
+            "fn pair (draft : ({reviews} :: Draft , {reviews} :: Decision ,)) -> u32 {{ Reviews :: pair ({{ let (item0 , item1 ,) = draft ; (item0 . into_inner () , {into} (item1) ,) }}) }}"
+        ),
+        // Both copies of the hook's types convert to and from the author's.
+        format!("impl :: core :: convert :: From < Verdict > for {export} :: Verdict {{"),
+        format!(
+            "impl :: core :: convert :: From < Verdict > for {import} :: Verdict {{ fn from (value : Verdict) -> Self {{ match value {{ Verdict :: Accepted => Self :: Accepted , Verdict :: Refused {{ reason }} => Self :: Refused ({import} :: VerdictRefused {{ reason : {into} (reason) }}) , }} }} }}"
+        ),
+        format!(
+            "impl :: core :: convert :: From < {import} :: Decision > for Decision {{ fn from (value : {import} :: Decision) -> Self {{ Self {{ verdict : {into} (value . verdict) }} }} }}"
+        ),
+        format!("fn apply (_input : {export} :: Decision) -> {export} :: Decision {{"),
+        format!(
+            "pub fn run (input : Decision) -> Decision {{ let input : {import} :: Decision = {into} (input) ; let answer = {import} :: apply (& input) ; {into} (answer) }}"
+        ),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+    assert!(
+        !generated.contains(&format!(
+            "From < {export} :: Decision > for {import} :: Decision"
+        )),
+        "{generated}"
+    );
+    let native = expanded(
+        "example:review@1.0.0",
+        &format!(
+            "mod review {{
+                pub enum Outcome {{ Accepted, Opened {{ draft: Draft }} }}
+                {draft}
+                #[service]
+                pub struct Reviews;
+                impl Reviews {{ pub fn open() -> Outcome {{ todo!() }} }}
+            }}"
+        ),
+    );
+    let native = tokens(&native);
+    assert!(
+        native.contains("a record or a variant holding a resource is component-only"),
+        "{native}"
+    );
 }
 
 const WALK: &str = "mod walk {
@@ -9707,8 +9768,7 @@ fn a_nested_option_is_refused_wherever_a_method_reaches_it() {
 /// component's bridges spell it as the bindings' string, from `alloc`, and read or write its text
 /// wherever a method holds it; a record holding it stays the author's, converted to and from the
 /// bindings' record of its text. The native codec reads and writes the text. A bare `Value` names
-/// a type of the module, which the refusal says to write by its path, and free JSON beside a
-/// resource, or in a derived hook's input, is refused.
+/// a type of the module, which the refusal says to write by its path.
 #[test]
 fn free_json_is_a_string_that_holds_its_text() {
     let module = expanded(
@@ -9755,42 +9815,17 @@ fn free_json_is_a_string_that_holds_its_text() {
     ] {
         assert!(native.contains(expected), "{expected}\n{native}");
     }
-    for (module, message) in [
-        (
-            "mod book {
-                use serde_json::Value;
-                #[service]
-                pub struct Ledger;
-                impl Ledger { pub fn read(document: Value) {} }
-            }",
-            "`Value` is used by a service method or a hook but is not a struct or enum of this module; for free JSON, write it by its path, `serde_json::Value`",
-        ),
-        (
-            "mod book {
-                #[wit_resource]
-                pub struct Ticket;
-                impl Ticket { #[constructor] pub fn new() -> Self { Ticket } }
-                #[service]
-                pub struct Ledger;
-                impl Ledger { pub fn issue() -> (Ticket, serde_json::Value) { todo!() } }
-            }",
-            "which holds the resource `Ticket` and free JSON, `serde_json::Value`",
-        ),
-        (
-            "mod book {
-                #[hook(composition = series, input = Event)]
-                pub struct Audit;
-                pub struct Event { pub data: serde_json::Value }
-                #[service]
-                pub struct Ledger;
-                impl Ledger { pub fn count() -> u32 { 0 } }
-            }",
-            "a derived hook's input holds free JSON",
-        ),
-    ] {
-        let error = refused(PACKAGE, module);
-        assert!(error.contains(message), "{message}\n{error}");
-    }
+    let error = refused(
+        PACKAGE,
+        "mod book {
+            use serde_json::Value;
+            #[service]
+            pub struct Ledger;
+            impl Ledger { pub fn read(document: Value) {} }
+        }",
+    );
+    let message = "`Value` is used by a service method or a hook but is not a struct or enum of this module; for free JSON, write it by its path, `serde_json::Value`";
+    assert!(error.contains(message), "{message}\n{error}");
 }
 
 /// A newtype, a tuple struct of one field, is spelled in the WIT as its field's type wherever a
@@ -9931,9 +9966,7 @@ fn a_newtype_is_spelled_as_its_field() {
 }
 
 /// What a newtype cannot be is refused: a newtype holding a resource, which the conversions do
-/// not carry, a newtype beside a resource in one parameter or result, a newtype in a derived
-/// hook's input, which has two types in the bindings, and a newtype holding itself, which WIT
-/// cannot spell.
+/// not carry, and a newtype holding itself, which WIT cannot spell.
 #[test]
 fn what_a_newtype_cannot_be_is_refused() {
     let resource = "#[wit_resource]
@@ -9944,11 +9977,6 @@ fn what_a_newtype_cannot_be_is_refused() {
             "pub struct Held(Ticket);",
             "pub fn issue() -> Held { todo!() }",
             "the newtype `Held` holds the resource `Ticket`",
-        ),
-        (
-            "pub struct Code(String);",
-            "pub fn issue() -> (Ticket, Code) { todo!() }",
-            "`Ledger::issue` returns `(Ticket , Code)`, which holds the resource `Ticket` and the newtype `Code`",
         ),
         (
             "pub struct Chain(Vec<Link>); pub struct Link(Chain);",
@@ -9964,30 +9992,57 @@ fn what_a_newtype_cannot_be_is_refused() {
         );
         assert!(error.contains(message), "{message}\n{error}");
     }
-    for module in [
+}
+
+/// Free JSON and a newtype cross beside a resource, each converted while the resource is wrapped
+/// into its handle type, and into a derived hook's input: the input's WIT spells a newtype as its
+/// field, and `run` converts a record holding both, or a newtype alone, to the import's copy, which
+/// the import takes by reference, as it holds a string.
+#[test]
+fn free_json_and_a_newtype_cross_beside_a_resource_and_into_a_derived_hook() {
+    let module = expanded(
+        PACKAGE,
         "mod book {
+            #[wit_resource]
+            pub struct Ticket;
+            impl Ticket { #[constructor] pub fn new() -> Self { Ticket } }
             pub struct Code(String);
-            #[hook(composition = series, input = Code)]
+            pub struct Event { pub data: serde_json::Value, pub code: Code }
+            #[hook(composition = bail, input = Event)]
             pub struct Audit;
+            #[hook(composition = waterfall, input = Code)]
+            pub struct Coded;
             #[service]
             pub struct Ledger;
-            impl Ledger { pub fn count() -> u32 { 0 } }
+            impl Ledger {
+                pub fn issue() -> (Ticket, Code) { todo!() }
+                pub fn noted() -> (Ticket, serde_json::Value) { todo!() }
+            }
         }",
-        "mod book {
-            pub struct Code(String);
-            pub struct Event { pub code: Code }
-            #[hook(composition = series, input = Event)]
-            pub struct Audit;
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn count() -> u32 { 0 } }
-        }",
+    );
+    let wit = self::wit(&module);
+    for expected in [
+        "record event {\n    data: string,\n    code: string,\n  }",
+        "interface coded {\n  apply: func(input: string) -> string;\n}",
+        "issue: func() -> tuple<ticket, string>;\n  noted: func() -> tuple<ticket, string>;",
     ] {
-        let error = refused(PACKAGE, module);
-        assert!(
-            error.contains("a derived hook's input holds the newtype `Code`"),
-            "{error}"
-        );
+        assert!(wit.contains(expected), "{expected}\n{wit}");
+    }
+    let generated = tokens(&module);
+    let ledger = "exports :: example :: book :: ledger";
+    let import = "self :: example :: book :: audit";
+    let into = ":: core :: convert :: Into :: into";
+    for expected in [
+        format!("fn issue () -> ({ledger} :: Ticket , < Code as __TembraNewtype > :: Bindings ,) {{ {{ let (item0 , item1 ,) = Ledger :: issue () ; ({ledger} :: Ticket :: new (item0) , < Code as __TembraNewtype > :: __tembra_into_bindings (item1) ,) }} }}"),
+        format!("fn noted () -> ({ledger} :: Ticket , __tembra_alloc :: string :: String ,) {{ {{ let (item0 , item1 ,) = Ledger :: noted () ; ({ledger} :: Ticket :: new (item0) , match serde_json :: to_string (& item1) {{"),
+        format!("impl :: core :: convert :: From < Event > for {import} :: Event {{ fn from (value : Event) -> Self {{ Self {{ data : match serde_json :: to_string (& value . data) {{"),
+        "code : < Code as __TembraNewtype > :: __tembra_into_bindings (value . code) } } }".to_owned(),
+        "fn apply (_input : exports :: example :: book :: audit :: Event) -> :: core :: option :: Option < exports :: example :: book :: audit :: Event > {".to_owned(),
+        format!("pub fn run (input : Event) -> :: core :: option :: Option < Event > {{ let input : {import} :: Event = {into} (input) ; let answer = {import} :: apply (& input) ; answer . map (| item | {into} (item)) }}"),
+        "fn apply (_input : < Code as __TembraNewtype > :: Bindings) -> < Code as __TembraNewtype > :: Bindings {".to_owned(),
+        "pub fn run (input : Code) -> Code { let input : String = < Code as __TembraNewtype > :: __tembra_into_bindings (input) ; let answer = self :: example :: book :: coded :: apply (& input) ; < Code as __TembraNewtype > :: __tembra_from_bindings (answer) }".to_owned(),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
 }
 

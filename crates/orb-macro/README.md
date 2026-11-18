@@ -194,8 +194,8 @@ retire its revision for every caller until a reload. So a component reads a newt
 `From`, and a newtype that only a refusing `TryFrom` makes is native only: a component build of
 the module fails, with an error that names the newtype and says why. A tuple struct of a name
 another type of the Orb takes stays ordinary Rust, read by that name as before. A newtype holding a
-resource, a newtype beside a resource in one parameter or result, and a newtype in a derived hook's
-input are compile errors.
+resource is a compile error; a newtype beside a resource in one parameter or result, and a newtype
+in a derived hook's input, cross as its field there too.
 
 ## Contributing to a hook
 
@@ -1863,9 +1863,11 @@ the version whose rules the macro follows, and the generated code reaches it the
   converts it to and from the bindings' type at the boundary, `From` in both directions in the
   type's module, inside lists, options, results and tuples too. Such a type derives `serde`'s traits
   where a state reaches it, unless the author does. The bindings name its fields and cases from their
-  WIT names, which the conversions use on their side, so the author's names are free. It holds no
-  resource, and a derived hook's input reaches none of them: both are compile errors, as is another
-  type or a function of the interface whose WIT name is the record's.
+  WIT names, which the conversions use on their side, so the author's names are free. A resource it
+  holds is wrapped into the bindings' handle type and taken back from it. A derived hook's input
+  may reach it, as it may hold free JSON or a newtype: the bindings hold a hook's types twice, in
+  its export and in its import, and the author's type converts to and from each. Another type or a
+  function of the interface whose WIT name is the record's is a compile error.
 - The macro reads a type that enters the WIT, a flags struct included, before the compiler
   evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`. The type, a field, a case or a case's payload under
   `#[cfg(..)]`, which the WIT would hold in every configuration, is a compile error, and so is a

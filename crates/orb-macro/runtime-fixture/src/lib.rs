@@ -448,6 +448,13 @@ mod guest {
         }
     }
 
+    /// A tally opened, or why none was: an enum with a case with named fields, which stays this
+    /// one, converted at the boundary, the tally it holds included.
+    pub enum Opening {
+        Opened { tally: Tally, at: u32 },
+        Refused { reason: String },
+    }
+
     #[service]
     pub struct Tallies;
 
@@ -469,6 +476,30 @@ mod guest {
                 .chain(&last)
                 .map(|tally| tally.total.get())
                 .collect()
+        }
+
+        /// Open a tally at `at`, or refuse one above a thousand. The tally crosses in the record
+        /// of the case, wrapped into its handle.
+        pub fn open(at: u32) -> Opening {
+            if at > 1000 {
+                Opening::Refused {
+                    reason: String::from("above a thousand"),
+                }
+            } else {
+                Opening::Opened {
+                    tally: Tally::new(at),
+                    at,
+                }
+            }
+        }
+
+        /// Take an opening back: the total of the tally it holds, taken back from its handle, or
+        /// none.
+        pub fn settle(opening: Opening) -> Option<u32> {
+            match opening {
+                Opening::Opened { tally, .. } => Some(tally.total.get()),
+                Opening::Refused { .. } => None,
+            }
         }
 
         /// How many tallies were destroyed.

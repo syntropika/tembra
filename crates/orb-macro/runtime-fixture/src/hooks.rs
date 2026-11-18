@@ -1,6 +1,7 @@
-/// Declares a hook of each composition: a series and a bail derived from their input, and the
-/// waterfall `guard` of the package in `admission/`, declared by its identity. Other Orbs
-/// contribute; the desk runs each hook and reports what the contributions decided.
+/// Declares a hook of each composition: a series and a bail derived from their input, the series'
+/// holding a newtype, and the waterfall `guard` of the package in `admission/`, declared by its
+/// identity. Other Orbs contribute; the desk runs each hook and reports what the contributions
+/// decided.
 #[cfg_attr(
     feature = "no-std",
     tembra::orb(package = "example:gatehouse@1.0.0", wit = "admission", no_std)
@@ -16,10 +17,20 @@ pub mod gatehouse {
     #[hook(composition = series, input = Visit)]
     pub struct Visits;
 
-    /// A visit: who came, and at what hour.
+    /// A visit: who came, and at what hour. It holds a newtype, so it stays this struct, converted
+    /// to the hook's import at `run`.
     pub struct Visit {
         pub who: String,
-        pub hour: u32,
+        pub hour: Hour,
+    }
+
+    /// An hour of the day: a newtype, which the WIT spells as its `u32`.
+    pub struct Hour(u32);
+
+    impl From<u32> for Hour {
+        fn from(hour: u32) -> Self {
+            Self(hour)
+        }
     }
 
     /// The first contributor with an answer gives the room of a floor.
@@ -37,7 +48,10 @@ pub mod gatehouse {
     impl Desk {
         /// Tell every contributor of a visit.
         pub fn visit(who: String, hour: u32) {
-            Visits::run(Visit { who, hour })
+            Visits::run(Visit {
+                who,
+                hour: Hour(hour),
+            })
         }
 
         /// The room the first contributor with an answer gives the floor, if any.
