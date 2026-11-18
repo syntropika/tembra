@@ -373,7 +373,7 @@ impl PreparedContract {
                     if let Ty::Ref(id) = self.resolved(*inner)
                         && matches!(self.kind(id), Kind::Option(_))
                     {
-                        return Err(Error("nested options require a tagged option codec".into()));
+                        return Err(Error(crate::resource_profile::NESTED_OPTIONS.into()));
                     }
                     self.supported(*inner, depth + 1)
                 }

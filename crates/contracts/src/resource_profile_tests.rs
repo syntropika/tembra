@@ -462,7 +462,7 @@ fn resource_arguments_tell_a_mismatch_from_an_unknown_slot() {
 }
 
 /// `check_signature` says which part of a function the profile refuses: a parameter, by its index
-/// after a method's receiver, or the result.
+/// after a method's receiver, or the result, and why.
 #[test]
 fn a_refused_signature_names_the_parameter_or_the_result() {
     let contract = contract(
@@ -478,9 +478,17 @@ fn a_refused_signature_names_the_parameter_or_the_result() {
         let slot = contract
             .bind("test:resources/sessions@1.0.0", name, true)
             .unwrap();
-        let (refused, error) = contract.check_signature(slot).unwrap_err();
-        assert_eq!(refused, part, "{name}");
-        assert_eq!(error.0, "nested options require a tagged option codec");
+        let refusal = contract.check_signature(slot).unwrap_err();
+        assert_eq!(refusal.part, part, "{name}");
+        assert_eq!(
+            refusal.reason,
+            Some(SignatureReason::NestedOption),
+            "{name}"
+        );
+        assert_eq!(
+            refusal.error.0,
+            "nested options require a tagged option codec"
+        );
     }
     let fine = contract
         .bind("test:resources/sessions@1.0.0", "fine", true)

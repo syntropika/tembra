@@ -57,7 +57,7 @@ pub use port::envelope;
 #[cfg(feature = "authoring")]
 pub use prepare::check_value_type;
 pub use references::ReferenceBinding;
-pub use resource_profile::{ResourceSignature, SignaturePart};
+pub use resource_profile::{ResourceSignature, SignaturePart, SignatureReason, SignatureRefusal};
 pub use roles::ServicePolicy;
 pub use selection::OrbProvider;
 #[doc(hidden)]

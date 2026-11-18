@@ -32,6 +32,45 @@ pub enum SignaturePart {
     Result,
 }
 
+/// Why the resource profile refuses a signature, for the rules whose remedy an author applies in
+/// the signature itself ([`PreparedContract::check_signature`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignatureReason {
+    /// An option of an option, which needs a tagged option codec.
+    NestedOption,
+    /// A resource of another interface where only the defining interface carries it: in a result.
+    ForeignResource,
+    /// An owned resource of an interface the world neither defines nor imports, as an argument.
+    ForeignArgument,
+}
+
+impl SignatureReason {
+    /// The reason behind one of the profile's errors, by the message the profile writes for it.
+    fn of(error: &Error) -> Option<Self> {
+        [
+            (NESTED_OPTIONS, Self::NestedOption),
+            (FOREIGN_RESOURCE, Self::ForeignResource),
+            (FOREIGN_ARGUMENT, Self::ForeignArgument),
+        ]
+        .into_iter()
+        .find_map(|(message, reason)| (error.0 == message).then_some(reason))
+    }
+}
+
+/// A signature the resource profile refuses: the part the refusal falls on, if one does, why, if
+/// the author has a remedy, and the profile's error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignatureRefusal {
+    pub part: Option<SignaturePart>,
+    pub reason: Option<SignatureReason>,
+    pub error: Error,
+}
+
+/// The profile's errors that `SignatureReason` names, written and read through these alone.
+pub(crate) const NESTED_OPTIONS: &str = "nested options require a tagged option codec";
+const FOREIGN_RESOURCE: &str = "resource functions require their defining interface";
+const FOREIGN_ARGUMENT: &str = "a foreign owned argument requires its defining Orb import";
+
 impl PreparedContract {
     /// Encode the data part of a capability call. Implicit `self` travels separately as a
     /// host-issued loan; each owned result position names a payload-local attachment index.
@@ -174,10 +213,16 @@ impl PreparedContract {
 
     /// Check a bound function as `resource_signature` does, and say which part of it the profile
     /// refuses: a parameter, by its index after the receiver, or the result; none for a fault of
-    /// the function itself, its kind or its receiver. The `#[tembra::orb]` macro puts its error
-    /// on that part.
-    pub fn check_signature(&self, slot: u32) -> Result<(), (Option<SignaturePart>, Error)> {
-        self.signature_parts(slot).map(drop)
+    /// the function itself, its kind or its receiver; and why, for a rule with a remedy. The
+    /// `#[tembra::orb]` macro puts its error on that part, with the remedy.
+    pub fn check_signature(&self, slot: u32) -> Result<(), SignatureRefusal> {
+        self.signature_parts(slot)
+            .map(drop)
+            .map_err(|(part, error)| SignatureRefusal {
+                part,
+                reason: SignatureReason::of(&error),
+                error,
+            })
     }
 
     fn signature_parts(
@@ -371,9 +416,7 @@ impl PreparedContract {
                             if import.contract.as_ref() == Some(owner))
                     });
                     if interface.contract.as_ref() != Some(owner) && !imported {
-                        return Err(Error(
-                            "a foreign owned argument requires its defining Orb import".into(),
-                        ));
+                        return Err(Error(FOREIGN_ARGUMENT.into()));
                     }
                 } else {
                     self.defined_resource(interface, *resource)?;
@@ -387,7 +430,7 @@ impl PreparedContract {
                 if let Ty::Ref(id) = self.resolved(*inner)
                     && matches!(self.kind(id), Kind::Option(_))
                 {
-                    return Err(Error("nested options require a tagged option codec".into()));
+                    return Err(Error(NESTED_OPTIONS.into()));
                 }
                 self.resource_value_type(interface, *inner, depth + 1, arguments)
             }
@@ -558,9 +601,7 @@ impl PreparedContract {
                 self.resolved(Ty::Ref(*declared)) != self.resolved(Ty::Ref(resource))
             })
         {
-            return Err(Error(
-                "resource functions require their defining interface".into(),
-            ));
+            return Err(Error(FOREIGN_RESOURCE.into()));
         }
         Ok(identity)
     }

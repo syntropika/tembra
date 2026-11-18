@@ -3259,7 +3259,7 @@ fn component(
 /// moves: a derived function takes owned resources of its own interface or of an interface the
 /// world imports, and returns resources of its own interface only.
 fn check_profile(analysis: &Analysis, contract: &tembra_contracts::Contract) -> syn::Result<()> {
-    use tembra_contracts::SignaturePart;
+    use tembra_contracts::{SignaturePart, SignatureReason, SignatureRefusal};
     // Each derived function, by its interface's identity and its WIT name, with what the errors
     // call it and where, and its parameters and result: a derived hook's callback, `apply`, is
     // the hook's, which has neither.
@@ -3300,7 +3300,12 @@ fn check_profile(analysis: &Analysis, contract: &tembra_contracts::Contract) -> 
             )
         };
         let slot = contract.bind(&identity, &wit_name, true).map_err(refused)?;
-        let Err((part, error)) = contract.check_signature(slot) else {
+        let Err(SignatureRefusal {
+            part,
+            reason,
+            error,
+        }) = contract.check_signature(slot)
+        else {
             continue;
         };
         let at = match (part, written) {
@@ -3313,20 +3318,22 @@ fn check_profile(analysis: &Analysis, contract: &tembra_contracts::Contract) -> 
         let Some((verb, ty)) = at else {
             return Err(refused(error));
         };
-        let remedy = match error.0.as_str() {
-            "nested options require a tagged option codec" => {
+        let remedy = match reason {
+            Some(SignatureReason::NestedOption) => {
                 "; use an enum of the module with a case for each in place of the option of an option"
             }
-            "resource functions require their defining interface" => {
+            Some(SignatureReason::ForeignResource) => {
                 "; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none"
             }
-            "a foreign owned argument requires its defining Orb import" => {
+            Some(SignatureReason::ForeignArgument) => {
                 "; a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports"
             }
-            _ => "",
+            None => "",
         };
-        return Err(syn::Error::new(
-            ty.span(),
+        // The whole type, as written: a stable compiler joins no spans, so `Spanned::span` would
+        // fall on its first token only.
+        return Err(syn::Error::new_spanned(
+            ty,
             format!(
                 "{name} {verb} `{}`, which the runtime refuses in a signature: {error}{remedy}",
                 native::spelled(ty)
