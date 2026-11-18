@@ -3788,10 +3788,11 @@ fn component(
         }
     });
     // A component holds one Orb: one `tembra:wit` section and one export of each of the kernel's
-    // interfaces. An expansion cannot see the crate's other modules, so each defines this symbol,
-    // which rustc refuses to define twice, on the second module, in the words of its name. The
-    // name sorts before every other symbol, the kernel's exports among them, so that rustc, which
-    // stops at the first symbol defined twice, reports this one.
+    // interfaces. An expansion cannot see the crate's other modules, nor its dependencies, so each
+    // defines this symbol, which rustc refuses to define twice in one crate, on the second module,
+    // and the linker across crates, in the words of its name. The name sorts before every other
+    // symbol, the kernel's exports among them, so that rustc, which stops at the first symbol
+    // defined twice, reports this one.
     let one_orb = quote_spanned! { analysis.ident.span() =>
         #[cfg(target_arch = "wasm32")]
         #[doc(hidden)]
@@ -3901,10 +3902,11 @@ fn signature_ident(service: &Service) -> Ident {
     )
 }
 
-/// The symbol every Orb module defines in a build for wasm32, whose name is the error rustc
-/// reports, `symbol `..` is already defined`, on the second Orb module of one crate. It starts
+/// The symbol every Orb module defines in a build for wasm32, whose name is the error: rustc
+/// reports `symbol `..` is already defined` on the second Orb module of one crate, and the linker
+/// `duplicate symbol: ..` for an Orb crate whose dependency holds an Orb module too. It starts
 /// with a capital letter, which sorts before the kernel's exports and mangled names.
-const ONE_ORB: &str = "A component holds one Orb, and this crate holds more than one Orb module: put each in a crate of its own to build it for wasm32";
+const ONE_ORB: &str = "A component holds one Orb module, of this crate or of a dependency, and this build holds more than one: put each Orb module in a crate of its own, and what another crate uses of it in a crate without one";
 
 /// The members every reference to a service object has, which the kernel refuses as method names
 /// when it installs an Orb; `tembra-core` checks the same list.

@@ -3431,9 +3431,9 @@ fn variant_case(
 /// `bitflags`, as an object of the flags set, each `true`, which reads a flag left out as unset,
 /// through `bits()` and `from_bits_retain()` alone, which both the `bitflags` crate and
 /// `wit-bindgen`'s own `bitflags!` define, as the facade's `wit-bindgen` lacks its feature
-/// `bitflags`. The members are named as the bindings generate them. None for a type holding what the codec
-/// does not cover, which a method that takes or returns it refuses. The JSON is that of the facade
-/// named `facade`.
+/// `bitflags`. The members are named as the bindings generate them. None for a type holding what
+/// the codec does not cover, which a method that takes or returns it refuses. The JSON is that of
+/// the facade named `facade`.
 fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes, facade: &Ident) -> Option<TokenStream> {
     let boundary = format_ident!("{BOUNDARY}");
     let boundary = quote! { #boundary };
