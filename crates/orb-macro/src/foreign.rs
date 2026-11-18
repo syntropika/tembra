@@ -458,23 +458,6 @@ impl Modules {
         }
     }
 
-    /// The type of the Orb's modules the self type of an `impl`, written in the module `scope`,
-    /// names: as a contract type's name resolves (`resolve`), but through the glob imports from
-    /// the Orb's modules too, which the author's impl may use as rustc does. A name the macro does
-    /// not place in the Orb, through `crate::` or out of a crate, names none of its types.
-    pub(crate) fn implemented_type(&self, ty: &Type, scope: usize) -> Option<(Ident, usize)> {
-        let Type::Path(path) = ty else {
-            return None;
-        };
-        if path.qself.is_some() {
-            return None;
-        }
-        match self.resolve_within(&path.path, scope, 0, true) {
-            Resolution::Module(ident, module) => Some((ident, module)),
-            Resolution::Stopped(_) | Resolution::Refused(_) | Resolution::Composite(_) => None,
-        }
-    }
-
     /// Where a type path written in the module `scope` leads, as rustc resolves it inside the Orb
     /// module: through `self::`, `super::` and the sub-modules of the Orb, the names the `use`
     /// declarations of each module it passes bind, with `as` and in groups, a sub-module's
@@ -485,19 +468,11 @@ impl Modules {
     /// interfaces' modules the Orb module re-exports. A glob import, a path through `crate::` and
     /// an alias that is more than a path are refused, each with how to write the name.
     fn resolve(&self, path: &syn::Path, scope: usize) -> Resolution {
-        self.resolve_within(path, scope, 0, false)
+        self.resolve_within(path, scope, 0)
     }
 
     /// `resolve`, `depth` aliases deep: aliases naming one another in a circle would never end.
-    /// With `globs`, a glob import from the Orb's modules is followed to the module that binds or
-    /// declares the name, rather than refused.
-    fn resolve_within(
-        &self,
-        path: &syn::Path,
-        scope: usize,
-        depth: usize,
-        globs: bool,
-    ) -> Resolution {
+    fn resolve_within(&self, path: &syn::Path, scope: usize, depth: usize) -> Resolution {
         let mut segments: Vec<Ident> = path
             .segments
             .iter()
@@ -520,7 +495,7 @@ impl Modules {
             let uses = &self.uses[at];
             if rest.is_empty() {
                 if let Some(alias) = uses.aliases.get(&name) {
-                    return self.aliased(alias, at, depth, globs);
+                    return self.aliased(alias, at, depth);
                 }
                 if uses.items.contains(&name) {
                     return Resolution::Module(first, at);
@@ -560,10 +535,6 @@ impl Modules {
                     && let crate::Globbed::In(module) =
                         crate::through_globs(&first, at, &self.uses, &self.paths)
                 {
-                    if globs {
-                        at = module;
-                        continue;
-                    }
                     return Resolution::Refused(self.globbed(&first, at, module));
                 }
                 return Resolution::Module(first, at);
@@ -578,10 +549,6 @@ impl Modules {
             if let crate::Globbed::In(module) =
                 crate::through_globs(&first, at, &self.uses, &self.paths)
             {
-                if globs {
-                    at = module;
-                    continue;
-                }
                 return Resolution::Refused(self.globbed(&first, at, module));
             }
             break;
@@ -593,13 +560,7 @@ impl Modules {
     /// path, without type parameters, to the type it names, a type of the Orb's modules or of a
     /// consumed interface; to itself, a type of the module, when its path names neither, as
     /// `type Token = u32;` does. One that is more than a path is refused.
-    fn aliased(
-        &self,
-        alias: &syn::ItemType,
-        scope: usize,
-        depth: usize,
-        globs: bool,
-    ) -> Resolution {
+    fn aliased(&self, alias: &syn::ItemType, scope: usize, depth: usize) -> Resolution {
         let ident = &alias.ident;
         let Type::Path(target) = &*alias.ty else {
             return more_than_a_path(alias);
@@ -617,7 +578,7 @@ impl Modules {
         if depth >= 64 {
             return Resolution::Module(ident.clone(), scope);
         }
-        match self.resolve_within(&target.path, scope, depth + 1, globs) {
+        match self.resolve_within(&target.path, scope, depth + 1) {
             Resolution::Module(name, module)
                 if self.uses[module].items.contains(&name.to_string()) =>
             {

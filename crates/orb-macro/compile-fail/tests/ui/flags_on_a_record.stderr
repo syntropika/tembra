@@ -1,0 +1,5 @@
+error: cannot find attribute `flags` in this scope
+ --> tests/ui/flags_on_a_record.rs:3:7
+  |
+3 |     #[flags]
+  |       ^^^^^

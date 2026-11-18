@@ -194,7 +194,7 @@ pub mod calculator {
     }
 
     /// What the plotter draws: a case without a value, one with a value, and one with named fields,
-    /// which carries a record of its own, so the macro keeps the enum the author's.
+    /// which carries a record of its own.
     #[derive(Debug, Clone, PartialEq)]
     pub enum Shape {
         Dot,
@@ -212,7 +212,7 @@ pub mod calculator {
     /// The moves of a walk, in a private module: their JSON is written there, and the Orb module's
     /// services name them by path.
     mod moves {
-        /// One move of a walk: no case has named fields, so the bindings generate the enum.
+        /// One move of a walk: a case with a value, one with another module type, one without.
         #[derive(Debug, Clone, Copy, PartialEq)]
         pub enum Move {
             Turn(super::Heading),

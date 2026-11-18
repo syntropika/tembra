@@ -263,9 +263,7 @@ struct Interface<'a> {
 /// interface defines; then the view of each interface imported by key. Then a world using the
 /// kernel's interfaces for its states, resources and context, importing every consumed interface
 /// and every view, importing and exporting every hook, consumed or derived, and exporting every
-/// service interface, derived or implemented. Returns the text and, by interface name, the WIT
-/// names of the types each interface `use`s from the others, which its bindings' module declares
-/// as aliases beside the types it defines.
+/// service interface, derived or implemented.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
@@ -274,7 +272,7 @@ pub(crate) fn render<'a>(
     imports: &[String],
     views: &[crate::keyed::View],
     kernel: Kernel,
-) -> syn::Result<(String, BTreeMap<String, BTreeSet<String>>)> {
+) -> syn::Result<String> {
     let Items {
         shapes,
         placement,
@@ -525,18 +523,7 @@ pub(crate) fn render<'a>(
         }
     }
     wit.push_str("}\n");
-    let used = interfaces
-        .iter()
-        .map(|interface| {
-            let names = interface
-                .uses
-                .iter()
-                .flat_map(|(_, names)| names.iter().cloned())
-                .collect();
-            (interface.name.clone(), names)
-        })
-        .collect();
-    Ok((wit, used))
+    Ok(wit)
 }
 
 /// One function of an interface or a resource, with its `///` lines, at the given indentation.
@@ -1695,87 +1682,9 @@ pub(crate) struct Bindings {
     /// The records, variants and enums of the world's interfaces, which the bindings generate,
     /// that can derive `serde`'s traits but share their name, as `ignored_name` gives it, with one
     /// of `unserializable`, so the ignore option leaves them without the derives as well. They are
-    /// named by their full names, as in `types`, for the selectors that give the derives back.
+    /// named by their full names, `ns:name/interface@version/type`, for the selectors that give
+    /// the derives back.
     pub namesakes: BTreeSet<String>,
-    /// How the bindings generate each record, variant and enum of an interface, by the type's full
-    /// name as the selectors of `additional_type_attributes` write it,
-    /// `ns:name/interface@version/type`.
-    pub types: BTreeMap<String, Generated>,
-}
-
-/// How `wit-bindgen` 0.63 generates a record, a variant or an enum, as `wit-bindgen-core` records
-/// it to choose what it derives and implements: whether the type holds a string or a list, whether
-/// it holds a resource handle, and whether a function of a world returns it as the error of its
-/// result; and, for the derives the macro carries onto the type, whether every value of it holds a
-/// resource handle, whether it holds what the bindings give no `serde` implementation, whether the
-/// bindings derive serde's traits on it, and the parts of its fields that decide a derive of the
-/// standard library.
-#[derive(Clone, Default)]
-pub(crate) struct Generated {
-    pub list: bool,
-    pub resource: bool,
-    pub error: bool,
-    /// No value of the type is without a resource handle: a record with a field that is a handle,
-    /// a tuple holding one or such a type. A handle in an option or a list may be absent, and a
-    /// variant may take a case without one; `Default`, which makes a value from nothing, cannot.
-    pub needs_handle: bool,
-    /// The type holds, anywhere, a value the bindings give no `serde` implementation, as
-    /// `holds_unserializable` tells: besides a resource handle, a type of the module can hold a
-    /// consumed package's flags type, alone or in a consumed type.
-    pub unserializable: bool,
-    /// In an Orb without a state, where the bindings derive serde's traits on no type, the type
-    /// holds, anywhere, a type of a consumed package, which then has no `serde` implementation
-    /// either, or a resource handle; with a state, unset.
-    pub consumed: bool,
-    /// The bindings derive serde's traits on the type: in an Orb with a state, unless the ignore
-    /// option leaves the type out for what it holds; a type left out for its name alone, one of
-    /// `Bindings::namesakes`, gets them back through a selector and counts as serialized.
-    pub serialized: bool,
-    /// The parts of the type's fields, or of its cases' payloads, that decide what the generated
-    /// type can derive of the standard library's traits.
-    pub parts: Vec<Part>,
-}
-
-/// A part of a record's fields or a variant's payloads that decides what the generated type can
-/// derive, reached through the options, lists, results, tuples and aliases around it.
-#[derive(Clone)]
-pub(crate) struct Part {
-    pub held: Held,
-    /// The WIT name of the field or case holding the part.
-    pub member: String,
-    /// `Default` makes a value without the part: it sits in an option or a list, which `Default`
-    /// leaves empty, or in a case of a variant, whose `Default` is its `#[default]` case.
-    pub absent_in_default: bool,
-}
-
-/// What a part of a type is, as far as it decides a derive of the standard library: a resource
-/// handle implements none of those traits, a string or a list is not `Copy`, an `f32` or an `f64`
-/// implements no `Eq`, `Ord` or `Hash`, a result no `Default`, and a named type what its bindings,
-/// or the macro, give it; the other primitives implement every one of those traits.
-#[derive(Clone)]
-pub(crate) enum Held {
-    /// An owned resource handle.
-    Handle,
-    /// A string or a list.
-    List,
-    /// An `f32` or an `f64`, by its name.
-    Float(&'static str),
-    /// A `result`.
-    Result,
-    /// A record, a variant or an enum of the Orb's own package, by its WIT name: its generated
-    /// type implements what the macro knows of it.
-    Own(String),
-    /// A record, a variant, an enum or a flags of a consumed package: the name the bindings give it,
-    /// its kind with an article, for the errors, the interface defining it, and whether it holds a
-    /// string or a list, which no impl makes `Copy`. What else its bindings do not give it,
-    /// `PartialEq` for a record, `Default` for each, the author may implement for it by hand,
-    /// anywhere in the crate; one holding a resource handle is refused before any derive is read.
-    Consumed {
-        name: String,
-        kind: &'static str,
-        interface: String,
-        list: bool,
-    },
 }
 
 /// Read the WIT the bindings read, for what they make of its types, where a state, `serde`, makes
@@ -1898,77 +1807,9 @@ pub(crate) fn bindings(
         .filter(|(id, _)| !holds_unserializable(&resolve, wit_parser::Type::Id(*id), own, false))
         .filter_map(|(id, _)| full_name(id))
         .collect();
-    let mut types: BTreeMap<String, Generated> = resolve
-        .types
-        .iter()
-        .filter(|(_, definition)| {
-            matches!(
-                definition.kind,
-                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
-            )
-        })
-        .filter_map(|(id, definition)| {
-            let name = full_name(id)?;
-            let (list, resource) = holds(&resolve, wit_parser::Type::Id(id));
-            // The ignore option leaves the type out of serde's derives by its `ignored_name`, where
-            // a namesake takes them back through a selector.
-            let ignored = definition
-                .name
-                .as_deref()
-                .is_some_and(|name| unserializable.contains(&ignored_name(name)));
-            let serialized = serde && (namesakes.contains(&name) || !ignored);
-            let unserializable = |stateless: bool| {
-                holds_unserializable(&resolve, wit_parser::Type::Id(id), own, stateless)
-            };
-            let generated = Generated {
-                list,
-                resource,
-                error: false,
-                needs_handle: needs_handle(&resolve, wit_parser::Type::Id(id)),
-                unserializable: unserializable(false),
-                consumed: !serde && unserializable(true),
-                serialized,
-                parts: parts(&resolve, id, own),
-            };
-            Some((name, generated))
-        })
-        .collect();
-    // The bindings mark the error of the result of every function of every world, through the
-    // aliases `use` leaves, and implement `Display` and `Error` for it.
-    for (_, world) in resolve.worlds.iter() {
-        for item in world.imports.values().chain(world.exports.values()) {
-            let functions: Vec<&wit_parser::Function> = match item {
-                wit_parser::WorldItem::Function(function) => vec![function],
-                wit_parser::WorldItem::Interface { id, .. } => {
-                    resolve.interfaces[*id].functions.values().collect()
-                }
-                wit_parser::WorldItem::Type { .. } => Vec::new(),
-            };
-            for function in functions {
-                let Some(wit_parser::Type::Id(result)) = function.result else {
-                    continue;
-                };
-                let TypeDefKind::Result(result) = &resolve.types[result].kind else {
-                    continue;
-                };
-                let Some(wit_parser::Type::Id(mut error)) = result.err else {
-                    continue;
-                };
-                while let TypeDefKind::Type(wit_parser::Type::Id(aliased)) =
-                    resolve.types[error].kind
-                {
-                    error = aliased;
-                }
-                if let Some(generated) = full_name(error).and_then(|name| types.get_mut(&name)) {
-                    generated.error = true;
-                }
-            }
-        }
-    }
     Bindings {
         unserializable: unserializable.into_iter().collect(),
         namesakes,
-        types,
     }
 }
 
@@ -2093,148 +1934,6 @@ fn holds(resolve: &Resolve, ty: wit_parser::Type) -> (bool, bool) {
         | TypeDefKind::Stream(_) => (false, true),
         _ => (false, false),
     }
-}
-
-/// Whether every value of a WIT type holds an owned resource handle, which no `Default` makes: a
-/// handle itself, a record or a tuple with such a part, or a variant or a result whose every case
-/// has one; an option or a list may be empty, and a variant may take another case.
-fn needs_handle(resolve: &Resolve, ty: wit_parser::Type) -> bool {
-    let wit_parser::Type::Id(id) = ty else {
-        return false;
-    };
-    let needs = |ty: wit_parser::Type| needs_handle(resolve, ty);
-    match &resolve.types[id].kind {
-        TypeDefKind::Handle(wit_parser::Handle::Own(_)) => true,
-        TypeDefKind::Record(record) => record.fields.iter().any(|field| needs(field.ty)),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().any(needs),
-        TypeDefKind::Variant(variant) => {
-            variant.cases.iter().all(|case| case.ty.is_some_and(needs))
-        }
-        TypeDefKind::Result(result) => {
-            result.ok.is_some_and(needs) && result.err.is_some_and(needs)
-        }
-        TypeDefKind::FixedLengthList(inner, length) => *length > 0 && needs(*inner),
-        TypeDefKind::Type(inner) => needs(*inner),
-        _ => false,
-    }
-}
-
-/// The parts of a record's fields or a variant's payloads that decide what the generated type can
-/// derive (`Part`), each with the field or case holding it; an enum has none.
-fn parts(resolve: &Resolve, id: wit_parser::TypeId, own: wit_parser::PackageId) -> Vec<Part> {
-    let mut parts = Vec::new();
-    match &resolve.types[id].kind {
-        TypeDefKind::Record(record) => {
-            for field in &record.fields {
-                held(resolve, field.ty, own, &field.name, false, &mut parts);
-            }
-        }
-        TypeDefKind::Variant(variant) => {
-            for case in &variant.cases {
-                if let Some(ty) = case.ty {
-                    held(resolve, ty, own, &case.name, true, &mut parts);
-                }
-            }
-        }
-        _ => {}
-    }
-    parts
-}
-
-/// The parts the member `member` of a type holds in `ty`, into `parts`: a resource handle, a
-/// string, a list or a map and what it holds, an `f32` or an `f64`, a result and what its sides
-/// hold, and a named type of the Orb's package or of a consumed one, through the options, lists,
-/// maps, tuples, fixed-length lists and aliases around them; an option, a list or a map makes what
-/// it holds `absent` in `Default`, as the member may be already.
-fn held(
-    resolve: &Resolve,
-    ty: wit_parser::Type,
-    own: wit_parser::PackageId,
-    member: &str,
-    absent: bool,
-    parts: &mut Vec<Part>,
-) {
-    let part = |held: Held, absent: bool| Part {
-        held,
-        member: member.to_owned(),
-        absent_in_default: absent,
-    };
-    let id = match ty {
-        wit_parser::Type::String => {
-            parts.push(part(Held::List, absent));
-            return;
-        }
-        wit_parser::Type::F32 => {
-            parts.push(part(Held::Float("f32"), absent));
-            return;
-        }
-        wit_parser::Type::F64 => {
-            parts.push(part(Held::Float("f64"), absent));
-            return;
-        }
-        wit_parser::Type::Id(id) => id,
-        _ => return,
-    };
-    let definition = &resolve.types[id];
-    let kind = match &definition.kind {
-        TypeDefKind::Record(_) => "a record",
-        TypeDefKind::Variant(_) => "a variant",
-        TypeDefKind::Enum(_) => "an enum",
-        TypeDefKind::Flags(_) => "a flags",
-        TypeDefKind::Handle(_) => {
-            parts.push(part(Held::Handle, absent));
-            return;
-        }
-        TypeDefKind::Type(inner) | TypeDefKind::FixedLengthList(inner, _) => {
-            return held(resolve, *inner, own, member, absent, parts);
-        }
-        TypeDefKind::Option(inner) => return held(resolve, *inner, own, member, true, parts),
-        TypeDefKind::List(inner) => {
-            parts.push(part(Held::List, absent));
-            return held(resolve, *inner, own, member, true, parts);
-        }
-        TypeDefKind::Map(key, value) => {
-            parts.push(part(Held::List, absent));
-            held(resolve, *key, own, member, true, parts);
-            return held(resolve, *value, own, member, true, parts);
-        }
-        TypeDefKind::Tuple(tuple) => {
-            for ty in &tuple.types {
-                held(resolve, *ty, own, member, absent, parts);
-            }
-            return;
-        }
-        TypeDefKind::Result(result) => {
-            parts.push(part(Held::Result, absent));
-            for ty in result.ok.into_iter().chain(result.err) {
-                held(resolve, ty, own, member, absent, parts);
-            }
-            return;
-        }
-        TypeDefKind::Resource
-        | TypeDefKind::Future(_)
-        | TypeDefKind::Stream(_)
-        | TypeDefKind::Unknown => return,
-    };
-    let (Some(name), wit_parser::TypeOwner::Interface(owner)) =
-        (definition.name.as_deref(), definition.owner)
-    else {
-        return;
-    };
-    if resolve.interfaces[owner].package == Some(own) {
-        parts.push(part(Held::Own(name.to_owned()), absent));
-        return;
-    }
-    let (list, _) = holds(resolve, ty);
-    parts.push(part(
-        Held::Consumed {
-            name: crate::type_ident(name).to_string(),
-            kind,
-            interface: resolve.id_of(owner).unwrap_or_default(),
-            list,
-        },
-        absent,
-    ));
 }
 
 /// How an imported function takes a part of its parameter, as `wit-bindgen` binds it by default:
@@ -2399,7 +2098,6 @@ pub(crate) fn record(
         references: Vec::new(),
         kind: ShapeKind::Record(named),
         scope: 0,
-        carried: Default::default(),
         item: Item::Struct(item.clone()),
     })
 }
@@ -2502,7 +2200,6 @@ pub(crate) fn enumeration(
         references: Vec::new(),
         kind,
         scope: 0,
-        carried: Default::default(),
         item: Item::Enum(item.clone()),
     })
 }

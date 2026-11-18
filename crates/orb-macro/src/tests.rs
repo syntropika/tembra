@@ -4114,6 +4114,44 @@ fn a_type_that_enters_the_wit_keeps_its_derives() {
     }
 }
 
+/// The helper attributes a type's derives read, on the type and on its members, a
+/// `#[cfg_attr(..)]` around them and an enum's explicit discriminants are the author's as well: the
+/// type keeps them as written, and the bindings' type takes none of them.
+#[test]
+fn a_type_that_enters_the_wit_keeps_its_attributes() {
+    let module = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            #[derive(Clone, serde::Serialize, serde::Deserialize)]
+            #[serde(rename_all = \"camelCase\")]
+            pub struct Step {
+                #[serde(default)]
+                pub step_length: u32,
+                #[cfg_attr(test, serde(skip))]
+                pub note: String,
+            }
+            #[derive(Clone, Copy)]
+            #[repr(u8)]
+            pub enum Heading { North = 1, East = 2 }
+            #[service]
+            pub struct Walker;
+            impl Walker {
+                pub fn walk(step: Step, heading: Heading) -> Step { todo!() }
+            }
+        }",
+    );
+    let generated = tokens(&module);
+    for expected in [
+        "# [derive (Clone , serde :: Serialize , serde :: Deserialize)] # [serde (rename_all = \"camelCase\")] pub struct Step { # [serde (default)] pub step_length : u32 , # [cfg_attr (test , serde (skip))] pub note : String , }",
+        "# [derive (Clone , Copy)] # [repr (u8)] pub enum Heading { North = 1 , East = 2 }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    for unexpected in ["additional_type_attributes", "additional_member_attributes"] {
+        assert!(!generated.contains(unexpected), "{unexpected}\n{generated}");
+    }
+}
+
 /// The types a derived hook reaches are defined in its interface, which the world imports and
 /// exports: the bindings generate each twice, and the author's type, with its derives as written,
 /// converts to and from both.

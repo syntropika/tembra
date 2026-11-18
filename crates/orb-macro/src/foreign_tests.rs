@@ -1474,8 +1474,8 @@ fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
         "additional_derives_ignore : [\"entry\" , \"slot\"] ,",
         concat!(
             "additional_type_attributes : { ",
-            "\"example:shopper/shopping@1.0.0/slot\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
-            "\"example:shop/catalog@1.0.0/entry\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
+            "\"example:shop/catalog@1.0.0/entry\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
+            "\"example:shopper/shopping@1.0.0/slot\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
         ),
         "# [derive (serde :: Serialize , Hash)] pub struct Slot { pub shelf : u32 }",
     ] {
