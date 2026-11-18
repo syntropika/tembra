@@ -318,6 +318,23 @@ fn a_package_with_a_binary_builds_its_library() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A manifest that uses TOML 1.1 syntax, a trailing comma in an inline table, which Cargo reads,
+/// is read by `build`, and by the macro in a native build.
+#[test]
+#[ignore = "builds scratch crates, which is slow from a cold target directory; run by `just test-cargo-tembra`"]
+fn a_manifest_with_a_trailing_comma_builds_both_ways() {
+    let dir = scratch("trailing-comma");
+    let (krate, _) = scaffold(&dir, NAME, PACKAGE);
+    let manifest = krate.join("Cargo.toml");
+    let features = "\n[package.metadata.other]\nkey = { a = 1, b = 2, }\n\n\
+                    [features]\nhost = [\"tembra/host\"]\n";
+    std::fs::write(&manifest, read(&manifest) + features).unwrap();
+    tembra(&krate, &["build"]);
+    assert!(krate.join("artifacts/greeter-orb.wasm").is_file());
+    cargo(&krate, &["build", "--features", "host"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// `wit` prints the WIT of the component that `build` wrote and, given `--emit` and the world,
 /// writes it to a file. The macro embedded its own text in the component, so the file holds that
 /// text, comments included, as the contract `build` wrote. `inspect` lists what the component
