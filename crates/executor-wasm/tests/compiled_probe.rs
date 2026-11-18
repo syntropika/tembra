@@ -309,6 +309,159 @@ fn an_answer_after_the_deadline_is_a_timeout() {
     assert_eq!(engine.instances(), 0);
 }
 
+/// A monotonic clock whose reading holds the Store's thread for a second, as a busy machine can.
+struct Holding;
+
+impl tembra_executor_wasm::HostMonotonicClock for Holding {
+    fn resolution(&self) -> u64 {
+        1
+    }
+
+    fn now(&self) -> u64 {
+        std::thread::sleep(Duration::from_millis(1_000));
+        0
+    }
+}
+
+/// An engine with a 500 ms deadline whose monotonic clock holds the Store's thread past it, and
+/// the installation that grants the clock.
+fn holding() -> (Engine, Install) {
+    let engine = Engine::new(Limits {
+        timeout_ms: 500,
+        ..Limits::default()
+    })
+    .unwrap()
+    .monotonic_clock(|| Holding);
+    let mut install = Install::default();
+    install.grants = Grants {
+        system: [tembra_executor_wasm::SystemCapability::Clocks].into(),
+        ..Grants::default()
+    };
+    (engine, install)
+}
+
+/// Package a core module of `wit`'s world `late`, which may import the WASI monotonic clock.
+fn clocked(wit: &str, module: &str) -> Vec<u8> {
+    let mut resolve = wit_parser::Resolve::default();
+    resolve
+        .push_str(
+            "clocks.wit",
+            include_str!("../../contracts/wit/wasi03/clocks.wit"),
+        )
+        .unwrap();
+    let package = resolve.push_str("late.wit", wit).unwrap();
+    let world = resolve.select_world(&[package], Some("late")).unwrap();
+    let mut core = wat::parse_str(module).unwrap();
+    wit_component::embed_component_metadata(
+        &mut core,
+        &resolve,
+        world,
+        wit_component::StringEncoding::UTF8,
+        false,
+    )
+    .unwrap();
+    let component = wit_component::ComponentEncoder::default()
+        .validate(true)
+        .module(&core)
+        .unwrap()
+        .encode()
+        .unwrap();
+    Contract::from_source("late.wit", wit, Some("late"))
+        .unwrap()
+        .component_artifact(&component, "late", 1, &Default::default())
+        .unwrap()
+}
+
+/// The answers of `LATE_WIT`, from a module that reads the clock while it initializes.
+const STARTED_WIT: &str = r#"package example:late@1.0.0;
+interface answers { answer: func() -> u32; }
+world late { import wasi:clocks/monotonic-clock@0.3.0; export answers; }"#;
+
+const STARTED_MODULE: &str = r#"(module
+  (import "wasi:clocks/monotonic-clock@0.3.0" "now" (func $now (result i64)))
+  (memory (export "memory") 1)
+  (func (export "_initialize") call $now drop)
+  (func (export "example:late/answers@1.0.0#answer") (result i32)
+    i32.const 7))"#;
+
+/// A component whose instantiation ends after its deadline fails with its timeout, even when
+/// its Store's thread runs the timer late: the clock holds that thread past the deadline while
+/// the module initializes, and instantiation ends as soon as the clock answers.
+#[test]
+fn an_instantiation_after_the_deadline_is_a_timeout() {
+    let (engine, install) = holding();
+    let error = engine
+        .load(&clocked(STARTED_WIT, STARTED_MODULE), install)
+        .map(drop)
+        .unwrap_err();
+    assert!(error.message.contains("timed out"), "{error}");
+    assert_eq!(engine.instances(), 0);
+}
+
+/// One resource, whose destructor reads the clock.
+const DESTROYED_WIT: &str = r#"package example:late@1.0.0;
+interface things { resource thing { constructor(); } }
+world late { import wasi:clocks/monotonic-clock@0.3.0; export things; }"#;
+
+const DESTROYED_MODULE: &str = r#"(module
+  (import "wasi:clocks/monotonic-clock@0.3.0" "now" (func $now (result i64)))
+  (import "[export]example:late/things@1.0.0" "[resource-new]thing"
+    (func $new (param i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "example:late/things@1.0.0#[constructor]thing") (result i32)
+    i32.const 1 call $new)
+  (func (export "example:late/things@1.0.0#[dtor]thing") (param i32)
+    call $now drop))"#;
+
+/// A destructor that ends after its deadline fails with its timeout and quarantines its Orb,
+/// even when its Store's thread runs the timer late: the clock holds that thread past the
+/// deadline, and the destructor returns as soon as the clock answers.
+#[test]
+fn a_destructor_after_the_deadline_is_a_timeout() {
+    let (engine, install) = holding();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine
+            .load(&clocked(DESTROYED_WIT, DESTROYED_MODULE), install)
+            .unwrap(),
+    ])
+    .unwrap();
+    let things = Rc::new(
+        host.get(
+            "late::example:late/things@1.0.0",
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(things.ready()).unwrap();
+    let construct = |pool: &mut LocalPool| {
+        let called = things.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move {
+                called
+                    .call_portable::<_, tembra::portable::Owned>(
+                        &context,
+                        "[constructor]thing",
+                        json!([]),
+                    )
+                    .await
+            }
+            .boxed_local()
+        }))
+    };
+    drop(construct(&mut pool).unwrap());
+    let refused = construct(&mut pool)
+        .err()
+        .expect("the destructor's timeout quarantines the Orb");
+    assert_eq!(refused.reason, "wasm_executor_quarantined", "{refused}");
+    assert!(refused.message.contains("timed out"), "{refused}");
+    things.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
+
 /// Compiled grants are the standard WASI preopen permissions, not the source Orb text API.
 #[test]
 #[ignore = "requires TEMBRA_WASM_PROBE"]

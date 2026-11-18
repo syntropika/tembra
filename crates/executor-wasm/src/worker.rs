@@ -33,6 +33,20 @@ pub(crate) mod wasi;
 pub(crate) use runtime::check;
 pub(crate) use standard::{Pipe, PipeConsumer, StreamAdapter, adapter as stream_adapter};
 
+/// Await `work` for at most `timeout`; `None` is a timeout. A result after the deadline is a
+/// timeout too: a thread held past it, as a busy machine or a slow host callback holds it, runs
+/// the timer late, and `tokio::time::timeout` still returns a result that is ready by then.
+pub(crate) async fn within<F: std::future::Future>(
+    timeout: std::time::Duration,
+    work: F,
+) -> Option<F::Output> {
+    let started = tokio::time::Instant::now();
+    match tokio::time::timeout(timeout, work).await {
+        Ok(output) if started.elapsed() <= timeout => Some(output),
+        _ => None,
+    }
+}
+
 pub(crate) enum Event {
     Host {
         packet: String,

@@ -324,3 +324,60 @@ globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reent
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
 }
+
+/// A source callback that answers only after its deadline fails with the wall time limit and
+/// quarantines its Orb, even when its Store's thread runs the timer late. The host's log sink
+/// holds that thread past the deadline on `late`; the guest answers as soon as the log returns.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn an_answer_after_the_deadline_is_a_timeout() {
+    let component =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
+    let engine = Engine::new(Limits {
+        timeout_ms: 500,
+        ..Limits::default()
+    })
+    .unwrap()
+    .interpreter(&component)
+    .unwrap()
+    .on_log(|record| {
+        if record.message == "late" {
+            std::thread::sleep(Duration::from_millis(1_000));
+        }
+    });
+    let wit = "package example:late; interface answers { answer: func() -> u32; } world test { export answers; }";
+    let contract = Contract::from_source("late.wit", wit, None).unwrap();
+    let source = r#"globalThis.__tembraOrb = {services:{answers:{methods:{
+  answer() { console.log("late"); return 7; },
+}}}};"#;
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine
+            .load(
+                &contract.source_artifact(source, "late", 1).unwrap(),
+                Install::default(),
+            )
+            .unwrap(),
+    ])
+    .unwrap();
+    let late = Rc::new(
+        host.get("late::example:late/answers", vec!["main".into()], "alice")
+            .unwrap(),
+    );
+    pool.run_until(late.ready()).unwrap();
+    let answer = |pool: &mut LocalPool| {
+        let called = late.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move { called.call::<_, Value>(&context, "answer", json!([])).await }
+                .boxed_local()
+        }))
+    };
+    let error = answer(&mut pool).unwrap_err();
+    assert!(error.message.contains("wall time limit"), "{error}");
+    let refused = answer(&mut pool).unwrap_err();
+    assert_eq!(refused.reason, "wasm_executor_quarantined", "{refused}");
+    late.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}

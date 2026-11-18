@@ -455,12 +455,12 @@ pub(super) async fn run(
                     + std::time::Duration::from_millis(engine.limits.timeout_ms),
             );
             store.set_fuel(engine.limits.fuel)?;
-            let result = tokio::time::timeout(
+            let result = super::within(
                 std::time::Duration::from_millis(engine.limits.timeout_ms),
                 driver.call(command.operation, packet, &mut store),
             )
             .await
-            .map_err(|_| {
+            .ok_or_else(|| {
                 wasmtime::Error::msg(
                     "interpreter callback exceeded its wall time limit; Store quarantined",
                 )

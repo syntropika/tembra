@@ -252,12 +252,11 @@ export class ComponentPort {
     this.#destroying = true;
     const exited = Promise.withResolvers<void>();
     this.#destructorExited = exited.resolve;
+    const expired = () => new Error("Resource destructor exceeded its wall time limit");
+    const started = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error("Resource destructor exceeded its wall time limit")),
-        this.timeout,
-      );
+      timer = setTimeout(() => reject(expired()), this.timeout);
     });
     const physical = (async () => {
       await exited.promise;
@@ -271,6 +270,8 @@ export class ComponentPort {
       // Instrumentation reports the exact task exit through its exit promise. Even a
       // synchronous canonical destructor delivers that notification asynchronously.
       await Promise.race([physical, deadline, this.#trap]);
+      // An end after the deadline is a timeout too: a thread held past it runs the timer late.
+      if (performance.now() - started > this.timeout) throw expired();
       if (this.#poisoned) throw this.#cause ?? new Error("A resource destructor trapped");
     } catch (error) {
       this.poison(error);
@@ -374,16 +375,24 @@ export class ComponentPort {
     };
     this.#callbacks.add(callback);
     this.#active = callback;
+    const expired = () => {
+      const error = new Error("Component callback exceeded its wall time limit");
+      this.poison(error);
+      return error;
+    };
+    const started = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        const error = new Error("Component callback exceeded its wall time limit");
-        this.poison(error);
-        reject(error);
-      }, this.timeout);
+      timer = setTimeout(() => reject(expired()), this.timeout);
     });
     deadline.catch(() => {});
-    const bounded = <V>(operation: Promise<V>) => Promise.race([operation, deadline, this.#trap]);
+    // A result after the deadline is a timeout too: a thread held past it runs the timer late,
+    // and the race still takes a result that is ready by then.
+    const bounded = async <V>(operation: Promise<V>) => {
+      const value = await Promise.race([operation, deadline, this.#trap]);
+      if (performance.now() - started > this.timeout) throw expired();
+      return value;
+    };
     let ended = false;
     const revoke = () => {
       if (ended) return;
