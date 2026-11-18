@@ -30,7 +30,7 @@ use super::{
     Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode, kind, refused,
     spelled, wit_kind,
 };
-use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident, wit};
+use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident};
 use heck::ToSnakeCase;
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
@@ -69,7 +69,10 @@ impl Import<'_> {
 /// refusal of the first import it does not cover: a WASI import, an interface with a synchronous
 /// function, which works in a component build only, or with a resource, or a function taking or
 /// returning what the codec does not cover.
-pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
+pub(super) fn imports<'a>(
+    analysis: &'a Analysis,
+    contract: Result<&Contract, &syn::Error>,
+) -> Result<Vec<Import<'a>>, Refused> {
     let mut imports = Vec::new();
     for identity in &analysis.imports {
         if crate::wasi::is_wasi(identity) {
@@ -96,7 +99,7 @@ pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
         return Ok(Vec::new());
     }
     // What each provider must offer, from the module's contract, as its plan requires it.
-    let contract = contract(analysis)?;
+    let contract = contract.map_err(unresolvable)?;
     imports
         .into_iter()
         .map(|(field, interface, view)| {
@@ -117,16 +120,10 @@ pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
         .collect()
 }
 
-/// The module's contract: its WIT, with the consumed packages, as `cargo tembra build` and the
-/// kernel read it.
-fn contract(analysis: &Analysis) -> Result<Contract, Refused> {
-    let file = format!("{}.wit", analysis.world);
-    let world = wit::escaped(&analysis.world);
-    match &analysis.wit_dir {
-        Some(dir) => Contract::from_source_in(dir, &file, &analysis.wit, Some(&world)),
-        None => Contract::from_source(&file, &analysis.wit, Some(&world)),
-    }
-    .map_err(unresolved)
+/// The refusal of the module's contract, which the derived WIT does not resolve as: the
+/// expansion's error (`resolved`), which the component build reports too.
+fn unresolvable(error: &syn::Error) -> Refused {
+    refused(&error.to_string())
 }
 
 /// The refusal of a contract the derived WIT does not resolve as.
@@ -148,7 +145,10 @@ pub(super) struct Contributed<'a> {
 
 /// The hooks the module contributes to, each with the signature of its callback; or the refusal
 /// of the first contribution taking or returning what the codec does not cover.
-pub(super) fn contributions(analysis: &Analysis) -> Result<Vec<Contributed<'_>>, Refused> {
+pub(super) fn contributions<'a>(
+    analysis: &'a Analysis,
+    contract: Result<&Contract, &syn::Error>,
+) -> Result<Vec<Contributed<'a>>, Refused> {
     for contribution in &analysis.contributions {
         let owner = &contribution.ident;
         let place = |role: &str, ty: &syn::Type, uncovered: Uncovered| {
@@ -169,7 +169,7 @@ pub(super) fn contributions(analysis: &Analysis) -> Result<Vec<Contributed<'_>>,
     if analysis.contributions.is_empty() {
         return Ok(Vec::new());
     }
-    let contract = contract(analysis)?;
+    let contract = contract.map_err(unresolvable)?;
     analysis
         .contributions
         .iter()

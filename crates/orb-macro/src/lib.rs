@@ -1685,12 +1685,14 @@ fn expand(
     crate_dir: Option<&Path>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let analysis = analyze(options, module)?;
-    let native = native::emit(&analysis, metadata.as_ref());
+    // The derived WIT resolved as a contract, once, with the consumed directory read and checked
+    // as `cargo tembra build` reads it: the native side reads what its providers offer from it,
+    // and, once both sides accepted the module, it says what the runtime carries, the roles, and
+    // the signature of each service.
+    let contract = resolved(&analysis);
+    let native = native::emit(&analysis, metadata.as_ref(), contract.as_ref());
     let component = component(&analysis, &native.nested, &native.served)?;
-    // Once both sides accepted the module, the derived WIT resolved as a contract, once, with the
-    // consumed directory read and checked as `cargo tembra build` reads it: what the runtime
-    // carries, the roles, and the signature of each service, from the WIT.
-    let contract = resolved(&analysis)?;
+    let contract = contract?;
     check_profile(&analysis, &contract)?;
     check_roles(&analysis, &contract)?;
     let native = native.root;

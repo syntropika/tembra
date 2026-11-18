@@ -8875,7 +8875,8 @@ fn only_the_library_target_writes_the_contract() {
 /// expansion read the WIT as the bindings do, and a WASI import, which nests the bundled packages.
 /// The derived WIT is resolved as a contract once, which reads the directory as `cargo tembra
 /// build` reads it, for the checks of the signatures, of the roles and of the consumed copies of
-/// the bundled packages, and for the signature of each service.
+/// the bundled packages, for the signature of each service, and for what the native side requires
+/// of the providers of the imports, the keyed one too, and of the hook contributed to.
 #[test]
 fn an_expansion_reads_the_consumed_directory_and_the_bundled_packages_once() {
     let dir = consumed(
@@ -8959,6 +8960,59 @@ interface counter {
         (1, 1, 1),
         "the consumed directory and the bundled WASI packages are read once each, and the contract resolved once"
     );
+}
+
+/// The native side reads what it requires of the providers of the imports, the keyed one too, and
+/// of the hook contributed to from the one contract the expansion resolves.
+#[test]
+fn the_native_providers_read_the_one_contract() {
+    let dir = consumed(
+        "providers",
+        "package example:ledger@1.0.0;
+
+interface guard {
+  record admission { value: s32, blocked: bool }
+  apply: func(input: admission) -> admission;
+}
+
+interface reports {
+  latest: async func() -> s64;
+}
+
+interface counter {
+  add: async func(amount: u32) -> u32;
+}
+",
+    );
+    let options = Options {
+        imports: vec![literal("example:ledger/reports@1.0.0")],
+        keyed: vec![literal("example:ledger/counter@1.0.0")],
+        ..options("example:keeper@1.0.0", Some(&dir))
+    };
+    let resolutions = super::CONTRACT_RESOLUTIONS.get();
+    let module = expanded_with(
+        options,
+        "mod keeper {
+            #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
+            pub fn admit(input: guard::Admission) -> guard::Admission { input }
+            #[service]
+            pub struct Report;
+            impl Report { pub fn count() -> u32 { 0 } }
+        }",
+    );
+    assert_eq!(
+        super::CONTRACT_RESOLUTIONS.get() - resolutions,
+        1,
+        "the contract is resolved once"
+    );
+    let native = native(&module, &[]);
+    for expected in [
+        "__tembra_contribution_admit (orb",
+        "\"example:ledger/counter@1.0.0\"",
+        "\"example:ledger/reports@1.0.0\"",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
+    }
 }
 
 /// A module whose expansion reads the bundled WASI packages in every place that reads them: a WASI

@@ -62,7 +62,11 @@ pub(crate) struct Native {
 /// cover yet, an `orb()` that answers the error naming it; or the compile error for a manifest whose
 /// `metadata` could not be read. With the `context` option, the native `context` too, which the
 /// author's code calls either way.
-pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>) -> Native {
+pub(crate) fn emit(
+    analysis: &Analysis,
+    metadata: Result<&Metadata, &syn::Error>,
+    contract: Result<&tembra_contracts::Contract, &syn::Error>,
+) -> Native {
     let facade = &analysis.options.facade();
     let context = analysis.options.context.then(|| context_module(facade));
     // The items the native side writes in place of the Orb, beside `context`.
@@ -85,9 +89,9 @@ pub(crate) fn emit(analysis: &Analysis, metadata: Result<&Metadata, &syn::Error>
         |Refused(message)| alone(unsupported(metadata, inputs.as_ref(), &message, facade));
     // The interfaces the module imports from other Orbs and the hooks it contributes to, which
     // `orb(..)` takes the providers of.
-    let consumed = providers::imports(analysis).and_then(|imports| {
+    let consumed = providers::imports(analysis, contract).and_then(|imports| {
         covered(analysis)?;
-        Ok((imports, providers::contributions(analysis)?))
+        Ok((imports, providers::contributions(analysis, contract)?))
     });
     let (imports, contributions) = match consumed {
         Ok(consumed) => consumed,
