@@ -33,7 +33,15 @@ world provider { export shapes; }
 /** A call site: the valid calls compile and each wrong argument is a reported error. */
 const SITE = `import type { Host } from "@syntropika/tembra-sdk/runtime";
 import type { Context } from "@syntropika/tembra-sdk";
-import { get, IDENTITY, type Shapes } from "./example-values-shapes.ts";
+import {
+  get,
+  IDENTITY,
+  type Access,
+  type Item,
+  type Mode,
+  type Shape,
+  type Shapes,
+} from "./example-values-shapes.ts";
 
 export async function check(host: Host, context: Context) {
   const identity: "example:values/shapes@1.0.0" = IDENTITY;
@@ -42,16 +50,16 @@ export async function check(host: Host, context: Context) {
   const total: bigint = await fromHost.numbers(1, 2.5, 3, 4n);
   const withContext: bigint = await fromHost.numbers(1, 2.5, 3, 4n, context);
   const bytes: number[] = await fromHost.collect([{ name: "a", count: null, bigNumber: 1n }]);
-  const tagged = await fromHost.tagged(
-    { tag: "named", val: { name: "a", count: 2, bigNumber: 3n } },
-    "fast",
-    { writeAll: true },
-  );
+  const item: Item = { name: "a", count: 2, bigNumber: 3n };
+  const shape: Shape = { tag: "named", val: item };
+  const mode: Mode = "fast";
+  const access: Access = { writeAll: true };
+  const tagged = await fromHost.tagged(shape, mode, access);
   const count: number | null = tagged.tag === "ok" ? tagged.val.count : tagged.val.length;
   const char: string = await fromHost.deep([[1], []], [5n, "x"]);
   const nothing: void = await fromHost.nothing();
-  const maybe: { name: string; count: number | null; bigNumber: bigint } | null =
-    await fromHost.maybe(null);
+  const maybe: Item | null = await fromHost.maybe(null);
+  const structural: { name: string; count: number | null; bigNumber: bigint } | null = maybe;
   const plain: { tag: "ok" } | { tag: "err" } = await fromHost.plain();
   const flag: boolean = await fromContext.kebabName(1, true, [{ tag: "none" }]);
   const checked: boolean = await fromHost.check(true, 1, "x", [1], 1.5, -1, false);
@@ -72,9 +80,13 @@ export async function check(host: Host, context: Context) {
   fromHost.nothing(1);
   // @ts-expect-error Kebab-case keys are not methods of the client.
   fromHost["kebab-name"](1, true, []);
+  // @ts-expect-error A named record keeps its WIT fields.
+  const partial: Item = { name: "a", count: null };
+  // @ts-expect-error A named enum is one of its cases.
+  const slow: Mode = "medium";
   // @ts-expect-error A result stays tagged, never unwrapped.
   const unwrapped: { name: string } = await fromHost.tagged({ tag: "none" }, "fast", {});
-  return { identity, total, withContext, bytes, count, char, nothing, maybe, plain, flag, checked, unwrapped };
+  return { identity, total, withContext, bytes, count, char, nothing, maybe, structural, plain, flag, checked, unwrapped, partial, slow };
 }
 `;
 
@@ -100,7 +112,7 @@ function diagnostics(files: readonly string[]): Map<string, string[]> {
   return reported;
 }
 
-test("a generated client types every WIT kind in the host's value form and checks call sites", async () => {
+test("a generated client names and types every WIT kind in the host's value form and checks call sites", async () => {
   const root = await mkdtemp(
     path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-client-"),
   );
@@ -114,11 +126,24 @@ test("a generated client types every WIT kind in the host's value form and check
     expect(generated).toContain(
       "numbers(small: number, wide: number, byte: number, signed: bigint, context?: Context): Promise<bigint>;",
     );
+    // Each record, variant, enum and flags is exported under its WIT name; an alias is not.
     expect(generated).toContain(
-      "collect(values: { name: string; count: number | null; bigNumber: bigint }[], context?: Context): Promise<number[]>;",
+      "/** The WIT record `item`. */\nexport type Item = { name: string; count: number | null; bigNumber: bigint };",
     );
     expect(generated).toContain(
-      'tagged(value: { tag: "none" } | { tag: "size"; val: number } | { tag: "named"; val: { name: string; count: number | null; bigNumber: bigint } }, mode: "fast" | "slow", access: { read?: boolean; writeAll?: boolean }, context?: Context): Promise<{ tag: "ok"; val: { name: string; count: number | null; bigNumber: bigint } } | { tag: "err"; val: string }>;',
+      '/** The WIT variant `shape`. */\nexport type Shape = { tag: "none" } | { tag: "size"; val: number } | { tag: "named"; val: Item };',
+    );
+    expect(generated).toContain('/** The WIT enum `mode`. */\nexport type Mode = "fast" | "slow";');
+    expect(generated).toContain(
+      "/** The WIT flags `access`. */\nexport type Access = { read?: boolean; writeAll?: boolean };",
+    );
+    expect(generated).not.toContain("Items");
+    expect(generated).toContain("collect(values: Item[], context?: Context): Promise<number[]>;");
+    expect(generated).toContain(
+      'tagged(value: Shape, mode: Mode, access: Access, context?: Context): Promise<{ tag: "ok"; val: Item } | { tag: "err"; val: string }>;',
+    );
+    expect(generated).toContain(
+      "maybe(value: string | null, context?: Context): Promise<Item | null>;",
     );
     expect(generated).toContain(
       "deep(value: number[][], pair: [bigint, string], context?: Context): Promise<string>;",
@@ -128,7 +153,7 @@ test("a generated client types every WIT kind in the host's value form and check
       'plain(context?: Context): Promise<{ tag: "ok" } | { tag: "err" }>;',
     );
     expect(generated).toContain(
-      'kebabName(firstValue: number, delete_: boolean, context_: ({ tag: "none" } | { tag: "size"; val: number } | { tag: "named"; val: { name: string; count: number | null; bigNumber: bigint } })[], context?: Context): Promise<boolean>;',
+      "kebabName(firstValue: number, delete_: boolean, context_: Shape[], context?: Context): Promise<boolean>;",
     );
     expect(generated).toContain(
       'kebabName: (...args) => reference["kebab-name"](...sent(args, 3)),',
@@ -264,6 +289,9 @@ test("client generation refuses functions a reference's own members would hide",
 /** WIT names TypeScript reads otherwise: `new`, `Object`'s members, the module's own types. */
 const NAMES = `package example:names@1.0.0;
 interface calls {
+  record calls { value: u32 }
+  record context { value: u32 }
+  wrap: func(value: calls, scope: context) -> calls;
   new: func(value: u32) -> u32;
   %constructor: func() -> string;
   to-string: func() -> string;
@@ -290,7 +318,7 @@ world app {
 
 /** A call site of those clients, next to the SDK's own `Context`. */
 const NAMES_SITE = `import type { Context } from "@syntropika/tembra-sdk";
-import { get, type Calls } from "./example-names-calls.ts";
+import { get, type Calls, type Calls_, type Context_ } from "./example-names-calls.ts";
 import * as acquisition from "./example-names-acquisition-options.ts";
 import * as context from "./example-names-context.ts";
 import * as dynamic from "./example-names-dynamic-reference.ts";
@@ -303,6 +331,8 @@ export async function check(scope: Parameters<typeof get>[0], ctx?: Context) {
   const made: number = await calls.new(1, ctx);
   const text: string = await calls.toString();
   const owned: boolean = await calls.hasOwnProperty("name", ctx);
+  const scoped: Context_ = { value: 2 };
+  const wrapped: Calls_ = await calls.wrap({ value: 1 }, scoped, ctx);
   // @ts-expect-error \`new\` is a method that takes its WIT parameters.
   calls.new("1");
   // @ts-expect-error \`toString\` takes no WIT argument.
@@ -321,7 +351,7 @@ export async function check(scope: Parameters<typeof get>[0], ctx?: Context) {
     base.get(scope, address),
   ]);
   const sum: number = await services[1].add(1, ctx);
-  return { made, text, owned, services, sum };
+  return { made, text, owned, wrapped, services, sum };
 }
 `;
 
@@ -336,6 +366,10 @@ test("a generated client type-checks for WIT names TypeScript reads otherwise", 
     // In an interface, `new(..)` would declare a construct signature; the quoted name is a method.
     expect(await readFile(path.join(out, "example-names-calls.ts"), "utf8")).toContain(
       '  "new"(value: number, context?: Context): Promise<number>;',
+    );
+    // A WIT type takes a `_` where the module or its interface already uses its name.
+    expect(await readFile(path.join(out, "example-names-calls.ts"), "utf8")).toContain(
+      "  wrap(value: Calls_, scope: Context_, context?: Context): Promise<Calls_>;",
     );
     // An interface's type takes a `_` where the module already uses its name.
     for (const [file, service] of [

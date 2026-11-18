@@ -20,12 +20,13 @@ struct Lowering<'a> {
 
 /// Prepare a resolved world once; the result is validated like any decoded artifact.
 /// `explicit` holds the world's own import keys; elaborated type-only dependencies are absent.
-/// `None` (unknown provenance) treats every import as explicit.
+/// `None` (unknown provenance) treats every import as explicit. Also answers the WIT definition
+/// each compact type index was lowered from, which the prepared contract does not keep.
 pub(crate) fn world(
     resolve: &Resolve,
     world: WorldId,
     explicit: Option<&std::collections::BTreeSet<String>>,
-) -> Result<PreparedContract, Error> {
+) -> Result<(PreparedContract, HashMap<TypeId, u32>), Error> {
     let selected = &resolve.worlds[world];
     let mut lowering = Lowering {
         resolve,
@@ -56,7 +57,7 @@ pub(crate) fn world(
     };
     let imports = side(&selected.imports, true)?;
     let exports = side(&selected.exports, false)?;
-    PreparedContract::new(Model {
+    let prepared = PreparedContract::new(Model {
         world: selected.name.clone(),
         package: selected
             .package
@@ -64,7 +65,8 @@ pub(crate) fn world(
         types: lowering.types,
         imports,
         exports,
-    })
+    })?;
+    Ok((prepared, lowering.ids))
 }
 
 impl Lowering<'_> {

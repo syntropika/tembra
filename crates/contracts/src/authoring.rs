@@ -20,6 +20,8 @@ pub struct Contract {
     pub(crate) resolve: Resolve,
     pub(crate) world: WorldId,
     prepared: PreparedContract,
+    /// The compact index each WIT definition was lowered to, for [`Self::type_names`].
+    lowered: std::collections::HashMap<wit_parser::TypeId, u32>,
 }
 
 /// Every runtime query is answered by the prepared contract.
@@ -143,12 +145,60 @@ impl Contract {
         world: WorldId,
         explicit: Option<&BTreeSet<String>>,
     ) -> Result<Self, Error> {
-        let prepared = crate::prepare::world(&resolve, world, explicit)?;
+        let (prepared, lowered) = crate::prepare::world(&resolve, world, explicit)?;
         Ok(Self {
             resolve,
             world,
             prepared,
+            lowered,
         })
+    }
+
+    /// Answer a query of the prepared contract, or `{"kind":"type-names"}`, which only a
+    /// contract read from WIT answers with [`Self::type_names`]: the prepared contract, its
+    /// describe graph and the artifacts it is packaged into keep no type names.
+    pub fn request(&self, packet: &str) -> String {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+        enum Own {
+            TypeNames {},
+        }
+        match serde_json::from_str::<Own>(packet) {
+            Ok(Own::TypeNames {}) => crate::port::envelope(Ok(self.type_names())),
+            Err(_) => self.prepared.request(packet),
+        }
+    }
+
+    /// The WIT name of each record, variant, enum and flags type of the describe graph, by its
+    /// `id` there, with the name's JavaScript spelling (`Point` for `point`), in id order.
+    pub fn type_names(&self) -> serde_json::Value {
+        use wit_parser::TypeDefKind;
+        let mut named: Vec<(u32, &str)> = self
+            .lowered
+            .iter()
+            .filter_map(|(id, index)| {
+                let definition = &self.resolve.types[*id];
+                let named = matches!(
+                    definition.kind,
+                    TypeDefKind::Record(_)
+                        | TypeDefKind::Variant(_)
+                        | TypeDefKind::Enum(_)
+                        | TypeDefKind::Flags(_)
+                );
+                Some((*index, definition.name.as_deref().filter(|_| named)?))
+            })
+            .collect();
+        named.sort_unstable();
+        named
+            .into_iter()
+            .map(|(id, name)| {
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "javascript": heck::ToUpperCamelCase::to_upper_camel_case(name),
+                })
+            })
+            .collect()
     }
 
     /// Resolve a WIT directory and its local `deps/` without acquiring packages.
@@ -407,7 +457,7 @@ pub(crate) fn verify_component(expected: &PreparedContract, bytes: &[u8]) -> Res
         return Err(Error("expected an executable WebAssembly component".into()));
     };
     // A decoded component has no import provenance; only signatures are compared here.
-    let actual = crate::prepare::world(&resolve, world, None)?;
+    let (actual, _) = crate::prepare::world(&resolve, world, None)?;
     if expected.signatures(true)? != actual.signatures(true)? {
         return Err(Error(
             "component export signatures differ from the selected WIT world".into(),

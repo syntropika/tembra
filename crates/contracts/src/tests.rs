@@ -620,3 +620,70 @@ world aware {
     let error = contract.plan("aware", 1, &bindings).unwrap_err();
     assert!(error.0.contains("reserved"), "{error}");
 }
+
+/// One contract with its value types named as given: two calls differ only in type names.
+fn named(record: &str, variant: &str, enumeration: &str, flags: &str) -> String {
+    format!(
+        "package example:named@1.0.0;
+        interface shapes {{
+            enum {enumeration} {{ fast, slow }}
+            flags {flags} {{ read, write-all }}
+            record {record} {{ name: string, count: option<u32> }}
+            variant {variant} {{ none, item({record}) }}
+            type alias = {record};
+            call: func(value: {variant}, mode: {enumeration}, access: {flags}) -> tuple<alias, u8>;
+        }}
+        world provider {{ export shapes; }}"
+    )
+}
+
+#[test]
+fn a_contract_read_from_wit_names_its_types_outside_the_describe_graph_and_the_artifact() {
+    let first = named("item-value", "shape", "mode", "access");
+    let second = named("entry", "form", "speed", "rights");
+    let first = Contract::from_source("named.wit", &first, None).unwrap();
+    let second = Contract::from_source("named.wit", &second, None).unwrap();
+    // The describe graph and the prepared-artifact bytes keep no type name.
+    assert_eq!(first.describe(), second.describe());
+    assert_eq!(
+        first.source_artifact("export {}", "named", 1).unwrap(),
+        second.source_artifact("export {}", "named", 1).unwrap()
+    );
+    // The contract read from WIT answers them by the describe graph's ids; an alias and a tuple
+    // have no name of their own.
+    let graph = first.describe();
+    let names: serde_json::Value =
+        serde_json::from_str(&first.request(r#"{"kind":"type-names"}"#)).unwrap();
+    let mut spelled: Vec<(String, String, String)> = names["ok"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            let id = entry["id"].as_u64().unwrap() as usize;
+            let kind = graph["types"][id]["definition"]["kind"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            let name = entry["name"].as_str().unwrap().to_owned();
+            (kind, name, entry["javascript"].as_str().unwrap().to_owned())
+        })
+        .collect();
+    spelled.sort();
+    let expected = [
+        ("enum", "mode", "Mode"),
+        ("flags", "access", "Access"),
+        ("record", "item-value", "ItemValue"),
+        ("variant", "shape", "Shape"),
+    ];
+    assert_eq!(
+        spelled,
+        expected.map(|(kind, name, javascript)| (kind.into(), name.into(), javascript.into()))
+    );
+    // Every other query is the prepared contract's.
+    let described: serde_json::Value =
+        serde_json::from_str(&first.request(r#"{"kind":"describe"}"#)).unwrap();
+    assert_eq!(described["ok"], graph);
+}
