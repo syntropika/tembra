@@ -100,12 +100,14 @@ pub mod parity {
     /// `bool` fields.
     pub mod ledger {
         /// One deposit.
+        #[derive(serde::Serialize, serde::Deserialize)]
         pub struct Entry {
             pub label: String,
             pub amount: u64,
         }
 
         /// What moved the balance last.
+        #[derive(serde::Serialize, serde::Deserialize)]
         pub enum Movement {
             Opened,
             Deposit(u64),
@@ -121,6 +123,7 @@ pub mod parity {
 
         /// The book of one ledger object, which the kernel keeps.
         #[state(service = Ledger)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Book {
             pub entries: Vec<Entry>,
             pub last: Option<Movement>,

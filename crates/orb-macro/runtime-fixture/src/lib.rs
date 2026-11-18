@@ -248,11 +248,12 @@ mod guest {
         /// The last tally a readings object took, and how many readings it made, kept by the
         /// kernel as the JSON `serde` writes for the provider's record.
         #[state(service = Readings)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Recorded {
             pub last: Option<counter::Tally>,
             pub readings: u32,
             /// How many readings were thrown away: no build holds the field, as `any()` is never
-            /// on, and the `Default` the macro writes for the state leaves it out with it.
+            /// on, and the `Default` the state derives leaves it out with it.
             #[cfg(any())]
             pub discarded: u32,
         }
@@ -524,6 +525,7 @@ mod guest {
 
     /// The last access a permits object granted and how many grants it made, kept by the kernel.
     #[state(service = Permits)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Granted {
         pub last: Access,
         pub grants: u32,

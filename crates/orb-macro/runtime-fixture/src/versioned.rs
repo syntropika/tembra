@@ -12,6 +12,7 @@
 pub mod counting {
     /// The count of one counter object.
     #[state(version = 1)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Count {
         pub total: u32,
     }
@@ -41,6 +42,7 @@ pub mod counting {
 pub mod counting {
     /// The count of one counter object, and how many additions made it.
     #[state(version = 2)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Count {
         pub total: u32,
         pub additions: u32,

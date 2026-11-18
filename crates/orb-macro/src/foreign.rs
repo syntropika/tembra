@@ -1472,9 +1472,8 @@ fn checked<'a>(
 
 /// The types of a state's fields and of the module types they reach, each once, with the module
 /// type that holds it, `None` for the state's own fields, and the module the holder is declared
-/// in. A name resolves as `serialized` resolves it, to the type of the module that declares it; one
-/// the macro cannot follow, through a glob import or `crate::`, is an error, as the state's derives
-/// need what it holds (`Modules::followed`).
+/// in. A name resolves to the type of the module that declares it; one the macro cannot follow,
+/// through a glob import or `crate::`, is an error (`Modules::followed`).
 fn state_types<'a>(
     state: &State,
     shapes: &'a [Shape],

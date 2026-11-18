@@ -647,6 +647,7 @@ pub mod calculator {
         /// How many totals the accumulators an object of the service issued stored in the
         /// calculator's memory, which the kernel keeps for the object.
         #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Stored {
             pub count: u32,
         }
@@ -1093,6 +1094,7 @@ pub mod library {
 
     /// How many books one shelf holds, which the kernel keeps for each shelf.
     #[state(service = Shelf)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Shelved {
         pub books: u32,
     }
@@ -1222,6 +1224,7 @@ pub mod worker {
 pub mod meters {
     /// The total of one meter, which the kernel keeps for each object.
     #[state(service = Gauge)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Total {
         pub total: u64,
     }
@@ -1893,14 +1896,14 @@ pub mod sketch {
     }
 
     /// How large the sketch is drawn, whose fields sit beside the shape's in the state's JSON.
-    #[derive(Default)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Size {
         pub scale: f64,
     }
 
     /// The sketch an object keeps.
     #[state(service = Pad)]
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Sketch {
         pub shape: Shape,
         #[serde(flatten)]

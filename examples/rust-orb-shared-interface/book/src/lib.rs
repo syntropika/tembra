@@ -12,6 +12,7 @@ mod keeper {
     /// The entries of one book object, kept by the kernel: the shared package's own records,
     /// which the bindings give `serde`'s derives in an Orb with a state.
     #[state]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Entries {
         pub entries: Vec<book::Entry>,
     }

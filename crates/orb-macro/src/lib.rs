@@ -546,9 +546,6 @@ impl Composition {
 /// of one service.
 struct State {
     ident: Ident,
-    /// The named fields, each with the span of its type, where a missing `Default` is reported,
-    /// and its `#[cfg(..)]` attributes, which the macro's `Default` writes on its initializer.
-    fields: Vec<(Ident, Span, Vec<Attribute>)>,
     /// The owning service, as named by `service = ...` or resolved to the module's only one.
     service: Option<Ident>,
     version: u32,
@@ -560,13 +557,6 @@ struct State {
     identity: String,
     /// The module declaring the state, by scope; 0 is the Orb module.
     scope: usize,
-    /// The struct derives `Default`, by name or under another name, `SmartDefault`: the derive
-    /// stays on the author's struct when the state stays out of the WIT, and goes to the generated
-    /// type replacing it when the state enters it.
-    derives_default: bool,
-    /// The author gives the state its `Default`, its initial value: by an `impl Default` in the
-    /// Orb module, or by a derive. Otherwise the macro implements it field by field.
-    authored_default: bool,
 }
 
 /// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a function
@@ -838,8 +828,6 @@ struct Scan {
     /// The tuple structs of one field, which the WIT spells as their field's type.
     newtypes: Vec<Newtype>,
     impls: Vec<(usize, syn::ItemImpl)>,
-    /// Each `impl Default for ..` of the Orb module, with the module it is written in.
-    default_impls: Vec<(usize, syn::ItemImpl)>,
     marked: Vec<Marked>,
     /// What each module imports, by scope.
     uses: Vec<Uses>,
@@ -1282,15 +1270,7 @@ impl Scan {
                 }
                 Item::Impl(i) => {
                     // A trait impl is copied through unread; a marker belongs to an inherent
-                    // block. An `impl Default` may give a state its initial value.
-                    let implements_default = i.trait_.as_ref().is_some_and(|(_, path, _)| {
-                        path.segments
-                            .last()
-                            .is_some_and(|segment| segment.ident == "Default")
-                    });
-                    if implements_default {
-                        self.default_impls.push((scope, i.clone()));
-                    }
+                    // block.
                     for impl_item in &i.items {
                         let syn::ImplItem::Fn(function) = impl_item else {
                             continue;
@@ -1666,8 +1646,8 @@ struct Analysis {
     /// The names each interface of the derived WIT uses from another, by interface.
     used: BTreeMap<String, BTreeSet<String>>,
     /// What each type that enters the WIT implements besides what the bindings implement for it
-    /// and what its derives implement, by name: the hand impls, a state's `Default` the macro
-    /// writes, and the refusals of impls that give a trait in some configurations only.
+    /// and what its derives implement, by name: the hand impls and the refusals of impls that give
+    /// a trait in some configurations only.
     implemented_elsewhere: BTreeMap<String, Elsewhere>,
     /// The trait impls the Orb's modules write by hand for each type that enters the WIT, by name,
     /// for what the bindings implement themselves (`clashing`).
@@ -1804,7 +1784,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         native_only: Vec::new(),
         newtypes: Vec::new(),
         impls: Vec::new(),
-        default_impls: Vec::new(),
         marked: Vec::new(),
         uses: vec![Uses::default()],
         own_types: Vec::new(),
@@ -1835,7 +1814,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         mut native_only,
         newtypes,
         impls,
-        default_impls,
         marked,
         uses,
         own_types,
@@ -2444,60 +2422,10 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         })
         .collect();
 
-    // A state whose `Default` the author implements by hand or derives starts from the author's
-    // value: a derive stays on the author's struct or goes to the generated type replacing it.
-    // The macro writes no `Default` for a state whose impls it reads, before the compiler
-    // evaluates `#[cfg(..)]`, so those give it one in every configuration, with a derive under
-    // `#[cfg_attr(..)]` too (`uncovered`).
-    let authored: Vec<Vec<(usize, syn::ItemImpl)>> = states
-        .iter()
-        .map(|state| {
-            default_impls
-                .iter()
-                .filter(|(scope, block)| {
-                    consumed_modules
-                        .implemented_type(&block.self_ty, *scope)
-                        .is_some_and(|(name, module)| name == state.ident && module == state.scope)
-                })
-                .cloned()
-                .collect()
-        })
-        .collect();
-    for (state, hands) in states.iter_mut().zip(authored) {
-        state.authored_default = !hands.is_empty() || state.derives_default;
-        if hands.is_empty() || state.derives_default {
-            continue;
-        }
-        let attrs = candidates
-            .iter()
-            .find_map(|candidate| match &candidate.item {
-                Item::Struct(item)
-                    if candidate.scope == state.scope && item.ident == state.ident =>
-                {
-                    Some(item.attrs.as_slice())
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
-        let derived = attrs
-            .iter()
-            .filter_map(|attribute| {
-                applying(&attribute.meta, &|applied| {
-                    derives(&[attrs, applied].concat(), "Default")
-                })
-            })
-            .collect();
-        if let Some(refusal) = uncovered(&hands, derived, "Default", &state.ident, &tree) {
-            return Err(refusal);
-        }
-    }
-
     // Only the types a service method, a resource or a hook uses, directly or through another
-    // type, enter the WIT; the others go back to their modules as ordinary Rust. A state alone
-    // makes no type enter: a state that stays out of the WIT is serde's to serialize, and so is
-    // every type of the module its fields reach that stays out too, so each of them gets the
-    // serde derives the author did not write. The types that enter the WIT are generated with
-    // the derives already.
+    // type, enter the WIT; the others go back to their modules as ordinary Rust, with the derives
+    // the author writes. A state alone makes no type enter: its `Default` and serde's traits are
+    // the author's, which the macro asserts on the state's name (`state_code`).
     let mut unreached: Vec<Candidate> = Vec::new();
     let mut shapes = reachable(
         candidates,
@@ -2522,55 +2450,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             unconditional(&shape.item, Written::Replaced)?;
             replaceable(&shape.item)?;
             shape.carried = carried(&shape.item)?;
-        }
-    }
-    // The `Default` the macro writes for a state kept out of the WIT names each field, before the
-    // compiler evaluates `#[cfg_attr(..)]`, and carries only a plain `#[cfg(..)]` onto a field's
-    // initializer: a field under a `#[cfg_attr(..)]` wrapping one would be named in every
-    // configuration, and a derive of `Default` under one would add a second `Default` where it
-    // applies. A state entering the WIT has had the attribute refused already.
-    for state in states.iter().filter(|state| !state.authored_default) {
-        let Some(item) = unreached
-            .iter()
-            .find_map(|candidate| match &candidate.item {
-                Item::Struct(item)
-                    if candidate.scope == state.scope && item.ident == state.ident =>
-                {
-                    Some(item)
-                }
-                _ => None,
-            })
-        else {
-            continue;
-        };
-        // A `#[cfg_attr(..)]` whose attributes, applied, make the struct derive `Default`: without
-        // them it derives none, or the state's `Default` would be the author's.
-        let derived = item.attrs.iter().find(|attribute| {
-            let applied = applied(&attribute.meta);
-            !applied.is_empty() && derives(&[item.attrs.as_slice(), &applied].concat(), "Default")
-        });
-        if let Some(attribute) = derived {
-            let state = &state.ident;
-            return Err(syn::Error::new(
-                attribute.span(),
-                format!(
-                    "`#[cfg_attr(..)]` deriving `Default` on the state `{state}`: the macro writes the `Default` of the state `{state}` before the compiler evaluates the attribute, so `{state}` would implement `Default` twice where the attribute applies; derive `Default` without `#[cfg_attr(..)]`, or implement it"
-                ),
-            ));
-        }
-        for field in &item.fields {
-            let condition = field.attrs.iter().find(|attribute| {
-                attribute.path().is_ident("cfg_attr") && conditional(&attribute.meta)
-            });
-            if let (Some(name), Some(attribute)) = (&field.ident, condition) {
-                let state = &state.ident;
-                return Err(syn::Error::new(
-                    attribute.span(),
-                    format!(
-                        "`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the field `{state}::{name}`: the macro writes the `Default` of the state `{state}` before the compiler evaluates the attribute, so that `Default` would name `{state}::{name}` in every configuration; write the condition as a plain `#[cfg(..)]`, which the macro carries onto the field's initializer, or derive or implement `Default`"
-                    ),
-                ));
-            }
         }
     }
     // Where each type is defined, computed once for the WIT and for the re-exports below.
@@ -2626,125 +2505,15 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         states: &states,
         unreached: &unreached,
     })?;
-    let serialized = serialized(&unreached, &shapes, &states);
-    let serialized_converted =
-        serialized_converted(&shapes, &converted, &unreached, &serialized, &states);
-    for (index, candidate) in unreached.into_iter().enumerate() {
-        let Candidate {
-            mut item,
-            ident,
-            scope,
-            ..
-        } = candidate;
-        let attrs = match &mut item {
-            Item::Struct(item) => Some(&mut item.attrs),
-            Item::Enum(item) => Some(&mut item.attrs),
-            _ => None,
-        };
-        if let Some(attrs) = attrs
-            && serialized.contains(&index)
-        {
-            // The traits of `serde` the type has already: a derive of one, under any name, or an
-            // impl the Orb's modules write by hand. A derive the macro cannot follow to a crate
-            // is `serde`'s by its name, as one a crate-root `#[macro_use]` brings.
-            let derived = serde_derived(attrs, scope, &uses, &modules, &ident, true);
-            let by_hand: Vec<(String, (usize, syn::ItemImpl))> =
-                impls::impls_of(&mut tree, &modules, &consumed_modules, &ident, scope)
-                    .into_iter()
-                    .filter_map(|(written, block)| {
-                        let (_, path, _) = block.trait_.as_ref()?;
-                        let name = serde_trait(path, written, &uses, &modules, &ident, true)?;
-                        Some((name, (written, block)))
-                    })
-                    .collect();
-            let missing: Vec<(&str, proc_macro2::TokenStream)> = [
-                ("Serialize", quote! { ::serde::Serialize }),
-                ("Deserialize", quote! { ::serde::Deserialize }),
-            ]
-            .into_iter()
-            .filter(|(name, _)| {
-                !derived.iter().any(|has| has == name)
-                    && !by_hand.iter().any(|(has, _)| has == name)
-            })
-            .collect();
-            // The macro reads those impls before the compiler evaluates `#[cfg(..)]`, so those it
-            // leaves a trait to give it in every configuration, with a derive under
-            // `#[cfg_attr(..)]` too (`uncovered`): the code it writes serializes the state, and
-            // the derives it writes on the type holding this one, the state or another type its
-            // fields reach, need the trait of this one.
-            for name in ["Serialize", "Deserialize"] {
-                if derived.iter().any(|has| has == name) {
-                    continue;
-                }
-                let hands: Vec<(usize, syn::ItemImpl)> = by_hand
-                    .iter()
-                    .filter(|(has, _)| has == name)
-                    .map(|(_, hand)| hand.clone())
-                    .collect();
-                if hands.is_empty() {
-                    continue;
-                }
-                let under = attrs
-                    .iter()
-                    .filter_map(|attribute| {
-                        applying(&attribute.meta, &|applied| {
-                            serde_derived(applied, scope, &uses, &modules, &ident, true)
-                                .iter()
-                                .any(|has| has == name)
-                        })
-                    })
-                    .collect();
-                if let Some(refusal) = uncovered(&hands, under, name, &ident, &tree) {
-                    return Err(refusal);
-                }
-            }
-            // The macro reads the type's derives before the compiler evaluates `#[cfg_attr(..)]`:
-            // one of those it writes, derived under such an attribute as well, would be a second
-            // where the attribute applies.
-            let twice = attrs.iter().find_map(|attribute| {
-                let name = conditional_serde(&attribute.meta, scope, &uses, &modules, &ident)
-                    .into_iter()
-                    .find(|name| missing.iter().any(|(missing, _)| name == missing))?;
-                Some((attribute, name))
-            });
-            if let Some((attribute, name)) = twice {
-                let state = states
-                    .iter()
-                    .any(|state| state.ident == ident && state.scope == scope);
-                let (owner, reached) = if state {
-                    (format!("the state `{ident}`"), "")
-                } else {
-                    (format!("`{ident}`"), ", which a state's fields reach,")
-                };
-                return Err(syn::Error::new(
-                    attribute.span(),
-                    format!(
-                        "`#[cfg_attr(..)]` deriving `{name}` on {owner}: the macro derives `serde`'s `{name}` for {owner}{reached} before the compiler evaluates the attribute, so `{ident}` would implement `{name}` twice where the attribute applies; derive `{name}` without `#[cfg_attr(..)]`, or remove the derive, which the macro writes in every configuration"
-                    ),
-                ));
-            }
-            if !missing.is_empty() {
-                let paths = missing.iter().map(|(_, path)| path);
-                attrs.push(syn::parse_quote!(#[derive(#(#paths),*)]));
-            }
-        }
-        tree.at(scope).items.push(item);
+    for candidate in unreached {
+        tree.at(candidate.scope).items.push(candidate.item);
     }
     // A type the macro converts stays the author's; the component writes its conversions.
-    keep_converted(
-        &shapes,
-        &converted,
-        &serialized_converted,
-        &mut tree,
-        &modules,
-        &uses,
-        &consumed_modules,
-    );
+    keep_converted(&shapes, &converted, &mut tree);
     // What each other type that enters the WIT implements besides what the bindings implement for
     // it and what its derives implement, which the types holding one may derive: the traits the
-    // Orb's modules implement for it by hand, which apply to the generated type replacing it, and
-    // the `Default` the macro writes for a state the author gives none. Those impls are kept, by
-    // type, for what the bindings implement themselves (`clashing`).
+    // Orb's modules implement for it by hand, which apply to the generated type replacing it.
+    // Those impls are kept, by type, for what the bindings implement themselves (`clashing`).
     let mut implemented_elsewhere: BTreeMap<String, Elsewhere> = BTreeMap::new();
     let mut hand_impls: BTreeMap<String, Vec<(usize, syn::ItemImpl)>> = BTreeMap::new();
     for shape in &shapes {
@@ -2755,13 +2524,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             &shape.ident,
             shape.scope,
         );
-        let mut implemented = Elsewhere::by_hand(&hands, &shape.ident, &tree);
-        let macro_default = states.iter().any(|state| {
-            state.ident == shape.ident && state.scope == shape.scope && !state.authored_default
-        });
-        if macro_default {
-            implemented.traits.insert("Default".to_owned());
-        }
+        let implemented = Elsewhere::by_hand(&hands, &shape.ident, &tree);
         implemented_elsewhere.insert(shape.ident.to_string(), implemented);
         hand_impls.insert(
             shape.ident.to_string(),
@@ -3755,30 +3518,6 @@ fn reserved_member(wit_name: &str) -> Option<String> {
     RESERVED_MEMBERS
         .contains(&member.as_str())
         .then_some(member)
-}
-
-/// The traits an item's `#[derive(..)]` attributes implement, by name: the trait of each derive's
-/// last name, or those it implements under another name (`implemented_by`).
-fn derived(attrs: &[Attribute]) -> Vec<String> {
-    attrs
-        .iter()
-        .filter(|attribute| attribute.path().is_ident("derive"))
-        .filter_map(|attribute| {
-            attribute
-                .parse_args_with(
-                    syn::punctuated::Punctuated::<syn::Path, Token![,]>::parse_terminated,
-                )
-                .ok()
-        })
-        .flatten()
-        .filter_map(|path| Some(implemented_by(&path.segments.last()?.ident, attrs)))
-        .flatten()
-        .collect()
-}
-
-/// Whether an item's `#[derive(..)]` attributes implement a trait (`derived`).
-fn derives(attrs: &[Attribute], name: &str) -> bool {
-    derived(attrs).iter().any(|implemented| implemented == name)
 }
 
 /// The type-level helper attribute through which a derive names the traits it implements, for
@@ -5145,30 +4884,6 @@ fn conditional(meta: &syn::Meta) -> bool {
     wrapped.is_ok_and(|wrapped| wrapped.iter().skip(1).any(conditional))
 }
 
-/// The attributes a `#[cfg_attr(..)]` applies where its configuration holds, directly or through
-/// another `#[cfg_attr(..)]`: none for another attribute, or for one that does not parse.
-fn applied(meta: &syn::Meta) -> Vec<Attribute> {
-    if !meta.path().is_ident("cfg_attr") {
-        return Vec::new();
-    }
-    let wrapped = meta.require_list().and_then(|list| {
-        list.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated)
-    });
-    // The first is the configuration predicate.
-    wrapped
-        .into_iter()
-        .flatten()
-        .skip(1)
-        .flat_map(|meta| {
-            if meta.path().is_ident("cfg_attr") {
-                applied(&meta)
-            } else {
-                vec![syn::parse_quote!(#[#meta])]
-            }
-        })
-        .collect()
-}
-
 /// How the errors write an attribute that drops what it sits on where a configuration is off
 /// (`conditional`).
 fn written_condition(attribute: &Attribute) -> &'static str {
@@ -5282,40 +4997,6 @@ fn keeping(meta: &syn::Meta) -> Predicate {
     ])
 }
 
-/// Where a `#[cfg_attr(..)]` applies attributes that `give` what the caller looks for: where its
-/// predicate holds, when the attributes it wraps directly give it, and otherwise where the
-/// predicate of another `#[cfg_attr(..)]` in it holds too, whose attributes give it with those;
-/// none where no configuration applies such attributes.
-fn applying(meta: &syn::Meta, give: &dyn Fn(&[Attribute]) -> bool) -> Option<Predicate> {
-    if !meta.path().is_ident("cfg_attr") {
-        return None;
-    }
-    let wrapped = meta
-        .require_list()
-        .and_then(|list| {
-            list.parse_args_with(
-                syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated,
-            )
-        })
-        .ok()?;
-    let mut wrapped = wrapped.into_iter();
-    let predicate = Predicate::of(&wrapped.next()?);
-    let (nested, direct): (Vec<syn::Meta>, Vec<syn::Meta>) =
-        wrapped.partition(|meta| meta.path().is_ident("cfg_attr"));
-    let direct: Vec<Attribute> = direct
-        .iter()
-        .map(|meta| syn::parse_quote!(#[#meta]))
-        .collect();
-    if !direct.is_empty() && give(&direct) {
-        return Some(predicate);
-    }
-    let nested: Vec<Predicate> = nested
-        .iter()
-        .filter_map(|meta| applying(meta, &|more| give(&[direct.as_slice(), more].concat())))
-        .collect();
-    (!nested.is_empty()).then(|| Predicate::All(vec![predicate, Predicate::Any(nested)]))
-}
-
 /// The configuration names a configuration may give several values at once, or none: the
 /// features, and the target's families, features and atomic widths. Each value written for one
 /// is an option of its own, set or not.
@@ -5372,8 +5053,7 @@ fn always(predicates: &[Predicate]) -> bool {
 
 /// What a type that enters the WIT implements besides what the bindings implement for it and what
 /// its derives implement, for the derives of the types holding it: the traits the Orb's modules
-/// implement for it by hand in every configuration and the `Default` the macro writes for a state
-/// the author gives none; and, by trait, the refusal of the impls that
+/// implement for it by hand in every configuration; and, by trait, the refusal of the impls that
 /// give it a trait in some configurations only (`uncovered`), for a derive that needs the trait.
 #[derive(Default)]
 struct Elsewhere {
@@ -5598,78 +5278,6 @@ fn overlaps(
         }
         _ => false,
     })
-}
-
-/// The traits of `serde`, by name, that a `#[cfg_attr(..)]` derives where its configuration holds,
-/// directly or through another `#[cfg_attr(..)]`, on `owner` in the module `scope`: through a path
-/// the macro follows to `serde`, or through a `Serialize` or `Deserialize` it cannot follow to a
-/// crate, from a crate's glob import or from above the Orb module, which `carried_derive` takes
-/// for `serde`'s too. Another crate's derive of either name implements another trait.
-fn conditional_serde(
-    meta: &syn::Meta,
-    scope: usize,
-    uses: &[Uses],
-    modules: &[Vec<Ident>],
-    owner: &Ident,
-) -> Vec<String> {
-    serde_derived(&applied(meta), scope, uses, modules, owner, false)
-}
-
-/// The traits of `serde`, by name, that the `#[derive(..)]`s among `attrs` implement on `owner`,
-/// in the module `scope`, each derive's path followed as `serde_trait` follows it.
-fn serde_derived(
-    attrs: &[Attribute],
-    scope: usize,
-    uses: &[Uses],
-    modules: &[Vec<Ident>],
-    owner: &Ident,
-    unbound: bool,
-) -> Vec<String> {
-    attrs
-        .iter()
-        .filter(|attribute| attribute.path().is_ident("derive"))
-        .filter_map(|derive| {
-            derive
-                .parse_args_with(
-                    syn::punctuated::Punctuated::<syn::Path, Token![,]>::parse_terminated,
-                )
-                .ok()
-        })
-        .flatten()
-        .filter_map(|path| serde_trait(&path, scope, uses, modules, owner, unbound))
-        .collect()
-}
-
-/// The trait of `serde`, `Serialize` or `Deserialize`, that a path written in the module `scope`
-/// for `owner` names, a derive's or an implemented trait's, followed as `carried_derive` follows a
-/// derive: through a path the macro follows to `serde`, a re-export through `crate::` included,
-/// under any name, or by the name of a path it cannot follow to a crate, from a crate's glob
-/// import or from above the Orb module, which `carried_derive` takes for `serde`'s too, and, with
-/// `unbound`, from nothing the module binds, as a crate-root `#[macro_use]` brings it. Another
-/// crate's trait of either name, `rkyv::Serialize`, is another trait, and so is one the module
-/// declares itself, `pub trait Serialize`.
-fn serde_trait(
-    path: &syn::Path,
-    scope: usize,
-    uses: &[Uses],
-    modules: &[Vec<Ident>],
-    owner: &Ident,
-    unbound: bool,
-) -> Option<String> {
-    let name = match followed(path, scope, uses, modules, owner).ok()? {
-        Followed::Path(named) => match Derive::of(named) {
-            Derive::Serde(named) => named.segments.last()?.to_string(),
-            Derive::Standard(..) | Derive::Other(_) => return None,
-        },
-        Followed::Name {
-            ident,
-            globs,
-            declared: false,
-        } if globs || unbound => ident.to_string(),
-        Followed::Above(ident) => ident.to_string(),
-        Followed::Name { .. } => return None,
-    };
-    serde_name(&name).then_some(name)
 }
 
 /// Whether an attribute is a `#[cfg_attr(..)]` hiding from the macro, until the compiler evaluates
@@ -7041,7 +6649,8 @@ struct Layout<'a> {
 /// only for the name of one that cannot carry them, of the module or consumed, takes them here
 /// instead (`Bindings::namesakes`). `elsewhere` is what each type that enters the WIT implements
 /// besides what the bindings implement for it and what its derives implement, by the type's name:
-/// the traits the Orb's modules implement for it by hand, a state's `Default`, and the refusal of the impls that give it a trait in some configurations only.
+/// the traits the Orb's modules implement for it by hand, and the refusal of the impls that give it
+/// a trait in some configurations only.
 fn carried_attributes(
     shapes: &[Shape],
     layout: Layout<'_>,
@@ -7167,45 +6776,6 @@ fn carried_attributes(
         types.push(quote! { #literal: [#[derive(::serde::Serialize, ::serde::Deserialize)]] });
     }
     Ok((types, members))
-}
-
-/// The types, among those that stay out of the WIT, that serde serializes: each state that stays
-/// out, and every type of the module its fields reach, directly or through other such types. A
-/// name resolves to the type of the module that declares it (`declared_in`); one that resolves to a type entering the WIT stops there,
-/// because that type is generated with serde's derives, and one the module does not declare is
-/// the author's to serialize.
-fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> BTreeSet<usize> {
-    let mut serialized = BTreeSet::new();
-    let mut pending: Vec<(Ident, usize)> = Vec::new();
-    for (index, candidate) in unreached.iter().enumerate() {
-        let state = matches!(candidate.item, Item::Struct(_))
-            && states
-                .iter()
-                .any(|state| state.ident == candidate.ident && state.scope == candidate.scope);
-        if state && serialized.insert(index) {
-            pending.extend(candidate.references.iter().cloned());
-        }
-    }
-    while let Some((name, scope)) = pending.pop() {
-        // Each type of that name, with its module and its place among the unreached, if there.
-        let named = entered
-            .iter()
-            .filter(|shape| shape.ident == name)
-            .map(|shape| (shape.scope, None))
-            .chain(
-                unreached
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, candidate)| candidate.ident == name)
-                    .map(|(index, candidate)| (candidate.scope, Some(index))),
-            );
-        if let Some(Some(index)) = declared_in(named, scope)
-            && serialized.insert(index)
-        {
-            pending.extend(unreached[index].references.iter().cloned());
-        }
-    }
-    serialized
 }
 
 /// Read one public function of a service: a plain name for each owned parameter, `&self` when
@@ -8129,94 +7699,14 @@ fn wit_named(item: &Item) -> syn::Result<()> {
     Ok(())
 }
 
-/// The types the macro converts that serde serializes, by name: each one that is a state, each one
-/// a type serde serializes out of the WIT names, and every one those reach through their fields.
-/// Such a type stays the author's, so it needs serde's derives, which a generated type would get
-/// from the bindings.
-fn serialized_converted(
-    shapes: &[Shape],
-    converted: &BTreeMap<String, Ident>,
-    unreached: &[Candidate],
-    serialized: &BTreeSet<usize>,
-    states: &[State],
-) -> BTreeSet<String> {
-    let mut pending: Vec<String> = shapes
-        .iter()
-        .filter(|shape| {
-            states
-                .iter()
-                .any(|state| state.ident == shape.ident && state.scope == shape.scope)
-        })
-        .map(|shape| shape.ident.to_string())
-        .collect();
-    for index in serialized {
-        pending.extend(
-            unreached[*index]
-                .references
-                .iter()
-                .map(|(ident, _)| ident.to_string()),
-        );
-    }
-    let mut reached = BTreeSet::new();
-    while let Some(name) = pending.pop() {
-        if !converted.contains_key(&name) || !reached.insert(name.clone()) {
-            continue;
-        }
-        if let Some(shape) = shapes.iter().find(|shape| shape.ident == name) {
-            pending.extend(shape.references.iter().map(|(ident, _)| ident.to_string()));
-        }
-    }
-    reached
-}
-
-/// Put each type the macro converts back in its module, as written, with serde's derives where
-/// serde serializes it, unless the author derives or implements them. Its conversions are the
-/// component's to write, `converted_conversions`.
-fn keep_converted(
-    shapes: &[Shape],
-    converted: &BTreeMap<String, Ident>,
-    serialized: &BTreeSet<String>,
-    tree: &mut Module,
-    modules: &[Vec<Ident>],
-    uses: &[Uses],
-    resolver: &foreign::Modules,
-) {
+/// Put each type the macro converts back in its module, as written, with the derives the author
+/// writes. Its conversions are the component's to write, `converted_conversions`.
+fn keep_converted(shapes: &[Shape], converted: &BTreeMap<String, Ident>, tree: &mut Module) {
     for shape in shapes
         .iter()
         .filter(|shape| converted.contains_key(&shape.ident.to_string()))
     {
-        let ident = &shape.ident;
-        let scope = shape.scope;
-        let mut item = shape.item.clone();
-        if serialized.contains(&ident.to_string())
-            && let Item::Struct(syn::ItemStruct { attrs, .. })
-            | Item::Enum(syn::ItemEnum { attrs, .. }) = &mut item
-        {
-            // The traits of `serde` the type has already: a derive of one, under any name, or an
-            // impl the Orb's modules write by hand.
-            let derived = serde_derived(attrs, scope, uses, modules, ident, true);
-            let by_hand: Vec<String> = impls::impls_of(tree, modules, resolver, ident, scope)
-                .into_iter()
-                .filter_map(|(written, block)| {
-                    let (_, path, _) = block.trait_.as_ref()?;
-                    serde_trait(path, written, uses, modules, ident, true)
-                })
-                .collect();
-            let missing: Vec<proc_macro2::TokenStream> = [
-                ("Serialize", quote! { ::serde::Serialize }),
-                ("Deserialize", quote! { ::serde::Deserialize }),
-            ]
-            .into_iter()
-            .filter(|(name, _)| {
-                !derived.iter().any(|has| has == name) && !by_hand.iter().any(|has| has == name)
-            })
-            .map(|(_, path)| path)
-            .collect();
-            if !missing.is_empty() {
-                attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
-            }
-        }
-        tree.at(scope).items.push(item);
+        tree.at(shape.scope).items.push(shape.item.clone());
     }
 }
 
@@ -8486,7 +7976,7 @@ fn refusal(ty: &Type) -> bool {
 
 /// Read a state: a struct with named fields, the owning service and the version (default 1).
 fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
-    let Fields::Named(fields) = &item.fields else {
+    let Fields::Named(_) = &item.fields else {
         return Err(syn::Error::new(
             attribute.span(),
             "a state is a struct with named fields",
@@ -8512,27 +8002,29 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
     }
     Ok(State {
         ident: item.ident.clone(),
-        fields: fields
-            .named
-            .iter()
-            .filter_map(|field| {
-                let cfg = field
-                    .attrs
-                    .iter()
-                    .filter(|attribute| attribute.path().is_ident("cfg"))
-                    .cloned()
-                    .collect();
-                Some((field.ident.clone()?, field.ty.span(), cfg))
-            })
-            .collect(),
         service,
         version,
         validator: None,
         identity: String::new(),
         scope: 0,
-        derives_default: derives(&item.attrs, "Default"),
-        authored_default: false,
     })
+}
+
+/// `tokens` with every token at `span`, so rustc reports an error about them there.
+fn respanned(tokens: proc_macro2::TokenStream, span: Span) -> proc_macro2::TokenStream {
+    tokens
+        .into_iter()
+        .map(|mut token| {
+            if let proc_macro2::TokenTree::Group(group) = &token {
+                let mut inner =
+                    proc_macro2::Group::new(group.delimiter(), respanned(group.stream(), span));
+                inner.set_span(span);
+                token = proc_macro2::TokenTree::Group(inner);
+            }
+            token.set_span(span);
+            token
+        })
+        .collect()
 }
 
 /// The Rust side of the states: the kernel's `state-init` callback answering one declaration per
@@ -8587,14 +8079,6 @@ fn state_code(
     });
     let accessors = states.iter().map(|state| {
         let path = from_root(&modules[state.scope], &state.ident);
-        // Each field takes its type's `Default`; a type without one is reported on the field,
-        // where the author either gives the type a `Default` or implements the state's. The
-        // initializer carries the field's `#[cfg(..)]`, which the compiler evaluates after the
-        // macro, so the value holds the fields the struct holds, as a derived `Default` does.
-        let fields = state.fields.iter().map(|(field, span, cfg)| {
-            let value = quote::quote_spanned!(*span=> ::core::default::Default::default());
-            quote! { #(#cfg)* #field: #value }
-        });
         let service = state.service.as_ref().expect("resolved owner").to_string();
         let name = LitStr::new(&state.ident.to_string(), Span::call_site());
         let read_doc = format!(
@@ -8634,17 +8118,24 @@ fn state_code(
                 }
             }
         };
-        let default = (!state.authored_default).then(|| {
-            quote! {
-                impl ::core::default::Default for #path {
-                    fn default() -> Self {
-                        Self { #(#fields),* }
-                    }
+        // The state's `Default`, its initial value, and serde's traits, which keep it as JSON, are
+        // the author's: a state without one fails here, with rustc's error on the state's name.
+        let span = state.ident.span();
+        let named = respanned(path.clone(), span);
+        let assertion = quote_spanned! {span=>
+            const _: () = {
+                fn state<T>()
+                where
+                    T: ::core::default::Default
+                        + ::serde::Serialize
+                        + ::serde::de::DeserializeOwned,
+                {
                 }
-            }
-        });
+                let _ = state::<#named>;
+            };
+        };
         quote! {
-            #default
+            #assertion
             impl #path {
                 #[doc = #read_doc]
                 pub fn read() -> Self {

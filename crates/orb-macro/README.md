@@ -141,7 +141,8 @@ fields of another type that enters; a state alone does not make a type enter. Th
 module, and unit structs without the marker, remain ordinary Rust, whatever they hold: only a type
 that enters the WIT needs a WIT spelling for its fields and cases, so an array field or a case with
 two unnamed payloads is a compile error there and nowhere else. A state that stays out of the WIT, and
-every type of the module its fields reach that stays out too, get `serde`'s derives. A method that
+every type of the module its fields reach that stays out too, keeps the derives its author writes,
+`serde`'s included. A method that
 names a type the module does not declare, other than a consumed interface's type named through
 that interface's module, `greeting::Entry`, or free JSON, `serde_json::Value`, is a compile error, and so is a service with the name of
 the module, because WIT refuses a world and an interface of one name. So is a method named `then`,
@@ -320,6 +321,7 @@ module has more than one, and a version (default 1) the kernel compares on reloa
 mod tally {
     /// The state of one counter object.
     #[state(service = Counter, version = 1)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Count {
         pub total: i64,
         pub steps: u32,
@@ -342,13 +344,14 @@ mod tally {
 
 The macro gives the state type two associated functions: `Count::read()` returns the state of the
 object running the current call, `Count::update(|count| ...)` changes it and stores it, returning
-the stored value. The initial value is the state's `Default`, which the macro implements field by
-field unless the author provides it: an `impl Default for Count` anywhere in the Orb module, or a
-derive of `Default` on the state, `#[derive(Default)]` or one implementing it under another name,
-`SmartDefault`, which stays on the author's struct when the state stays out of the WIT and goes to
-the generated type replacing it when the state enters the WIT, as every derive of a type that
-enters it does (see [Limits](#limits)). That is how a state starts from a value of the author's
-choosing:
+the stored value. The state's `Default` is its initial value, and `serde`'s `Serialize` and
+`Deserialize` are how the kernel keeps it, as JSON: the three are the author's, derived or
+implemented anywhere in the crate, and so are the `serde` traits of every type of the module the
+state's fields reach. The macro writes none of them, only an assertion that the state implements
+the three, on the state's name, where rustc reports the one missing. A derive on a state that
+enters the WIT goes to the generated type replacing it, as every derive of a type that enters it
+does (see [Limits](#limits)). A state starts from a value of the author's choosing when the author
+implements `Default` by hand instead of deriving it:
 
 ```rust
 impl Default for Count {
@@ -358,18 +361,12 @@ impl Default for Count {
 }
 ```
 
-The macro's `Default`, like a derived one, gives each field its type's `Default`, and follows a
-field's `#[cfg(..)]` written plainly: one under `#[cfg_attr(..)]` is a compile error on the field,
-since the macro writes the `Default` before the compiler evaluates the attribute, so derive or
-implement `Default` for such a state. For the same reason, a derive of `Default` under
-`#[cfg_attr(..)]` is a compile error on the attribute, since the macro's `Default` would be a
-second one where it applies: derive `Default` without the attribute, or implement it. A field
-whose type has none, an enum of the module for instance, is a compile error on that field:
-implement `Default` for the state, as above, or give the field's type one, by hand or by a
-derive, which for an enum marks the case it starts from:
+A derived `Default` gives each field its type's `Default`, so a field whose type has none, an enum
+of the module for instance, is a compile error: give the field's type one, by hand or by a derive,
+which for an enum marks the case it starts from, or implement the state's by hand:
 
 ```rust
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub enum Phase {
     #[default]
     Open,
@@ -981,6 +978,7 @@ mod ledger {
     pub mod pinned {
         /// The balance of one pinned ledger object, kept by the kernel.
         #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Balance { pub total: i64 }
 
         #[service(lifetime = host)]
@@ -1651,8 +1649,8 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    `export!` under `#[cfg(target_arch = "wasm32")]`, so that a native build defines none of the
    component's export symbols; the resource trait of each `#[wit_resource]` struct on the struct
    itself, its constructor and methods forwarded and the handles wrapped, or taken back, at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
-8. with a state, `Default`, field by field unless the author provides it, and the `read`/`update`
-   functions on each state type, over a hidden module that maps the kernel's JSON to the type with
+8. with a state, an assertion that it implements `Default`, `Serialize` and `DeserializeOwned`,
+   on the state's name, and the `read`/`update` functions on each state type, over a hidden module that maps the kernel's JSON to the type with
    `serde_json` and holds back a value whose JSON would not read back as the type, and reaches the
    kernel through the bindings' import in a component build, inside `tembra::__guest!`, and through
    the state each method's object declared natively, inside `tembra::__host!`; and the kernel's
@@ -1709,14 +1707,10 @@ the version whose rules the macro follows, and the generated code reaches it the
   arguments besides the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary, a consumed type's
-  included. The macro derives `Serialize` and `Deserialize` on a state that stays out of the WIT,
-  and on every type of the module its fields reach that stays out too, unless the author already
-  does, before the compiler evaluates `#[cfg_attr(..)]`: a derive of either under that attribute
-  is a compile error on it, since the type would implement the trait twice where it applies, so
-  derive it without the attribute, or leave it to the macro. Such a derive is `serde`'s when the
-  macro follows it to `serde`, and when it cannot follow it to a crate, through a glob import or
-  `super::`, as on a type that enters the WIT; another crate's, `rkyv::Serialize`, is that
-  crate's own. JSON holds no NaN or infinite float, so a state holding one cannot be stored, and
+  included. The state's `Default` and `serde`'s derives are the author's, on the state and on every
+  type of the module its fields reach, under `#[cfg(..)]` or `#[cfg_attr(..)]` too, which the
+  compiler evaluates: the macro asserts the three traits on the state's name, and adds no derive.
+  JSON holds no NaN or infinite float, so a state holding one cannot be stored, and
   the JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles, so an integer beyond
   ±2^53 in a state loses precision there.
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
@@ -1755,8 +1749,8 @@ the version whose rules the macro follows, and the generated code reaches it the
   holding a `Result`. A handle, a string or a list held through a type of the module or a consumed
   type counts the same, unless the macro sees the trait implemented for that type: by the bindings,
   by its own derives, by an `impl` of the Orb's modules, whose type the macro resolves as a contract
-  type's name, through the glob imports from the Orb's modules too but not through `crate::`, by
-  the macro for a state's `Default`. A trait such a type lacks otherwise, `PartialEq` on a record holding a
+  type's name, through the glob imports from the Orb's modules too but not through `crate::`. A
+  trait such a type lacks otherwise, `PartialEq` on a record holding a
   `Spot` that derives none, or holding a consumed record, which its bindings give `Debug`, `Clone`
   and `Copy` only, as [the types of a consumed interface](#the-types-of-a-consumed-interface)
   says, is left to the author, who may implement it for the type by hand anywhere in the crate,
@@ -1805,8 +1799,8 @@ the version whose rules the macro follows, and the generated code reaches it the
   record of its own, `<enum>-<case>`, `outcome-refused`, which the bindings give the case as a tuple
   payload, so the author's type stays as written, attributes and derives included, and the macro
   converts it to and from the bindings' type at the boundary, `From` in both directions in the
-  type's module, inside lists, options, results and tuples too. Such a type derives `serde`'s traits
-  where a state reaches it, unless the author does. The bindings name its fields and cases from their
+  type's module, inside lists, options, results and tuples too. Where a state reaches such a type,
+  its `serde` derives are the author's, as on the state. The bindings name its fields and cases from their
   WIT names, which the conversions use on their side, so the author's names are free. A resource it
   holds is wrapped into the bindings' handle type and taken back from it. A derived hook's input
   may reach it, as it may hold free JSON or a newtype: the bindings hold a hook's types twice, in

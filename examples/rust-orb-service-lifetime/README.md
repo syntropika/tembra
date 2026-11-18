@@ -49,6 +49,7 @@ mod ledger {
     pub mod pinned {
         /// The balance of one pinned ledger object, kept by the kernel.
         #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Balance { pub total: i64 }
 
         #[service(lifetime = host)]

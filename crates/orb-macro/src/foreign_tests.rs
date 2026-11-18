@@ -1366,8 +1366,8 @@ fn a_wasi_type_a_consumed_interface_uses_is_refused_as_a_wasi_type() {
 }
 
 /// A state holds a consumed type whose bindings `serde` writes, in its fields or in the module
-/// types they reach, whether it stays out of the WIT, with serde's derives the macro adds, or
-/// enters it; a resource, a type holding a resource handle and a consumed flags are refused.
+/// types they reach, whether it stays out of the WIT, with the author's serde derives, or enters
+/// it; a resource, a type holding a resource handle and a consumed flags are refused.
 #[test]
 fn a_state_holds_the_consumed_types_serde_writes() {
     let dir = consumed("state", SHOP);
@@ -1391,7 +1391,7 @@ fn a_state_holds_the_consumed_types_serde_writes() {
     let out = expanded(shopping(&dir), &module(fields, ""));
     let generated = tokens(&out);
     for expected in [
-        "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Kept { pub last : Option < catalog :: Item > , pub all : Vec < catalog :: Item > , pub size : Option < catalog :: Size > }",
+        "pub struct Kept { pub last : Option < catalog :: Item > , pub all : Vec < catalog :: Item > , pub size : Option < catalog :: Size > }",
         "additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");

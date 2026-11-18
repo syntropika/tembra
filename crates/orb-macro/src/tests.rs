@@ -2617,57 +2617,6 @@ fn an_impl_names_the_type_through_a_glob_or_an_alias() {
     ] {
         expanded("example:office@1.0.0", &office(&ops, ""));
     }
-    // A state's `Default` written so is the author's.
-    let ledger = |items: &str| {
-        format!(
-            "mod ledger {{
-                #[state]
-                pub struct Balance {{ pub total: i64 }}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
-                {items}
-            }}"
-        )
-    };
-    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 7 } } }";
-    let written = "impl :: core :: default :: Default for";
-    for items in [
-        format!("pub mod defaults {{ use super::Balance; {default} }}"),
-        format!("pub mod api {{ pub type Balance = super::Balance; {default} }}"),
-    ] {
-        let generated = tokens(&expanded("example:ledger@1.0.0", &ledger(&items)));
-        assert!(!generated.contains(written), "{items}\n{generated}");
-    }
-    for items in [
-        "impl Default for crate::elsewhere::Balance { fn default() -> Self { todo!() } }"
-            .to_owned(),
-        format!("pub mod defaults {{ use crate::ledger::Balance; {default} }}"),
-    ] {
-        let generated = tokens(&expanded("example:ledger@1.0.0", &ledger(&items)));
-        assert!(generated.contains(written), "{items}\n{generated}");
-    }
-    for uses in ["use super::*;", "use super::pinned;"] {
-        let generated = tokens(&expanded(
-            "example:ledger@1.0.0",
-            &format!(
-                "mod ledger {{
-                    pub mod pinned {{
-                        #[state]
-                        pub struct Balance {{ pub total: i64 }}
-                        #[service]
-                        pub struct Pinned;
-                        impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
-                    }}
-                    pub mod defaults {{
-                        {uses}
-                        impl Default for pinned::Balance {{ fn default() -> Self {{ pinned::Balance {{ total: 7 }} }} }}
-                    }}
-                }}"
-            ),
-        ));
-        assert!(!generated.contains(written), "{uses}\n{generated}");
-    }
     // A type holding a resource handle has the `Clone` a type holding it derives when the macro
     // sees it implemented, through such a `use` too.
     expanded(
@@ -3565,7 +3514,7 @@ fn the_constructor_is_the_marked_function_not_the_one_named_new() {
     }
 }
 
-/// A state no method mentions stays the author's struct, with serde derives, and out of the WIT.
+/// A state no method mentions stays the author's struct, as written, and out of the WIT.
 #[test]
 fn a_state_enters_the_wit_only_when_a_method_mentions_it() {
     let module = expanded(
@@ -3581,32 +3530,30 @@ fn a_state_enters_the_wit_only_when_a_method_mentions_it() {
     assert!(!wit(&module).contains("record"), "{}", wit(&module));
     let generated = tokens(&module);
     assert!(
-        generated.contains(
-            "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance"
-        ),
+        generated.contains("pub struct Balance { pub total : i64 }"),
         "{generated}"
     );
+    assert!(!generated.contains("# [derive (:: serde"), "{generated}");
     assert!(!generated.contains("pub use exports :: example :: ledger :: pinned :: { Balance }"));
 }
 
-/// A state that stays out of the WIT is serialized by serde, and so is every type of the module
-/// its fields reach, directly or through other types, that stays out too: each gets the serde
-/// derives its author did not write. A type a method mentions enters the WIT, generated with the
-/// derives; a type no state reaches stays as written.
+/// A state that stays out of the WIT, and every type of the module its fields reach that stays out
+/// too, is the author's as written: the macro adds no serde derive to any of them, whose derives
+/// the author writes. A type a method mentions enters the WIT.
 #[test]
-fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
+fn the_types_a_state_out_of_the_wit_reaches_stay_as_written() {
     let module = expanded(
         "example:ledger@1.0.0",
         "mod ledger {
             #[state]
+            #[derive(Default, serde::Serialize, serde::Deserialize)]
             pub struct Balance { pub total: i64, pub phase: Phase, pub notes: Vec<Note>, pub shown: Shown }
-            impl Default for Balance { fn default() -> Self { todo!() } }
-            pub enum Phase { Open, Closed }
-            pub struct Note { pub text: String, pub mood: Option<Mood> }
-            #[derive(serde::Serialize)]
-            pub enum Mood { Calm, Loud }
+            #[derive(Default, serde::Serialize, serde::Deserialize)]
+            pub enum Phase { #[default] Open, Closed }
+            #[derive(serde::Serialize, serde::Deserialize)]
+            pub struct Note { pub text: String }
+            #[derive(Default, serde::Serialize, serde::Deserialize)]
             pub struct Shown { pub at: u64 }
-            pub struct Other { pub n: u32 }
             #[service]
             pub struct Pinned;
             impl Pinned {
@@ -3615,127 +3562,17 @@ fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
             }
         }",
     );
-    let derived = "# [derive (:: serde :: Serialize , :: serde :: Deserialize)]";
+    let derived = "# [derive (Default , serde :: Serialize , serde :: Deserialize)]";
     let generated = tokens(&module);
     for expected in [
         format!("{derived} pub struct Balance"),
         format!("{derived} pub enum Phase"),
-        format!("{derived} pub struct Note"),
-        "# [derive (serde :: Serialize)] # [derive (:: serde :: Deserialize)] pub enum Mood".into(),
+        "# [derive (serde :: Serialize , serde :: Deserialize)] pub struct Note".into(),
         "pub use exports :: example :: ledger :: pinned :: { Shown } ;".into(),
-        "pub struct Other { pub n : u32 }".into(),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
-    assert!(
-        !generated.contains(&format!("{derived} pub struct Other")),
-        "{generated}"
-    );
-}
-
-/// The serde derives the macro adds to a state kept out of the WIT, and to the types it reaches,
-/// are those the type does not have yet: a derive the macro follows to `serde`, under another name
-/// too, `Ser` after `use serde::{Serialize as Ser};`, or an impl of `serde`'s trait the Orb's
-/// modules write by hand, in the type's module or another, gives the type the trait, and the macro
-/// adds no second one. Another crate's trait of either name, `rkyv::Serialize`, derived or
-/// implemented, is no `serde` trait, so the macro still adds `serde`'s, and neither is a trait of
-/// the Orb's own named so, `pub trait Serialize` declared in the module, implemented under
-/// `#[cfg(..)]` too.
-#[test]
-fn the_serde_derives_a_state_gets_follow_renames_and_hand_impls() {
-    let module = |items: &str| {
-        format!(
-            "mod ledger {{
-                use serde::{{Serialize as Ser, Deserialize as De}};
-                #[state]
-                pub struct Balance {{ pub total: i64, pub notes: Vec<Note>, pub mood: Mood }}
-                pub struct Note {{ pub text: String }}
-                pub enum Mood {{ Calm, Loud }}
-                {items}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
-            }}"
-        )
-    };
-    let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
-    let deserialize = "fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> { todo!() }";
-    for (items, expected) in [
-        (
-            "#[derive(Default, Ser, De)] pub struct Unused;".to_owned(),
-            [
-                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance",
-                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
-                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
-            ],
-        ),
-        (
-            format!(
-                "impl serde::Serialize for Balance {{ {serialize} }}
-                impl<'de> De<'de> for Note {{ {deserialize} }}
-                pub mod json {{
-                    use serde::ser::Serialize;
-                    impl Serialize for super::Mood {{ {serialize} }}
-                }}"
-            ),
-            [
-                "# [derive (:: serde :: Deserialize)] pub struct Balance",
-                "# [derive (:: serde :: Serialize)] pub struct Note",
-                "# [derive (:: serde :: Deserialize)] pub enum Mood",
-            ],
-        ),
-        (
-            format!(
-                "impl<S> rkyv::Serialize<S> for Balance {{}}
-                impl<'de> ::serde::de::Deserialize<'de> for Balance {{ {deserialize} }}"
-            ),
-            [
-                "# [derive (:: serde :: Serialize)] pub struct Balance",
-                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
-                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
-            ],
-        ),
-        (
-            "pub trait Serialize { fn bytes(&self) -> u32; }
-            impl Serialize for Balance { fn bytes(&self) -> u32 { 0 } }
-            #[cfg(test)]
-            impl Serialize for Note { fn bytes(&self) -> u32 { 0 } }"
-                .to_owned(),
-            [
-                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance",
-                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
-                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
-            ],
-        ),
-    ] {
-        let generated = tokens(&expanded("example:ledger@1.0.0", &module(&items)));
-        for expected in expected {
-            assert!(generated.contains(expected), "{expected}\n{generated}");
-        }
-    }
-    let renamed = module("").replace(
-        "pub struct Balance",
-        "#[derive(Default, Ser, De)] pub struct Balance",
-    );
-    let renamed = renamed.replace("pub struct Note", "#[derive(Ser)] pub struct Note");
-    let renamed = renamed.replace(
-        "pub enum Mood",
-        "#[derive(rkyv::Serialize, De)] pub enum Mood",
-    );
-    let generated = tokens(&expanded("example:ledger@1.0.0", &renamed));
-    for expected in [
-        "# [derive (Default , Ser , De)] pub struct Balance",
-        "# [derive (Ser)] # [derive (:: serde :: Deserialize)] pub struct Note",
-        "# [derive (rkyv :: Serialize , De)] # [derive (:: serde :: Serialize)] pub enum Mood",
-    ] {
-        assert!(generated.contains(expected), "{expected}\n{generated}");
-    }
-    assert!(
-        !generated.contains(
-            "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance"
-        ),
-        "{generated}"
-    );
+    assert!(!generated.contains("# [derive (:: serde"), "{generated}");
 }
 
 /// A type is translated to WIT only once a method, a resource or a hook reaches it: a type no
@@ -3765,14 +3602,13 @@ fn only_a_type_that_enters_the_wit_needs_a_wit_spelling() {
         "package example:vault@1.0.0;\n\ninterface vault {\n  get: func() -> u32;\n}\n\nworld safe {\n  import tembra:guest/state@1.0.0;\n  export tembra:guest/state-init@1.0.0;\n  import tembra:guest/resources@1.0.0;\n  export tembra:guest/resources-init@1.0.0;\n  export vault;\n}\n"
     );
     let generated = tokens(&kept);
-    let derived = "# [derive (:: serde :: Serialize , :: serde :: Deserialize)]";
     for expected in [
-        "pub struct Digest { pub bytes : [u8 ; 32] }".into(),
-        format!("{derived} pub struct Sealed {{ pub digest : [u8 ; 4] , pub shape : Shape }}"),
-        format!("{derived} pub enum Shape {{ Circle {{ radius : u32 }} , Rectangle (u32 , u32) }}"),
-        "pub struct Banner { pub text : & 'static str }".into(),
+        "pub struct Digest { pub bytes : [u8 ; 32] }",
+        "pub struct Sealed { pub digest : [u8 ; 4] , pub shape : Shape }",
+        "pub enum Shape { Circle { radius : u32 } , Rectangle (u32 , u32) }",
+        "pub struct Banner { pub text : & 'static str }",
     ] {
-        assert!(generated.contains(&expected), "{expected}\n{generated}");
+        assert!(generated.contains(expected), "{expected}\n{generated}");
     }
     for (returned, message) in [
         ("Digest", "this type has no WIT equivalent"),
@@ -3951,8 +3787,8 @@ world review {
 
 /// A type the macro converts goes back to its own module, where its fields are visible, with its
 /// conversions, which name the bindings from there; a function of another module names it through
-/// the module. Where serde serializes such a type, a state or a type a state reaches, it derives
-/// serde's traits, unless the author does; one no state reaches derives nothing more. A type that
+/// the module. It keeps the author's derives and gets none from the macro, a state or a type a
+/// state reaches neither, whose serde derives are the author's. A type that
 /// stays the author's keeps the names the bindings would spell otherwise: the conversions use both.
 #[test]
 fn a_converted_type_is_converted_in_its_own_module() {
@@ -3990,9 +3826,9 @@ fn a_converted_type_is_converted_in_its_own_module() {
     let bindings = "super :: exports :: example :: review :: reviews";
     let into = ":: core :: convert :: Into :: into";
     for expected in [
-        // The state and the enum it reaches derive serde's traits; the other enum does not.
-        "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Last { pub outcome : Option < verdicts :: Outcome > , pub count : u32 }".to_owned(),
-        "# [doc = \" What a reviewer decided.\"] # [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Outcome { Accepted , Refused { reason : String } }".to_owned(),
+        // Each type keeps the author's derives, and only those.
+        "pub struct Last { pub outcome : Option < verdicts :: Outcome > , pub count : u32 }".to_owned(),
+        "# [doc = \" What a reviewer decided.\"] pub enum Outcome { Accepted , Refused { reason : String } }".to_owned(),
         "# [derive (Debug , Clone , PartialEq)] pub enum Mood { Calm , Upset { since : u64 , HTTPCode : u16 } }".to_owned(),
         // The conversions sit in the sub-module and name the bindings from there, each side with
         // its own names.
@@ -4012,6 +3848,7 @@ fn a_converted_type_is_converted_in_its_own_module() {
         "{generated}"
     );
     assert!(!generated.contains("pub use exports"), "{generated}");
+    assert!(!generated.contains("# [derive (:: serde"), "{generated}");
 }
 
 /// What a type the macro converts cannot do is refused: a case with named fields but none of
@@ -5164,9 +5001,8 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
 }
 
 /// The macro reads the trait impls of the Orb's modules before the compiler evaluates
-/// `#[cfg(..)]`, and leaves to them what the code it writes needs: the `Default` of a state, a
-/// `serde` trait of a state kept out of the WIT or of a type its fields reach, and a trait a type's
-/// derive needs of a type it holds. An impl under `#[cfg(..)]`, written
+/// `#[cfg(..)]`, and leaves to them what the code it writes needs: a trait a type's derive needs
+/// of a type it holds. An impl under `#[cfg(..)]`, written
 /// plainly or under `#[cfg_attr(..)]`, or in a module under one, such as `#[cfg(test)] mod tests`,
 /// gives the trait in some configurations only, so it is refused, unless other impls, or a derive
 /// under `#[cfg_attr(..)]`, cover the others, as a `#[cfg(not(..))]` impl beside a `#[cfg(..)]` one
@@ -5203,25 +5039,11 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
             }}"
         )
     };
-    let ledger = |items: &str| {
-        format!(
-            "mod ledger {{
-                #[state]
-                pub struct Balance {{ pub total: i64 }}
-                {items}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
-            }}"
-        )
-    };
     let compared = |items: &str| {
         office(items).replace("pub struct Grant", "#[derive(PartialEq)] pub struct Grant")
     };
     let equal = "impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
     let compare = "impl PartialEq for Slot { fn eq(&self, other: &Self) -> bool { todo!() } }";
-    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
-    let serialize = "impl serde::Serialize for Balance { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }";
     for (build, hand, place, owner, name) in [
         (
             &compared as &dyn Fn(&str) -> String,
@@ -5236,20 +5058,6 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
             "`impl PartialEq for Slot`",
             "Slot",
             "PartialEq",
-        ),
-        (
-            &ledger,
-            default,
-            "`impl Default for Balance`",
-            "Balance",
-            "Default",
-        ),
-        (
-            &ledger,
-            serialize,
-            "`impl serde::Serialize for Balance`",
-            "Balance",
-            "Serialize",
         ),
     ] {
         for (condition, written) in CONDITIONS {
@@ -5293,28 +5101,6 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
         error.contains("`#[cfg(..)]` on the module `tests` holding `impl PartialEq for Access`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Access` to implement `PartialEq` in every configuration"),
         "{error}"
     );
-    let error = refused(
-        "example:office@1.0.0",
-        &ledger(&format!(
-            "#[cfg(feature = \"seeded\")] {default} #[cfg(test)] {default}"
-        )),
-    );
-    assert!(
-        error.contains("`#[cfg(..)]` on `impl Default for Balance`"),
-        "{error}"
-    );
-    // A derive under `#[cfg_attr(..)]` covers the configurations an impl leaves out.
-    let paired = tokens(&expanded(
-        "example:office@1.0.0",
-        &ledger(&format!("#[cfg(feature = \"compact\")] {serialize}")).replace(
-            "pub struct Balance",
-            "#[cfg_attr(not(feature = \"compact\"), derive(serde::Serialize))] pub struct Balance",
-        ),
-    ));
-    assert!(
-        paired.contains("# [derive (:: serde :: Deserialize)] pub struct Balance"),
-        "{paired}"
-    );
     // What the generated code does not need stays the author's, under `#[cfg(..)]`.
     expanded(
         "example:office@1.0.0",
@@ -5328,45 +5114,11 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
             }",
         ),
     );
-    // A type a state's fields reach is serialized with the state, and gets the serde derives the
-    // macro writes for it but where impls give the trait.
-    let reached = |items: &str| {
-        ledger(&format!("pub struct Note {{ pub text: String }} {items}"))
-            .replace("pub total: i64", "pub total: i64, pub notes: Vec<Note>")
-    };
-    let note = "impl serde::Serialize for Note { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }";
-    let error = refused(
-        "example:office@1.0.0",
-        &reached(&format!("#[cfg(feature = \"compact\")] {note}")),
-    );
-    assert!(
-        error.contains("`#[cfg(..)]` on `impl serde::Serialize for Note`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Note` to implement `Serialize` in every configuration"),
-        "{error}"
-    );
-    let paired = tokens(&expanded(
-        "example:office@1.0.0",
-        &reached(&format!(
-            "#[cfg(feature = \"compact\")] {note} #[cfg(not(feature = \"compact\"))] {note}"
-        )),
-    ));
-    assert!(
-        paired.contains("# [derive (:: serde :: Deserialize)] pub struct Note"),
-        "{paired}"
-    );
-    expanded(
-        "example:office@1.0.0",
-        &reached(&format!("#[cfg(feature = \"compact\")] {note}")).replace(
-            "pub struct Note",
-            "#[cfg_attr(not(feature = \"compact\"), derive(serde::Serialize))] pub struct Note",
-        ),
-    );
 }
 
 /// Two modules of one name, which `#[cfg(..)]`s select, are two modules: the macro reads the
-/// impls and the attributes of each, and puts a type it reads back in the type's own. A state's
-/// `Default` written in a `#[cfg(x)]` module and again in a `#[cfg(not(x))]` one of the same name
-/// gives the trait in every configuration, as the same impls side by side do; and a sub-module of
-/// the second, beside a state kept out of the WIT or a type that enters it, and a type kept out of
+/// impls and the attributes of each, and puts a type it reads back in the type's own: a sub-module
+/// of the second, beside a state kept out of the WIT or a type that enters it, and a type kept out of
 /// the WIT in either stay where they are written.
 #[test]
 fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
@@ -5393,24 +5145,6 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
             }}"
         )
     };
-    let default = |total: u32| {
-        format!(
-            "impl Default for super::Balance {{ fn default() -> Self {{ super::Balance {{ total: {total} }} }} }}"
-        )
-    };
-    let seeded = tokens(&expanded(
-        "example:ledger@1.0.0",
-        &ledger(&format!(
-            "#[cfg(feature = \"seeded\")] mod seed {{ {} }}
-             #[cfg(not(feature = \"seeded\"))] mod seed {{ {} }}",
-            default(1),
-            default(0)
-        )),
-    ));
-    assert!(
-        !seeded.contains("impl :: core :: default :: Default for Balance"),
-        "{seeded}"
-    );
     let audit = "#[cfg(feature = \"audit\")] mod audit { pub struct Entry { pub at: u64 } }
         #[cfg(not(feature = \"audit\"))] mod audit { pub struct Entry { pub at: u32 } mod sink {} }";
     for module in [ledger(audit), office(audit)] {
@@ -5432,91 +5166,42 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
 /// another option too leaves out the configurations without it, so those are refused.
 #[test]
 fn impls_split_across_the_values_of_one_name_give_the_trait() {
-    let ledger = |items: &str| {
+    let walk = |items: &str| {
         format!(
-            "mod ledger {{
-                #[state]
-                pub struct Balance {{ pub total: i64 }}
+            "mod walk {{
+                #[wit_resource]
+                pub struct Pen {{ pub ink: u32 }}
+                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                pub struct Slot {{ pub pen: Pen }}
+                #[derive(PartialEq)]
+                pub struct Page {{ pub slot: Slot }}
                 {items}
                 #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+                pub struct Walker;
+                impl Walker {{ pub fn turn() -> Page {{ todo!() }} }}
             }}"
         )
     };
-    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
+    let hand = "impl PartialEq for Slot { fn eq(&self, other: &Self) -> bool { todo!() } }";
     for split in [
-        "#[cfg(target_endian = \"little\")] {default} #[cfg(target_endian = \"big\")] {default}",
-        "#[cfg(target_pointer_width = \"32\")] {default} #[cfg(target_pointer_width = \"64\")] {default}",
-        "#[cfg(any(target_endian = \"little\", feature = \"audit\"))] {default}
-         #[cfg(all(target_endian = \"big\", not(feature = \"audit\")))] {default}",
+        "#[cfg(target_endian = \"little\")] {hand} #[cfg(target_endian = \"big\")] {hand}",
+        "#[cfg(target_pointer_width = \"32\")] {hand} #[cfg(target_pointer_width = \"64\")] {hand}",
+        "#[cfg(any(target_endian = \"little\", feature = \"audit\"))] {hand}
+         #[cfg(all(target_endian = \"big\", not(feature = \"audit\")))] {hand}",
     ] {
-        let expanded = tokens(&expanded(
-            "example:ledger@1.0.0",
-            &ledger(&split.replace("{default}", default)),
-        ));
-        assert!(
-            !expanded.contains("impl :: core :: default :: Default for Balance"),
-            "{split}: {expanded}"
-        );
+        expanded("example:walk@1.0.0", &walk(&split.replace("{hand}", hand)));
     }
     for split in [
-        "#[cfg(target_endian = \"little\")] {default}",
-        "#[cfg(all(target_pointer_width = \"32\", feature = \"audit\"))] {default}
-         #[cfg(target_pointer_width = \"64\")] {default}",
-        "#[cfg(feature = \"audit\")] {default} #[cfg(feature = \"seeded\")] {default}",
-        "#[cfg(target_feature = \"simd128\")] {default} #[cfg(target_feature = \"atomics\")] {default}",
+        "#[cfg(target_endian = \"little\")] {hand}",
+        "#[cfg(all(target_pointer_width = \"32\", feature = \"audit\"))] {hand}
+         #[cfg(target_pointer_width = \"64\")] {hand}",
+        "#[cfg(feature = \"audit\")] {hand} #[cfg(feature = \"seeded\")] {hand}",
+        "#[cfg(target_feature = \"simd128\")] {hand} #[cfg(target_feature = \"atomics\")] {hand}",
     ] {
-        let error = refused(
-            "example:ledger@1.0.0",
-            &ledger(&split.replace("{default}", default)),
-        );
+        let error = refused("example:walk@1.0.0", &walk(&split.replace("{hand}", hand)));
         assert!(
-            error.contains("`#[cfg(..)]` on `impl Default for Balance`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Balance` to implement `Default` in every configuration"),
+            error.contains("`#[cfg(..)]` on `impl PartialEq for Slot`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Slot` to implement `PartialEq` in every configuration"),
             "{split}: {error}"
-        );
-    }
-}
-
-/// A derive under a `#[cfg_attr(..)]` inside another applies where both predicates hold, so it
-/// covers what impls under `#[cfg(..)]` leave out of a state's `Default` or serde traits only
-/// there: `#[cfg_attr(feature = "a", cfg_attr(feature = "b", derive(Default)))]` beside an impl
-/// under `#[cfg(not(feature = "a"))]` leaves out the configurations with `a` and without `b`, and is
-/// refused, while an impl under `#[cfg(not(all(feature = "a", feature = "b")))]` covers them.
-#[test]
-fn a_derive_under_nested_cfg_attr_covers_where_both_predicates_hold() {
-    let ledger = |trait_name: &str, condition: &str, body: &str| {
-        format!(
-            "mod ledger {{
-                #[state]
-                #[cfg_attr(feature = \"a\", cfg_attr(feature = \"b\", derive({trait_name})))]
-                pub struct Balance {{ pub total: i64 }}
-                #[cfg({condition})]
-                impl {trait_name} for Balance {{ {body} }}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
-            }}"
-        )
-    };
-    let default = "fn default() -> Self { Balance { total: 100 } }";
-    let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
-    for (trait_name, body) in [("Default", default), ("serde::Serialize", serialize)] {
-        let error = refused(
-            "example:ledger@1.0.0",
-            &ledger(trait_name, "not(feature = \"a\")", body),
-        );
-        assert!(
-            error.contains(&format!("`#[cfg(..)]` on `impl {trait_name} for Balance`: the macro reads the impl before the compiler evaluates the attribute and counts on it")),
-            "{trait_name}: {error}"
-        );
-        expanded(
-            "example:ledger@1.0.0",
-            &ledger(
-                trait_name,
-                "not(all(feature = \"a\", feature = \"b\"))",
-                body,
-            ),
         );
     }
 }
@@ -5895,15 +5580,14 @@ fn a_helper_argument_naming_no_path_from_its_scope_expands_under_a_glob() {
     }
 }
 
-/// A state starts from its `Default`: the macro implements it field by field unless the author
-/// gives it, by an `impl Default` anywhere in the Orb module or by a derive, which stays on a
-/// state out of the WIT and goes to the generated type replacing a state that enters it; the serde
-/// derives the author already wrote are not added again. A derive implementing `Default` under
-/// another name, `SmartDefault` or `Derivative` with `#[derivative(Default)]`, is the state's
-/// `Default` too.
+/// A state's `Default`, its initial value, and serde's traits, which keep it as JSON, are the
+/// author's: the macro writes no `Default` and no serde derive, only an assertion that the state
+/// implements the three traits, on the state's name, where rustc reports a missing one. A state
+/// that enters the WIT is the generated type, which takes the author's derive of `Default`, under
+/// another name too, `SmartDefault` or `Derivative` with `#[derivative(Default)]`. An impl the
+/// author writes under `#[cfg(..)]` is the compiler's to evaluate, so the macro refuses none.
 #[test]
-fn the_author_may_give_a_state_its_default_and_its_derives() {
-    let generated_default = "impl :: core :: default :: Default for Balance {";
+fn a_states_default_and_serde_derives_are_the_authors() {
     let state = |attributes: &str, extra: &str, returned: &str| {
         format!(
             "mod ledger {{
@@ -5917,36 +5601,41 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
             }}"
         )
     };
-    // Kept out of the WIT, the author's derives stay and complete what the macro adds.
-    let derived = tokens(&expanded(
-        "example:ledger@1.0.0",
-        &state(
-            "#[derive(Default, serde::Serialize, serde::Deserialize)]",
-            "",
-            "i64",
-        ),
-    ));
-    assert!(!derived.contains(generated_default), "{derived}");
-    assert!(!derived.contains("# [derive (:: serde"), "{derived}");
-    let half = tokens(&expanded(
-        "example:ledger@1.0.0",
-        &state("#[derive(serde::Serialize)]", "", "i64"),
-    ));
-    assert!(
-        half.contains(
-            "# [derive (serde :: Serialize)] # [derive (:: serde :: Deserialize)] pub struct Balance"
-        ),
-        "{half}"
-    );
-    assert!(half.contains(generated_default), "{half}");
-    // A hand-written `impl Default` is the state's, whether the state enters the WIT or not.
-    let by_hand = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
-    for returned in ["i64", "Balance"] {
-        let module = expanded("example:ledger@1.0.0", &state("", by_hand, returned));
-        assert!(!tokens(&module).contains(generated_default), "{returned}");
+    let asserted = |path: &str| {
+        format!(
+            "const _ : () = {{ fn state < T > () where T : :: core :: default :: Default + :: serde :: Serialize + :: serde :: de :: DeserializeOwned , {{ }} let _ = state :: < {path} > ; }} ;"
+        )
+    };
+    let written = "impl :: core :: default :: Default for";
+    for attributes in [
+        "#[derive(Default, serde::Serialize, serde::Deserialize)]",
+        "",
+    ] {
+        for returned in ["i64", "Balance"] {
+            let generated = tokens(&expanded(
+                "example:ledger@1.0.0",
+                &state(attributes, "", returned),
+            ));
+            assert!(generated.contains(&asserted("Balance")), "{generated}");
+            assert!(!generated.contains(written), "{generated}");
+            assert!(!generated.contains("# [derive (:: serde"), "{generated}");
+        }
     }
-    // A state that enters the WIT is the generated type, which takes the author's derive: the
-    // derived `Default` is the state's, and the macro implements none.
+    let by_hand = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
+    for extra in [
+        by_hand.to_owned(),
+        format!("#[cfg(feature = \"seeded\")] {by_hand}"),
+        format!("#[cfg(feature = \"seeded\")] {by_hand} #[cfg(test)] {by_hand}"),
+    ] {
+        for returned in ["i64", "Balance"] {
+            let generated = tokens(&expanded(
+                "example:ledger@1.0.0",
+                &state("", &extra, returned),
+            ));
+            assert!(!generated.contains(written), "{extra}\n{generated}");
+        }
+    }
+    // A state that enters the WIT is the generated type, which takes the author's derive.
     for derive in [
         "Default",
         "core::default::Default",
@@ -5956,13 +5645,11 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
             "example:ledger@1.0.0",
             &state(&format!("#[derive({derive})]"), "", "Balance"),
         ));
-        assert!(!entered.contains(generated_default), "{entered}");
         assert!(
             entered.contains("additional_type_attributes : { \"example:ledger/pinned@1.0.0/balance\" : [# [derive (:: core :: default :: Default)]] } ,"),
             "{entered}"
         );
     }
-    // So does a derive that implements `Default` under another name, in or out of the WIT.
     for (attributes, carried) in [
         (
             "#[derive(smart_default::SmartDefault)]",
@@ -5973,16 +5660,10 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
             "[# [derive (:: derivative :: Derivative)] # [derivative (Default (bound = \"\"))]]",
         ),
     ] {
-        let kept = tokens(&expanded(
-            "example:ledger@1.0.0",
-            &state(attributes, "", "i64"),
-        ));
-        assert!(!kept.contains(generated_default), "{kept}");
         let entered = tokens(&expanded(
             "example:ledger@1.0.0",
             &state(attributes, "", "Balance"),
         ));
-        assert!(!entered.contains(generated_default), "{entered}");
         assert!(
             entered.contains(&format!(
                 "additional_type_attributes : {{ \"example:ledger/pinned@1.0.0/balance\" : {carried} }} ,"
@@ -5990,284 +5671,12 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
             "{entered}"
         );
     }
-    // Two states of one name are told apart by the path the `impl` names.
-    for (place, skipped, kept) in [
-        (
-            "    pub mod pinned {",
-            "pinned :: Balance",
-            "passing :: Balance",
-        ),
-        (
-            "    pub mod pinned {\n        impl Default for super::passing::Balance { fn default() -> Self { super::passing::Balance { total: 1 } } }",
-            "passing :: Balance",
-            "pinned :: Balance",
-        ),
-    ] {
-        let source = if place.contains("super::passing") {
-            LEDGER.replace("    pub mod pinned {", place)
-        } else {
-            LEDGER.replace(
-                "    pub mod pinned {",
-                "    pub mod pinned {\n        impl Default for Balance { fn default() -> Self { Balance { total: 1 } } }",
-            )
-        };
-        let generated = tokens(&expanded("example:ledger@1.0.0", &source));
-        assert!(
-            !generated.contains(&format!("impl :: core :: default :: Default for {skipped}")),
-            "{generated}"
-        );
-        assert!(
-            generated.contains(&format!("impl :: core :: default :: Default for {kept}")),
-            "{generated}"
-        );
+    // Each of two states of one name is asserted through its own path.
+    let generated = tokens(&expanded("example:ledger@1.0.0", LEDGER));
+    for path in ["pinned :: Balance", "passing :: Balance"] {
+        assert!(generated.contains(&asserted(path)), "{path}\n{generated}");
     }
-}
-
-/// The `Default` the macro writes for a state follows each field's `#[cfg(..)]`, as a derived one
-/// does: the field's initializer carries the attribute, and none of the field's others, so the
-/// value holds the fields the struct holds in every configuration.
-#[test]
-fn the_default_the_macro_writes_follows_the_fields_cfg() {
-    let generated = tokens(&expanded(
-        "example:ledger@1.0.0",
-        "mod ledger {
-            #[state]
-            pub struct Balance {
-                /// What the balance holds.
-                pub total: i64,
-                #[cfg(feature = \"audit\")]
-                #[serde(default)]
-                pub audited: u32,
-            }
-            #[service]
-            pub struct Pinned;
-            impl Pinned { pub fn add(amount: i64) -> i64 { todo!() } }
-        }",
-    ));
-    assert!(
-        generated.contains("impl :: core :: default :: Default for Balance { fn default () -> Self { Self { total : :: core :: default :: Default :: default () , # [cfg (feature = \"audit\")] audited : :: core :: default :: Default :: default () } } }"),
-        "{generated}"
-    );
-}
-
-/// The `Default` the macro writes for a state is written before the compiler evaluates
-/// `#[cfg_attr(..)]`, and follows only a plain `#[cfg(..)]` on a field: a field under
-/// `#[cfg_attr(.., cfg(..))]` would be named in every configuration, so it is refused there. A
-/// `Default` the author derives or implements follows the attribute, and the same state without it
-/// expands.
-#[test]
-fn the_default_the_macro_writes_refuses_a_field_under_cfg_attr_cfg() {
-    let module = |default: &str, condition: &str| {
-        format!(
-            "mod ledger {{
-                #[state]
-                {default}
-                pub struct Balance {{
-                    pub total: i64,
-                    {condition}
-                    pub audited: u32,
-                }}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
-            }}"
-        )
-    };
-    let condition = "#[cfg_attr(test, cfg(feature = \"audit\"))]";
-    let error = refused("example:ledger@1.0.0", &module("", condition));
-    assert!(
-        error.contains("`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the field `Balance::audited`: the macro writes the `Default` of the state `Balance` before the compiler evaluates the attribute, so that `Default` would name `Balance::audited` in every configuration; write the condition as a plain `#[cfg(..)]`, which the macro carries onto the field's initializer, or derive or implement `Default`"),
-        "{error}"
-    );
-    expanded(
-        "example:ledger@1.0.0",
-        &module("#[derive(Default)]", condition),
-    );
-    let authored = module("", condition).replace(
-        "#[service]",
-        "impl Default for Balance { fn default() -> Self { todo!() } }
-        #[service]",
-    );
-    expanded("example:ledger@1.0.0", &authored);
-    expanded("example:ledger@1.0.0", &module("", ""));
-}
-
-/// The macro writes the `Default` of a state whose `Default` the author neither derives nor
-/// implements, before the compiler evaluates `#[cfg_attr(..)]`: a derive of `Default` under one,
-/// directly, under another name or through another `#[cfg_attr(..)]`, would give the state a
-/// second `Default` where the attribute applies, so it is refused. A `#[cfg_attr(..)]` deriving
-/// another trait expands, and so do a derive under one beside an `impl Default` the author writes
-/// for the other configurations, and the same state without the attribute.
-#[test]
-fn the_default_the_macro_writes_refuses_a_derive_of_default_under_cfg_attr() {
-    let module = |attributes: &str| {
-        format!(
-            "mod ledger {{
-                #[state]
-                {attributes}
-                pub struct Balance {{ pub total: i64 }}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
-            }}"
-        )
-    };
-    for attributes in [
-        "#[cfg_attr(feature = \"audit\", derive(Default))]",
-        "#[cfg_attr(test, derive(Debug, Default))]",
-        "#[cfg_attr(test, cfg_attr(feature = \"audit\", derive(Default)))]",
-        "#[cfg_attr(feature = \"audit\", derive(smart_default::SmartDefault))]",
-        "#[cfg_attr(feature = \"audit\", derive(educe::Educe), educe(Debug, Default))]",
-    ] {
-        let error = refused("example:ledger@1.0.0", &module(attributes));
-        assert!(
-            error.contains("`#[cfg_attr(..)]` deriving `Default` on the state `Balance`: the macro writes the `Default` of the state `Balance` before the compiler evaluates the attribute, so `Balance` would implement `Default` twice where the attribute applies; derive `Default` without `#[cfg_attr(..)]`, or implement it"),
-            "{attributes}: {error}"
-        );
-    }
-    expanded(
-        "example:ledger@1.0.0",
-        &module("#[cfg_attr(feature = \"audit\", derive(Debug))]"),
-    );
-    let paired = module("#[cfg_attr(feature = \"audit\", derive(Default))]").replace(
-        "#[service]",
-        "#[cfg(not(feature = \"audit\"))]
-        impl Default for Balance { fn default() -> Self { Balance { total: 7 } } }
-        #[service]",
-    );
-    expanded("example:ledger@1.0.0", &paired);
-    expanded("example:ledger@1.0.0", &module(""));
-}
-
-/// The macro derives `serde`'s `Serialize` and `Deserialize` for a state kept out of the WIT, those
-/// the author does not derive, before the compiler evaluates `#[cfg_attr(..)]`: a derive of either
-/// under one, directly or through another `#[cfg_attr(..)]`, through any path the macro follows to
-/// `serde`, or a `Serialize` or `Deserialize` it cannot follow to a crate, brought by a glob import
-/// or from above the Orb module, which it takes for `serde`'s as on a type entering the WIT, would
-/// give the state a second implementation where the attribute applies, so it is refused, whoever
-/// gives the state its `Default`. Another crate's derive of either name, `rkyv::Serialize`, and a
-/// `#[cfg_attr(..)]` deriving another trait expand, and so does the same state without the
-/// attribute.
-#[test]
-fn a_serde_derive_under_cfg_attr_on_a_state_out_of_the_wit_is_refused() {
-    let module = |uses: &str, attributes: &str| {
-        format!(
-            "mod ledger {{
-                {uses}
-                #[state]
-                {attributes}
-                pub struct Balance {{ pub total: i64 }}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
-            }}"
-        )
-    };
-    let named = "use serde::Serialize;";
-    for (uses, attributes, name) in [
-        (
-            named,
-            "#[cfg_attr(feature = \"audit\", derive(serde::Serialize))]",
-            "Serialize",
-        ),
-        (
-            named,
-            "#[cfg_attr(test, derive(Debug, serde::Deserialize))]",
-            "Deserialize",
-        ),
-        (
-            named,
-            "#[cfg_attr(test, cfg_attr(feature = \"audit\", derive(::serde::Serialize)))]",
-            "Serialize",
-        ),
-        (
-            named,
-            "#[cfg_attr(feature = \"audit\", derive(Serialize))]",
-            "Serialize",
-        ),
-        (
-            named,
-            "#[cfg_attr(feature = \"audit\", derive(serde_derive::Deserialize))]",
-            "Deserialize",
-        ),
-        (
-            named,
-            "#[cfg_attr(feature = \"audit\", derive(crate::prelude::Serialize))]",
-            "Serialize",
-        ),
-        (
-            named,
-            "#[derive(Default)] #[cfg_attr(feature = \"audit\", derive(serde::Serialize))]",
-            "Serialize",
-        ),
-        (
-            named,
-            "#[derive(serde::Serialize)] #[cfg_attr(feature = \"audit\", derive(serde::Deserialize))]",
-            "Deserialize",
-        ),
-        (
-            "use serde::*;",
-            "#[cfg_attr(feature = \"audit\", derive(Serialize))]",
-            "Serialize",
-        ),
-        (
-            "",
-            "#[cfg_attr(feature = \"audit\", derive(super::Deserialize))]",
-            "Deserialize",
-        ),
-    ] {
-        let error = refused("example:ledger@1.0.0", &module(uses, attributes));
-        assert!(
-            error.contains(&format!("`#[cfg_attr(..)]` deriving `{name}` on the state `Balance`: the macro derives `serde`'s `{name}` for the state `Balance` before the compiler evaluates the attribute, so `Balance` would implement `{name}` twice where the attribute applies; derive `{name}` without `#[cfg_attr(..)]`, or remove the derive, which the macro writes in every configuration")),
-            "{uses} {attributes}: {error}"
-        );
-    }
-    for attributes in [
-        "#[cfg_attr(feature = \"audit\", derive(rkyv::Serialize))]",
-        "#[cfg_attr(feature = \"audit\", derive(Debug))]",
-        "",
-    ] {
-        expanded("example:ledger@1.0.0", &module(named, attributes));
-    }
-}
-
-/// The macro derives `serde`'s traits as well for every type of the module that a state kept out
-/// of the WIT reaches through its fields, directly or through other types, and that stays out too:
-/// a derive of either under `#[cfg_attr(..)]` on such a struct or enum is refused as on the state.
-/// The same derive on a type no state reaches, which the macro gives no `serde`, expands, and so
-/// do the same types without the attribute.
-#[test]
-fn a_serde_derive_under_cfg_attr_on_a_type_a_state_reaches_is_refused() {
-    let module = |note: &str, mood: &str, other: &str| {
-        format!(
-            "mod ledger {{
-                #[state]
-                pub struct Balance {{ pub total: i64, pub notes: Vec<Note> }}
-                {note}
-                pub struct Note {{ pub text: String, pub mood: Mood }}
-                {mood}
-                pub enum Mood {{ Calm, Loud }}
-                {other}
-                pub struct Other {{ pub n: u32 }}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
-            }}"
-        )
-    };
-    let attribute = "#[cfg_attr(feature = \"note\", derive(serde::Serialize))]";
-    for (source, owner) in [
-        (module(attribute, "", ""), "Note"),
-        (module("", attribute, ""), "Mood"),
-    ] {
-        let error = refused("example:ledger@1.0.0", &source);
-        assert!(
-            error.contains(&format!("`#[cfg_attr(..)]` deriving `Serialize` on `{owner}`: the macro derives `serde`'s `Serialize` for `{owner}`, which a state's fields reach, before the compiler evaluates the attribute, so `{owner}` would implement `Serialize` twice where the attribute applies; derive `Serialize` without `#[cfg_attr(..)]`, or remove the derive, which the macro writes in every configuration")),
-            "{owner}: {error}"
-        );
-    }
-    expanded("example:ledger@1.0.0", &module("", "", attribute));
-    expanded("example:ledger@1.0.0", &module("", "", ""));
+    assert!(!generated.contains(written), "{generated}");
 }
 
 const GATE: &str = "mod gate {
@@ -6863,7 +6272,7 @@ fn sub_modules_group_a_service_with_its_state() {
         "pub use super :: exports :: example :: ledger :: pinned :: { Balance } ;",
         "impl super :: exports :: example :: ledger :: pinned :: Guest for super :: __TembraExports { fn add (amount : i64) -> Balance { Pinned :: add (amount) } }",
         "impl super :: exports :: example :: ledger :: passing :: Guest for super :: __TembraExports { fn add (amount : i64) -> i64 { Passing :: add (amount) } }",
-        "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance { pub total : i64 }",
+        "pub struct Balance { pub total : i64 }",
         "impl pinned :: Balance {",
         "impl passing :: Balance {",
         "< pinned :: Balance as :: core :: default :: Default > :: default ()",

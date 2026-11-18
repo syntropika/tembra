@@ -16,6 +16,7 @@ pub mod tally {
 
     /// The count of one counter object, kept by the kernel.
     #[state]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
     pub struct Count {
         pub total: u32,
     }

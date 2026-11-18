@@ -56,6 +56,7 @@ entries are a `#[state]` of the keeper's objects, so a keeper remembers across r
 
 ```rust
 #[state]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Entries { pub entries: Vec<book::Entry> }
 ```
 
