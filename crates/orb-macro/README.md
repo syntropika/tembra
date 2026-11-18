@@ -1441,8 +1441,10 @@ build does, so a compile error there would also fail builds that never install t
 
 ## Moving an existing Orb to these rules
 
-An Orb written before the macro left its types to their author needs these changes. Each shows as
-a compile error on the author's line.
+An Orb written before the macro left its types to their author needs these changes. Most show as a
+compile error on the author's line; three do not, and the text marks them: a consumed type a state
+does not hold loses `serde`'s traits, an enum's `Debug` prints another text, and turning a
+`#[flags]` struct into a record changes the contract, which shows at installation.
 
 A state derives `Default` and `serde`'s traits. The macro used to write them; it now asserts them
 on the state's name (see [kernel-managed state](#kernel-managed-state)):
@@ -1508,18 +1510,39 @@ An alias that is more than a path, `type Entries = Vec<Entry>;`, is written out 
 and a type declared outside the Orb module is moved into it, or the contract is written in WIT
 (see [what the macro reads](#what-the-macro-reads)).
 
-An impl of an Orb type written through `crate::`, `impl PartialEq for crate::books::model::Entry`,
-is no longer taken for the Orb type's own, since the macro places a name inside the Orb module
-only. The compiler still checks the impl; name the type as a contract type is named, through
-`super::model::Entry` or a `use`, where the macro should see it.
-
 A module type that entered the WIT stays the author's, so it has what its author derives, and not
 what the bindings' type had. Add the derives it needs, `Clone`, `Copy`, `Debug` and `PartialEq`
 among them, and an import the replaced type used to hide, `std::fmt` for a hand-written `Display`
 for instance. Where it holds a consumed type, which has `Clone`, `Copy` and `Debug` only, a
 derive of another trait on the author's type needs the author's impl on the consumed one (see
 [the types of a consumed interface](#the-types-of-a-consumed-interface)). An enum's `Debug` prints
-what the author derives, `North` where the bindings' type printed `Heading::North`.
+what the author derives, `North` where the bindings' type printed `Heading::North`. That is no
+compile error: a test, a log line or a message that compared the text changes.
+
+The bindings give `serde`'s traits only to the consumed types a state holds, directly or through
+the types of their package, and no longer to every consumed type. Code that serialized a consumed
+type the state does not hold, a record an imported interface returns, with `serde_json` for
+instance, no longer compiles: hold the type in a state, or convert it into a type of the module
+that derives `serde`'s traits. The error is rustc's, on the line that needs the trait.
+
+Turning a `#[flags]` struct into a record changes the WIT, `flags pen` into `record pen`, and the
+JSON a portable caller reads and writes, from an object of the flags set to an object holding
+every field, `true` or `false`. A compile succeeds, so nothing in `cargo check` shows it: an Orb
+that imports the interface was built against the old WIT and no longer pairs with the provider at
+installation, which compares the interface's contract. Raise the version of the providing package
+and rebuild the Orbs that import it together.
+
+Tests: the state's derives, `a_states_default_and_serde_derives_are_the_authors` and the
+compile-fail cases `state_without_default` and `state_reaches_a_type_without_serde`; the `#[flags]`
+struct as a record, `a_struct_of_bool_fields_is_a_record` and `flags_on_a_record`; names of contract
+types, `a_contract_type_the_macro_does_not_follow_is_refused_with_how_to_name_it`,
+`contract_type_through_a_glob` and `contract_type_through_crate`; the derives the author's type
+keeps, `a_type_that_enters_the_wit_keeps_its_derives` and
+`a_hand_impl_for_a_type_of_the_module_is_the_authors`; the consumed types given `serde`,
+`a_state_holds_the_consumed_types_serde_writes` and
+`a_state_holding_no_consumed_type_asks_the_bindings_for_no_derive`. The text an enum's `Debug`
+prints and the pairing of an importer after the change to a record show at runtime and at
+installation, and no test asserts them.
 
 ## Moving a hand-written service to the macro
 
