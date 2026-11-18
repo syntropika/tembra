@@ -1376,6 +1376,14 @@ fn a_state_gives_serde_to_a_consumed_type_in_any_form() {
             "pub pair: Pair",
         ),
         ("pub type Items = Vec<catalog::Item>;", "pub items: Items"),
+        (
+            "pub mod model { use super::catalog; pub type Items = Vec<catalog::Item>; }",
+            "pub items: model::Items",
+        ),
+        (
+            "pub mod model { use super::catalog; pub type Items = Vec<catalog::Item>; } use model::Items;",
+            "pub items: Items",
+        ),
         ("", "pub items: [catalog::Item; 2]"),
         (
             "pub struct Wrap(pub catalog::Item); pub mod other { pub struct Wrap(pub u32); }",

@@ -125,8 +125,9 @@ enum Resolution {
     /// A form the macro does not follow, a glob import or a path through `crate::`, with how to
     /// write the name.
     Refused(String),
-    /// An alias that is more than a path, which a contract type cannot name, with how to write it.
-    Composite(String),
+    /// An alias that is more than a path, which a contract type cannot name, with how to write it,
+    /// and the alias's name in the module declaring it, by scope.
+    Composite(String, Ident, usize),
 }
 
 /// What a walk through a type reaches: a name through a consumed interface's module, the name of
@@ -467,7 +468,7 @@ impl Modules {
         }
         match self.resolve(&path.path, scope) {
             Resolution::Module(ident, module) => Some((ident, module)),
-            Resolution::Stopped(_) | Resolution::Refused(_) | Resolution::Composite(_) => None,
+            Resolution::Stopped(_) | Resolution::Refused(_) | Resolution::Composite(..) => None,
         }
     }
 
@@ -573,7 +574,7 @@ impl Modules {
     fn aliased(&self, alias: &syn::ItemType, scope: usize, depth: usize) -> Resolution {
         let ident = &alias.ident;
         let Type::Path(target) = &*alias.ty else {
-            return more_than_a_path(alias);
+            return more_than_a_path(alias, scope);
         };
         if !alias.generics.params.is_empty()
             || target.qself.is_some()
@@ -583,7 +584,7 @@ impl Modules {
                 .iter()
                 .any(|segment| !segment.arguments.is_none())
         {
-            return more_than_a_path(alias);
+            return more_than_a_path(alias, scope);
         }
         if depth >= 64 {
             return Resolution::Module(ident.clone(), scope);
@@ -603,7 +604,7 @@ impl Modules {
                 Resolution::Stopped(leads)
             }
             Resolution::Refused(why) => Resolution::Refused(why),
-            Resolution::Composite(why) => Resolution::Composite(why),
+            Resolution::Composite(why, alias, module) => Resolution::Composite(why, alias, module),
             _ => Resolution::Module(ident.clone(), scope),
         }
     }
@@ -715,7 +716,7 @@ impl Modules {
                     Resolution::Refused(why) => {
                         visit(Reached::Refused(syn::Error::new_spanned(path, why), true));
                     }
-                    Resolution::Composite(why) => {
+                    Resolution::Composite(why, ..) => {
                         visit(Reached::Refused(syn::Error::new_spanned(path, why), false));
                     }
                 }
@@ -738,21 +739,20 @@ impl Modules {
     }
 
     /// The types of the aliases that are more than a path, `type Items = Vec<catalog::Item>;`,
-    /// which a type written in the module `scope` names by a bare name, itself or inside the type
-    /// parameters of a path, the elements of a tuple and an array: `resolve` follows none of them,
-    /// and a state's types are followed into them (`state_types`).
-    fn composite_aliases(&self, ty: &Type, scope: usize) -> Vec<&Type> {
+    /// which a type written in the module `scope` names, itself or inside the type parameters of a
+    /// path, the elements of a tuple and an array, however the name reaches the alias, through a
+    /// module path or a `use` included, each with the module declaring the alias, where its type
+    /// is written: `resolve` follows none of them, and a state's types are followed into them
+    /// (`state_types`).
+    fn composite_aliases(&self, ty: &Type, scope: usize) -> Vec<(&Type, usize)> {
         match ty {
             Type::Path(path) => {
                 let mut found = Vec::new();
-                if let ([segment], None) = (
-                    path.path.segments.iter().collect::<Vec<_>>().as_slice(),
-                    &path.qself,
-                ) && path.path.leading_colon.is_none()
-                    && let Some(alias) = self.uses[scope].aliases.get(&segment.ident.to_string())
-                    && matches!(self.resolve(&path.path, scope), Resolution::Composite(_))
+                if path.qself.is_none()
+                    && let Resolution::Composite(_, alias, module) = self.resolve(&path.path, scope)
+                    && let Some(alias) = self.uses[module].aliases.get(&alias.to_string())
                 {
-                    found.push(&*alias.ty);
+                    found.push((&*alias.ty, module));
                 }
                 if let Some(syn::PathArguments::AngleBracketed(arguments)) =
                     path.path.segments.last().map(|segment| &segment.arguments)
@@ -879,13 +879,17 @@ impl Modules {
     }
 }
 
-/// Why the alias `alias`, more than a path, does not name a contract type.
-fn more_than_a_path(alias: &syn::ItemType) -> Resolution {
+/// Why the alias `alias` of the module `scope`, more than a path, does not name a contract type.
+fn more_than_a_path(alias: &syn::ItemType, scope: usize) -> Resolution {
     let ident = &alias.ident;
     let ty = quote::ToTokens::to_token_stream(&alias.ty).to_string();
-    Resolution::Composite(format!(
-        "`{ident}` is an alias of `{ty}`, which is more than a path: the macro follows an alias of a contract type only when it names the type by its path, `type {ident} = model::Entry;`; write `{ty}` where `{ident}` stands"
-    ))
+    Resolution::Composite(
+        format!(
+            "`{ident}` is an alias of `{ty}`, which is more than a path: the macro follows an alias of a contract type only when it names the type by its path, `type {ident} = model::Entry;`; write `{ty}` where `{ident}` stands"
+        ),
+        ident.clone(),
+        scope,
+    )
 }
 
 /// The types of a struct's fields, or of the payloads of an enum's cases.
@@ -1420,17 +1424,19 @@ fn state_types<'a>(
         }))
         .collect();
     // A struct with named fields or an enum of the module, else a tuple struct, by the name it
-    // resolves to in its module.
-    let resolve = |name: &Ident, scope: usize| -> Option<(&'a Ident, usize, Vec<&'a Type>)> {
+    // resolves to in its module, with the types it holds, each with the module it is written in.
+    type Held<'h> = Vec<(&'h Type, usize)>;
+    let resolve = |name: &Ident, scope: usize| -> Option<(&'a Ident, usize, Held<'a>)> {
         let named = declared
             .iter()
             .filter(|(ident, _, _)| *ident == name)
             .map(|entry| (entry.1, entry));
         if let Some((ident, scope, held)) = crate::declared_in(named, scope) {
-            return Some((ident, *scope, held.clone()));
+            let held = held.iter().map(|ty| (*ty, *scope)).collect();
+            return Some((ident, *scope, held));
         }
         let (ident, fields) = modules.uses[scope].tuples.get(&name.to_string())?;
-        Some((ident, scope, fields.iter().collect()))
+        Some((ident, scope, fields.iter().map(|ty| (ty, scope)).collect()))
     };
     let mut types = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1443,10 +1449,11 @@ fn state_types<'a>(
             continue;
         }
         let via = (!own).then_some(ident);
-        // The types of the aliases the held types name are held too, each once.
+        // The types of the aliases the held types name are held too, each once, in the module
+        // declaring the alias.
         let mut aliased: BTreeSet<*const Type> = BTreeSet::new();
         let mut next = 0;
-        while let Some(&ty) = held.get(next) {
+        while let Some(&(ty, scope)) = held.get(next) {
             next += 1;
             modules.followed(ty, scope)?;
             types.push((ty, via, scope));
@@ -1458,7 +1465,7 @@ fn state_types<'a>(
                     .map(|(reference, scope)| (reference, scope, false)),
             );
             for alias in modules.composite_aliases(ty, scope) {
-                if aliased.insert(alias) {
+                if aliased.insert(alias.0) {
                     held.push(alias);
                 }
             }
