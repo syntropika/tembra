@@ -728,7 +728,46 @@ impl Modules {
                     self.walk_within(element, scope, visit, within);
                 }
             }
+            Type::Array(array) => self.walk_within(&array.elem, scope, visit, within),
             _ => {}
+        }
+    }
+
+    /// The types of the aliases that are more than a path, `type Items = Vec<catalog::Item>;`,
+    /// which a type written in the module `scope` names by a bare name, itself or inside the type
+    /// parameters of a path, the elements of a tuple and an array: `resolve` follows none of them,
+    /// and a state's types are followed into them (`state_types`).
+    fn composite_aliases(&self, ty: &Type, scope: usize) -> Vec<&Type> {
+        match ty {
+            Type::Path(path) => {
+                let mut found = Vec::new();
+                if let ([segment], None) = (
+                    path.path.segments.iter().collect::<Vec<_>>().as_slice(),
+                    &path.qself,
+                ) && path.path.leading_colon.is_none()
+                    && let Some(alias) = self.uses[scope].aliases.get(&segment.ident.to_string())
+                    && matches!(self.resolve(&path.path, scope), Resolution::Composite(_))
+                {
+                    found.push(&*alias.ty);
+                }
+                if let Some(syn::PathArguments::AngleBracketed(arguments)) =
+                    path.path.segments.last().map(|segment| &segment.arguments)
+                {
+                    for argument in &arguments.args {
+                        if let syn::GenericArgument::Type(ty) = argument {
+                            found.extend(self.composite_aliases(ty, scope));
+                        }
+                    }
+                }
+                found
+            }
+            Type::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .flat_map(|ty| self.composite_aliases(ty, scope))
+                .collect(),
+            Type::Array(array) => self.composite_aliases(&array.elem, scope),
+            _ => Vec::new(),
         }
     }
 
@@ -1354,13 +1393,15 @@ fn checked<'a>(
 
 /// The types of a state's fields and of the module types they reach, each once, with the module
 /// type that holds it, `None` for the state's own fields, and the module the holder is declared
-/// in. A name resolves to the type of the module that declares it; one the macro cannot follow,
-/// through a glob import or `crate::`, is an error (`Modules::followed`).
+/// in: a struct with named fields, an enum or a tuple struct of the module, newtype or not, and
+/// the type of an alias that is more than a path, which a type names. A name resolves to the type
+/// of the module that declares it; one the macro cannot follow, through a glob import or
+/// `crate::`, is an error (`Modules::followed`).
 fn state_types<'a>(
     state: &State,
     shapes: &'a [Shape],
     unreached: &'a [Candidate],
-    modules: &Modules,
+    modules: &'a Modules,
 ) -> syn::Result<Vec<(&'a Type, Option<&'a Ident>, usize)>> {
     // Each type of the module, by its name and its module, with the types it holds.
     let declared: Vec<(&'a Ident, usize, Vec<&'a Type>)> = shapes
@@ -1374,34 +1415,49 @@ fn state_types<'a>(
             )
         }))
         .collect();
-    let resolve = |name: &Ident, scope: usize| {
+    // A struct with named fields or an enum of the module, else a tuple struct, by the name it
+    // resolves to in its module.
+    let resolve = |name: &Ident, scope: usize| -> Option<(&'a Ident, usize, Vec<&'a Type>)> {
         let named = declared
             .iter()
             .filter(|(ident, _, _)| *ident == name)
             .map(|entry| (entry.1, entry));
-        crate::declared_in(named, scope)
+        if let Some((ident, scope, held)) = crate::declared_in(named, scope) {
+            return Some((ident, *scope, held.clone()));
+        }
+        let (ident, fields) = modules.uses[scope].tuples.get(&name.to_string())?;
+        Some((ident, scope, fields.iter().collect()))
     };
     let mut types = Vec::new();
     let mut seen = BTreeSet::new();
     let mut pending = vec![(state.ident.clone(), state.scope, true)];
     while let Some((name, scope, own)) = pending.pop() {
-        let Some((ident, scope, held)) = resolve(&name, scope) else {
+        let Some((ident, scope, mut held)) = resolve(&name, scope) else {
             continue;
         };
-        if !seen.insert((ident.to_string(), *scope)) {
+        if !seen.insert((ident.to_string(), scope)) {
             continue;
         }
-        let via = (!own).then_some(*ident);
-        for ty in held {
-            modules.followed(ty, *scope)?;
-            types.push((*ty, via, *scope));
+        let via = (!own).then_some(ident);
+        // The types of the aliases the held types name are held too, each once.
+        let mut aliased: BTreeSet<*const Type> = BTreeSet::new();
+        let mut next = 0;
+        while let Some(&ty) = held.get(next) {
+            next += 1;
+            modules.followed(ty, scope)?;
+            types.push((ty, via, scope));
             let mut references = Vec::new();
-            modules.references_in(ty, *scope, &mut references);
+            modules.references_in(ty, scope, &mut references);
             pending.extend(
                 references
                     .into_iter()
                     .map(|(reference, scope)| (reference, scope, false)),
             );
+            for alias in modules.composite_aliases(ty, scope) {
+                if aliased.insert(alias) {
+                    held.push(alias);
+                }
+            }
         }
     }
     Ok(types)

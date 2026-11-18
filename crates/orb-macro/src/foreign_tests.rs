@@ -1358,6 +1358,50 @@ fn a_wasi_type_a_consumed_interface_uses_is_refused_as_a_wasi_type() {
     }
 }
 
+/// The bindings derive serde's traits on a consumed type a state reaches in any form the state's
+/// fields write it: through a record of the module, a tuple struct of several fields, an alias
+/// that is more than a path, an array, or a newtype whose name another of the Orb takes, which
+/// the macro does not read through as a newtype; each gives `item` and the `status` it holds a
+/// selector.
+#[test]
+fn a_state_gives_serde_to_a_consumed_type_in_any_form() {
+    let dir = consumed("forms", SHOP);
+    for (types, field) in [
+        (
+            "pub struct Holder { pub item: catalog::Item }",
+            "pub held: Holder",
+        ),
+        (
+            "pub struct Pair(pub Option<catalog::Item>, pub u32);",
+            "pub pair: Pair",
+        ),
+        ("pub type Items = Vec<catalog::Item>;", "pub items: Items"),
+        ("", "pub items: [catalog::Item; 2]"),
+        (
+            "pub struct Wrap(pub catalog::Item); pub mod other { pub struct Wrap(pub u32); }",
+            "pub wrap: Wrap",
+        ),
+    ] {
+        let module = format!(
+            "mod shopper {{
+                {types}
+                #[state]
+                pub struct Kept {{ {field} }}
+                #[service]
+                pub struct Shopping;
+                impl Shopping {{ pub fn count() -> u32 {{ 0 }} }}
+            }}"
+        );
+        let generated = tokens(&expanded(shopping(&dir), &module));
+        let expected = concat!(
+            "additional_type_attributes : { ",
+            "\"example:shop/catalog@1.0.0/item\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] , ",
+            "\"example:shop/kinds@1.0.0/status\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
+        );
+        assert!(generated.contains(expected), "{field}\n{generated}");
+    }
+}
+
 /// A state holds a consumed type whose bindings `serde` writes, in its fields or in the module
 /// types they reach, whether it stays out of the WIT, with the author's serde derives, or enters
 /// it; a resource, a type holding a resource handle and a consumed flags are refused. The bindings

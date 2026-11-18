@@ -820,16 +820,17 @@ struct Scan {
 }
 
 /// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
-/// the paths it imports by glob, `use path::*;`: what the macro follows to name a derive the
-/// author writes in that module from another module, the bindings'. With the names of the items
-/// the module declares, which the bindings' module does not reach, and its type aliases, by name,
-/// which a contract type's name is followed through (`foreign::Modules`).
+/// the paths it imports by glob, `use path::*;`, which a contract type's name is followed through
+/// (`foreign::Modules`). With the names of the items the module declares, its type aliases, by
+/// name, and its tuple structs, by name, with the types of their fields, which a state's types are
+/// followed through (`foreign::state_types`).
 #[derive(Clone, Default)]
 struct Uses {
     names: BTreeMap<String, Named>,
     globs: Vec<Named>,
     items: BTreeSet<String>,
     aliases: BTreeMap<String, syn::ItemType>,
+    tuples: BTreeMap<String, (Ident, Vec<Type>)>,
 }
 
 /// A path as a list of names, from the crates when `global`, as `::serde::Serialize` is, and
@@ -923,7 +924,18 @@ impl Uses {
             }) => ident,
             Item::Mod(item) => &item.ident,
             Item::Static(item) => &item.ident,
-            Item::Struct(item) => &item.ident,
+            Item::Struct(item) => {
+                if let Fields::Unnamed(fields) = &item.fields {
+                    let types = fields
+                        .unnamed
+                        .iter()
+                        .map(|field| field.ty.clone())
+                        .collect();
+                    self.tuples
+                        .insert(item.ident.to_string(), (item.ident.clone(), types));
+                }
+                &item.ident
+            }
             Item::Trait(item) => &item.ident,
             Item::TraitAlias(item) => &item.ident,
             Item::Type(item) => {
