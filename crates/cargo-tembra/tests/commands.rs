@@ -2,9 +2,9 @@
 //! component and natively. `build --out` collects its outputs in one directory. `wit` and
 //! `inspect` read the component back, and `inspect` names the grants a WASI import needs.
 //!
-//! Each test scaffolds its crates in a temporary directory. The `target/` of each crate is a link
-//! to one directory in the target directory of the tests, so the dependencies compile once, not
-//! once per crate. Each crate starts from a lockfile of the repository, so a run resolves nothing
+//! Each test scaffolds its crates in a temporary directory. The crates build into one target
+//! directory, which `CARGO_TARGET_DIR` names, so the dependencies compile once, not once per
+//! crate. Each crate starts from a lockfile of the repository, so a run resolves nothing
 //! from the registry, and a release published or yanked since cannot change its result. A build
 //! from a cold target directory is slow, so the tests are ignored. `just test-cargo-tembra` runs
 //! them.
@@ -91,6 +91,7 @@ fn tembra(directory: &Path, arguments: &[&str]) -> String {
         .arg("tembra")
         .args(arguments)
         .current_dir(directory)
+        .env("CARGO_TARGET_DIR", shared_target())
         .output()
         .unwrap();
     printed(&format!("cargo tembra {}", arguments.join(" ")), output)
@@ -101,23 +102,17 @@ fn cargo(directory: &Path, arguments: &[&str]) {
     let output = Command::new(env!("CARGO"))
         .args(arguments)
         .current_dir(directory)
+        .env("CARGO_TARGET_DIR", shared_target())
         .output()
         .unwrap();
     printed(&format!("cargo {}", arguments.join(" ")), output);
 }
 
-/// Make the crate build into the directory every crate of these tests shares. `cargo tembra build`
-/// always builds into `target/` beside the manifest, so that is where the link goes.
-#[cfg(unix)]
-fn share_target(krate: &Path) {
-    let shared = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cargo-tembra-tests");
-    std::fs::create_dir_all(&shared).unwrap();
-    std::os::unix::fs::symlink(shared, krate.join("target")).unwrap();
+/// The target directory every crate of these tests shares, which the commands that build take
+/// from `CARGO_TARGET_DIR`, set for the processes the tests spawn only.
+fn shared_target() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("cargo-tembra-tests")
 }
-
-/// Without links, each crate builds into its own `target/`.
-#[cfg(not(unix))]
-fn share_target(_krate: &Path) {}
 
 /// The lockfile each crate starts from. Cargo keeps the versions a lockfile holds and resolves
 /// from the registry only what it lacks. The runtime fixture of the macro depends on what `new`
@@ -129,11 +124,9 @@ fn lockfile() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/runtime-fixture/Cargo.lock")
 }
 
-/// Start the crate from the lockfile of the repository, and make it build into the directory every
-/// crate of these tests shares.
+/// Start the crate from the lockfile of the repository.
 fn prepare(krate: &Path) {
     std::fs::copy(lockfile(), krate.join("Cargo.lock")).unwrap();
-    share_target(krate);
 }
 
 /// The packages a lockfile takes from a registry, by name and version, with their checksums.
@@ -418,5 +411,29 @@ fn inspect_names_the_grants_a_wasi_import_needs() {
         ],
     );
     assert!(printed.contains("  ACCEPTED, artifact of "), "{printed}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// `build` writes where Cargo would: the `target_directory` of `cargo metadata`, which follows
+/// `CARGO_TARGET_DIR`. The README names the path of the component there, and a crate whose
+/// `target/` does not exist gets none.
+#[test]
+#[ignore = "builds scratch crates, which is slow from a cold target directory; run by `just test-cargo-tembra`"]
+fn build_writes_the_component_into_the_target_directory_of_cargo() {
+    let dir = scratch("target-dir");
+    let (krate, _) = scaffold(&dir, NAME, PACKAGE);
+    let target = shared_target();
+    tembra(&krate, &["build"]);
+    let built = target.join("wasm32-unknown-unknown/release/greeter_orb.wasm");
+    assert!(built.is_file(), "{}", built.display());
+    assert!(
+        !krate.join("target").exists(),
+        "target/ beside the manifest"
+    );
+    // The copy in artifacts/ is the file Cargo wrote.
+    assert_eq!(
+        std::fs::read(krate.join("artifacts/greeter-orb.wasm")).unwrap(),
+        std::fs::read(&built).unwrap()
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }

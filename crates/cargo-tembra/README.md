@@ -125,6 +125,11 @@ the artifact, a copy of the contract and the checksums go to that directory inst
 repository with several Orbs can collect them in one place. A build replaces the lines of its own
 files in `checksums.txt` and keeps the others, sorted by file name.
 
+The compilation goes where Cargo builds the crate, the `target_directory` of `cargo metadata`: the
+`target/` beside the workspace root, or the directory that `CARGO_TARGET_DIR` or `build.target-dir`
+names. The component Cargo wrote is `<target directory>/wasm32-unknown-unknown/release/<lib>.wasm`
+(`debug/` with `--debug`), and `artifacts/<name>.wasm` is a copy of it.
+
 and a summary, here for the filter of the hooks example:
 
 ```text
