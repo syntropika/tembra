@@ -52,7 +52,6 @@ A change keeps each invariant below. Each one names the tests that guard it, and
   - Known exception: an example built with `crate-type = ["lib"]` writes `contract/` too, since the macro does not tell it from the library. The macro's guide names it as a limit.
 - Native and compiled Orbs answer the same codes and values for the same calls.
   - `the_native_build_and_the_component_answer_alike` in `crates/executor-wasm/tests/orb_macro_parity.rs` (`just test-orb-parity`). A new case is a scenario: a module or a function of `crates/orb-macro/parity-fixture`, and a row of its list.
-  - Known to break it: arguments that the boundary refuses answer `invalid/arguments` natively, and a result that is not finite answers `invalid/result`, but a component answers `unavailable/wasm_executor` to both. The parity test marks both rows, and #10 fixes them, in its item 1.3.
 - `Host` releases on close every callback it keeps, so that a callback holding the host does not keep it alive.
   - `closing_the_host_releases_its_observer` in `crates/tembra/tests/call_context.rs` (`cargo test --locked -p tembra`).
 - Every option that the macro's guide, `crates/orb-macro/README.md`, documents has a test that builds it, both ways where the guide promises both.

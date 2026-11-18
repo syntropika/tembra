@@ -585,6 +585,9 @@ impl Session {
             events: &events,
             completed: false,
         };
+        // The host's refusals in this declaration. One the guest fails with, unchanged, keeps its
+        // code, as a native declaration's does: a changed state version is `invalid/state_version`.
+        let mut refused: Vec<tembra::Error> = Vec::new();
         loop {
             match events.recv_blocking().map_err(failure)? {
                 // Carrier events exist only on platform ingress exchanges.
@@ -592,6 +595,12 @@ impl Session {
                 Event::Done(result) => {
                     self.0.io.scope().end_callback();
                     guard.completed = true;
+                    if let Err(text) = &result
+                        && let Some(error) =
+                            refused.into_iter().find(|error| error.to_string() == *text)
+                    {
+                        return Err(error);
+                    }
                     return decode(result);
                 }
                 Event::Host {
@@ -606,6 +615,9 @@ impl Session {
                     } else {
                         host(&packet, false)
                     };
+                    if let Err(error) = &result {
+                        refused.push(error.clone());
+                    }
                     let _ = reply.send(encode(
                         result.map(|value| value.to_string()),
                         self.0.packet_bytes,
@@ -1005,7 +1017,19 @@ impl Drop for Count {
 
 /// Parse guest output only after preserving boundary diagnostics.
 fn decode(result: std::result::Result<String, String>) -> Result<Value> {
-    serde_json::from_str(&result.map_err(failure)?).map_err(failure)
+    serde_json::from_str(&result.map_err(refusal)?).map_err(failure)
+}
+
+/// The error of a callback that failed with `text`. A float result the portable profile cannot
+/// carry keeps the `invalid/result` its lift refused it with, as a native host answers it; any
+/// other text is the executor's failure.
+fn refusal(text: String) -> tembra::Error {
+    let unrepresentable = crate::unrepresentable_float();
+    if text == unrepresentable.to_string() {
+        unrepresentable
+    } else {
+        failure(text)
+    }
 }
 
 /// Close an event stream and drop its buffered reply senders so no request outlives its driver.

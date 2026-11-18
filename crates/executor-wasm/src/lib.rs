@@ -35,9 +35,21 @@ pub use providers::{
 #[doc(hidden)]
 pub use tembra_contracts::{Binding, ComponentRoles, Contract};
 
-use tembra::{Error, core::Code};
+use tembra::{
+    Error,
+    core::{Code, Reason},
+};
 
 /// Preserve the executor boundary in diagnostics returned through the native facade.
 fn failure(message: impl ToString) -> Error {
     Error::new(Code::Unavailable, "wasm_executor", message.to_string())
+}
+
+/// A float result of a component that the portable profile cannot carry: the call fails with
+/// `invalid/result`, as a native host's does. The worker sends its text, which `worker` reads back.
+fn unrepresentable_float() -> Error {
+    Error::invalid(
+        Reason::Result,
+        "component float cannot be represented by the portable profile",
+    )
 }

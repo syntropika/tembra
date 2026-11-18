@@ -2117,7 +2117,7 @@ fn hooks_a_component_declares_compose_their_contributions() {
 /// the `versioned` feature keeps its state at version 1, and its next revision, built with
 /// `revised`, at version 2. The versions are compared on reload. Changing the version of a living
 /// object's state needs a migration of its value, which the macro does not declare: the reload is
-/// refused, naming the state's version, and the running revision keeps serving the object. Once
+/// refused with `invalid/state_version`, as a native host refuses it, and the running revision keeps serving the object. Once
 /// the object is released the reload goes through, and a new object starts from the next
 /// revision's state at its version; going back to version 1 is then refused the same way.
 /// Natively, each revision keeps its state at its version, across a reload of its own code: one
@@ -2141,9 +2141,7 @@ fn a_state_version_is_compared_across_a_reload() {
             .unwrap();
         let reload = |pool: &mut LocalPool, artifact: &[u8]| {
             let orb = engine.load(artifact, Install::default()).unwrap();
-            pool.run_until(host.reload(vec![orb], 5_000))
-                .map(|_| ())
-                .map_err(|error| error.message)
+            pool.run_until(host.reload(vec![orb], 5_000)).map(|_| ())
         };
         let counter = ready(&mut pool, &host, COUNTER);
         let add = |pool: &mut LocalPool, counter: &Rc<Reference>, by: u32| {
@@ -2151,7 +2149,11 @@ fn a_state_version_is_compared_across_a_reload() {
         };
         assert_eq!(add(&mut pool, &counter, 3), json!(3), "{runtime}");
         let refused = reload(&mut pool, &next).expect_err("a raised version needs a migration");
-        assert!(refused.contains("state_version"), "{runtime}: {refused}");
+        assert_eq!(
+            (refused.code, refused.reason.as_str()),
+            (Code::Invalid, "state_version"),
+            "{runtime}: {refused}"
+        );
         assert_eq!(add(&mut pool, &counter, 1), json!(4), "{runtime}");
         assert_eq!(counter.state_snapshot().unwrap().0.version, 1, "{runtime}");
         counter.release().unwrap();
@@ -2172,7 +2174,11 @@ fn a_state_version_is_compared_across_a_reload() {
         );
         assert_eq!(counter.state_snapshot().unwrap().0.version, 2, "{runtime}");
         let refused = reload(&mut pool, &first).expect_err("a lowered version needs a migration");
-        assert!(refused.contains("state_version"), "{runtime}: {refused}");
+        assert_eq!(
+            (refused.code, refused.reason.as_str()),
+            (Code::Invalid, "state_version"),
+            "{runtime}: {refused}"
+        );
         assert_eq!(add(&mut pool, &counter, 1), json!(3), "{runtime}");
         counter.release().unwrap();
         pool.run_until(host.close()).unwrap();

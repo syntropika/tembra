@@ -213,9 +213,7 @@ fn wide<T: std::str::FromStr>(value: &Value) -> Option<T> {
 /// Refuse values JSON would silently change or replace with null.
 fn float(value: f64) -> Result<Value> {
     if !value.is_finite() || (value == 0.0 && value.is_sign_negative()) {
-        return Err(failure(
-            "component float cannot be represented by the portable profile",
-        ));
+        return Err(crate::unrepresentable_float());
     }
     Ok(json!(value))
 }

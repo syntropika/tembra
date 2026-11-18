@@ -212,7 +212,10 @@ pub(crate) fn orb(
                     let contract = contract.clone();
                     async move {
                         // Packets spell WIT 64-bit integers as canonical decimal strings.
-                        let args = contract.to_wire(slot, true, args).map_err(failure)?;
+                        // Arguments that do not match the WIT are the caller's, as natively.
+                        let args = contract.to_wire(slot, true, args).map_err(|error| {
+                            tembra::Error::invalid(core::Reason::Arguments, error.to_string())
+                        })?;
                         let value = environment.invoke(context, slot, args).await?;
                         contract.from_wire(slot, false, value).map_err(failure)
                     }
