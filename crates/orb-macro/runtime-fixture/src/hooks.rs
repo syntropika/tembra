@@ -1,7 +1,7 @@
 /// Declares a hook of each composition: a series and a bail derived from their input, the series'
 /// holding a newtype, and the waterfall `guard` of the package in `admission/`, declared by its
-/// identity. Other Orbs contribute; the desk runs each hook and reports what the contributions
-/// decided.
+/// identity, whose callback answers a `verdict`: the admission's fields under another name. Other
+/// Orbs contribute; the desk runs each hook and reports what the contributions decided.
 #[cfg_attr(
     feature = "no-std",
     tembra::orb(package = "example:gatehouse@1.0.0", wit = "admission", no_std)

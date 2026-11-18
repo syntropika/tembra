@@ -5036,6 +5036,53 @@ fn a_waterfall_result_is_its_input_type_through_aliases() {
     );
 }
 
+/// A waterfall callback may return a record that holds the input's fields under another name, as
+/// `cargo tembra build` accepts it: the types are compared by shape, so the macro writes the hook
+/// without a refusal.
+#[test]
+fn a_waterfall_result_may_be_a_record_of_the_inputs_fields_under_another_name() {
+    let dir = consumed(
+        "renamed-result",
+        &ADMISSION_WIT.replace(
+            "  apply: func(input: admission) -> admission;",
+            "  record verdict { value: s32, blocked: bool }\n  apply: func(input: admission) -> verdict;",
+        ),
+    );
+    let module = orb_with(options("example:gate@1.0.0", Some(&dir)), SHARED_GATE)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        tokens(&module).contains("example :: admission :: guard"),
+        "{}",
+        tokens(&module)
+    );
+}
+
+/// A `#[cfg_attr(.., derive(..))]` on a state outside the WIT is the author's, as written: the
+/// macro expands it and keeps the attribute on the state.
+#[test]
+fn a_cfg_attr_derive_on_a_state_outside_the_wit_expands() {
+    let module = expanded(
+        "example:tally@1.0.0",
+        "mod tally {
+            #[state]
+            #[cfg_attr(test, derive(Default, serde::Serialize, serde::Deserialize))]
+            pub struct Count { pub total: u32 }
+            #[service]
+            pub struct Counter;
+            impl Counter {
+                pub fn add(by: u32) -> u32 { Count::update(|count| count.total += by).total }
+            }
+        }",
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains(
+            "# [cfg_attr (test , derive (Default , serde :: Serialize , serde :: Deserialize))] pub struct Count"
+        ),
+        "{generated}"
+    );
+}
+
 const LEDGER: &str = "mod ledger {
     pub mod pinned {
         /// The balance of a pinned ledger object.

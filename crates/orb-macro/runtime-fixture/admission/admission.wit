@@ -8,5 +8,12 @@ interface guard {
     blocked: bool,
   }
 
-  apply: func(input: admission) -> admission;
+  /// What a contributor answers: the admission's fields under another name, which the waterfall
+  /// accepts as the input's type.
+  record verdict {
+    value: s32,
+    blocked: bool,
+  }
+
+  apply: func(input: admission) -> verdict;
 }
