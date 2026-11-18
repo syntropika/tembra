@@ -362,6 +362,7 @@ impl PortEvents {
                 packet,
                 asynchronous,
                 reply,
+                ..
             } => Some(PortEvent::Host {
                 packet,
                 asynchronous,

@@ -421,3 +421,15 @@ test("a guest failure before the callback's deadline keeps its own error", async
   expect(await port.execute("{}", scope())).toBe("42");
   await port.close();
 });
+
+test("the guest's question about a refusal and its naming of one answer null, without a scope", () => {
+  const port = new BrowserPort(
+    10000,
+    async () => {},
+    () => {},
+  );
+  expect(port.sync('{"operation":"refusal"}')).toBe("null");
+  expect(port.sync('{"operation":"refused","effect":1}')).toBe("null");
+  expect(port.sync('{"operation":"refused","request":7}')).toBe("null");
+  expect(() => port.sync('{"operation":"address"}')).toThrow("No active host scope");
+});

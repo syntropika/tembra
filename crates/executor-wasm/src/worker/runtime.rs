@@ -2,6 +2,7 @@
 use super::{Command, Event};
 use crate::{Engine, abi};
 use async_channel::Sender;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::oneshot;
 use wasmtime::{
@@ -34,10 +35,56 @@ pub(super) struct State {
     pub(super) resolve: bool,
     /// The incoming HTTP request of the active ingress callback, if any.
     pub(super) ingress: Option<Ingress>,
+    /// The host's refusals the active callback's guest received, and the one it failed with.
+    pub(super) refusals: Arc<Mutex<Refusals>>,
     /// The host-created end of the active callback's whole byte-stream result, until
     /// `STREAM_RESULT` publishes it. Dropped unpublished at the callback's end, so its caller
     /// learns that no stream was returned.
     pub(super) stream: Option<super::StreamCall>,
+}
+
+/// The host's refusals a callback's guest received, by the request each refused, and the one
+/// the guest named as its failure. A guest names a refusal only by an identity the executor gave
+/// it in this callback: the id of the effect that delivered it, or the id of the synchronous
+/// request it asked about at once. So no guest text, and no refusal of another callback, takes a
+/// code.
+#[derive(Default)]
+pub(super) struct Refusals {
+    /// The refused requests.
+    requests: HashSet<u64>,
+    /// The request each refused effect answered, by effect id.
+    effects: HashMap<u64, u64>,
+    /// The request of the last synchronous call, if the host refused it.
+    last: Option<u64>,
+    /// The refused request the guest failed with.
+    named: Option<u64>,
+}
+
+impl Refusals {
+    /// The host refused the request of an effect.
+    pub(super) fn effect(&mut self, effect: u64, request: u64) {
+        self.requests.insert(request);
+        self.effects.insert(effect, request);
+    }
+
+    /// The refused request the guest named as its failure, if it named one.
+    pub(super) fn named(&mut self) -> Option<u64> {
+        self.named.take()
+    }
+}
+
+/// The guest's question about the synchronous call that just failed: the id of the request the
+/// host refused, or `null`.
+const REFUSAL: &str = r#"{"operation":"refusal"}"#;
+
+/// The prefix of the guest's naming of the refusal it fails with, by `effect` or `request` id.
+const REFUSED: &str = r#"{"operation":"refused","#;
+
+/// A refusal the guest names.
+#[derive(serde::Deserialize)]
+struct Named {
+    effect: Option<u64>,
+    request: Option<u64>,
 }
 
 /// The upstream request body's processing result.
@@ -227,36 +274,65 @@ pub(crate) fn check(module: &Module) -> std::result::Result<(), String> {
 }
 
 /// Dispatch a request through the current invocation's channel, never a guest-selected scope.
+/// Returns the request's id, by which a refusal of the host is known, and its reply.
 pub(super) fn request(
     state: &State,
     packet: String,
     asynchronous: bool,
-) -> std::result::Result<oneshot::Receiver<std::result::Result<String, String>>, String> {
+) -> std::result::Result<(u64, oneshot::Receiver<std::result::Result<String, String>>), String> {
     if packet.len() > state.packet_bytes {
         return Err("host packet limit exceeded".into());
     }
     let (reply, receive) = oneshot::channel();
+    let id = super::request_id();
     state
         .events
         .as_ref()
         .ok_or("no active invocation")?
         .try_send(Event::Host {
+            id,
             packet,
             asynchronous,
             reply,
         })
         .map_err(|_| "host operation queue is full or closed")?;
-    Ok(receive)
+    Ok((id, receive))
+}
+
+/// Forget the refusal of the last synchronous call: another one was made.
+fn forget_synchronous(state: &State) {
+    state.refusals.lock().expect("refusals").last = None;
 }
 
 /// Serve one synchronous request while the guest stack waits; diagnostics need no scope.
 fn synchronous(state: &State, packet: String) -> std::result::Result<String, String> {
+    let mut refusals = state.refusals.lock().expect("refusals");
+    if packet == REFUSAL {
+        return Ok(refusals
+            .last
+            .take()
+            .map_or_else(|| "null".into(), |request| request.to_string()));
+    }
+    if packet.starts_with(REFUSED) {
+        // Only a refusal of this callback is named; anything else names none.
+        let named = serde_json::from_str::<Named>(&packet)
+            .ok()
+            .and_then(|named| match (named.effect, named.request) {
+                (Some(effect), None) => refusals.effects.get(&effect).copied(),
+                (None, Some(request)) => Some(request),
+                _ => None,
+            });
+        refusals.named = named.filter(|request| refusals.requests.contains(request));
+        return Ok("null".into());
+    }
+    refusals.last = None;
+    drop(refusals);
     if let Some(result) = state.diagnostics.accept(&packet) {
         return result
             .map(|value| value.to_string())
             .map_err(|error| error.to_string());
     }
-    let reply = request(state, packet, false)?;
+    let (id, reply) = request(state, packet, false)?;
     let remaining = state
         .deadline
         .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
@@ -264,9 +340,16 @@ fn synchronous(state: &State, packet: String) -> std::result::Result<String, Str
     let reply = std::pin::pin!(reply);
     let deadline = std::pin::pin!(futures_timer::Delay::new(remaining));
     match futures::executor::block_on(futures::future::select(reply, deadline)) {
-        futures::future::Either::Left((reply, _)) => {
-            reply.unwrap_or_else(|_| Err("host callback scope ended".into()))
-        }
+        futures::future::Either::Left((reply, _)) => match reply {
+            Ok(Err(refusal)) => {
+                let mut refusals = state.refusals.lock().expect("refusals");
+                refusals.requests.insert(id);
+                refusals.last = Some(id);
+                Err(refusal)
+            }
+            Ok(reply) => reply,
+            Err(_) => Err("host callback scope ended".into()),
+        },
         futures::future::Either::Right(_) => {
             Err("host callback reply exceeded its deadline".into())
         }
@@ -290,6 +373,7 @@ fn linker(engine: &wasmtime::Engine) -> wasmtime::Result<Linker<State>> {
                     return Err(wasmtime::Error::msg("synchronous reply was not read"));
                 }
                 let reply = if length as usize > caller.data().packet_bytes {
+                    forget_synchronous(caller.data());
                     Err("host packet limit exceeded".to_owned())
                 } else if length > 0
                     && memory.data(&caller).get(pointer as usize).copied()
@@ -302,6 +386,7 @@ fn linker(engine: &wasmtime::Engine) -> wasmtime::Result<Linker<State>> {
                         .get(start..start + length as usize)
                         .ok_or_else(|| wasmtime::Error::msg("host packet is outside guest memory"))?
                         .to_vec();
+                    forget_synchronous(caller.data());
                     if caller.data().events.is_none() {
                         Err("no active invocation".to_owned())
                     } else {
@@ -405,6 +490,7 @@ pub(super) async fn instantiate(
             callback_scope: scope,
             resolve,
             ingress: None,
+            refusals: Arc::default(),
             stream: None,
         },
     );
@@ -450,6 +536,7 @@ pub(super) async fn run(
             }
             store.data_mut().stream = command.stream.take();
             store.data_mut().events = Some(command.events.clone());
+            *store.data().refusals.lock().expect("refusals") = Refusals::default();
             store.data_mut().deadline = Some(
                 std::time::Instant::now()
                     + std::time::Duration::from_millis(engine.limits.timeout_ms),
@@ -512,10 +599,13 @@ pub(super) async fn run(
                 drop(store);
                 return Ok(vec![(command.events, error)]);
             }
-            let _ = command
-                .events
-                .send(Event::Done(result.map_err(super::Failed::Text)))
-                .await;
+            // A guest that failed with the host's refusal unchanged answers it.
+            let named = store.data().refusals.lock().expect("refusals").named();
+            let result = result.map_err(|text| match named {
+                Some(request) => super::Failed::Host { request, text },
+                None => super::Failed::Text(text),
+            });
+            let _ = command.events.send(Event::Done(result)).await;
         }
         Ok::<_, wasmtime::Error>(Vec::new())
     }
@@ -574,6 +664,7 @@ pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
         callback_scope: scope,
         resolve: false,
         ingress: None,
+        refusals: Arc::default(),
         stream: None,
     }
 }

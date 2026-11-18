@@ -434,6 +434,7 @@ async fn check_context(events: &Sender<Event>) -> Result<(), String> {
     let (reply, receive) = oneshot::channel();
     events
         .try_send(Event::Host {
+            id: crate::worker::request_id(),
             packet: json!({"operation": "context.check"}).to_string(),
             asynchronous: false,
             reply,
@@ -1173,6 +1174,7 @@ fn acquire_request(
         return Ok(receive);
     }
     if let Err(error) = authority.events.try_send(Event::Host {
+        id: crate::worker::request_id(),
         packet,
         asynchronous: true,
         reply,
@@ -1261,6 +1263,7 @@ fn request(
                 pipe,
             },
             None => Event::Host {
+                id: crate::worker::request_id(),
                 packet,
                 asynchronous: true,
                 reply,
@@ -1514,6 +1517,7 @@ impl Channel {
         let (reply, receive) = oneshot::channel();
         self.events
             .try_send(Event::Host {
+                id: crate::worker::request_id(),
                 packet,
                 asynchronous: false,
                 reply,
@@ -1572,6 +1576,7 @@ fn hook_request(
     authority
         .events
         .try_send(Event::Host {
+            id: crate::worker::request_id(),
             packet,
             asynchronous: true,
             reply,
@@ -1765,18 +1770,21 @@ async fn declaration(
         return Err("host packet limit exceeded".into());
     }
     let (reply, receive) = oneshot::channel();
+    let request = crate::worker::request_id();
     events
         .send(Event::Host {
+            id: request,
             packet,
             asynchronous: false,
             reply,
         })
         .await
         .map_err(|_| "declaration scope ended".to_owned())?;
+    // The host's refusal of this very request fails the declaration with it.
     let text = receive
         .await
         .map_err(|_| "declaration scope ended".to_owned())?
-        .map_err(Failed::Host)?;
+        .map_err(|text| Failed::Host { request, text })?;
     serde_json::from_str(&text).map_err(|error| error.to_string().into())
 }
 
@@ -2704,6 +2712,7 @@ async fn release_dropped(dropped: &Dropped, (events, scope): &(Sender<Event>, u6
         let packet = json!({"operation": "reference.release", "scope": scope, "id": slot});
         let sent = events
             .send(Event::Host {
+                id: crate::worker::request_id(),
                 packet: packet.to_string(),
                 asynchronous: false,
                 reply,
@@ -2939,6 +2948,7 @@ mod tests {
                     packet,
                     asynchronous,
                     reply,
+                    ..
                 }) = receive.recv_blocking()
                 else {
                     panic!("expected a host request");

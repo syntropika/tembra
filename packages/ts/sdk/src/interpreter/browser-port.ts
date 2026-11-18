@@ -8,6 +8,11 @@ import { DROP } from "./standard-codec.ts";
 import type { ExecutionScope, IngressDispatch, InterpreterPort } from "./types.ts";
 import type { IngressExchange } from "./http-ingress.ts";
 
+/** The guest's question about the refusal of the synchronous call that just failed. */
+const REFUSAL = '{"operation":"refusal"}';
+/** The prefix of the guest's naming of the refusal its callback fails with. */
+const REFUSED = '{"operation":"refused",';
+
 /** Internal delivery journal; core ABI completion encoding ignores these host-owned identities. */
 interface Delivery extends Completion {
   readonly issued: readonly number[] | undefined;
@@ -65,6 +70,10 @@ export class BrowserPort implements InterpreterPort {
         throw error instanceof Error ? error.message : String(error);
       }
     }
+    // The native executor keeps the host's refusals a guest received, so that a callback failing
+    // with one answers it; this port keeps none: it answers the guest's question about one with
+    // `null` and ignores its naming of one.
+    if (packet === REFUSAL || packet.startsWith(REFUSED)) return "null";
     try {
       const request = decodeHostRequest(this.bounded(packet));
       if (request.operation === "console") {
