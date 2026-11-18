@@ -1167,6 +1167,36 @@ mod tests {
     use crate::{Contract, Limits};
     use std::time::{Duration, Instant};
 
+    /// A callback answers one of its most recent refusals by request, once; an older one, or a
+    /// failure that names none, answers nothing.
+    #[test]
+    fn a_callback_keeps_only_its_most_recent_refusals() {
+        let mut refused = Refused::default();
+        let kept = Refused::KEPT as u64;
+        for request in 0..=kept {
+            refused.insert(
+                request,
+                tembra::Error::new(tembra::core::Code::Forbidden, "key", request.to_string()),
+            );
+        }
+        let host = |request| {
+            Err(Failed::Host {
+                request,
+                text: String::new(),
+            })
+        };
+        assert!(refused.answer(&host(0)).is_none());
+        assert_eq!(refused.answer(&host(1)).unwrap().message, "1");
+        assert!(refused.answer(&host(1)).is_none());
+        assert_eq!(
+            refused.answer(&host(kept)).unwrap().message,
+            kept.to_string()
+        );
+        assert!(refused.answer(&Err(Failed::Text("2".into()))).is_none());
+        assert!(refused.answer(&Ok("2".into())).is_none());
+        assert_eq!(refused.0.len(), Refused::KEPT - 2);
+    }
+
     #[test]
     fn callback_release_wakes_each_waiter_once_after_repeated_polls() {
         use std::sync::atomic::{AtomicUsize, Ordering};

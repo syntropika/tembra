@@ -2,7 +2,7 @@
 use super::{Command, Event};
 use crate::{Engine, abi};
 use async_channel::Sender;
-use std::collections::{HashMap, HashSet};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::oneshot;
 use wasmtime::{
@@ -48,23 +48,56 @@ pub(super) struct State {
 /// it in this callback: the id of the effect that delivered it, or the id of the synchronous
 /// request it asked about at once. So no guest text, and no refusal of another callback, takes a
 /// code.
+///
+/// A guest rethrows a refusal it has just received, so only the most recent
+/// [`Refused::KEPT`](super::Refused::KEPT) of each kind are kept: a guest that makes refused
+/// requests in a loop does not grow them without bound.
 #[derive(Default)]
 pub(super) struct Refusals {
-    /// The refused requests.
-    requests: HashSet<u64>,
-    /// The request each refused effect answered, by effect id.
-    effects: HashMap<u64, u64>,
+    /// The refused requests, oldest first.
+    requests: VecDeque<u64>,
+    /// Each refused effect and the request it answered, oldest first.
+    effects: VecDeque<(u64, u64)>,
     /// The request of the last synchronous call, if the host refused it.
     last: Option<u64>,
     /// The refused request the guest failed with.
     named: Option<u64>,
 }
 
+/// Keep one entry, forgetting the oldest beyond the bound.
+fn keep<T>(entries: &mut VecDeque<T>, entry: T) {
+    if entries.len() == super::Refused::KEPT {
+        entries.pop_front();
+    }
+    entries.push_back(entry);
+}
+
 impl Refusals {
     /// The host refused the request of an effect.
     pub(super) fn effect(&mut self, effect: u64, request: u64) {
-        self.requests.insert(request);
-        self.effects.insert(effect, request);
+        keep(&mut self.requests, request);
+        keep(&mut self.effects, (effect, request));
+    }
+
+    /// The host refused the synchronous request that was made last.
+    fn synchronous(&mut self, request: u64) {
+        keep(&mut self.requests, request);
+        self.last = Some(request);
+    }
+
+    /// Keep the refusal the guest names, if this callback still keeps it; anything else names
+    /// none.
+    fn name(&mut self, named: Option<Named>) {
+        let request = named.and_then(|named| match (named.effect, named.request) {
+            (Some(effect), None) => self
+                .effects
+                .iter()
+                .find(|(id, _)| *id == effect)
+                .map(|(_, request)| *request),
+            (None, Some(request)) => Some(request),
+            _ => None,
+        });
+        self.named = request.filter(|request| self.requests.contains(request));
     }
 
     /// The refused request the guest named as its failure, if it named one.
@@ -314,15 +347,7 @@ fn synchronous(state: &State, packet: String) -> std::result::Result<String, Str
             .map_or_else(|| "null".into(), |request| request.to_string()));
     }
     if packet.starts_with(REFUSED) {
-        // Only a refusal of this callback is named; anything else names none.
-        let named = serde_json::from_str::<Named>(&packet)
-            .ok()
-            .and_then(|named| match (named.effect, named.request) {
-                (Some(effect), None) => refusals.effects.get(&effect).copied(),
-                (None, Some(request)) => Some(request),
-                _ => None,
-            });
-        refusals.named = named.filter(|request| refusals.requests.contains(request));
+        refusals.name(serde_json::from_str::<Named>(&packet).ok());
         return Ok("null".into());
     }
     refusals.last = None;
@@ -342,9 +367,7 @@ fn synchronous(state: &State, packet: String) -> std::result::Result<String, Str
     match futures::executor::block_on(futures::future::select(reply, deadline)) {
         futures::future::Either::Left((reply, _)) => match reply {
             Ok(Err(refusal)) => {
-                let mut refusals = state.refusals.lock().expect("refusals");
-                refusals.requests.insert(id);
-                refusals.last = Some(id);
+                state.refusals.lock().expect("refusals").synchronous(id);
                 Err(refusal)
             }
             Ok(reply) => reply,
@@ -666,5 +689,36 @@ pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
         ingress: None,
         refusals: Arc::default(),
         stream: None,
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::{Named, Refusals};
+
+    /// A guest names one of the most recent refusals of its callback, by effect or by request; an
+    /// older one, or one never received, names none.
+    #[test]
+    fn a_callback_keeps_only_its_most_recent_refusals() {
+        let kept = super::super::Refused::KEPT as u64;
+        let mut refusals = Refusals::default();
+        for effect in 0..=kept {
+            refusals.effect(effect, 1000 + effect);
+        }
+        refusals.synchronous(5000);
+        let name = |refusals: &mut Refusals, effect, request| {
+            refusals.name(Some(Named { effect, request }));
+            refusals.named()
+        };
+        // The synchronous refusal pushed out the oldest effect's request too.
+        assert_eq!(name(&mut refusals, Some(0), None), None);
+        assert_eq!(name(&mut refusals, Some(1), None), None);
+        assert_eq!(name(&mut refusals, Some(2), None), Some(1002));
+        assert_eq!(name(&mut refusals, Some(kept), None), Some(1000 + kept));
+        assert_eq!(name(&mut refusals, None, Some(5000)), Some(5000));
+        assert_eq!(name(&mut refusals, None, Some(4999)), None);
+        assert_eq!(name(&mut refusals, Some(2), Some(1002)), None);
+        assert_eq!(refusals.requests.len(), super::super::Refused::KEPT);
+        assert_eq!(refusals.effects.len(), super::super::Refused::KEPT);
     }
 }

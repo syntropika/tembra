@@ -312,3 +312,63 @@ pub(super) fn resources(value: &Val, visit: &mut impl FnMut(ResourceAny)) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasmtime::component::{Component, types::ComponentItem};
+
+    /// The parameter types of a component's exports `f`, a borrowed resource, which the portable
+    /// codec does not cover, and `g`, a `u32`.
+    fn parameters() -> (Type, Type) {
+        let engine = wasmtime::Engine::default();
+        let component = Component::new(
+            &engine,
+            wat::parse_str(
+                r#"(component
+  (type $r (resource (rep i32)))
+  (export $exported "r" (type $r))
+  (core module $m
+    (func (export "f") (param i32))
+    (func (export "g") (param i32)))
+  (core instance $i (instantiate $m))
+  (func $f (param "x" (borrow $exported)) (canon lift (core func $i "f")))
+  (func $g (param "x" u32) (canon lift (core func $i "g")))
+  (export "f" (func $f))
+  (export "g" (func $g)))"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let ty = component.component_type();
+        let parameter = |name: &str| match ty.get_export(&engine, name).map(|export| export.ty) {
+            Some(ComponentItem::ComponentFunc(function)) => function.params().next().unwrap().1,
+            _ => panic!("the component exports {name}"),
+        };
+        (parameter("f"), parameter("g"))
+    }
+
+    /// A value that differs from its type is the caller's `invalid/arguments`; a type the codec
+    /// does not cover is a limit of the executor, which stays `unavailable/wasm_executor`.
+    #[test]
+    fn a_lowering_limit_is_the_executors_and_a_mismatch_the_callers() {
+        let (borrowed, number) = parameters();
+        let refuse = &mut |_: ResourceType, _: &Value| -> Result<Val> {
+            panic!("no owned resource is lowered")
+        };
+        let limit = lower_with(borrowed, &json!(0), refuse).unwrap_err();
+        assert_eq!(
+            (limit.code, limit.reason.as_str()),
+            (tembra::core::Code::Unavailable, "wasm_executor")
+        );
+        let mismatch = lower_with(number.clone(), &json!("one"), refuse).unwrap_err();
+        assert_eq!(
+            (mismatch.code, mismatch.reason.as_str()),
+            (tembra::core::Code::Invalid, "arguments")
+        );
+        assert!(matches!(
+            lower_with(number, &json!(1), refuse),
+            Ok(Val::U32(1))
+        ));
+    }
+}

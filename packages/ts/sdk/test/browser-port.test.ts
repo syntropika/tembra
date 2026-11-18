@@ -523,3 +523,39 @@ test("a callback names only a refusal it received itself", async () => {
   expect(stale).not.toBe(refusal);
   await port.close();
 });
+
+test("a callback keeps only its most recent 64 refusals", async () => {
+  const refusals: TembraError[] = [];
+  let named = 0;
+  const port = new BrowserPort(
+    10000,
+    async () => {},
+    () => {},
+  );
+  port.guest = guest({
+    start: () => {
+      for (let request = 1; request <= 65; request++) {
+        expect(() => port.sync(ADDRESS)).toThrow("the bridge refuses");
+        expect(port.sync('{"operation":"refusal"}')).toBe(String(request));
+      }
+      port.sync(`{"operation":"refused","request":${named}}`);
+      return failed("forbidden/bridge_closed: the bridge refuses");
+    },
+  });
+  const refused = scope({
+    sync: () => {
+      const refusal = bridgeClosed();
+      refusals.push(refusal);
+      throw refusal;
+    },
+  });
+  // The first refusal was forgotten, the second is still kept.
+  named = 1;
+  const forgotten = await port.execute("{}", refused).catch((error: unknown) => error);
+  expect(forgotten).not.toBe(refusals[0]);
+  refusals.length = 0;
+  named = 2;
+  const kept = await port.execute("{}", refused).catch((error: unknown) => error);
+  expect(kept).toBe(refusals[1]);
+  await port.close();
+});
