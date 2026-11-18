@@ -1073,7 +1073,11 @@ resource's `#[open]` and `#[close]` functions, is visible to the Orb module: `pu
 at any depth, `pub(super)` one level down only. The macro names such an item through every module
 of its path, from the Orb module, and a WIT resource from its service's module, so each of those
 modules is visible there too: a WIT resource may sit below a private module that also holds its
-service. A `pub use` re-exporting the item past a module hidden there does not help. A name that
+service. A `pub use` re-exporting the item past a module hidden there does not help. Natively, a
+WIT resource's `#[constructor]` and static functions are methods of its service's client, written
+in the resource's module: a resource with one sees that client, so its service and each module of
+the service's path are visible to the resource's module, at least `pub(crate)` where it sits
+elsewhere, or the macro refuses the Orb, naming them. A resource with neither has no such rule. A name that
 enters the WIT is one across the modules, because the package has one namespace: the services, the
 hooks, the resources and the types a method or a hook mentions; a state that stays out of the WIT
 may repeat its name module by module, as `Balance` does, and a module's own name wins when a method

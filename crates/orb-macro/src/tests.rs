@@ -2708,6 +2708,63 @@ fn a_wit_resource_is_named_from_its_service_module() {
     );
 }
 
+/// A WIT resource beside its service, in a module that cannot name the service's client: without
+/// a constructor or a static function, the native side writes nothing of the client there, and the
+/// Orb expands; with one, which the native side writes on the client there, the macro refuses the
+/// Orb, naming the module and the service to make visible, and expands once they are `pub(crate)`.
+#[test]
+fn a_resource_whose_module_cannot_see_the_client_has_no_constructor() {
+    let module = |nest: &str, service: &str, functions: &str| {
+        format!(
+            "mod burrow {{
+                pub mod den {{
+                    {nest} mod nest {{
+                        use super::super::tags::Token;
+                        #[service]
+                        {service} struct Tokens;
+                        impl Tokens {{ pub fn open(n: u32) -> Token {{ Token {{ n }} }} }}
+                    }}
+                }}
+                pub mod tags {{
+                    #[wit_resource(service = Tokens)]
+                    pub struct Token {{ pub(crate) n: u32 }}
+                    impl Token {{
+                        {functions}
+                        pub fn number(&self) -> u32 {{ self.n }}
+                    }}
+                }}
+            }}"
+        )
+    };
+    let package = "example:burrow@1.0.0";
+    let constructor = "#[constructor] pub fn new(n: u32) -> Token { Token { n } }";
+    let made = "pub fn made(n: u32) -> Token { Token { n } }";
+    let plain = expanded(package, &module("", "pub", ""));
+    let tags = native(&plain, &["tags"]);
+    assert!(!tags.contains("TokensClient"), "{tags}");
+    for (nest, service, hidden) in [
+        ("", "pub", "the module `nest`"),
+        ("pub(crate)", "", "the service `Tokens`"),
+        ("", "", "the module `nest` and the service `Tokens`"),
+    ] {
+        for functions in [constructor, made] {
+            let error = refused(package, &module(nest, service, functions));
+            assert_eq!(
+                error,
+                format!(
+                    "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `tags`, which cannot see it: make {hidden} visible to the module `tags`, at least `pub(crate)`"
+                ),
+            );
+        }
+    }
+    let visible = expanded(package, &module("pub(crate)", "pub(crate)", constructor));
+    let tags = native(&visible, &["tags"]);
+    assert!(
+        tags.contains("impl super :: den :: nest :: TokensClient {"),
+        "{tags}"
+    );
+}
+
 /// What WIT or the bindings rule out of a flags struct is refused on the item: a field that is no
 /// `bool`, no field or more than the component model's 32, a generic parameter, two fields of one
 /// WIT name, an option on the attribute, a function of a name the bindings call or the author's own

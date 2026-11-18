@@ -1041,6 +1041,46 @@ fn check_seen(
     ))
 }
 
+/// Refuse a WIT resource with a constructor or a static function, `resource`, of the module at
+/// `from`, when that module cannot name the native client of its service, `service`, declared in
+/// the module at `path`, where `seen_from` says each module of the path is visible: the native side
+/// writes those functions on the client, in the resource's module. The error names the module of
+/// the path and the service to make visible to it. Writing the calls in the service's module
+/// instead would name the parameter types from there, and raising a visibility would change the
+/// author's code.
+fn client_seen(
+    service: &Service,
+    path: &[Ident],
+    seen_from: &[usize],
+    from: &[Ident],
+    resource: &Ident,
+) -> syn::Result<()> {
+    let module = seen_from
+        .iter()
+        .position(|&depth| !from.starts_with(&path[..depth]))
+        .map(|position| format!("the module `{}`", path[position]));
+    let declared = path.len().saturating_sub(reach(&service.vis));
+    let hidden =
+        (!from.starts_with(&path[..declared])).then(|| format!("the service `{}`", service.ident));
+    let hidden: Vec<String> = module.into_iter().chain(hidden).collect();
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let viewer = if from.is_empty() {
+        "the Orb module".to_owned()
+    } else {
+        format!("the module {}", describe(from))
+    };
+    Err(syn::Error::new(
+        resource.span(),
+        format!(
+            "`{resource}` has a constructor or a static function, which a native build writes on the client of its service `{}` in {viewer}, which cannot see it: make {} visible to {viewer}, at least `pub(crate)`",
+            service.ident,
+            hidden.join(" and ")
+        ),
+    ))
+}
+
 /// Whether a type alias names a namesake, `pub type Token = super::sessions::Token;`: a path
 /// ending in the alias's own name, with generics on neither, which the alias stands for as
 /// `use super::sessions::Token;` would.
@@ -2467,6 +2507,15 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             "a resource",
             &format!("whose service `{}` hands it out", owner.ident),
         )?;
+        if resource.constructor.is_some() || !resource.statics.is_empty() {
+            client_seen(
+                owner,
+                &modules[owner.scope],
+                &seen_from[owner.scope],
+                &modules[resource.scope],
+                &resource.ident,
+            )?;
+        }
         resource.service = Some(owner.ident.clone());
     }
     // The modules the Orb module re-exports for the consumed interfaces name the consumed types and

@@ -1730,6 +1730,7 @@ fn resource_handle(resource: &WitResource, analysis: &Analysis) -> Result<TokenS
 /// `new_<resource>` for the constructor, `new_cursor` for `Cursor`, and `<resource>_<function>`
 /// for each static function, `cursor_open` for `Cursor::open`, each called portably, as the
 /// client's functions whose result holds a resource are, answering the resource as its handle type.
+/// None without either, so a resource's module that cannot see the client still compiles.
 fn resource_client(
     resource: &WitResource,
     service: &Service,
@@ -1813,6 +1814,11 @@ fn resource_client(
                 #body
             }
         });
+    }
+    // Without a constructor or a static function, the resource's module names no client, which it
+    // may not see; the scan refuses one it does not see when it has one.
+    if methods.is_empty() {
+        return Ok(TokenStream::new());
     }
     Ok(quote! {
         impl #client {

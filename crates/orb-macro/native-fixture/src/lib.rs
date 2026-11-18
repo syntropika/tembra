@@ -17,6 +17,8 @@
 //! import, a synchronous import, a hook declaration and a record holding a resource: they compile
 //! here all the same, and their `orb()` answers an error naming it. `trail` holds a service and its
 //! root two private modules down, and a service whose method is named `clone`, as a method of `Rc`.
+//! `burrow` and `warren` hold a service in a module below `den` and its WIT resource in `tags`:
+//! private, for a resource without a constructor, and `pub(crate)`, for one with a constructor.
 //! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
@@ -1921,6 +1923,98 @@ pub mod sketch {
             match sketch.shape {
                 Shape::Circle { radius } => (radius, sketch.size.scale),
                 Shape::Dot => (0.0, sketch.size.scale),
+            }
+        }
+    }
+}
+
+/// A service in a private module and its WIT resource in another module, which cannot name the
+/// service's client: the resource has no constructor and no static function, the parts of the
+/// client the native side writes in the resource's module, so the Orb builds natively too.
+#[tembra::orb(package = "example:burrow@1.0.0")]
+pub mod burrow {
+    pub mod den {
+        mod nest {
+            use super::super::tags::Token;
+
+            /// Hands out tokens, from a module only `den` can name.
+            #[service]
+            pub struct Tokens;
+
+            impl Tokens {
+                /// A token numbered `n`.
+                pub fn open(n: u32) -> Token {
+                    Token { n }
+                }
+
+                /// How many kinds of token there are.
+                pub fn kinds() -> u32 {
+                    1
+                }
+            }
+        }
+    }
+
+    pub mod tags {
+        /// A numbered token, which `Tokens` hands out.
+        #[wit_resource(service = Tokens)]
+        pub struct Token {
+            pub(crate) n: u32,
+        }
+
+        impl Token {
+            /// The token's number.
+            pub fn number(&self) -> u32 {
+                self.n
+            }
+        }
+    }
+}
+
+/// The layout of `burrow`, with a constructor on the resource: the native side writes it on the
+/// service's client, in the resource's module, which names the client since the module and the
+/// service are `pub(crate)`.
+#[tembra::orb(package = "example:warren@1.0.0")]
+pub mod warren {
+    pub mod den {
+        pub(crate) mod nest {
+            use super::super::tags::Token;
+
+            /// Hands out tokens, from a module the crate can name.
+            #[service]
+            pub(crate) struct Tokens;
+
+            impl Tokens {
+                /// A token numbered `n`.
+                pub fn open(n: u32) -> Token {
+                    Token::new(n)
+                }
+
+                /// How many kinds of token there are.
+                pub fn kinds() -> u32 {
+                    1
+                }
+            }
+        }
+    }
+
+    pub mod tags {
+        /// A numbered token, which `Tokens` hands out.
+        #[wit_resource(service = Tokens)]
+        pub struct Token {
+            n: u32,
+        }
+
+        impl Token {
+            /// A token numbered `n`: the resource's constructor.
+            #[constructor]
+            pub fn new(n: u32) -> Token {
+                Token { n }
+            }
+
+            /// The token's number.
+            pub fn number(&self) -> u32 {
+                self.n
             }
         }
     }
