@@ -65,7 +65,12 @@ function connect(executable: string) {
   return { child, stderr, sent, received, output, remote: new RemoteHost(transport) };
 }
 
-/** Fail promptly and clean up the child when a terminal transport path stalls. */
+/**
+ * Fail promptly and clean up the child when a terminal transport path stalls.
+ *
+ * A provider that sees its terminal cause exits within milliseconds; the two seconds only bound a
+ * stall, and leave room for a loaded machine to schedule the child.
+ */
 async function terminalExit(child: Bun.Subprocess<"pipe", "pipe", "pipe">) {
   const status = await Promise.race([child.exited, Bun.sleep(2000).then(() => undefined)]);
   if (status === undefined) {
@@ -162,10 +167,24 @@ test.skipIf(!process.env.TEMBRA_NATIVE_RPC)(
     });
     const stderr = new Response(child.stderr).text();
     await child.stdout.cancel();
-    child.stdin.write(jsonCodec.serialize({ id: 1, op: "describe", payload: null }));
-    child.stdin.write("\n");
-    await child.stdin.flush();
+    // Bun may close the cancelled stdout only after the provider has written a reply, which the
+    // socket then drops without an error. Ask again until a reply meets the closed end.
+    const asking = (async () => {
+      for (let id = 1; ; id++) {
+        try {
+          child.stdin.write(jsonCodec.serialize({ id, op: "describe", payload: null }));
+          child.stdin.write("\n");
+          await child.stdin.flush();
+        } catch (error) {
+          if (!(error && typeof error === "object" && "code" in error && error.code === "EPIPE"))
+            throw error;
+        }
+        const ended = await Promise.race([child.exited.then(() => true), Bun.sleep(10)]);
+        if (ended) return;
+      }
+    })();
     await terminalExit(child);
+    await asking;
     expect(await stderr).toContain('reason: "stdio"');
   },
 );
