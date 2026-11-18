@@ -4,10 +4,13 @@
 //!
 //! Each test scaffolds its crates in a temporary directory. The `target/` of each crate is a link
 //! to one directory in the target directory of the tests, so the dependencies compile once, not
-//! once per crate. A build from a cold target directory is slow, so the tests are ignored.
-//! `just test-cargo-tembra` runs them.
+//! once per crate. Each crate starts from a lockfile of the repository, so a run resolves nothing
+//! from the registry, and a release published or yanked since cannot change its result. A build
+//! from a cold target directory is slow, so the tests are ignored. `just test-cargo-tembra` runs
+//! them.
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -116,6 +119,57 @@ fn share_target(krate: &Path) {
 #[cfg(not(unix))]
 fn share_target(_krate: &Path) {}
 
+/// The lockfile each crate starts from. Cargo keeps the versions a lockfile holds and resolves
+/// from the registry only what it lacks. The runtime fixture of the macro depends on what `new`
+/// writes into a manifest, the facade with `macros`, `dlmalloc`, `serde` and `serde_json`, and on
+/// the facade's `host` runtime for its native tests. The recipes that build it use `--locked`, so
+/// its lockfile holds all of them and stays current. The lockfile of the workspace does not
+/// serve: it has no `dlmalloc`.
+fn lockfile() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/runtime-fixture/Cargo.lock")
+}
+
+/// Start the crate from the lockfile of the repository, and make it build into the directory every
+/// crate of these tests shares.
+fn prepare(krate: &Path) {
+    std::fs::copy(lockfile(), krate.join("Cargo.lock")).unwrap();
+    share_target(krate);
+}
+
+/// The packages a lockfile takes from a registry, by name and version, with their checksums.
+fn registry_packages(path: &Path) -> BTreeMap<String, String> {
+    let lock: toml::Value = toml::from_str(&read(path)).unwrap();
+    let field = |package: &toml::Value, key: &str| package[key].as_str().unwrap().to_owned();
+    lock["package"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|package| package.get("source").is_some())
+        .map(|package| {
+            let name = format!("{} {}", field(package, "name"), field(package, "version"));
+            (name, field(package, "checksum"))
+        })
+        .collect()
+}
+
+/// Check that the builds of the crate resolved nothing from the registry. Cargo writes the
+/// packages the crate needs back to its lockfile. A package that Cargo had to resolve is missing
+/// from the lockfile the crate started from, or has another version or checksum there.
+fn assert_pinned(krate: &Path) {
+    let pinned = registry_packages(&lockfile());
+    let resolved: Vec<String> = registry_packages(&krate.join("Cargo.lock"))
+        .into_iter()
+        .filter(|(package, checksum)| pinned.get(package) != Some(checksum))
+        .map(|(package, _)| package)
+        .collect();
+    assert!(
+        resolved.is_empty(),
+        "{}: resolved from the registry, not held by {}: {resolved:?}",
+        krate.display(),
+        lockfile().display()
+    );
+}
+
 /// Run `cargo tembra new` in `directory` for the crate `name` of the WIT package `package`, with
 /// the facade of this checkout. Returns the new crate and what the command printed.
 fn scaffold(directory: &Path, name: &str, package: &str) -> (PathBuf, String) {
@@ -132,13 +186,14 @@ fn scaffold(directory: &Path, name: &str, package: &str) -> (PathBuf, String) {
         ],
     );
     let krate = directory.join(name);
-    share_target(&krate);
+    prepare(&krate);
     (krate, printed)
 }
 
 /// The crate `new` writes builds as a component, whose outputs `build --out` collects in the
-/// directory it is given, and natively, with and without the facade's host runtime. A native
-/// build writes the contract that the component build wrote.
+/// directory it is given, and natively, without the facade's host runtime and with it, which a
+/// feature of the manifest enables. A native build writes the contract that the component build
+/// wrote.
 #[test]
 #[ignore = "builds scratch crates, which is slow from a cold target directory; run by `just test-cargo-tembra`"]
 fn a_new_crate_builds_as_a_component_and_natively() {
@@ -155,6 +210,13 @@ fn a_new_crate_builds_as_a_component_and_natively() {
     for file in ["Cargo.toml", "src/lib.rs", ".gitignore"] {
         assert!(krate.join(file).is_file(), "{file}");
     }
+    // The manifest names the facade's `host` feature, as the manifest of an author who builds
+    // natively does. A lockfile holds the packages of the features that manifests name, so
+    // `--features tembra/host` on the command line would resolve those of the runtime from the
+    // registry at each build.
+    let manifest = krate.join("Cargo.toml");
+    let features = "\n[features]\nhost = [\"tembra/host\"]\n";
+    std::fs::write(&manifest, read(&manifest) + features).unwrap();
 
     // As a component, built where `new` says to build it, with the outputs collected in `out`
     // instead of `artifacts/`.
@@ -228,7 +290,13 @@ fn a_new_crate_builds_as_a_component_and_natively() {
         written,
         "the contract of the native build"
     );
-    cargo(&krate, &["build", "--features", "tembra/host"]);
+    cargo(&krate, &["build", "--features", "host"]);
+    assert_pinned(&krate);
+    let locked = registry_packages(&krate.join("Cargo.lock"));
+    assert!(
+        locked.keys().any(|package| package.starts_with("futures ")),
+        "the lockfile holds the packages of the runtime"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -243,6 +311,7 @@ fn wit_and_inspect_read_back_the_component_a_build_wrote() {
     let (krate, _) = scaffold(&dir, NAME, PACKAGE);
     let manifest = krate.join("Cargo.toml");
     tembra(&dir, &["build", "--manifest-path", text(&manifest)]);
+    assert_pinned(&krate);
     let component = krate.join("artifacts/greeter-orb.wasm");
     let contract = read(&krate.join("contract/greeter-orb.wit"));
 
@@ -310,6 +379,7 @@ fn inspect_names_the_grants_a_wasi_import_needs() {
     std::fs::write(krate.join("src/lib.rs"), DICE).unwrap();
     let manifest = krate.join("Cargo.toml");
     tembra(&dir, &["build", "--manifest-path", text(&manifest)]);
+    assert_pinned(&krate);
     let component = krate.join("artifacts/dice.wasm");
 
     let printed = tembra(&dir, &["inspect", text(&component)]);
