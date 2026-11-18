@@ -94,8 +94,7 @@ fn native(item: &Item) -> bool {
 }
 
 /// Only the native side reads the manifest, for the name and API version of `orb()`. A manifest
-/// the macro cannot read, one with a trailing comma in an inline table, which Cargo accepts and
-/// the macro's TOML reader refuses, or none at all, as in a build without Cargo, is a compile
+/// the macro cannot read, one that is no TOML, or none at all, as in a build without Cargo, is a compile
 /// error naming it inside the facade's `__host!`, which a component build drops: the component
 /// side is the one a manifest that reads gives.
 #[test]
@@ -119,19 +118,14 @@ fn a_manifest_the_macro_cannot_read_fails_the_native_side_alone() {
         quote::quote!(#(#kept)*).to_string()
     };
     let read = expanded(Ok(Metadata::named("book")));
-    let comma = manifest(
-        "comma",
-        &format!(
-            "{PACKAGE}\n[dependencies]\ntembra = {{ path = \"../tembra\", default-features = false, features = [\"macros\"], }}\n"
-        ),
-    );
+    let invalid = manifest("invalid", &format!("{PACKAGE}\n[dependencies\n"));
     let missing = std::env::temp_dir()
         .join(format!(
             "tembra-orb-macro-metadata-none-{}",
             std::process::id()
         ))
         .join("Cargo.toml");
-    for path in [comma, missing] {
+    for path in [invalid, missing] {
         let error = match Metadata::from_manifest(&path) {
             Ok(_) => panic!("{} was read", path.display()),
             Err(error) => error,
@@ -161,4 +155,13 @@ fn the_manifest_is_the_crates_own() {
     let metadata = Metadata::read().unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(metadata.name, "tembra-orb-macro");
     assert_eq!(metadata.api_version, 1);
+}
+
+/// TOML 1.1 allows a trailing comma in an inline table, which Cargo reads, so the macro reads it.
+#[test]
+fn a_manifest_with_a_trailing_comma_in_an_inline_table_reads() {
+    let text = format!(
+        "{PACKAGE}\n[dependencies]\ntembra = {{ version = \"0.2\", features = [\"macros\"], }}\n"
+    );
+    assert_eq!(read("trailing-comma", &text).name, "example_greeter");
 }

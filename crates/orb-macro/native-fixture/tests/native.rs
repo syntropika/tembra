@@ -337,7 +337,11 @@ fn portable_calls_go_through_the_codec() {
                     json!(["x", 2]),
                     "invalid type: string \"x\", expected u32",
                 ),
-                ("add", json!([1, -2]), "invalid number"),
+                (
+                    "add",
+                    json!([1, -2]),
+                    "invalid value: integer `-2`, expected u32",
+                ),
                 ("ping", json!([1]), "expected no arguments, got 1"),
                 (
                     "negate",
@@ -359,7 +363,7 @@ fn portable_calls_go_through_the_codec() {
                 (
                     "swap",
                     json!([[1, "a"]]),
-                    "invalid type: number, expected a string",
+                    "invalid type: integer `1`, expected a string",
                 ),
             ] {
                 let error = call(method, arguments).await.unwrap_err();

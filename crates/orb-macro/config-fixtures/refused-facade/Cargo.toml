@@ -1,0 +1,21 @@
+[package]
+name = "tembra-config-refused-facade"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The facade under another name, which the module's `crate = ".."` does not give as a Rust
+# identifier: the macro refuses the attribute.
+sdk = { package = "tembra", path = "../../../tembra", default-features = false, features = [
+  "macros",
+] }
+dlmalloc = { version = "0.2.12", features = ["global"] }
+
+[package.metadata.cargo-machete]
+ignored = ["dlmalloc"]

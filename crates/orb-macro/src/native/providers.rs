@@ -24,6 +24,8 @@
 //! requires the hook of it, with the signature of the hook's callback, and adds the contribution
 //! with `Orb::contribute_portable`, whose callback reads the hook's input with the codec, runs the
 //! author's function in the Orb's root, as a component's contribution runs, and writes its answer.
+//! Without the runtime's `hooks`, which that function needs, `orb(..)` answers an error naming the
+//! feature instead.
 use super::{
     Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode, kind, refused,
     spelled, wit_kind,
@@ -204,6 +206,10 @@ pub(super) fn contribution_ident(contribution: &Contribution) -> Ident {
 /// `context` reads, with the `context` option, of the Orb's root resources, with some, and of its
 /// imports, `imported`, but on no object, so it reaches no state. The function is the registry's of
 /// the contribution's module, which `orb(..)` reaches whatever the visibility of the module.
+/// `Orb::contribute_portable` exists only with the runtime's `hooks`, so the call goes through the
+/// facade's `__hooks!`: without the feature, the function answers the error naming it, with the
+/// code `unsupported` and the reason `native`, which `orb(..)` answers in turn, and the module
+/// compiles whatever runtime features the build enables.
 pub(super) fn contribution(
     contributed: &Contributed<'_>,
     analysis: &Analysis,
@@ -299,8 +305,17 @@ pub(super) fn contribution(
         quote! { , imports: &::std::rc::Rc<self::#root __tembra_import::Imports> }
     });
     let doc = format!(
-        " The contribution of `{ident}` to the hook `{hook}`, which `orb(..)` adds to the native Orb, with the Orb that declares the hook, `target`."
+        " The contribution of `{ident}` to the hook `{hook}`, which `orb(..)` adds to the native Orb, with the Orb that declares the hook, `target`; without the runtime's `hooks`, the error naming the feature."
     );
+    let message = format!(
+        "the contribution of `{ident}` to the hook {hook} needs the runtime's `hooks`: enable the facade's `hooks` feature in the host that installs this Orb"
+    );
+    let unused = [
+        resources.as_ref().map(|_| quote! { resources }),
+        imports.as_ref().map(|_| quote! { imports }),
+    ]
+    .into_iter()
+    .flatten();
     let registry = format_ident!("{REGISTRY}");
     let registered = Literal::usize_unsuffixed(scope);
     quote! {
@@ -311,8 +326,24 @@ pub(super) fn contribution(
                 target: &str
                 #resources
                 #imports
-            ) -> ::#facade::Orb {
-                orb.contribute_portable(target, #hook, #signature, #priority, #handle)
+            ) -> ::#facade::Result<::#facade::Orb> {
+                ::#facade::__hooks! {
+                    {
+                        ::core::result::Result::Ok(
+                            orb.contribute_portable(target, #hook, #signature, #priority, #handle)
+                        )
+                    }
+                    {
+                        {
+                            let _ = (orb, target #(, #unused)*);
+                            ::core::result::Result::Err(::#facade::Error::new(
+                                ::#facade::core::Code::Unsupported,
+                                "native",
+                                #message
+                            ))
+                        }
+                    }
+                }
             }
         }
     }

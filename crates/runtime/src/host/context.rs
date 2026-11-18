@@ -17,6 +17,7 @@ impl Host {
             root,
             frame: invocation.as_ref().map_or(0, |call| call.context),
             call: invocation,
+            signal: self.context_signal(root),
         })
     }
 
@@ -80,6 +81,10 @@ pub struct Context {
     pub(crate) host: Host,
     pub root: core::Id,
     call: Option<core::Invocation>,
+    /// The root's signal, which every context of the root holds: a signal of the root or of its
+    /// calls, first read once the kernel has forgotten the root, still finds whether it was
+    /// cancelled.
+    signal: Cancellation,
 }
 
 impl Context {
@@ -103,6 +108,7 @@ impl Context {
             root: self.root,
             call: self.call.clone(),
             frame,
+            signal: self.signal.clone(),
         })
     }
 
@@ -115,6 +121,7 @@ impl Context {
             root: self.root,
             call: self.call.clone(),
             frame,
+            signal: self.signal.clone(),
         })
     }
 
@@ -179,23 +186,29 @@ impl Context {
     /// descends from); that never cancels the root or sibling calls.
     pub fn signal(&self) -> Cancellation {
         match &self.call {
-            Some(call) => self.host.call_signal(self.root, call.id),
-            None => self.host.context_signal(self.root),
+            Some(call) => self.host.call_signal(self.root, &self.signal, call.id),
+            None => self.signal.clone(),
         }
     }
 }
 
 impl Host {
     /// One shared signal per entered invocation, created when first observed: cancelled at once
-    /// if its root or the invocation itself already was.
-    fn call_signal(&self, root: core::Id, call: core::Id) -> Cancellation {
+    /// if its root or the invocation itself already was. The root's signal answers for the root,
+    /// as a signal read earlier would: its normal end cancels nothing of the call.
+    fn call_signal(
+        &self,
+        root: core::Id,
+        root_signal: &Cancellation,
+        call: core::Id,
+    ) -> Cancellation {
         let mut signals = self.0.call_signals.borrow_mut();
         signals.retain(|_, (_, signal)| signal.strong_count() != 0);
         if let Some(signal) = signals.get(&call).and_then(|(_, signal)| signal.upgrade()) {
             return Cancellation(signal);
         }
         let signal = Cancellation::new("root");
-        if self.kernel().check_root(root).is_err() {
+        if root_signal.is_cancelled() {
             signal.cancel();
         } else if self.kernel().call_cancelled(call) {
             signal.cancel_because("call");
@@ -217,16 +230,17 @@ impl Host {
         }
     }
 
+    /// The signal of a root, for a context of it: the one its other contexts hold, or a new one.
+    /// A context is issued only for a root neither ended nor cancelled, so a new signal starts
+    /// uncancelled, and the root's cancellation reaches it while a context holds it.
     fn context_signal(&self, root: core::Id) -> Cancellation {
         let mut signals = self.0.context_signals.borrow_mut();
-        signals.retain(|_, signal| signal.strong_count() != 0);
+        // Each context of a root asks for its signal: only a new one sweeps the released ones.
         if let Some(signal) = signals.get(&root).and_then(std::rc::Weak::upgrade) {
             return Cancellation(signal);
         }
+        signals.retain(|_, signal| signal.strong_count() != 0);
         let signal = Cancellation::new("root");
-        if self.kernel().check_root(root).is_err() {
-            signal.cancel();
-        }
         signals.insert(root, Rc::downgrade(&signal.0));
         signal
     }

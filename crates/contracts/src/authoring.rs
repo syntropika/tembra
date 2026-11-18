@@ -20,6 +20,8 @@ pub struct Contract {
     pub(crate) resolve: Resolve,
     pub(crate) world: WorldId,
     prepared: PreparedContract,
+    /// The compact index each WIT definition was lowered to, for [`Self::type_names`].
+    lowered: std::collections::HashMap<wit_parser::TypeId, u32>,
 }
 
 /// Every runtime query is answered by the prepared contract.
@@ -143,12 +145,83 @@ impl Contract {
         world: WorldId,
         explicit: Option<&BTreeSet<String>>,
     ) -> Result<Self, Error> {
-        let prepared = crate::prepare::world(&resolve, world, explicit)?;
+        let (prepared, lowered) = crate::prepare::world(&resolve, world, explicit)?;
         Ok(Self {
             resolve,
             world,
             prepared,
+            lowered,
         })
+    }
+
+    /// Answer a query of the prepared contract, or `{"kind":"type-names"}`, which only a
+    /// contract read from WIT answers with [`Self::type_names`]: the prepared contract, its
+    /// describe graph and the artifacts it is packaged into keep no type names.
+    pub fn request(&self, packet: &str) -> String {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+        enum Own {
+            TypeNames {},
+        }
+        match serde_json::from_str::<Own>(packet) {
+            Ok(Own::TypeNames {}) => crate::port::envelope(Ok(self.type_names())),
+            Err(_) => self.prepared.request(packet),
+        }
+    }
+
+    /// The WIT name of each record, variant, enum and flags type of the describe graph, by its
+    /// `id` there, in id order, with the interface where the name is written, the name's
+    /// JavaScript spelling (`Point` for `point`) and that spelling after the name of the
+    /// interface that declares the definition (`APoint` for `a`'s `point`), for a client module
+    /// where another type has the same name. An alias of one is named too, by its own name: a
+    /// type an interface takes with `use b.{point as spot}` is `spot` there, written in that
+    /// interface, an alias of `b`'s `point`.
+    pub fn type_names(&self) -> serde_json::Value {
+        use wit_parser::{Type, TypeDefKind, TypeOwner};
+        let interface = |owner: TypeOwner| match owner {
+            TypeOwner::Interface(owner) => Some(owner),
+            TypeOwner::World(_) | TypeOwner::None => None,
+        };
+        let mut named: Vec<(u32, &wit_parser::TypeDef, &wit_parser::TypeDef)> = self
+            .lowered
+            .iter()
+            .filter_map(|(id, index)| {
+                self.resolve.types[*id].name.as_ref()?;
+                let mut target = *id;
+                while let TypeDefKind::Type(Type::Id(next)) = self.resolve.types[target].kind {
+                    target = next;
+                }
+                let definition = &self.resolve.types[target];
+                matches!(
+                    definition.kind,
+                    TypeDefKind::Record(_)
+                        | TypeDefKind::Variant(_)
+                        | TypeDefKind::Enum(_)
+                        | TypeDefKind::Flags(_)
+                )
+                .then_some((*index, &self.resolve.types[*id], definition))
+            })
+            .collect();
+        named.sort_unstable_by_key(|(index, ..)| *index);
+        named
+            .into_iter()
+            .map(|(id, written, definition)| {
+                let name = written.name.as_deref().unwrap_or_default();
+                let declared = interface(definition.owner)
+                    .and_then(|owner| self.resolve.interfaces[owner].name.as_deref());
+                let qualified = match declared {
+                    Some(declared) => format!("{declared}-{name}"),
+                    None => name.to_owned(),
+                };
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "interface": interface(written.owner).and_then(|owner| self.resolve.id_of(owner)),
+                    "javascript": heck::ToUpperCamelCase::to_upper_camel_case(name),
+                    "qualified": heck::ToUpperCamelCase::to_upper_camel_case(qualified.as_str()),
+                })
+            })
+            .collect()
     }
 
     /// Resolve a WIT directory and its local `deps/` without acquiring packages.
@@ -407,7 +480,7 @@ pub(crate) fn verify_component(expected: &PreparedContract, bytes: &[u8]) -> Res
         return Err(Error("expected an executable WebAssembly component".into()));
     };
     // A decoded component has no import provenance; only signatures are compared here.
-    let actual = crate::prepare::world(&resolve, world, None)?;
+    let (actual, _) = crate::prepare::world(&resolve, world, None)?;
     if expected.signatures(true)? != actual.signatures(true)? {
         return Err(Error(
             "component export signatures differ from the selected WIT world".into(),

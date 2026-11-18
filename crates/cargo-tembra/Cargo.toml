@@ -16,7 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 tembra-contracts.workspace = true
-toml = "0.8"
+toml = "1.1"
 wasmparser = "=0.261.0"
 wit-component = "=0.261.0"
 wit-parser = "=0.261.0"

@@ -380,7 +380,12 @@ calculation.reference.release();
 
 The types are the values a host sends and receives: camelCase record fields, `{ tag, val }` for
 variants and results (with the declared error type), `T | null` for options, plain arrays for
-lists, `bigint` for `u64` and `s64`. Every method takes an optional `Context` last, leaves it out
+lists, `bigint` for `u64` and `s64`. Each record, variant, enum and flags type the interface uses
+is exported under its WIT name (`Item` for `item`, with a `_` where the module already uses the
+name), so a call site can name the values it builds. A type the interface takes with `use` keeps
+its name there (`Spot` for `use b.{point as spot}`). Two different types of one name in one module
+are named after the interface that declares each (`APoint` and `BPoint`), and refused only when
+those names clash too. Every method takes an optional `Context` last, leaves it out
 when it is `undefined`, and returns a promise. The wrapper adds no other behaviour: the contract
 still checks every value, and an interface that declares WIT resources is refused, since a host
 cannot call it by name.

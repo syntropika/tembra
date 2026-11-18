@@ -92,6 +92,10 @@ native host:
 - `hooks` selects the module `gatehouse`, which declares a series hook and a bail hook from their
   input, and the waterfall `guard` of the package in `admission/` by its identity. The test's native
   contributions answer them; natively, `orb()` refuses the declarations;
+- `contributor` selects the module `contributor`, which contributes to the waterfall `guard` of the
+  package in `admission/`. The test builds its component; natively, with `native` alone, the
+  runtime has no `hooks` and `orb(..)` answers an error naming the feature, and with
+  `native-hooks` the contribution joins the hook of a gate its native test writes by hand;
 - `versioned` selects the module `counting`, whose state is at version 1; with `revised`, its next
   revision, whose state is at version 2. The test reloads one component into the other; natively,
   one build holds one revision, whose state keeps its version across a reload of the same code;

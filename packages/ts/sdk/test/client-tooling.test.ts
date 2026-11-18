@@ -33,7 +33,15 @@ world provider { export shapes; }
 /** A call site: the valid calls compile and each wrong argument is a reported error. */
 const SITE = `import type { Host } from "@syntropika/tembra-sdk/runtime";
 import type { Context } from "@syntropika/tembra-sdk";
-import { get, IDENTITY, type Shapes } from "./example-values-shapes.ts";
+import {
+  get,
+  IDENTITY,
+  type Access,
+  type Item,
+  type Mode,
+  type Shape,
+  type Shapes,
+} from "./example-values-shapes.ts";
 
 export async function check(host: Host, context: Context) {
   const identity: "example:values/shapes@1.0.0" = IDENTITY;
@@ -42,16 +50,16 @@ export async function check(host: Host, context: Context) {
   const total: bigint = await fromHost.numbers(1, 2.5, 3, 4n);
   const withContext: bigint = await fromHost.numbers(1, 2.5, 3, 4n, context);
   const bytes: number[] = await fromHost.collect([{ name: "a", count: null, bigNumber: 1n }]);
-  const tagged = await fromHost.tagged(
-    { tag: "named", val: { name: "a", count: 2, bigNumber: 3n } },
-    "fast",
-    { writeAll: true },
-  );
+  const item: Item = { name: "a", count: 2, bigNumber: 3n };
+  const shape: Shape = { tag: "named", val: item };
+  const mode: Mode = "fast";
+  const access: Access = { writeAll: true };
+  const tagged = await fromHost.tagged(shape, mode, access);
   const count: number | null = tagged.tag === "ok" ? tagged.val.count : tagged.val.length;
   const char: string = await fromHost.deep([[1], []], [5n, "x"]);
   const nothing: void = await fromHost.nothing();
-  const maybe: { name: string; count: number | null; bigNumber: bigint } | null =
-    await fromHost.maybe(null);
+  const maybe: Item | null = await fromHost.maybe(null);
+  const structural: { name: string; count: number | null; bigNumber: bigint } | null = maybe;
   const plain: { tag: "ok" } | { tag: "err" } = await fromHost.plain();
   const flag: boolean = await fromContext.kebabName(1, true, [{ tag: "none" }]);
   const checked: boolean = await fromHost.check(true, 1, "x", [1], 1.5, -1, false);
@@ -72,11 +80,18 @@ export async function check(host: Host, context: Context) {
   fromHost.nothing(1);
   // @ts-expect-error Kebab-case keys are not methods of the client.
   fromHost["kebab-name"](1, true, []);
+  // @ts-expect-error A named record keeps its WIT fields.
+  const partial: Item = { name: "a", count: null };
+  // @ts-expect-error A named enum is one of its cases.
+  const slow: Mode = "medium";
   // @ts-expect-error A result stays tagged, never unwrapped.
   const unwrapped: { name: string } = await fromHost.tagged({ tag: "none" }, "fast", {});
-  return { identity, total, withContext, bytes, count, char, nothing, maybe, plain, flag, checked, unwrapped };
+  return { identity, total, withContext, bytes, count, char, nothing, maybe, structural, plain, flag, checked, unwrapped, partial, slow };
 }
 `;
+
+/** A test that runs the TypeScript checker takes seconds, more on a loaded CI runner. */
+const CHECKER = 30_000;
 
 /** Typecheck files under the SDK's project options, with the SDK resolved from source. */
 function diagnostics(files: readonly string[]): Map<string, string[]> {
@@ -100,64 +115,83 @@ function diagnostics(files: readonly string[]): Map<string, string[]> {
   return reported;
 }
 
-test("a generated client types every WIT kind in the host's value form and checks call sites", async () => {
-  const root = await mkdtemp(
-    path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-client-"),
-  );
-  try {
-    await writeFile(path.join(root, "contract.wit"), CONTRACT);
-    const out = path.join(root, "clients");
-    const files = await client({ wit: path.join(root, "contract.wit"), world: "provider", out });
-    expect(files).toEqual([path.join(out, "example-values-shapes.ts")]);
-    const generated = await readFile(files[0]!, "utf8");
-    expect(generated).toContain('export const IDENTITY = "example:values/shapes@1.0.0";');
-    expect(generated).toContain(
-      "numbers(small: number, wide: number, byte: number, signed: bigint, context?: Context): Promise<bigint>;",
+test(
+  "a generated client names and types every WIT kind in the host's value form and checks call sites",
+  async () => {
+    const root = await mkdtemp(
+      path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-client-"),
     );
-    expect(generated).toContain(
-      "collect(values: { name: string; count: number | null; bigNumber: bigint }[], context?: Context): Promise<number[]>;",
-    );
-    expect(generated).toContain(
-      'tagged(value: { tag: "none" } | { tag: "size"; val: number } | { tag: "named"; val: { name: string; count: number | null; bigNumber: bigint } }, mode: "fast" | "slow", access: { read?: boolean; writeAll?: boolean }, context?: Context): Promise<{ tag: "ok"; val: { name: string; count: number | null; bigNumber: bigint } } | { tag: "err"; val: string }>;',
-    );
-    expect(generated).toContain(
-      "deep(value: number[][], pair: [bigint, string], context?: Context): Promise<string>;",
-    );
-    expect(generated).toContain("nothing(context?: Context): Promise<void>;");
-    expect(generated).toContain(
-      'plain(context?: Context): Promise<{ tag: "ok" } | { tag: "err" }>;',
-    );
-    expect(generated).toContain(
-      'kebabName(firstValue: number, delete_: boolean, context_: ({ tag: "none" } | { tag: "size"; val: number } | { tag: "named"; val: { name: string; count: number | null; bigNumber: bigint } })[], context?: Context): Promise<boolean>;',
-    );
-    expect(generated).toContain(
-      'kebabName: (...args) => reference["kebab-name"](...sent(args, 3)),',
-    );
-    expect(generated).toContain(
-      "check(public_: boolean, static_: number, let_: string, arguments_: number[], eval_: number, implements_: number, await_: boolean, context?: Context): Promise<boolean>;",
-    );
-    // The generated module and the call site typecheck where the signatures agree with the WIT.
-    const site = path.join(out, "site.ts");
-    const wrong = path.join(out, "wrong.ts");
-    await writeFile(site, SITE);
-    await writeFile(
-      wrong,
-      'import { get } from "./example-values-shapes.ts";\nexport const wrong = (scope: Parameters<typeof get>[0]) => get(scope, { orb: "values", key: "main" }).then((shapes) => shapes.numbers(1, 2.5, 3, 4));\n',
-    );
-    const reported = diagnostics([files[0]!, site, wrong]);
-    expect(reported.get(files[0]!)).toEqual([]);
-    expect(reported.get(site)).toEqual([]);
-    expect(reported.get(wrong)!.join("\n")).toContain(
-      "Argument of type 'number' is not assignable to parameter of type 'bigint'",
-    );
-    // Regeneration leaves an unchanged module untouched.
-    const before = await stat(files[0]!, { bigint: true });
-    await client({ wit: path.join(root, "contract.wit"), world: "provider", out });
-    expect((await stat(files[0]!, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+    try {
+      await writeFile(path.join(root, "contract.wit"), CONTRACT);
+      const out = path.join(root, "clients");
+      const files = await client({ wit: path.join(root, "contract.wit"), world: "provider", out });
+      expect(files).toEqual([path.join(out, "example-values-shapes.ts")]);
+      const generated = await readFile(files[0]!, "utf8");
+      expect(generated).toContain('export const IDENTITY = "example:values/shapes@1.0.0";');
+      expect(generated).toContain(
+        "numbers(small: number, wide: number, byte: number, signed: bigint, context?: Context): Promise<bigint>;",
+      );
+      // Each record, variant, enum and flags is exported under its WIT name; an alias is not.
+      expect(generated).toContain(
+        "/** The WIT record `item`. */\nexport type Item = { name: string; count: number | null; bigNumber: bigint };",
+      );
+      expect(generated).toContain(
+        '/** The WIT variant `shape`. */\nexport type Shape = { tag: "none" } | { tag: "size"; val: number } | { tag: "named"; val: Item };',
+      );
+      expect(generated).toContain(
+        '/** The WIT enum `mode`. */\nexport type Mode = "fast" | "slow";',
+      );
+      expect(generated).toContain(
+        "/** The WIT flags `access`. */\nexport type Access = { read?: boolean; writeAll?: boolean };",
+      );
+      expect(generated).not.toContain("Items");
+      expect(generated).toContain("collect(values: Item[], context?: Context): Promise<number[]>;");
+      expect(generated).toContain(
+        'tagged(value: Shape, mode: Mode, access: Access, context?: Context): Promise<{ tag: "ok"; val: Item } | { tag: "err"; val: string }>;',
+      );
+      expect(generated).toContain(
+        "maybe(value: string | null, context?: Context): Promise<Item | null>;",
+      );
+      expect(generated).toContain(
+        "deep(value: number[][], pair: [bigint, string], context?: Context): Promise<string>;",
+      );
+      expect(generated).toContain("nothing(context?: Context): Promise<void>;");
+      expect(generated).toContain(
+        'plain(context?: Context): Promise<{ tag: "ok" } | { tag: "err" }>;',
+      );
+      expect(generated).toContain(
+        "kebabName(firstValue: number, delete_: boolean, context_: Shape[], context?: Context): Promise<boolean>;",
+      );
+      expect(generated).toContain(
+        'kebabName: (...args) => reference["kebab-name"](...sent(args, 3)),',
+      );
+      expect(generated).toContain(
+        "check(public_: boolean, static_: number, let_: string, arguments_: number[], eval_: number, implements_: number, await_: boolean, context?: Context): Promise<boolean>;",
+      );
+      // The generated module and the call site typecheck where the signatures agree with the WIT.
+      const site = path.join(out, "site.ts");
+      const wrong = path.join(out, "wrong.ts");
+      await writeFile(site, SITE);
+      await writeFile(
+        wrong,
+        'import { get } from "./example-values-shapes.ts";\nexport const wrong = (scope: Parameters<typeof get>[0]) => get(scope, { orb: "values", key: "main" }).then((shapes) => shapes.numbers(1, 2.5, 3, 4));\n',
+      );
+      const reported = diagnostics([files[0]!, site, wrong]);
+      expect(reported.get(files[0]!)).toEqual([]);
+      expect(reported.get(site)).toEqual([]);
+      expect(reported.get(wrong)!.join("\n")).toContain(
+        "Argument of type 'number' is not assignable to parameter of type 'bigint'",
+      );
+      // Regeneration leaves an unchanged module untouched.
+      const before = await stat(files[0]!, { bigint: true });
+      await client({ wit: path.join(root, "contract.wit"), world: "provider", out });
+      expect((await stat(files[0]!, { bigint: true })).mtimeNs).toBe(before.mtimeNs);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  CHECKER,
+);
 
 test("a generated client acquires the kebab-case service and forwards each call unchanged", async () => {
   const root = await mkdtemp(
@@ -264,6 +298,9 @@ test("client generation refuses functions a reference's own members would hide",
 /** WIT names TypeScript reads otherwise: `new`, `Object`'s members, the module's own types. */
 const NAMES = `package example:names@1.0.0;
 interface calls {
+  record calls { value: u32 }
+  record context { value: u32 }
+  wrap: func(value: calls, scope: context) -> calls;
   new: func(value: u32) -> u32;
   %constructor: func() -> string;
   to-string: func() -> string;
@@ -290,7 +327,7 @@ world app {
 
 /** A call site of those clients, next to the SDK's own `Context`. */
 const NAMES_SITE = `import type { Context } from "@syntropika/tembra-sdk";
-import { get, type Calls } from "./example-names-calls.ts";
+import { get, type Calls, type Calls_, type Context_ } from "./example-names-calls.ts";
 import * as acquisition from "./example-names-acquisition-options.ts";
 import * as context from "./example-names-context.ts";
 import * as dynamic from "./example-names-dynamic-reference.ts";
@@ -303,6 +340,8 @@ export async function check(scope: Parameters<typeof get>[0], ctx?: Context) {
   const made: number = await calls.new(1, ctx);
   const text: string = await calls.toString();
   const owned: boolean = await calls.hasOwnProperty("name", ctx);
+  const scoped: Context_ = { value: 2 };
+  const wrapped: Calls_ = await calls.wrap({ value: 1 }, scoped, ctx);
   // @ts-expect-error \`new\` is a method that takes its WIT parameters.
   calls.new("1");
   // @ts-expect-error \`toString\` takes no WIT argument.
@@ -321,38 +360,125 @@ export async function check(scope: Parameters<typeof get>[0], ctx?: Context) {
     base.get(scope, address),
   ]);
   const sum: number = await services[1].add(1, ctx);
-  return { made, text, owned, services, sum };
+  return { made, text, owned, wrapped, services, sum };
 }
 `;
 
-test("a generated client type-checks for WIT names TypeScript reads otherwise", async () => {
+test(
+  "a generated client type-checks for WIT names TypeScript reads otherwise",
+  async () => {
+    const root = await mkdtemp(
+      path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-client-"),
+    );
+    try {
+      await writeFile(path.join(root, "contract.wit"), NAMES);
+      const out = path.join(root, "clients");
+      const files = await client({ wit: path.join(root, "contract.wit"), world: "app", out });
+      // In an interface, `new(..)` would declare a construct signature; the quoted name is a method.
+      expect(await readFile(path.join(out, "example-names-calls.ts"), "utf8")).toContain(
+        '  "new"(value: number, context?: Context): Promise<number>;',
+      );
+      // A WIT type takes a `_` where the module or its interface already uses its name.
+      expect(await readFile(path.join(out, "example-names-calls.ts"), "utf8")).toContain(
+        "  wrap(value: Calls_, scope: Context_, context?: Context): Promise<Calls_>;",
+      );
+      // An interface's type takes a `_` where the module already uses its name.
+      for (const [file, service] of [
+        ["acquisition-options", "AcquisitionOptions_"],
+        ["context", "Context_"],
+        ["dynamic-reference", "DynamicReference_"],
+        ["promise", "Promise_"],
+        ["reference-base", "ReferenceBase_"],
+      ]) {
+        const generated = await readFile(path.join(out, `example-names-${file}.ts`), "utf8");
+        expect(generated).toContain(`export interface ${service} {`);
+        expect(generated).toContain("  add(value: number, context?: Context): Promise<number>;");
+      }
+      const site = path.join(out, "site.ts");
+      await writeFile(site, NAMES_SITE);
+      const reported = diagnostics([...files, site]);
+      expect([...reported].filter(([, messages]) => messages.length)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  CHECKER,
+);
+
+/** Types an interface takes with `use`, one renamed, and a type of another interface inside one. */
+const USED = (extra: string) => `package example:used@1.0.0;
+interface a { record point { x: u32 } record holder { at: point } }
+interface b { record point { y: string } record shape { at: point } }
+interface s {
+  use a.{point};
+  use b.{point as spot};
+  ${extra}
+  f: func(p: spot);
+  g: func(p: point);
+}
+interface u { use a.{holder}; k: func(h: holder); }
+interface other { record point { z: bool } m: func(p: point); }
+interface both { use a.{holder}; use b.{shape}; n: func(h: holder, s: shape); }
+interface fields { use a.{holder}; use b.{shape}; record a-point { w: u8 } r: func(h: holder, s: shape, p: a-point); }
+interface renamed { use a.{holder}; use b.{shape}; use b.{point as a-point}; r: func(h: holder, s: shape, p: a-point); }
+world app { export s; export u; export other; export both; }
+world record-clash { export fields; }
+world alias-clash { export renamed; }
+`;
+
+test("a generated client names the types its interface takes by their names there", async () => {
   const root = await mkdtemp(
     path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-client-"),
   );
   try {
-    await writeFile(path.join(root, "contract.wit"), NAMES);
-    const out = path.join(root, "clients");
-    const files = await client({ wit: path.join(root, "contract.wit"), world: "app", out });
-    // In an interface, `new(..)` would declare a construct signature; the quoted name is a method.
-    expect(await readFile(path.join(out, "example-names-calls.ts"), "utf8")).toContain(
-      '  "new"(value: number, context?: Context): Promise<number>;',
-    );
-    // An interface's type takes a `_` where the module already uses its name.
-    for (const [file, service] of [
-      ["acquisition-options", "AcquisitionOptions_"],
-      ["context", "Context_"],
-      ["dynamic-reference", "DynamicReference_"],
-      ["promise", "Promise_"],
-      ["reference-base", "ReferenceBase_"],
-    ]) {
-      const generated = await readFile(path.join(out, `example-names-${file}.ts`), "utf8");
-      expect(generated).toContain(`export interface ${service} {`);
-      expect(generated).toContain("  add(value: number, context?: Context): Promise<number>;");
+    const generate = async (extra: string) => {
+      await writeFile(path.join(root, "contract.wit"), USED(extra));
+      const out = path.join(root, "clients");
+      await rm(out, { recursive: true, force: true });
+      await client({ wit: path.join(root, "contract.wit"), world: "app", out });
+      const read = (name: string) => readFile(path.join(out, `example-used-${name}.ts`), "utf8");
+      return {
+        s: await read("s"),
+        u: await read("u"),
+        other: await read("other"),
+        both: await read("both"),
+      };
+    };
+    // The alias names the type it takes; a function rendered first changes no name.
+    for (const extra of ["", "e: func(x: point);", "a0: func(x: point, y: spot);"]) {
+      const { s } = await generate(extra);
+      expect(s).toContain("export type Point = { x: number };");
+      expect(s).toContain("export type Spot = { y: string };");
+      expect(s).toContain("  f(p: Spot, context?: Context): Promise<void>;");
+      expect(s).toContain("  g(p: Point, context?: Context): Promise<void>;");
+      expect(s).not.toContain("Point_");
     }
-    const site = path.join(out, "site.ts");
-    await writeFile(site, NAMES_SITE);
-    const reported = diagnostics([...files, site]);
-    expect([...reported].filter(([, messages]) => messages.length)).toEqual([]);
+    const { u, other, both } = await generate("");
+    // A named type reached only inside another type's declaration is exported too.
+    expect(u).toContain("export type Holder = { at: Point };");
+    expect(u).toContain("export type Point = { x: number };");
+    // Two interfaces with one type name each have their own, in their own module.
+    expect(other).toContain("export type Point = { z: boolean };");
+    // Two different types of one name in one module are named after the interface of each.
+    expect(both).toContain("export type APoint = { x: number };");
+    expect(both).toContain("export type BPoint = { y: string };");
+    expect(both).toContain("export type Holder = { at: APoint };");
+    expect(both).toContain("export type Shape = { at: BPoint };");
+    expect(both).not.toMatch(/export type Point\b/);
+    // Two different types left with one name after that are refused, each named with the
+    // interface where its name is written.
+    await expect(
+      client({ wit: path.join(root, "contract.wit"), world: "record-clash", out: root }),
+    ).rejects.toThrow(
+      "example:used/fields@1.0.0: the WIT types a-point of example:used/fields@1.0.0 and " +
+        "point of example:used/a@1.0.0 both name APoint",
+    );
+    await expect(
+      client({ wit: path.join(root, "contract.wit"), world: "alias-clash", out: root }),
+    ).rejects.toThrow(
+      "example:used/renamed@1.0.0: the WIT types a-point of example:used/renamed@1.0.0 and " +
+        "point of example:used/a@1.0.0 both name APoint",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

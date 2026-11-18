@@ -2708,6 +2708,130 @@ fn a_wit_resource_is_named_from_its_service_module() {
     );
 }
 
+/// A WIT resource beside its service, in a module that cannot name the service's client: without
+/// a constructor or a static function, the native side writes nothing of the client there, and the
+/// Orb expands; with one, which the native side writes on the client there, the Orb expands too,
+/// for a component, and natively writes no client there: its `orb()` answers the error naming the
+/// module and the service to make visible. Once they are `pub(crate)`, the native side writes it.
+#[test]
+fn a_resource_whose_module_cannot_see_the_client_has_no_constructor() {
+    let module = |nest: &str, service: &str, functions: &str| {
+        format!(
+            "mod burrow {{
+                pub mod den {{
+                    {nest} mod nest {{
+                        use super::super::tags::Token;
+                        #[service]
+                        {service} struct Tokens;
+                        impl Tokens {{ pub fn open(n: u32) -> Token {{ Token {{ n }} }} }}
+                    }}
+                }}
+                pub mod tags {{
+                    #[wit_resource(service = Tokens)]
+                    pub struct Token {{ pub(crate) n: u32 }}
+                    impl Token {{
+                        {functions}
+                        pub fn number(&self) -> u32 {{ self.n }}
+                    }}
+                }}
+            }}"
+        )
+    };
+    let package = "example:burrow@1.0.0";
+    let constructor = "#[constructor] pub fn new(n: u32) -> Token { Token { n } }";
+    let made = "pub fn made(n: u32) -> Token { Token { n } }";
+    let plain = expanded(package, &module("", "pub", ""));
+    let tags = native(&plain, &["tags"]);
+    assert!(!tags.contains("TokensClient"), "{tags}");
+    for (nest, service, hidden) in [
+        ("", "pub", "the module `nest`"),
+        ("pub(crate)", "", "the service `Tokens`"),
+        ("", "", "the module `nest` and the service `Tokens`"),
+    ] {
+        for functions in [constructor, made] {
+            // The module expands, for a component as it is; natively, `orb()` answers why.
+            let refused = expanded(package, &module(nest, service, functions));
+            let message = format!(
+                "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `tags`, which cannot see it: make {hidden} visible to the module `tags`, at least `pub(crate)`"
+            );
+            assert_eq!(native(&refused, &[]), unsupported(&message));
+            assert!(native(&refused, &["tags"]).is_empty());
+        }
+    }
+    let visible = expanded(package, &module("pub(crate)", "pub(crate)", constructor));
+    let tags = native(&visible, &["tags"]);
+    assert!(
+        tags.contains("impl super :: den :: nest :: TokensClient {"),
+        "{tags}"
+    );
+}
+
+/// Where 1.2's rule stops: a `pub(super)` service seen from a sibling under the same parent, and a
+/// resource in the parent of the service's private module, see the client and expand; for a private
+/// service seen from that parent, natively, `orb()` answers the error naming the service.
+#[test]
+fn a_resource_sees_the_client_of_a_service_its_parent_holds() {
+    let constructor = "#[constructor] pub fn new(n: u32) -> Token { Token { n } }";
+    let resource = format!(
+        "#[wit_resource(service = Tokens)]
+        pub struct Token {{ pub(crate) n: u32 }}
+        impl Token {{
+            {constructor}
+            pub fn number(&self) -> u32 {{ self.n }}
+        }}"
+    );
+    let nest = |service: &str, use_token: &str| {
+        format!(
+            "mod nest {{
+                use {use_token};
+                #[service]
+                {service} struct Tokens;
+                impl Tokens {{ pub fn open(n: u32) -> Token {{ Token::new(n) }} }}
+            }}"
+        )
+    };
+    let package = "example:burrow@1.0.0";
+    let sibling = expanded(
+        package,
+        &format!(
+            "mod burrow {{
+                pub mod den {{
+                    {}
+                    pub mod tags {{ {resource} }}
+                }}
+            }}",
+            nest("pub(super)", "super::tags::Token")
+        ),
+    );
+    let tags = native(&sibling, &["den", "tags"]);
+    assert!(
+        tags.contains("impl super :: super :: den :: nest :: TokensClient {"),
+        "{tags}"
+    );
+    let parent = |service: &str| {
+        format!(
+            "mod burrow {{
+                pub mod den {{
+                    {}
+                    {resource}
+                }}
+            }}",
+            nest(service, "super::Token")
+        )
+    };
+    let den = native(&expanded(package, &parent("pub")), &["den"]);
+    assert!(
+        den.contains("impl super :: den :: nest :: TokensClient {"),
+        "{den}"
+    );
+    assert_eq!(
+        native(&expanded(package, &parent("")), &[]),
+        unsupported(
+            "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `den`, which cannot see it: make the service `Tokens` visible to the module `den`, at least `pub(crate)`"
+        )
+    );
+}
+
 /// What WIT or the bindings rule out of a flags struct is refused on the item: a field that is no
 /// `bool`, no field or more than the component model's 32, a generic parameter, two fields of one
 /// WIT name, an option on the attribute, a function of a name the bindings call or the author's own
@@ -9257,7 +9381,7 @@ fn a_contribution_joins_the_hook_natively() {
         "pub fn orb (providers : Providers) -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"book\" , 1u32 , providers) }",
         "pub struct Providers { # [doc = \" The Orb that declares the hook `example:admission/guard@1.0.0`, which this Orb contributes to.\"] pub guard : :: tembra :: Provider , }",
         "let requirement = entry (& mut requirements , & providers . guard) ? ; requirement . hooks . insert (:: std :: string :: String :: from (\"example:admission/guard@1.0.0\")) ;",
-        "let orb = self :: __TembraRegistry :: < 1 > :: __tembra_contribution_admit (orb , & providers . guard . name , & resources) ; :: core :: result :: Result :: Ok (orb)",
+        "let orb = self :: __TembraRegistry :: < 1 > :: __tembra_contribution_admit (orb , & providers . guard . name , & resources) ? ; :: core :: result :: Result :: Ok (orb)",
         "impl __TembraBoundary for exports :: example :: admission :: guard :: Admission {",
     ] {
         assert!(root.contains(expected), "{expected}\n{root}");
@@ -9265,7 +9389,9 @@ fn a_contribution_joins_the_hook_natively() {
     assert!(!root.contains("__tembra_import"), "{root}");
     let filters = native(&module, &["filters"]);
     for expected in [
-        "pub (crate) fn __tembra_contribution_admit (orb : :: tembra :: Orb , target : & str , resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >) -> :: tembra :: Orb { orb . contribute_portable (target , \"example:admission/guard@1.0.0\" ,",
+        "pub (crate) fn __tembra_contribution_admit (orb : :: tembra :: Orb , target : & str , resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >) -> :: tembra :: Result < :: tembra :: Orb > { :: tembra :: __hooks ! { { :: core :: result :: Result :: Ok (orb . contribute_portable (target , \"example:admission/guard@1.0.0\" ,",
+        // Without the runtime's `hooks`, the error naming the feature, which `orb(..)` answers.
+        "{ { let _ = (orb , target , resources) ; :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: core :: Code :: Unsupported , \"native\" , \"the contribution of `admit` to the hook example:admission/guard@1.0.0 needs the runtime's `hooks`: enable the facade's `hooks` feature in the host that installs this Orb\")) } } }",
         ", - 7i32 , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | __tembra_context : :: tembra :: Context , __tembra_input : :: tembra :: serde_json :: Value | self :: super :: context :: __scoped (__tembra_context . clone () , self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ;",
         "let input = read (__tembra_input) . map_err (| message | { :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }) ? ; let value = admit (input) ;",
         "write (value) . map_err (| message | { :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Result , message) })",

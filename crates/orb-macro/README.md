@@ -93,7 +93,8 @@ mod greeter {
 ```
 
 That guest additionally lists `dlmalloc` with its `global` feature. The macro emits its allocator and trapping
-panic handler only for the Wasm target; a host `cargo check` continues to use `std`. The `no_std`
+panic handler only for the Wasm target; a host `cargo check` continues to use `std`. When the
+facade gets a feature that links `std`, `host` or `contracts`, std's panic handler serves in place of the macro's. The `no_std`
 option selects runtime ownership and does not change the WIT contract. A procedural attribute
 cannot inspect the crate's `#![no_std]`, so the two declarations must agree. `cargo tembra new`
 starts with this explicit freestanding mode.
@@ -1072,7 +1073,16 @@ resource's `#[open]` and `#[close]` functions, is visible to the Orb module: `pu
 at any depth, `pub(super)` one level down only. The macro names such an item through every module
 of its path, from the Orb module, and a WIT resource from its service's module, so each of those
 modules is visible there too: a WIT resource may sit below a private module that also holds its
-service. A `pub use` re-exporting the item past a module hidden there does not help. A name that
+service. A `pub use` re-exporting the item past a module hidden there does not help. Natively, a
+WIT resource's `#[constructor]` and static functions are methods of its service's client, written
+in the resource's module: a resource with one sees that client, so its service and each module of
+the service's path are visible to the resource's module, at least `pub(crate)` where it sits
+elsewhere. Otherwise the module still builds, as a component and natively, and its `orb()` answers
+an error naming them, so only a host that installs the Orb fails. A resource with neither has no
+such rule. As
+for the other visibility rules, the macro counts a `pub(in ..)` path from `crate` as visible
+everywhere and leaves it to the compiler, which then reports the module or the service the
+resource's module cannot see. A name that
 enters the WIT is one across the modules, because the package has one namespace: the services, the
 hooks, the resources and the types a method or a hook mentions; a state that stays out of the WIT
 may repeat its name module by module, as `Balance` does, and a module's own name wins when a method
@@ -1439,7 +1449,8 @@ it reads the hook's input with the codec, runs the author's function and writes 
 It runs in the Orb's root, as a component's contribution does: with the root's resources, its
 imports and the call's `context`, whose `object()` is an empty key and the principal `host`, and
 with no state. The runtime's contributions come with the facade's `hooks` feature, which a host
-that installs such an Orb enables. A [hook declaration](#declaring-a-hook) makes the module's
+that installs such an Orb enables. Without it the module still compiles, and its `orb(..)`
+answers an error with the code `unsupported`, naming the feature. A [hook declaration](#declaring-a-hook) makes the module's
 `orb()` answer an error naming it where the runtime is linked: its `run` is synchronous, and
 natively a method has no fiber to suspend while the kernel runs the hook's contributions, so the
 declaration works in a component build of the module only.
@@ -1654,9 +1665,12 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    component happens to call;
 3. only with the `no_std` option, the freestanding Wasm prelude: `#[global_allocator]` on
    `dlmalloc` and a `#[panic_handler]` that traps, under `#[cfg(target_arch = "wasm32")]`; std
-   guests keep their standard runtime, and host checks require no Wasm target. When the macro
+   guests keep their standard runtime, and host checks require no Wasm target. The panic handler
+   goes through the facade's hidden `__freestanding!`, which drops it when the facade links `std`,
+   through `host` or `contracts`, on wasm32 too: std brings its own. When the macro
    refuses the module of a `no_std` guest, the prelude comes with its error, which is then the
-   only one the compiler reports;
+   only one the compiler reports; when it refuses a `crate = ".."` that names no Rust identifier,
+   the prelude writes its panic handler without the facade, whose name it does not know;
 4. `generate!({ inline: WIT, world, generate_all, runtime_path })`, the official `wit-bindgen`
    macro, called through the facade's re-export of the version whose rules the macro follows,
    with the bindings' runtime reached there too, and the WIT

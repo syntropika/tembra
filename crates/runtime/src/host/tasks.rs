@@ -113,7 +113,18 @@ impl Host {
             let host = self.clone();
             let receive = self.spawn(async move {
                 let _guard = guard;
-                if let Err(error) = start(authority).await
+                // A task that panics fails as one that returns an error does.
+                let ended = std::panic::AssertUnwindSafe(async move { start(authority).await })
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Error::new(
+                            core::Code::Unavailable,
+                            "callback",
+                            "native callback panicked",
+                        ))
+                    });
+                if let Err(error) = ended
                     && !signal.is_cancelled()
                 {
                     host.0.errors.borrow_mut().push(error);
