@@ -1579,9 +1579,10 @@ fn a_component_build_refuses_a_newtype_only_try_from_makes() {
 /// A build for wasm32 is a component whatever the facade's features. A guest gets `host` when its
 /// `tembra` keeps the default features, or from another crate of the build; its component keeps the
 /// bindings' `context` all the same, and answers each call as the guest built without `host` does,
-/// where the native `context` would find no call to read and trap the revision. The host feature
-/// fixture is built both ways into the fixtures' target directory, where `just test-orb-macro`
-/// built their components.
+/// where the native `context` would find no call to read and trap the revision. A `no_std` guest
+/// with `host` links as a component too, on the panic handler of the std the facade links. The
+/// host feature fixture is built both ways, std and without, into the fixtures' target directory,
+/// where `just test-orb-macro` built their components.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
 fn a_wasm32_guest_with_the_host_feature_answers_as_a_component() {
@@ -1592,7 +1593,13 @@ fn a_wasm32_guest_with_the_host_feature_answers_as_a_component() {
         .expect("the fixtures' target directory");
     let manifest =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/host-feature-fixture/Cargo.toml");
-    let answers = [&[][..], &["--features", "host"]].map(|features| {
+    let answers = [
+        &[][..],
+        &["--features", "host"],
+        &["--features", "no-std"],
+        &["--features", "no-std,host"],
+    ]
+    .map(|features| {
         let output = std::process::Command::new(env!("CARGO"))
             .args([
                 "rustc",
@@ -1658,6 +1665,8 @@ fn a_wasm32_guest_with_the_host_feature_answers_as_a_component() {
     });
     assert_eq!(answers[0], [Ok(json!("alice")), Ok(json!("alice"))]);
     assert_eq!(answers[1], answers[0], "built with `host`");
+    assert_eq!(answers[2], answers[0], "built without std");
+    assert_eq!(answers[3], answers[0], "built without std, with `host`");
 }
 
 /// The fixtures' target directory, where `just test-orb-macro` built their components, and the

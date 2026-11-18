@@ -98,7 +98,7 @@ fn expansion(
         Ok(tokens) => tokens,
         Err(error) => {
             let error = error.to_compile_error();
-            let prelude = freestanding.then(prelude);
+            let prelude = freestanding.then(|| prelude(&facade_of(&attribute)));
             quote! { #error #prelude }
         }
     }
@@ -157,19 +157,44 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
 
 /// The runtime prelude of a `no_std` component: the allocator and a panic handler that traps, for
 /// the Wasm target. On the host the crate builds with std, so `cargo check` and rust-analyzer
-/// need no Wasm target.
-fn prelude() -> proc_macro2::TokenStream {
+/// need no Wasm target. The panic handler goes through the facade, named `facade`, which drops it
+/// when the facade links std, with `host`: std's would then be a second.
+fn prelude(facade: &Ident) -> proc_macro2::TokenStream {
     quote! {
         #[cfg(target_arch = "wasm32")]
         #[global_allocator]
         static __TEMBRA_ALLOCATOR: ::dlmalloc::GlobalDlmalloc = ::dlmalloc::GlobalDlmalloc;
 
-        #[cfg(target_arch = "wasm32")]
-        #[panic_handler]
-        fn __tembra_panic(_: &::core::panic::PanicInfo<'_>) -> ! {
-            ::core::arch::wasm32::unreachable()
+        ::#facade::__freestanding! {
+            #[cfg(target_arch = "wasm32")]
+            #[panic_handler]
+            fn __tembra_panic(_: &::core::panic::PanicInfo<'_>) -> ! {
+                ::core::arch::wasm32::unreachable()
+            }
         }
     }
+}
+
+/// The facade's name that the attribute's `crate = ".."` gives, read from the tokens, so that an
+/// attribute the macro refuses still has it; `tembra` without one.
+fn facade_of(attribute: &proc_macro2::TokenStream) -> Ident {
+    let tokens: Vec<_> = attribute.clone().into_iter().collect();
+    tokens
+        .windows(3)
+        .find_map(|window| match window {
+            [
+                proc_macro2::TokenTree::Ident(key),
+                proc_macro2::TokenTree::Punct(equals),
+                proc_macro2::TokenTree::Literal(literal),
+            ] if key == "crate" && equals.as_char() == '=' => {
+                syn::parse_str::<LitStr>(&literal.to_string())
+                    .ok()?
+                    .parse::<Ident>()
+                    .ok()
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| Ident::new("tembra", Span::call_site()))
 }
 
 /// The attribute options.
@@ -3772,7 +3797,7 @@ fn component(
             #with
         });
     };
-    let runtime_prelude = options.no_std.then(prelude);
+    let runtime_prelude = options.no_std.then(|| prelude(&options.facade()));
     // A component cannot serve a native-only module, so its build refuses the module at each
     // marker, every one at once; a host build compiles none of these errors.
     let refusals = analysis.native_only.iter().map(|NativeOnly { name, span }| {

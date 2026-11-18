@@ -11,9 +11,16 @@ publish = false
 # from another crate of the build: a build for wasm32 is a component all the same, which
 # `executor-wasm/tests/orb_macro_runtime.rs` checks.
 host = ["tembra/host"]
+# The crate without std on wasm32, on the module's freestanding runtime: with `host`, the facade
+# links std, whose panic handler then serves in place of the module's.
+no-std = ["dep:dlmalloc"]
 
 [dependencies]
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
+dlmalloc = { version = "0.2.12", features = ["global"], optional = true }
+
+[package.metadata.cargo-machete]
+ignored = ["dlmalloc"]
 
 # The runtime fixture's, so that a build shares its dependencies in the fixtures' target directory.
 [profile.release]

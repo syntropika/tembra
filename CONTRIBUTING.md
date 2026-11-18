@@ -34,9 +34,8 @@ Give every production method a short doc sentence that states its purpose or gua
 A change keeps each invariant below. Each one names the tests that guard it, and the recipe in parentheses runs them. A change that adds a case to an invariant adds a test for it. A case that is known to break an invariant is named under it, with the pull request that fixes it, which removes the line.
 
 - A build for wasm32 is a component, whatever the facade's features. A guest gets the facade's `host` feature when its `tembra` keeps the default features, or when another crate of the build enables it. Its component still answers each call as the guest built without `host` does.
-  - `a_wasm32_guest_with_the_host_feature_answers_as_a_component` in `crates/executor-wasm/tests/orb_macro_runtime.rs`, which builds `crates/orb-macro/host-feature-fixture` both ways (`just test-orb-macro`).
+  - `a_wasm32_guest_with_the_host_feature_answers_as_a_component` in `crates/executor-wasm/tests/orb_macro_runtime.rs`, which builds `crates/orb-macro/host-feature-fixture` both ways, std and `no_std` (`just test-orb-macro`).
   - `the_facade_checks_for_wasm32_with_macros` in `crates/orb-macro/tests/configurations.rs` (`just test-configurations`).
-  - Known to break it: a `no_std` guest built for wasm32 with `host` fails with E0152, a duplicate `panic_impl`. #8 fixes it.
 - A part that the native side does not support never fails a build, whatever runtime features the build enables. The module compiles, and its `orb()` names the part. Only a host that installs the Orb fails.
   - `crates/orb-macro/native-fixture/tests/unsupported.rs` (`just test-native-fixture`).
   - The native tests of the modules `gatehouse`, `system` and `io`, and of `notebook` with its `archive` feature, in `crates/orb-macro/runtime-fixture/src` (`just test-orb-macro`).

@@ -93,7 +93,8 @@ mod greeter {
 ```
 
 That guest additionally lists `dlmalloc` with its `global` feature. The macro emits its allocator and trapping
-panic handler only for the Wasm target; a host `cargo check` continues to use `std`. The `no_std`
+panic handler only for the Wasm target; a host `cargo check` continues to use `std`. When the
+facade gets `host`, it links `std`, whose panic handler then serves in place of the macro's. The `no_std`
 option selects runtime ownership and does not change the WIT contract. A procedural attribute
 cannot inspect the crate's `#![no_std]`, so the two declarations must agree. `cargo tembra new`
 starts with this explicit freestanding mode.
@@ -1654,7 +1655,9 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    component happens to call;
 3. only with the `no_std` option, the freestanding Wasm prelude: `#[global_allocator]` on
    `dlmalloc` and a `#[panic_handler]` that traps, under `#[cfg(target_arch = "wasm32")]`; std
-   guests keep their standard runtime, and host checks require no Wasm target. When the macro
+   guests keep their standard runtime, and host checks require no Wasm target. The panic handler
+   goes through the facade's hidden `__freestanding!`, which drops it when the facade's `host`
+   links `std`, on wasm32 too: std brings its own. When the macro
    refuses the module of a `no_std` guest, the prelude comes with its error, which is then the
    only one the compiler reports;
 4. `generate!({ inline: WIT, world, generate_all, runtime_path })`, the official `wit-bindgen`

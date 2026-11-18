@@ -101,3 +101,30 @@ macro_rules! __guest {
 __guest! {
     const _: () = assert!(!cfg!(feature = "host") || cfg!(target_arch = "wasm32"));
 }
+
+/// Expand the input only when this crate does not link std, without its `host` feature.
+///
+/// `#[tembra::orb(no_std)]` wraps the panic handler of its runtime prelude in it, by the absolute
+/// path: with `host`, this crate links std, whose panic handler a second one would duplicate, on
+/// wasm32 too. The macro reads this crate's features, which Cargo unifies across a build.
+#[cfg(not(feature = "host"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __freestanding {
+    ($($item:tt)*) => {
+        $($item)*
+    };
+}
+
+/// With `host`, the input is dropped; the other definition describes the macro.
+#[cfg(feature = "host")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __freestanding {
+    ($($item:tt)*) => {};
+}
+
+// A build with `host` compiles this only because the macro drops it.
+__freestanding! {
+    const _: () = assert!(!cfg!(feature = "host"));
+}
