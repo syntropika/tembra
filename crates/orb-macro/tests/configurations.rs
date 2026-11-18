@@ -110,53 +110,47 @@ fn the_other_targets_of_a_library_leave_its_contract_unchanged() {
     }
 }
 
-/// The facade compiles natively with no feature and with each feature alone, so each feature
-/// enables whatever its items need. `wasm` is left out: it brings Wasmtime, and the examples'
-/// hosts build the facade with it alone.
+/// The facade's manifest.
+const FACADE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tembra/Cargo.toml");
+
+/// Check the facade without its default features, with `features` and `args`, and return Cargo's
+/// output, under the command line, when it fails.
+fn check_facade(features: &str, args: &[&str]) -> Result<(), String> {
+    let check = ["check", "--no-default-features", "--features", features];
+    cargo(Path::new(FACADE), &[&check[..], args].concat())
+        .map_err(|errors| format!("--features '{features}' {}\n{errors}", args.join(" ")))
+}
+
+/// The facade compiles natively with no feature and with each feature of its manifest alone, so
+/// each feature enables whatever its items need. Only `default` is left out: it is `host`.
 #[test]
 #[ignore = "runs cargo on the facade: just test-configurations"]
 fn the_facade_checks_with_each_feature_alone() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tembra/Cargo.toml");
-    let features = [
-        "",
-        "host",
-        "macros",
-        "contracts",
-        "authoring",
-        "rpc",
-        "hooks",
-        "subscriptions",
-        "views",
-        "telemetry",
-    ];
-    let failed = features
-        .into_iter()
-        .filter_map(|feature| {
-            cargo(
-                &manifest,
-                &["check", "--no-default-features", "--features", feature],
-            )
-            .err()
-            .map(|errors| format!("--features '{feature}'\n{errors}"))
-        })
+    let manifest: toml::Table = std::fs::read_to_string(FACADE).unwrap().parse().unwrap();
+    let features = manifest["features"]
+        .as_table()
+        .expect("the facade's features")
+        .keys()
+        .map(String::as_str)
+        .filter(|feature| *feature != "default");
+    let failed = std::iter::once("")
+        .chain(features)
+        .filter_map(|feature| check_facade(feature, &[]).err())
         .collect::<Vec<_>>();
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
-/// The facade compiles for wasm32 with `macros` alone, as a guest's build compiles it.
+/// The facade compiles for wasm32 with `macros`, as a guest's build compiles it, and with `host`
+/// too, which a guest gets when another crate of the build enables it. `__host!` must drop what it
+/// wraps there, or the facade's assertion inside it, that the build is not for wasm32, fails.
 #[test]
 #[ignore = "runs cargo on the facade: just test-configurations"]
 fn the_facade_checks_for_wasm32_with_macros() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tembra/Cargo.toml");
-    let args = [
-        "check",
-        "--no-default-features",
-        "--features",
-        "macros",
-        "--target",
-        "wasm32-unknown-unknown",
-    ];
-    if let Err(errors) = cargo(&manifest, &args) {
-        panic!("{errors}");
-    }
+    let failed = ["macros", "macros,host"]
+        .into_iter()
+        .filter_map(|features| {
+            check_facade(features, &["--target", "wasm32-unknown-unknown"]).err()
+        })
+        .collect::<Vec<_>>();
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }

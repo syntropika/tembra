@@ -248,7 +248,7 @@ Then run the recipe of the area. Each area below names its crates and its recipe
   builds it the way users do: `just test-orb-examples` for the examples,
   `just test-configurations` for the features and targets that only Cargo sets up,
   `just test-orb-parity` for the answers of native and compiled Orbs, and
-  `just test-orb-both-ways` for each Orb crate built the other way.
+  `just test-orb-both-ways` for each Orb crate built, or checked, the other way.
 - The runtime and the executor: `tembra-core`, `tembra-runtime`, `tembra` and
   `tembra-executor-wasm`. Run `just test-hook-lifecycle`, and `just test-no-hooks` when you change
   feature gates or shared bridge operations.
@@ -282,7 +282,7 @@ Then run the recipe of the area. Each area below names its crates and its recipe
   Orb modules, and the facade with each feature alone;
 - `just test-orb-both-ways`, which builds each Orb crate the way the other parts do not: the
   examples' Orb crates, the async and host feature fixtures and the runtime fixture's default
-  module natively, with the facade's `host`, and the native fixture for wasm32.
+  module natively, with the facade's `host`. It checks the native fixture for wasm32.
 
 `just ci` does not run `just test-wasm-acceptance`, which CI runs in its `acceptance` job. That
 recipe qualifies the isolated orbs on native Rust, Node and Chrome. It needs the built interpreter,

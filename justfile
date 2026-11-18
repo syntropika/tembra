@@ -204,39 +204,55 @@ test-orb-parity:
 test-configurations:
     cargo test --locked -p tembra-orb-macro --test configurations -- --ignored
 
-# Build each Orb crate of the examples and of the macro's fixtures the way the other recipes do not: natively, or for wasm32.
+# Build each Orb crate of the examples and of the macro's fixtures the way the other recipes do not: natively, or, the native fixture, checked for wasm32. Every step runs; the recipe then fails, naming each step that failed.
 test-orb-both-ways:
     #!/usr/bin/env bash
     set -euo pipefail
     target="${CARGO_TARGET_DIR:-target}/orb-both-ways"
     hosts=crates/orb-macro/config-fixtures/native-hosts
+    native_hosts="tembra-config-native-host tembra-config-native-hooks-host"
+    failed=""
+    # Run the command after the step's name, and note the step when it fails.
+    step() {
+        echo "== $1"
+        if ! "${@:2}"; then
+            failed+="  $1"$'\n'
+        fi
+    }
     # Natively, the Orb crates of the examples, as the fixture's native hosts link them: with the
     # facade's `host`, and `hooks` where a module contributes to a hook. Each host builds on its
     # own, so that Cargo unifies the features of its Orb crates only, and names every crate that
     # fails.
-    for host in tembra-config-native-host tembra-config-native-hooks-host; do
-        echo "== $host"
-        cargo build --locked --keep-going --manifest-path "$hosts/Cargo.toml" -p "$host" --target-dir "$target"
+    for host in $native_hosts; do
+        step "$host" cargo build --locked --keep-going --manifest-path "$hosts/Cargo.toml" -p "$host" --target-dir "$target"
     done
-    # A native host links each Orb crate of the examples but those native already: the hosts, the
-    # hook's provider written by hand, and the Orb crates the native example's host links.
-    for manifest in examples/rust-orb-*/*/Cargo.toml; do
-        crate="${manifest%/Cargo.toml}"
-        case "$crate" in
-            */host | examples/rust-orb-hook-contribution/gate | examples/rust-orb-native/*) ;;
-            *)
-                if ! grep -q "\"../../../../../$crate\"" "$hosts"/*/Cargo.toml; then
-                    echo "No native host of $hosts links $crate" >&2
-                    exit 1
-                fi
-                ;;
-        esac
-    done
+    # The native hosts link each Orb crate of the examples but those native already: the hosts, the
+    # hook's provider written by hand, and the Orb crates the native example's host links. Cargo
+    # lists the hosts' normal dependencies, which a commented-out entry or a dev-dependency is not.
+    each_crate_linked() {
+        local linked crate status=0
+        linked="$(for host in $native_hosts; do
+            cargo tree --locked --manifest-path "$hosts/Cargo.toml" -p "$host" -e normal --depth 1 --prefix none --format '{p}' || exit 1
+        done)" || return 1
+        for manifest in examples/rust-orb-*/*/Cargo.toml; do
+            crate="${manifest%/Cargo.toml}"
+            case "$crate" in
+                */host | examples/rust-orb-hook-contribution/gate | examples/rust-orb-native/*) ;;
+                *)
+                    if ! grep -qF "($(pwd -P)/$crate)" <<< "$linked"; then
+                        echo "No native host of $hosts links $crate" >&2
+                        status=1
+                    fi
+                    ;;
+            esac
+        done
+        return "$status"
+    }
+    step "a native host links each Orb crate of the examples" each_crate_linked
     # Natively, the async and host feature fixtures, whose `host` feature puts the runtime in their
     # lockfiles. Not the parity fixture, which `just test-orb-parity` builds both ways.
     for fixture in async-fixture host-feature-fixture; do
-        echo "== crates/orb-macro/$fixture natively"
-        cargo build --locked --manifest-path "crates/orb-macro/$fixture/Cargo.toml" --features host --target-dir "$target"
+        step "crates/orb-macro/$fixture natively" cargo build --locked --manifest-path "crates/orb-macro/$fixture/Cargo.toml" --features host --target-dir "$target"
     done
     # Natively, the runtime fixture's default module `guest`, std and `no-std`, with the facade's
     # `host` through the fixture's `native` feature. `just test-orb-macro` builds `guest` only as a
@@ -244,14 +260,16 @@ test-orb-both-ways:
     # `guest`, but `flagged`, whose native build fails today: see the native fixture's
     # `tests/flags.rs`.
     for features in native native,no-std; do
-        echo "== crates/orb-macro/runtime-fixture natively, with $features"
-        cargo build --locked --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --features "$features" --target-dir "$target"
+        step "crates/orb-macro/runtime-fixture natively, with $features" cargo build --locked --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --features "$features" --target-dir "$target"
     done
     # For wasm32, the native fixture, which its tests build natively. Checked, not built: two Orbs
     # of one crate export one interface of the kernel, whose symbols the crate would define twice;
     # see #10's item 1.2.
-    echo "== crates/orb-macro/native-fixture for wasm32"
-    cargo check --locked -p tembra-orb-native-fixture --target wasm32-unknown-unknown --target-dir "$target"
+    step "crates/orb-macro/native-fixture checked for wasm32" cargo check --locked -p tembra-orb-native-fixture --target wasm32-unknown-unknown --target-dir "$target"
+    if [ -n "$failed" ]; then
+        printf 'These steps failed:\n%s' "$failed" >&2
+        exit 1
+    fi
 
 check: fmt-check check-ci-parts build-node build-wasm build-sdk
     bun run typecheck

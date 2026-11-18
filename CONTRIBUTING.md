@@ -57,7 +57,7 @@ A change keeps each invariant below. Each one names the tests that guard it, and
   - `closing_the_host_releases_its_observer` in `crates/tembra/tests/call_context.rs` (`cargo test --locked -p tembra`).
 - Every option that the macro's guide, `crates/orb-macro/README.md`, documents has a test that builds it, both ways where the guide promises both.
   - The modules of `crates/orb-macro/runtime-fixture` (`just test-orb-macro`): the default one, `guest`, as a component only; each other one, under its feature, as a component, whose test calls it, and natively, where its native tests call it. The native build of `flagged` fails on `main`, so its native test runs from `crates/orb-macro/native-fixture/tests/flags.rs`, ignored until #10. `just test-orb-both-ways` builds `guest` natively.
-  - Each Orb crate of the examples and the fixtures, built the way the other recipes do not (`just test-orb-both-ways`).
+  - Each Orb crate of the examples and the fixtures, built the way the other recipes do not, and the native fixture, checked for wasm32 (`just test-orb-both-ways`).
   - The `cargo tembra` commands, run on the crates they write (`just test-cargo-tembra`).
 - The full verification leaves the tree as it found it: no modified file, and no new file that `.gitignore` does not list.
   - `just check-clean-tree` ends each job of CI. `just ci` compares the tree after its parts with the tree before them.
