@@ -2437,12 +2437,18 @@ async fn invoke(
         arguments: ownership,
     } = call;
     let ty = function.ty(&*store);
+    if ty.results().len() > 1 {
+        return Ok(Err("component function has more than one result".into()));
+    }
+    // Arguments that do not match the export's parameters are the caller's, as natively.
     let Some(args) = arguments.as_array() else {
-        return Ok(Err("component arguments require a tuple".into()));
+        return Ok(Err(arguments::mismatch(
+            "component arguments require a tuple",
+        )));
     };
     let lent = usize::from(roles.receiver.is_some());
-    if args.len() + lent != ty.params().len() || ty.results().len() > 1 {
-        return Ok(Err("component function arity differs".into()));
+    if args.len() + lent != ty.params().len() {
+        return Ok(Err(arguments::mismatch("component function arity differs")));
     }
     let mut lowered = Vec::with_capacity(ty.params().len());
     // The lent resource must still be held for this environment with exactly this type:
@@ -2459,7 +2465,7 @@ async fn invoke(
     }
     let prepared = match arguments::lower(store, &ty, args, lent, ownership)? {
         Ok(prepared) => prepared,
-        Err(error) => return Ok(Err(error.into())),
+        Err(failed) => return Ok(Err(failed)),
     };
     lowered.extend(prepared.values);
     let accepted = prepared.accepted;

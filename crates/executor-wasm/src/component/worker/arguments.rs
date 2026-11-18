@@ -6,6 +6,15 @@ pub(super) struct Prepared {
     pub(super) accepted: Option<oneshot::Sender<()>>,
 }
 
+/// The refusal of arguments that do not match the export's parameters: the caller's, answered
+/// with `invalid/arguments` as a native host answers it.
+pub(super) fn mismatch(message: impl Into<String>) -> Failed {
+    Failed::Coded(tembra::Error::invalid(
+        tembra::core::Reason::Arguments,
+        message.into(),
+    ))
+}
+
 /// Refusals before the first handle is consumed leave a healthy Store usable. After that
 /// point a lowering failure is a physical Store failure and must quarantine the revision.
 pub(super) fn lower(
@@ -14,7 +23,7 @@ pub(super) fn lower(
     args: &[Value],
     lent: usize,
     ownership: Option<crate::worker::arguments::Arguments>,
-) -> wasmtime::Result<std::result::Result<Prepared, String>> {
+) -> wasmtime::Result<std::result::Result<Prepared, Failed>> {
     let mut lowered = Vec::with_capacity(args.len());
     let (resources, accepted) = match ownership {
         Some(arguments) => (arguments.resources, Some(arguments.accepted)),
@@ -25,7 +34,10 @@ pub(super) fn lower(
     let mut used = BTreeSet::new();
     let mut physical = BTreeSet::new();
     for ((_, ty), value) in ty.params().skip(lent).zip(args) {
+        // A refused attachment is the executor's; data that does not lower is the caller's.
+        let mut attachment = false;
         let checked = values::lower_with(ty, value, &mut |expected, value| {
+            attachment = true;
             let index =
                 slot(value).ok_or_else(|| crate::failure("owned argument names no attachment"))?;
             if !used.insert(index) {
@@ -65,10 +77,13 @@ pub(super) fn lower(
                     }
                 }
             }
+            attachment = false;
             Ok(Val::Bool(false))
         });
-        if let Err(error) = checked {
-            return Ok(Err(error.to_string()));
+        match checked {
+            Err(error) if attachment => return Ok(Err(error.to_string().into())),
+            Err(error) => return Ok(Err(mismatch(error.message))),
+            Ok(_) => {}
         }
     }
     if used.len() != resources.len() {

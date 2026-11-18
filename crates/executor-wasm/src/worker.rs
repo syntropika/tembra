@@ -78,6 +78,14 @@ impl Failed {
             Self::Coded(error) => error.to_string(),
         }
     }
+
+    /// The error a call answers: a coded refusal keeps its code, and any text is the executor's.
+    pub(crate) fn error(self) -> tembra::Error {
+        match self {
+            Self::Coded(error) => error,
+            Self::Text(text) | Self::Host(text) => failure(text),
+        }
+    }
 }
 
 impl From<String> for Failed {
@@ -1073,10 +1081,7 @@ impl Drop for Count {
 
 /// Parse guest output only after preserving boundary diagnostics.
 fn decode(result: std::result::Result<String, Failed>) -> Result<Value> {
-    let text = result.map_err(|failed| match failed {
-        Failed::Coded(error) => error,
-        Failed::Text(text) | Failed::Host(text) => failure(text),
-    })?;
+    let text = result.map_err(Failed::error)?;
     serde_json::from_str(&text).map_err(failure)
 }
 

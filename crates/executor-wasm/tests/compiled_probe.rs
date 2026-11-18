@@ -382,6 +382,78 @@ fn an_infinite_import_argument_is_not_a_result_refusal() {
     assert_eq!(engine.instances(), 0);
 }
 
+/// A component whose `ratio` divides its arguments, so `ratio(1, 0)` returns an infinite float.
+const RATIO_WIT: &str = r#"package example:ratio@1.0.0;
+interface checks { ratio: func(a: f64, b: f64) -> f64; }
+world provider { export checks; }"#;
+
+const RATIO_MODULE: &str = r#"(module
+  (func (export "example:ratio/checks@1.0.0#ratio") (param f64 f64) (result f64)
+    local.get 0 local.get 1 f64.div))"#;
+
+/// A compiled Orb served through a platform port answers the codes a native host answers: a result
+/// the portable profile cannot carry is `invalid/result`, and arguments that do not match the
+/// function's parameters are `invalid/arguments`. Neither retires the Store.
+#[test]
+fn a_platform_port_answers_the_native_codes() {
+    use tembra_executor_wasm::PortEvent;
+
+    let engine = Engine::new(Limits::default()).unwrap();
+    let artifact = tembra_contracts::Artifact::decode(&components::encode(
+        RATIO_WIT,
+        "provider",
+        RATIO_MODULE,
+        "ratio",
+        &Default::default(),
+    ))
+    .unwrap();
+    let port = engine
+        .open_port(
+            &artifact,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+    port.declare(
+        json!({"kind":"create", "environment":1, "service":"checks"}),
+        |_, _| panic!("the provider declares no imports"),
+    )
+    .unwrap();
+    let ratio = artifact
+        .contract
+        .bind("example:ratio/checks@1.0.0", "ratio", true)
+        .unwrap();
+    let call = |args: Value| {
+        let packet = json!({"kind":"invoke", "environment":1, "function":ratio, "args":args});
+        let (ticket, events) = port.begin(packet.to_string()).unwrap();
+        let PortEvent::Complete(result) = events.receive().unwrap() else {
+            panic!("the provider calls no imports")
+        };
+        ticket.finish().unwrap();
+        result
+    };
+    for (args, reason) in [
+        (json!([1, 0]), "result"),
+        (json!([0, 0]), "result"),
+        (json!(["one", 1]), "arguments"),
+        (json!([1]), "arguments"),
+        (json!([1, 2, 3]), "arguments"),
+        (json!(null), "arguments"),
+    ] {
+        let error = call(args.clone()).unwrap_err();
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            (tembra::Code::Invalid, reason),
+            "{args}: {error}"
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(&call(json!([1, 4])).unwrap()).unwrap(),
+        json!(0.25)
+    );
+}
+
 /// A monotonic clock whose reading holds the Store's thread for a second, as a busy machine can.
 struct Holding;
 
