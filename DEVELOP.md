@@ -284,6 +284,10 @@ Then run the recipe of the area. Each area below names its crates and its recipe
   examples' Orb crates, the async and host feature fixtures and the runtime fixture's default
   module natively, with the facade's `host`, and the native fixture for wasm32.
 
+`just ci` does not run `just test-wasm-acceptance`, which CI runs in its `acceptance` job. That
+recipe qualifies the isolated orbs on native Rust, Node and Chrome. It needs the built interpreter,
+the compiled fixtures and Chrome; see [Isolated orbs](#isolated-orbs).
+
 `just ci` also fails when the parts change the tree: a modified or deleted file, or a new file
 that `.gitignore` does not list. It compares the tree after the parts with the tree before them,
 so the edits you made first do not count. The examples are the exception.
@@ -294,8 +298,7 @@ builds write. Any other edit under `examples/` must be staged or committed. Comm
 
 CI runs each part in a job of its own, side by side, so that each job fits its timeout.
 Each job starts from a clean checkout and ends with `just check-clean-tree`, which fails on any
-such change. So does the `acceptance` job that runs beside them; see
-[Isolated orbs](#isolated-orbs).
+such change. So does the `acceptance` job that runs beside them.
 A new part is a recipe in `ci` and a line in the job matrix of the
 [quality workflow](.github/workflows/quality.yml). `just check` runs `just check-ci-parts`, which
 fails when the two differ.
