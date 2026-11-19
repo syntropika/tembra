@@ -565,3 +565,140 @@ describe("a root resource that does not open", () => {
     await refused(owner, () => owner.install(definition), "probe", events, failed);
   });
 });
+
+/** The world, whose root owns resources when `root` says so. */
+const sockets = (root: boolean) => `package test:sockets@1.0.0;
+interface probe {
+  /// The handle of this object's \`y\`.
+  mine: func() -> u32;
+  /// The handle of the root's \`a\`.
+  shared: func() -> u32;
+}
+world sockets {
+  import tembra:guest/resources@1.0.0;
+  ${root ? "export tembra:guest/resources-init@1.0.0;" : ""}
+  export tembra:guest/service-resources-init@1.0.0;
+  export probe;
+}`;
+
+const PROBE = "test:sockets/probe@1.0.0";
+
+/**
+ * A compiled Orb whose root owns `a` when `root` says so and each object of whose service owns
+ * `x`, which depends on `a` (on nothing without a root resource), and `y`, which depends on `x`.
+ * It records each open and close in `events` and hands out handles in opening order; when `down`
+ * says so, the `y` that would get the handle 5 answers `err("down")` instead.
+ */
+const socketsOrb = async (events: string[], root = true, down = false): Promise<Compiled> => ({
+  name: "sockets",
+  contract: await contract(sockets(root), "sockets"),
+  component: ({ "tembra:guest/resources@1.0.0": resources }) => {
+    let next = 0;
+    const open = (name: string) => {
+      if (down && name === "y" && next === 4) throw refusal("down");
+      events.push(`open ${name}`);
+      return ++next;
+    };
+    const close = (name: string) => void events.push(`close ${name}`);
+    return {
+      ...(root && {
+        "tembra:guest/resources-init@1.0.0": {
+          declare: () => [{ name: "a", version: 1, dependencies: [] }],
+          open,
+          close,
+        },
+      }),
+      "tembra:guest/service-resources-init@1.0.0": {
+        declare: (service: string) =>
+          service === PROBE
+            ? [
+                { name: "x", version: 1, dependencies: root ? ["a"] : [] },
+                { name: "y", version: 1, dependencies: ["x"] },
+              ]
+            : [],
+        open: (service: string, name: string) => {
+          if (service !== PROBE) throw new Error(`no resources for ${service}`);
+          return open(name);
+        },
+        close: (service: string, name: string) => {
+          if (service !== PROBE) throw new Error(`no resources for ${service}`);
+          close(name);
+        },
+      },
+      [PROBE]: {
+        mine: () => resources!.read("y"),
+        shared: () => resources!.read("a"),
+      },
+    };
+  },
+});
+
+/** Wait until `events` holds `count` entries. */
+const recorded = async (events: readonly string[], count: number) => {
+  for (let turn = 0; events.length < count && turn < 200; turn++)
+    await new Promise((settled) => setTimeout(settled, 5));
+};
+
+describe("resources of a compiled Orb's service objects", () => {
+  type Probe = { mine(): Promise<number>; shared(): Promise<number>; release(): void };
+  const get = async (owner: Host, key: string) =>
+    (await owner.get(`sockets::${PROBE}`, key)) as unknown as Probe;
+
+  test("each object opens its own after the root's and closes them before", async () => {
+    const events: string[] = [];
+    const owner = host([await socketsOrb(events)]);
+    try {
+      await owner.install({ artifact: Uint8Array.of(0) });
+      const one = await get(owner, "one");
+      const two = await get(owner, "two");
+      expect(events).toEqual(["open a", "open x", "open y", "open x", "open y"]);
+      // The handles are the opening order: `a` is 1; `one` opened 2 and 3, `two` 4 and 5.
+      expect(await one.mine()).toBe(3);
+      expect(await two.mine()).toBe(5);
+      expect(await one.shared()).toBe(1);
+      expect(await two.shared()).toBe(1);
+      one.release();
+      await recorded(events, 7);
+      expect(events.slice(5)).toEqual(["close y", "close x"]);
+      expect(await two.mine()).toBe(5);
+      two.release();
+    } finally {
+      await owner.close();
+    }
+    expect(events.slice(7)).toEqual(["close y", "close x", "close a"]);
+    expect(owner.errors()).toEqual([]);
+  });
+
+  test("a service owns resources without the root", async () => {
+    const events: string[] = [];
+    const owner = host([await socketsOrb(events, false)]);
+    try {
+      await owner.install({ artifact: Uint8Array.of(0) });
+      const one = await get(owner, "one");
+      expect(await one.mine()).toBe(2);
+      one.release();
+    } finally {
+      await owner.close();
+    }
+    expect(events).toEqual(["open x", "open y", "close y", "close x"]);
+    expect(owner.errors()).toEqual([]);
+  });
+
+  test("an object whose open answers an error is not created and closes what opened", async () => {
+    const events: string[] = [];
+    const owner = host([await socketsOrb(events, true, true)]);
+    try {
+      await owner.install({ artifact: Uint8Array.of(0) });
+      const one = await get(owner, "one");
+      await expect(get(owner, "two")).rejects.toThrow("the resource `y` did not open: down");
+      expect(events).toEqual(["open a", "open x", "open y", "open x", "close x"]);
+      expect(await one.mine()).toBe(3);
+      expect(await one.shared()).toBe(1);
+      one.release();
+    } finally {
+      await owner.close();
+    }
+    expect(events.slice(5)).toEqual(["close y", "close x", "close a"]);
+    expect(owner.errors()).toEqual([]);
+  });
+});

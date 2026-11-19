@@ -106,9 +106,12 @@ export function host(components: readonly Compiled[], logs: unknown[] = []): Hos
           orb: name,
           observer: (record) => logs.push(record),
         });
-        // The import objects a generated binding receives, built before instantiation.
+        // The import objects a generated binding receives, built before instantiation; an
+        // interface imported for its types alone has none, as in the browser's execution.
         const imports: Imports = Object.fromEntries(
-          graph.imports.map((entry) => [entry.binding, adapter.kernel.imports(entry.binding)]),
+          graph.imports
+            .filter((entry) => !entry.type_only)
+            .map((entry) => [entry.binding, adapter.kernel.imports(entry.binding)]),
         );
         port.exports = instrument(port, compiled.component(imports, revision)) as never;
         const identity = { name, apiVersion: 1 };

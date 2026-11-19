@@ -11,7 +11,8 @@
  *
  * - While each environment is declared, the root binds the hooks this Orb runs and declares the
  *   resources its component lists, with callback numbers of its own; a service object declares
- *   the state its component describes. The address of each environment is read then.
+ *   the resources and the state its component describes for its service. The address of each
+ *   environment is read then.
  * - The kernel later opens and closes resources through those numbers and, before a reload
  *   adopts a retained state, asks the replacement component to validate it.
  * - Imports issue `state.read`, `state.update`, `resource.read`, the context requests and
@@ -37,6 +38,7 @@ export const STATE = "tembra:guest/state@1.0.0";
 export const STATE_INIT = "tembra:guest/state-init@1.0.0";
 export const RESOURCES = "tembra:guest/resources@1.0.0";
 export const RESOURCES_INIT = "tembra:guest/resources-init@1.0.0";
+export const SERVICE_RESOURCES_INIT = "tembra:guest/service-resources-init@1.0.0";
 export const CONTEXT = "tembra:guest/context@1.0.0";
 
 /** Whether an interface identity belongs to the namespace reserved for the kernel. */
@@ -54,7 +56,7 @@ export interface KernelTable {
   readonly root: KernelTable;
   /** The state handle of a service object that declared state. */
   state?: number;
-  /** The root's resources by name. */
+  /** The resources this environment declared by name: the root's, or a service object's own. */
   readonly resources: Map<string, number>;
   /** The root's hook handles by the import binding that runs each hook. */
   readonly hooks: Map<string, number>;
@@ -76,9 +78,17 @@ export interface KernelAccess {
   readonly principal?: string | undefined;
 }
 
-/** A number this revision issued in a declaration, which the kernel calls back later. */
+/**
+ * A number this revision issued in a declaration, which the kernel calls back later; the opener
+ * and the closer of a service object's resource are told the interface identity of its service.
+ */
 type Numbered =
-  | { readonly kind: "open" | "close"; readonly environment: number; readonly name: string }
+  | {
+      readonly kind: "open" | "close";
+      readonly environment: number;
+      readonly name: string;
+      readonly service?: string;
+    }
   | { readonly kind: "validate"; readonly environment: number; readonly service: string };
 
 /** One function of a kernel interface the component exports, with its conversions. */
@@ -145,7 +155,8 @@ export class ComponentKernel {
     const graph = owner.graph;
     this.#convert = converters(graph);
     for (const entry of graph.exports) {
-      if (entry.contract !== STATE_INIT && entry.contract !== RESOURCES_INIT) continue;
+      if (![STATE_INIT, RESOURCES_INIT, SERVICE_RESOURCES_INIT].includes(entry.contract ?? ""))
+        continue;
       for (const [name, fn] of Object.entries(entry.functions ?? {})) {
         const spelling = graph.javascriptNames[name];
         if (spelling === undefined) throw new Error(`Missing WIT JavaScript name for ${name}`);
@@ -190,8 +201,8 @@ export class ComponentKernel {
   /**
    * Declare one environment's kernel handles while its factory runs, as the native component
    * worker does: the root reads its address, binds the hooks this Orb runs and declares the
-   * resources its component lists; a service object reads its address and declares the state its
-   * component describes for the service interface `contract`.
+   * resources its component lists; a service object reads its address and declares the resources
+   * and the state its component describes for the service interface `contract`.
    */
   async declare(
     environment: ComponentScope,
@@ -222,40 +233,20 @@ export class ComponentKernel {
         const list = this.#exports.get(`${RESOURCES_INIT}#declare`);
         if (!list) return;
         const declared = await this.#call(environment, callback, list, []);
-        if (!Array.isArray(declared)) throw new Error("The resource declarations are not a list");
-        // Each resource follows the resources it depends on, so each dependency's name maps to
-        // the id the kernel already gave it.
-        type Listed = { name?: unknown; version?: unknown; dependencies?: unknown };
-        for (const resource of declared as Listed[]) {
-          const { name, version, dependencies: names } = resource;
-          if (typeof name !== "string") throw new Error("A resource declaration carries no name");
-          if (!isU32(version)) throw new Error("A resource declaration carries no version");
-          if (!Array.isArray(names))
-            throw new Error("A resource declaration carries no dependencies");
-          const dependencies = names.map((dependency: unknown) => {
-            if (typeof dependency !== "string")
-              throw new Error("A resource dependency is not a name");
-            const id = table.resources.get(dependency);
-            if (id === undefined)
-              throw new Error(
-                `the resource \`${name}\` depends on \`${dependency}\`, which the Orb does not declare before it`,
-              );
-            return { id };
-          });
-          const id = execution.sync({
-            operation: "resource.declare",
-            name,
-            version,
-            open: this.#number({ kind: "open", environment: environment.id, name }),
-            close: this.#number({ kind: "close", environment: environment.id, name }),
-            dependencies,
-          });
-          table.resources.set(name, id as number);
-        }
+        this.#declareResources(environment, table, execution, declared, undefined);
         return;
       }
+      // Only the objects of a service the component exports own kernel state and resources.
+      if (contract === undefined) return;
+      // This object's resources: the component lists them for the service, each declared in the
+      // object's own table; the kernel opens them before the object answers a call.
+      const resources = this.#exports.get(`${SERVICE_RESOURCES_INIT}#declare`);
+      if (resources) {
+        const declared = await this.#call(environment, callback, resources, [contract]);
+        this.#declareResources(environment, table, execution, declared, contract);
+      }
       const describe = this.#exports.get(`${STATE_INIT}#declare`);
-      if (!describe || contract === undefined) return;
+      if (!describe) return;
       const declared = (await this.#call(environment, callback, describe, [contract])) as {
         initial?: unknown;
         version?: unknown;
@@ -277,6 +268,52 @@ export class ComponentKernel {
       }) as number;
     } finally {
       callback.cancel();
+    }
+  }
+
+  /**
+   * Declare the resources a component listed for the root (`service` is `undefined`) or for one
+   * object of the service `service`, in the environment's own table, with numbers of this
+   * revision. Each resource follows the resources it depends on, so each dependency's name maps to
+   * a handle the kernel already gave: one of this list, in this table, else one of the root's, in
+   * the root's table, for an object.
+   */
+  #declareResources(
+    environment: ComponentScope,
+    table: KernelTable,
+    execution: ExecutionScope,
+    declared: unknown,
+    service: string | undefined,
+  ): void {
+    if (!Array.isArray(declared)) throw new Error("The resource declarations are not a list");
+    type Listed = { name?: unknown; version?: unknown; dependencies?: unknown };
+    for (const resource of declared as Listed[]) {
+      const { name, version, dependencies: names } = resource;
+      if (typeof name !== "string") throw new Error("A resource declaration carries no name");
+      if (!isU32(version)) throw new Error("A resource declaration carries no version");
+      if (!Array.isArray(names)) throw new Error("A resource declaration carries no dependencies");
+      const dependencies = names.map((dependency: unknown) => {
+        if (typeof dependency !== "string") throw new Error("A resource dependency is not a name");
+        const id = table.resources.get(dependency);
+        if (id !== undefined) return { id };
+        const root = table.root.resources.get(dependency);
+        if (table.root !== table && root !== undefined)
+          return { scope: table.root.scope.id, id: root };
+        throw new Error(
+          `the resource \`${name}\` depends on \`${dependency}\`, which the Orb does not declare before it`,
+        );
+      });
+      const numbered = { environment: environment.id, name, ...(service && { service }) };
+      const id = execution.sync({
+        operation: "resource.declare",
+        name,
+        version,
+        open: this.#number({ kind: "open", ...numbered }),
+        close: this.#number({ kind: "close", ...numbered }),
+        dependencies,
+      });
+      if (table.resources.has(name)) throw new Error("A resource is declared twice");
+      table.resources.set(name, id as number);
     }
   }
 
@@ -386,15 +423,20 @@ export class ComponentKernel {
     return JSON.stringify((snapshot as { value: unknown }).value);
   }
 
-  /** `resource.read`: the handle the component's opener returned for a resource of its root. */
+  /**
+   * `resource.read`: the handle the component's opener returned for a resource of the object the
+   * call runs on, else of its root.
+   */
   #resource(name: string, args: readonly unknown[]): number {
     const { table, execution } = this.#current();
     const [resource] = args;
     if (name !== "read" || args.length !== 1 || typeof resource !== "string")
       throw new Error("unknown kernel resource function");
-    const id = table.root.resources.get(resource);
-    if (id === undefined) throw new Error(`the Orb root declares no resource named ${resource}`);
-    const handle = execution.sync({ operation: "resource.read", scope: table.root.scope.id, id });
+    const owner = [table, table.root].find((each) => each.resources.has(resource));
+    if (!owner)
+      throw new Error(`neither this object nor the Orb root declares a resource named ${resource}`);
+    const id = owner.resources.get(resource)!;
+    const handle = execution.sync({ operation: "resource.read", scope: owner.scope.id, id });
     if (!isU32(handle)) throw new Error("resource handle is not a u32");
     return handle;
   }
@@ -497,8 +539,13 @@ export class ComponentKernel {
       throw new Error("Unknown compiled resource callback");
     const environment = this.owner.scopes.get(numbered.environment);
     if (!environment) throw new Error("The resource's Orb scope is gone");
-    const exported = this.#exports.get(`${RESOURCES_INIT}#${numbered.kind}`);
+    // A service object's callbacks are told its service first, as `declare` was.
+    const { service } = numbered;
+    const exported = this.#exports.get(
+      `${service === undefined ? RESOURCES_INIT : SERVICE_RESOURCES_INIT}#${numbered.kind}`,
+    );
     if (!exported) throw new Error("The component declares no kernel resource callbacks");
+    const named = service === undefined ? [numbered.name] : [service, numbered.name];
     const callback =
       "context" in authority
         ? environment.exchange(authority.context, execution)
@@ -508,7 +555,7 @@ export class ComponentKernel {
       if (numbered.kind === "open") {
         // An opener answers `result<u32, string>`: its error fails this open with the message,
         // so the kernel closes what already opened, as for a native opener.
-        const answer = (await this.#call(environment, callback, exported, [numbered.name])) as {
+        const answer = (await this.#call(environment, callback, exported, named)) as {
           tag?: unknown;
           val?: unknown;
         };
@@ -524,7 +571,7 @@ export class ComponentKernel {
         return handle;
       }
       if (!isU32(value)) throw new Error("resource closer without a handle");
-      await this.#call(environment, callback, exported, [numbered.name, value]);
+      await this.#call(environment, callback, exported, [...named, value]);
       return null;
     } finally {
       callback.cancel();
