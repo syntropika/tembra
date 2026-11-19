@@ -286,13 +286,11 @@ provider is native, is declared by its identity instead, with the directory hold
 `#[hook("example:admission/guard@1.0.0", composition = waterfall)]` under `wit = "../wit"`. The
 hook's types then belong to the consumed package, re-exported under the interface's name,
 `guard::Admission`, and `run` takes and returns them; the macro checks that the callback's shape
-fits the composition. Those are the types of the hook's import, which `run` calls; the world exports
-the hook too, as the portable hook contract requires, and a derived interface takes the copy of the
-types the export holds, another Rust type, so a service's function does not name
-`guard::Admission`: it reports the hook's value in a type of the module, converted from it. A type
-the hook `use`s from an interface the world only imports has no copy of its own: the import and the
-export both name that interface's type, which a service's function names as the hook's module
-does. A state holds the import's types as they are. Which role an interface plays travels in the
+fits the composition. The world imports the hook, which `run` calls, and exports it, as the
+portable hook contract requires; the bindings would spell the hook's types once per side, so the
+macro gives them one copy, the export's: `guard` is the export's module, and the bindings of the
+hook's import, generated apart, name its types. A service's function takes and returns
+`guard::Admission` as a derived interface's type, as `run` does, and a state holds it as it is. Which role an interface plays travels in the
 `tembra:manifest` section next to the contribution priorities, and `cargo tembra build` packages
 it; an Orb declares a hook or contributes to it, never both. The world holds an interface in one
 role: the macro refuses a hook's interface the module also implements or imports plainly, and an
@@ -843,9 +841,6 @@ the type that names it:
 - a type that holds an option of an option, a map or a list of a fixed length anywhere, which the
   runtime refuses in a signature;
 - an object of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
-- a type of a hook the module declares from a consumed package, whose `run` speaks the import's
-  types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook)), but
-  one the hook `use`s from an interface the world only imports, which both name;
 - a type of an implemented interface or of a hook the module contributes to named through the
   bindings' module of its import, `self::example::counters::counter::Tally`, or through a name a
   `use` binds to it, `counter::Tally` after `use super::example::counters::counter;`, the import's
@@ -1754,6 +1749,11 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    remove a copy of the kernel's package an encoded package holds, since it brings that package
    itself. With a WASI import, the WASI packages it needs are nested the same way, from the
    sources `tembra-contracts` bundles.
+   With a hook declared from a consumed package, also `with` on the hook's import, mapped to its
+   export module, so the bindings generate no import of the hook, and a second `generate!` in the
+   hidden module `__tembra_declared`, of a world importing the hooks alone, whose `with` maps the
+   types each hook defines to the export's and the interfaces they use to the first invocation's
+   modules: `run` calls that import, and the hook's types have one Rust type.
    With a state holding a consumed type, also `serde` derives on the bindings of the consumed
    records, variants and enums the state holds, directly or through the types of the module, and
    of those they hold, each by its full name in `additional_type_attributes`, and on no other
@@ -1766,8 +1766,8 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    options, results and tuples too, a resource of the module wrapped into its handle type or taken
    back from it. The bindings name a field or a case from its WIT name, `type_` for `r#type`, so
    each side keeps its own names;
-   `pub use exports::...::guard;` for each contributed hook and each
-   implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
+   `pub use exports::...::guard;` for each contributed hook, each hook declared from a consumed
+   package and each implemented interface, `pub use ...::counter;`, the import module, for each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    but that of a service its `#[create]` builds, by forwarding to the author's functions, hook
@@ -1823,7 +1823,7 @@ the version whose rules the macro follows, and the generated code reaches it the
   Orb's WIT by importing an interface, plainly or by key, implementing one or contributing to a
   hook, and passes the interface's data types on as they are. A view takes the name of the
   interface imported by key, so two interfaces of one name are not both imported by key.
-- A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a newtype, a scalar, a string or a list, of the module's own types, and a newtype, alone or held, converts to each side of the hook's bindings, the export's and the import's copy of the record its field holds. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
+- A hook declared from a consumed package keeps the types of its export, which `run` takes and returns and a derived interface takes too: a method that reports its record returns `guard::Admission`. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a newtype, a scalar, a string or a list, of the module's own types, and a newtype, alone or held, converts to each side of the hook's bindings, the export's and the import's copy of the record its field holds. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`, unless the service's
   `#[create]` builds its objects, natively; the methods of a `#[wit_resource]` struct take
   `&self`, and none takes `&mut self`. Besides a service's state, a resource's fields, the root's

@@ -807,10 +807,9 @@ pub(crate) struct Callback {
     pub passed: Passed,
 }
 
-/// A WIT type as the generated bindings spell it in the hook's import module and in its export
-/// module, which are distinct Rust types.
+/// A WIT type as the generated bindings spell it in the export module of a hook or of an
+/// implemented interface.
 pub(crate) struct Spelled {
-    pub import: String,
     pub export: String,
     /// Where a value of the type holds owned resource handles, if anywhere: an exporter wraps
     /// each of the author's values there into the bindings' handle type.
@@ -1045,11 +1044,9 @@ pub(crate) fn consumed<'a>(
         .map(|identity| {
             let interface = interface(resolve, dir.path(), identity)?;
             let [namespace, package, name] = crate::hook_path(identity);
-            let import = format!("self::{namespace}::{package}::{name}");
             let export = format!("exports::{namespace}::{package}::{name}");
             let spell = |ty: wit_parser::Type| -> syn::Result<Spelled> {
                 Ok(Spelled {
-                    import: rust_type(resolve, ty, &import)?,
                     export: rust_type(resolve, ty, &export)?,
                     handles: handles(resolve, ty),
                 })
@@ -1326,8 +1323,8 @@ pub(crate) struct Defined {
     pub depends: BTreeSet<String>,
 }
 
-/// A type or a resource of a consumed interface: its WIT name, what it is, the WASI interface
-/// defining it, if one does, and whether the world's export of the interface holds a copy of it.
+/// A type or a resource of a consumed interface: its WIT name, what it is, and the WASI interface
+/// defining it, if one does.
 pub(crate) struct Definition {
     pub name: String,
     pub kind: Kind,
@@ -1335,10 +1332,6 @@ pub(crate) struct Definition {
     /// of WASI, or the one its alias chain leads into, `wasi:filesystem/types@0.3.0` for the
     /// `descriptor` another Orb's interface `use`s from there.
     pub wasi: Option<String>,
-    /// Whether the bindings of the world's export of the interface give the definition a Rust type
-    /// of its own, another than its import's (`copied`): false for one the interface `use`s from an
-    /// interface the world only imports, which the import and the export alias alike.
-    pub copied: bool,
 }
 
 /// What an item of a consumed interface is, for the places that name it.
@@ -1398,12 +1391,10 @@ impl Defined {
 }
 
 /// What each consumed interface of `identities` defines, read from the packages of the consumed
-/// directory, or from the bundled WASI packages for a WASI interface. `exported` are the consumed
-/// interfaces the world exports.
+/// directory, or from the bundled WASI packages for a WASI interface.
 pub(crate) fn defined<'a>(
     parsed: &Parsed,
     identities: impl Iterator<Item = &'a str>,
-    exported: &BTreeSet<&str>,
 ) -> syn::Result<BTreeMap<String, Defined>> {
     use crate::wasi::is_wasi;
     let identities: BTreeSet<&str> = identities.collect();
@@ -1471,7 +1462,6 @@ pub(crate) fn defined<'a>(
                     name: name.clone(),
                     kind,
                     wasi: wasi_origin(resolve, ty),
-                    copied: copied(resolve, ty, exported),
                 };
                 (crate::type_ident(name), definition)
             })
@@ -1491,48 +1481,6 @@ pub(crate) fn defined<'a>(
         defined.insert(identity.to_owned(), Defined { items, depends });
     }
     Ok(defined)
-}
-
-/// Whether the bindings give a WIT type of an interface the world exports a Rust type of its own in
-/// the export, another than the import's: whether the type is, or holds, a record, a variant, an
-/// enum, a flags or a resource of one of the consumed interfaces the world exports, `exported`,
-/// reached through aliases and the types of such interfaces. `wit-bindgen` copies the types of an
-/// interface the world imports and exports into the export, and those of the exported interfaces
-/// it `use`s, but aliases a type it `use`s from an interface the world only imports to that
-/// import's, as the import does: `use types.{admission};` in a hook makes the hook's import, its
-/// export and the view of its keyed import all name the one `admission` of `types`.
-fn copied(resolve: &Resolve, ty: wit_parser::Type, exported: &BTreeSet<&str>) -> bool {
-    let wit_parser::Type::Id(id) = ty else {
-        return false;
-    };
-    let definition = &resolve.types[id];
-    if let wit_parser::TypeOwner::Interface(owner) = definition.owner
-        && !resolve
-            .id_of(owner)
-            .is_some_and(|identity| exported.contains(identity.as_str()))
-    {
-        return false;
-    }
-    let copied = |ty: wit_parser::Type| copied(resolve, ty, exported);
-    match &definition.kind {
-        TypeDefKind::Record(_)
-        | TypeDefKind::Variant(_)
-        | TypeDefKind::Enum(_)
-        | TypeDefKind::Flags(_)
-        | TypeDefKind::Resource => true,
-        TypeDefKind::Type(inner)
-        | TypeDefKind::Option(inner)
-        | TypeDefKind::List(inner)
-        | TypeDefKind::FixedLengthList(inner, _) => copied(*inner),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().any(copied),
-        TypeDefKind::Map(key, value) => copied(*key) || copied(*value),
-        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).any(copied),
-        TypeDefKind::Handle(
-            wit_parser::Handle::Own(resource) | wit_parser::Handle::Borrow(resource),
-        ) => copied(wit_parser::Type::Id(*resource)),
-        TypeDefKind::Future(inner) | TypeDefKind::Stream(inner) => inner.is_some_and(copied),
-        TypeDefKind::Unknown => false,
-    }
 }
 
 /// The WASI interface a WIT type belongs to, if one does: the interface defining it, or the one
@@ -1706,11 +1654,9 @@ pub(crate) fn callbacks<'a>(
                 )));
             };
             let [namespace, package, interface] = crate::hook_path(hook);
-            let import = format!("self::{namespace}::{package}::{interface}");
             let export = format!("exports::{namespace}::{package}::{interface}");
             let spell = |ty: wit_parser::Type| -> syn::Result<Spelled> {
                 Ok(Spelled {
-                    import: rust_type(resolve, ty, &import)?,
                     export: rust_type(resolve, ty, &export)?,
                     handles: handles(resolve, ty),
                 })
@@ -1726,6 +1672,92 @@ pub(crate) fn callbacks<'a>(
             ))
         })
         .collect()
+}
+
+/// The `with` entries that give the hooks a module declares from a consumed package one copy of
+/// their types, the export's, which a derived interface takes. The bindings of the world spell
+/// each hook's import as its export module, `world`, so they generate no import of the hook; a
+/// second invocation, in the module `__tembra_declared` of the Orb module, generates the imports
+/// alone, `imports`: each type a hook defines spelled as the export's, and each interface the
+/// hooks use as the world's bindings spell it, the export module for an interface the world
+/// exports, `exported`, else the import module.
+pub(crate) struct DeclaredBindings {
+    pub world: Vec<(String, String)>,
+    pub imports: Vec<(String, String)>,
+}
+
+/// The `with` entries of the hooks `hooks`, declared from the consumed packages of `dir`
+/// (`DeclaredBindings`).
+pub(crate) fn declared_bindings(
+    dir: &Directory,
+    hooks: &[&String],
+    exported: &BTreeSet<&str>,
+) -> syn::Result<DeclaredBindings> {
+    let resolve = dir.packages()?;
+    let id_of = |identity: &str| {
+        resolve
+            .interfaces
+            .iter()
+            .map(|(id, _)| id)
+            .find(|id| resolve.id_of(*id).as_deref() == Some(identity))
+            .ok_or_else(|| {
+                error(format!(
+                    "{identity} is not an interface of the WIT packages in {}",
+                    dir.path().display()
+                ))
+            })
+    };
+    let module = |identity: &str| {
+        let [namespace, package, interface] = crate::hook_path(identity);
+        format!("{namespace}::{package}::{interface}")
+    };
+    let mut world = Vec::new();
+    let mut imports = BTreeMap::new();
+    let mut used = Vec::new();
+    for hook in hooks {
+        let id = id_of(hook)?;
+        let identity = resolve.id_of(id).expect("a hook is a named interface");
+        let export = format!("exports::{}", module(&identity));
+        world.push((identity.clone(), format!("self::{export}")));
+        // The second invocation spells a type of the hook in the hook's import module, three
+        // levels below its root, which is one level below the Orb module.
+        for (name, ty) in &resolve.interfaces[id].types {
+            let definition = &resolve.types[*ty];
+            if definition.owner == wit_parser::TypeOwner::Interface(id)
+                && !matches!(
+                    definition.kind,
+                    TypeDefKind::Type(_) | TypeDefKind::Resource
+                )
+            {
+                imports.insert(
+                    format!("{identity}/{name}"),
+                    format!(
+                        "super::super::super::super::{export}::{}",
+                        crate::type_ident(name)
+                    ),
+                );
+            }
+        }
+        used.extend(resolve.interface_direct_deps(id));
+    }
+    let mut seen = BTreeSet::new();
+    while let Some(id) = used.pop() {
+        let identity = resolve.id_of(id).expect("a used interface is named");
+        if hooks.iter().any(|hook| **hook == identity) || !seen.insert(identity.clone()) {
+            continue;
+        }
+        let path = if exported.contains(identity.as_str()) {
+            format!("super::exports::{}", module(&identity))
+        } else {
+            format!("super::{}", module(&identity))
+        };
+        imports.insert(identity, path);
+        used.extend(resolve.interface_direct_deps(id));
+    }
+    Ok(DeclaredBindings {
+        world,
+        imports: imports.into_iter().collect(),
+    })
 }
 
 /// A WIT type with its aliases followed: `type out = admission` is `admission`.

@@ -128,6 +128,16 @@ pub mod gatehouse {
                 });
                 (admission.value, admission.blocked)
             }
+
+            /// The admission the contributions answer, in the hook's own type: the desk's
+            /// interface and `Guard::run` name one `guard::Admission`.
+            pub fn admitted(admission: guard::Admission) -> guard::Admission {
+                let verdict = Guard::run(admission);
+                guard::Admission {
+                    value: verdict.value,
+                    blocked: verdict.blocked,
+                }
+            }
         }
     }
 }

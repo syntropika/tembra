@@ -2976,23 +2976,20 @@ fn component(
         .context
         .then(|| quote! { ::#facade::__guest! { pub use self::tembra::guest::context; } });
     // Each hook's generated module is re-exported under its interface name: the export module
-    // of a contributed hook, whose callback forwards to the author's function, and the import
-    // module of a hook declared from a consumed package, whose types `run` takes and returns.
+    // of a contributed hook, whose callback forwards to the author's function, and of a hook
+    // declared from a consumed package, whose types `run` takes and returns.
     let hook_modules = hooks
         .keys()
-        .map(|hook| {
-            let [ns, package, interface] = hook_path(hook);
-            quote! { pub use exports::#ns::#package::#interface; }
-        })
         .chain(
             declarations
                 .iter()
                 .filter(|(_, declaration)| declaration.input.is_none())
-                .map(|(hook, _)| {
-                    let [ns, package, interface] = hook_path(hook);
-                    quote! { pub use self::#ns::#package::#interface; }
-                }),
-        );
+                .map(|(hook, _)| hook),
+        )
+        .map(|hook| {
+            let [ns, package, interface] = hook_path(hook);
+            quote! { pub use exports::#ns::#package::#interface; }
+        });
     for contribution in contributions {
         let depth = modules[contribution.scope].len();
         let root = supers(depth);
@@ -3141,14 +3138,13 @@ fn component(
     if let Some(literal) = &options.package {
         wit::claim_package(literal, parsed, &copies, guest, &nested)?;
     }
-    let inline = if guest {
-        LitStr::new(
-            &format!("{wit}\n{}{standard}", wit::guest_package()?),
-            Span::call_site(),
-        )
+    // The packages beside the author's, given after its WIT, which a world added to it precedes.
+    let beside = if guest {
+        format!("\n{}{standard}", wit::guest_package()?)
     } else {
-        LitStr::new(&format!("{wit}{standard}"), Span::call_site())
+        standard.clone()
     };
+    let inline = LitStr::new(&format!("{wit}{beside}"), Span::call_site());
     let path = parsed.dir().map(|dir| {
         let dir = LitStr::new(&dir.path().display().to_string(), Span::call_site());
         quote! { path: #dir, }
@@ -3174,6 +3170,65 @@ fn component(
         &format!("::{facade}::__wit_bindgen::rt::bitflags"),
         Span::call_site(),
     );
+    // The hooks declared from a consumed package have one copy of their types, the export's, which
+    // `run` and a derived interface share: the bindings of the world spell each hook's import as
+    // its export module, and a second invocation, in `__tembra_declared`, generates the hooks'
+    // imports, which `run` calls, with their types spelled as the export's.
+    let declared_hooks: Vec<&String> = declared
+        .iter()
+        .filter(|declaration| declaration.input.is_none())
+        .map(|declaration| &declaration.hook)
+        .collect();
+    let (with, declared_imports) = match parsed.dir() {
+        Some(dir) if !declared_hooks.is_empty() => {
+            let exported: BTreeSet<&str> = services
+                .iter()
+                .filter_map(|service| service.implements.as_deref())
+                .chain(hooks.keys().map(String::as_str))
+                .chain(declared_hooks.iter().map(|hook| hook.as_str()))
+                .collect();
+            let bindings = wit::declared_bindings(dir, &declared_hooks, &exported)?;
+            let entries = |entries: &[(String, String)]| -> syn::Result<proc_macro2::TokenStream> {
+                let entries = entries
+                    .iter()
+                    .map(|(name, path)| {
+                        let name = LitStr::new(name, Span::call_site());
+                        let path: syn::Path = syn::parse_str(path)?;
+                        Ok(quote! { #name: #path })
+                    })
+                    .collect::<syn::Result<Vec<_>>>()?;
+                Ok(quote! { with: { #(#entries),* }, })
+            };
+            let world_with = entries(&bindings.world)?;
+            let imports_with = entries(&bindings.imports)?;
+            let imports_world = "tembra-declared-hooks";
+            let imports_text = declared_hooks
+                .iter()
+                .map(|hook| format!("  import {hook};\n"))
+                .collect::<String>();
+            let imports_inline = LitStr::new(
+                &format!("{wit}\nworld {imports_world} {{\n{imports_text}}}\n{beside}"),
+                Span::call_site(),
+            );
+            let imports_world = LitStr::new(imports_world, Span::call_site());
+            let imports = quote! {
+                #[doc(hidden)]
+                mod __tembra_declared {
+                    ::#facade::__wit_bindgen::generate!({
+                        #path
+                        inline: #imports_inline,
+                        world: #imports_world,
+                        generate_all,
+                        runtime_path: #runtime,
+                        bitflags_path: #bitflags,
+                        #imports_with
+                    });
+                }
+            };
+            (world_with, imports)
+        }
+        _ => (quote! {}, quote! {}),
+    };
     let generate = quote! {
         ::#facade::__wit_bindgen::generate!({
             #path
@@ -3183,7 +3238,9 @@ fn component(
             runtime_path: #runtime,
             bitflags_path: #bitflags,
             #derives
+            #with
         });
+        #declared_imports
     };
     let runtime_prelude = options.no_std.then(|| prelude(Some(&options.facade())));
     // A component cannot serve a native-only module, so its build refuses the module at each
@@ -5140,7 +5197,6 @@ fn declaration_code(
     let path = hook_path(&declaration.hook);
     let root = supers(depth);
     let export = export_module(depth, &path);
-    let import = import_module(depth, &path);
     if let Some((input, _)) = &declaration.input {
         let defining = defining.expect("a derived hook defines types");
         return Ok(derived_hook_code(
@@ -5164,20 +5220,18 @@ fn declaration_code(
         wit::Passed::Str | wit::Passed::List | wit::Passed::Named => quote! { &input },
         parts => lent(parts, quote! { &input }),
     };
-    let export_input: Type = syn::parse_str(&rooted(&callback.input.export, depth))?;
-    let import_input: Type = syn::parse_str(&rooted(&callback.input.import, depth))?;
-    let output = |spelling: &str| -> syn::Result<proc_macro2::TokenStream> {
-        let ty: Type = syn::parse_str(&rooted(spelling, depth))?;
-        Ok(quote! { -> #ty })
-    };
-    let export_result = match &callback.result {
-        Some(spelled) => output(&spelled.export)?,
+    // `run` takes and returns the export's types, which the hook's import, generated in
+    // `__tembra_declared`, takes and returns too (`wit::DeclaredBindings`).
+    let input: Type = syn::parse_str(&rooted(&callback.input.export, depth))?;
+    let result = match &callback.result {
+        Some(spelled) => {
+            let ty: Type = syn::parse_str(&rooted(&spelled.export, depth))?;
+            quote! { -> #ty }
+        }
         None => quote! {},
     };
-    let import_result = match &callback.result {
-        Some(spelled) => output(&spelled.import)?,
-        None => quote! {},
-    };
+    let [ns, package, interface] = &path;
+    let import = quote! { #root __tembra_declared::#ns::#package::#interface };
     let ident = &declaration.ident;
     let message = format!(
         "the hook {} is declared by this Orb: its contributions answer it, this export never does",
@@ -5189,13 +5243,13 @@ fn declaration_code(
     );
     Ok(quote! {
         impl #export::Guest for #root __TembraExports {
-            fn #name(_input: #export_input) #export_result {
+            fn #name(_input: #input) #result {
                 ::core::panic!(#message)
             }
         }
         impl #ident {
             #[doc = #doc]
-            pub fn run(input: #import_input) #import_result {
+            pub fn run(input: #input) #result {
                 #import::#name(#argument)
             }
         }

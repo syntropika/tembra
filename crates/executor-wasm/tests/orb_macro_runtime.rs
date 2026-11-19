@@ -2217,10 +2217,11 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
 /// a series whose input holds a newtype, a series whose input is a newtype holding a record of the
 /// module, a series in a module of no imports whose input is a newtype of a `String` declared in
 /// another, and a bail from their input, and the waterfall of a consumed package by its identity,
-/// which the component's roles name with their compositions. Native contributions answer them in
-/// plan order: every contribution to a series sees each visit, spot and door, a newtype as its
-/// field, the first answer of the bail gives the room, and each contribution to the waterfall
-/// changes the admission in turn. Without contributions, the series end, the bail answers nothing
+/// which the component's roles name with their compositions, and whose admission a function of the
+/// desk takes and returns as the hook's own type. Native contributions answer them in plan order:
+/// every contribution to a series sees each visit, spot and door, a newtype as its field, the first
+/// answer of the bail gives the room, and each contribution to the waterfall changes the admission
+/// in turn. Without contributions, the series end, the bail answers nothing
 /// and the waterfall hands its input back. Natively, the module compiles, and its `orb()` refuses
 /// the declarations, which only a component serves.
 #[test]
@@ -2275,6 +2276,8 @@ fn compose_the_declared_hooks(engine: &Engine) {
             assert_eq!(call("knock", json!(["east"])), Value::Null, "{features}");
             let rooms = [0, 3].map(|floor| call("room", json!([floor])));
             let admitted = [5, 10].map(|value| call("admit", json!([value])));
+            let admissions =
+                [5, 10].map(|value| call("admitted", json!([{"value": value, "blocked": false}])));
             let visit = json!({"who": "ada", "hour": 9});
             let spot = json!({"floor": 3, "door": "east"});
             let door = json!("east");
@@ -2297,12 +2300,28 @@ fn compose_the_declared_hooks(engine: &Engine) {
                     [json!([6, false]), json!([11, true])],
                     "{features}"
                 );
+                assert_eq!(
+                    admissions,
+                    [
+                        json!({"value": 6, "blocked": false}),
+                        json!({"value": 11, "blocked": true})
+                    ],
+                    "{features}"
+                );
             } else {
                 assert!(seen.borrow().is_empty(), "{features}");
                 assert_eq!(rooms, [Value::Null, Value::Null], "{features}");
                 assert_eq!(
                     admitted,
                     [json!([5, false]), json!([10, false])],
+                    "{features}"
+                );
+                assert_eq!(
+                    admissions,
+                    [
+                        json!({"value": 5, "blocked": false}),
+                        json!({"value": 10, "blocked": false})
+                    ],
                     "{features}"
                 );
             }

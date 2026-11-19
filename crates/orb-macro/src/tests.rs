@@ -1757,7 +1757,7 @@ fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
     let generated = tokens(&declared);
     for expected in [
         "fn return_ (_input : exports :: example :: ledger :: guard :: Admission)",
-        "self :: example :: ledger :: guard :: return_ (input)",
+        "__tembra_declared :: example :: ledger :: guard :: return_ (input)",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -5079,8 +5079,9 @@ const SHARED_GATE: &str = "mod gate {
 }";
 
 /// A hook declared from a consumed package keeps that package's types: the world imports and
-/// exports the identity, the import module is re-exported under the interface's name and `run`
-/// takes its types; the composition must fit the callback.
+/// exports the identity, the export module is re-exported under the interface's name and `run`
+/// takes its types, which the bindings of the hook's import, generated apart, name too; the
+/// composition must fit the callback.
 #[test]
 fn a_declared_hook_may_name_a_consumed_interface() {
     let dir = consumed("admission", ADMISSION_WIT);
@@ -5095,13 +5096,21 @@ fn a_declared_hook_may_name_a_consumed_interface() {
     );
     let generated = tokens(&module);
     assert!(
-        generated.contains("pub use self :: example :: admission :: guard ;"),
+        generated.contains("pub use exports :: example :: admission :: guard ;"),
         "{generated}"
     );
     assert!(
-        generated.contains("pub fn run (input : self :: example :: admission :: guard :: Admission) -> self :: example :: admission :: guard :: Admission"),
+        generated.contains("pub fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Admission"),
         "{generated}"
     );
+    for expected in [
+        "with : { \"example:admission/guard@1.0.0\" : self :: exports :: example :: admission :: guard } ,",
+        "mod __tembra_declared {",
+        "world tembra-declared-hooks {\\n  import example:admission/guard@1.0.0;\\n}",
+        "with : { \"example:admission/guard@1.0.0/admission\" : super :: super :: super :: super :: exports :: example :: admission :: guard :: Admission } ,",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
     let error = refused_with(
         options("example:gate@1.0.0", Some(&dir)),
         &SHARED_GATE.replace("composition = waterfall", "composition = series"),
@@ -5166,7 +5175,7 @@ fn run_borrows_an_input_that_holds_a_string_or_a_list() {
     };
     let plain = consumed_run("plain", "record admission { value: s32, blocked: bool }");
     assert!(
-        plain.contains("{ self :: example :: admission :: guard :: apply (input) }"),
+        plain.contains("{ __tembra_declared :: example :: admission :: guard :: apply (input) }"),
         "{plain}"
     );
     let noted = consumed_run(
@@ -5174,7 +5183,7 @@ fn run_borrows_an_input_that_holds_a_string_or_a_list() {
         "record admission { value: s32, blocked: bool, notes: list<string> }",
     );
     assert!(
-        noted.contains("{ self :: example :: admission :: guard :: apply (& input) }"),
+        noted.contains("{ __tembra_declared :: example :: admission :: guard :: apply (& input) }"),
         "{noted}"
     );
 }
@@ -5209,7 +5218,7 @@ fn run_lends_the_parts_of_an_option_a_result_or_a_tuple() {
         )
         .unwrap_or_else(|error| panic!("{input}: {error}"));
         let generated = tokens(&module);
-        let call = "self :: example :: admission :: guard :: apply (";
+        let call = "__tembra_declared :: example :: admission :: guard :: apply (";
         let start = generated.find(call).expect("the call") + call.len();
         generated[start..].to_owned()
     };
@@ -5265,7 +5274,7 @@ fn a_waterfall_result_is_its_input_type_through_aliases() {
     )
     .unwrap_or_else(|error| panic!("{error}"));
     assert!(
-        tokens(&module).contains("pub fn run (input : self :: example :: admission :: guard :: Admission) -> self :: example :: admission :: guard :: Out"),
+        tokens(&module).contains("pub fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Out"),
         "{}",
         tokens(&module)
     );
