@@ -298,7 +298,10 @@ describe("component port", () => {
       }),
     ).rejects.toThrow("provider close failed");
     expect(instance.usable).toBe(false);
-    await expect(instance.run(2n, scope(), () => 2)).rejects.toThrow("quarantined");
+    await expect(instance.run(2n, scope(), () => 2)).rejects.toMatchObject({
+      reason: "wasm_executor_quarantined",
+      message: "component trap: provider close failed",
+    });
     await instance.settled();
     await instance.close();
   });
@@ -327,13 +330,29 @@ describe("component port", () => {
     expect(instance.usable).toBe(false);
   });
 
+  test("a busy instance refuses another entry as the executor's fault", async () => {
+    const instance = port();
+    const first = instance.run(1n, scope(), () => 1);
+    expect(() => instance.start(2n, scope(), () => 2)).toThrow(
+      expect.objectContaining({ code: "unavailable", reason: "wasm_executor" }),
+    );
+    expect(await first).toBe(1);
+    expect(instance.usable).toBe(true);
+  });
+
   test("a trap or timeout quarantines the instance and refuses re-entry", async () => {
     const instance = port();
-    await expect(instance.run(1n, scope(), () => new Promise(() => {}))).rejects.toThrow(
-      "wall time",
-    );
+    await expect(instance.run(1n, scope(), () => new Promise(() => {}))).rejects.toMatchObject({
+      code: "unavailable",
+      reason: "wasm_executor",
+      message: "component trap: Component callback exceeded its wall time limit",
+    });
     expect(instance.usable).toBe(false);
-    await expect(instance.run(1n, scope(), () => 1)).rejects.toThrow("quarantined");
+    await expect(instance.run(1n, scope(), () => 1)).rejects.toMatchObject({
+      code: "unavailable",
+      reason: "wasm_executor_quarantined",
+      message: "component trap: Component callback exceeded its wall time limit",
+    });
   });
 });
 

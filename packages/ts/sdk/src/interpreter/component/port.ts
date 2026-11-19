@@ -14,7 +14,15 @@
  * import attribution from entry until that exit, even after its result was returned at
  * `task.return`. A trap, or a task that exits rejected, quarantines the instance and rejects
  * every waiter racing the trap signal. No event-loop timing is used as a completion signal.
+ *
+ * A callback answers its faults as the native worker's do: a trap, an uncaught guest exception or
+ * a timeout `unavailable/wasm_executor` with a `component trap: ` message, a busy or closed instance
+ * `unavailable/wasm_executor`, and every entry of a quarantined instance
+ * `unavailable/wasm_executor_quarantined` with the trap's message. A structured error the guest's
+ * callback failed with keeps its own code and reason.
  */
+import { TembraError } from "../../error.ts";
+import { Errors } from "../../errors.ts";
 import type { CoreLimits, TaskObserver } from "./instance.ts";
 import type { CallbackScope } from "./scope.ts";
 import { abortable, type WasiHost } from "./wasi-host.ts";
@@ -33,6 +41,35 @@ export interface Callback {
   /** Resolves at that task's real exit. */
   readonly exit: Promise<void>;
   readonly exited: () => void;
+}
+
+/** The message of a component fault, as the native worker words a trap. */
+function trapMessage(cause: unknown): string {
+  if (cause instanceof TembraError && cause.reason === Errors.Unavailable.WasmExecutor.reason)
+    return cause.message;
+  let text = "the component trapped";
+  try {
+    if (cause !== undefined) text = cause instanceof Error ? cause.message : String(cause);
+  } catch {
+    // An arbitrary thrown value must not hide the fault it stands for.
+  }
+  return `component trap: ${text}`;
+}
+
+/** The answer of each fault already answered: every wait the fault ends sees one error. */
+const faults = new WeakMap<object, TembraError>();
+
+/** The error a callback answers for a fault of the component: `unavailable/wasm_executor`. */
+function fault(error: unknown): TembraError {
+  if (error instanceof TembraError) return error;
+  const object = typeof error === "object" && error !== null ? error : undefined;
+  const known = object && faults.get(object);
+  if (known) return known;
+  const answer = new TembraError(Errors.Unavailable.WasmExecutor, trapMessage(error), {
+    cause: error,
+  });
+  if (object) faults.set(object, answer);
+  return answer;
 }
 
 export class ComponentPort {
@@ -307,6 +344,13 @@ export class ComponentPort {
     return !this.#closed && !this.#poisoned;
   }
 
+  /** The refusal of an entry into this quarantined instance, naming its trap. */
+  #quarantined(): TembraError {
+    return new TembraError(Errors.Unavailable.WasmExecutorQuarantined, trapMessage(this.#cause), {
+      cause: this.#cause,
+    });
+  }
+
   /** Mark the instance unusable after a trap observed outside `run`. */
   poison(cause?: unknown): void {
     if (!this.#poisoned) {
@@ -354,13 +398,11 @@ export class ComponentPort {
     scope: CallbackScope,
     call: () => T | Promise<T>,
   ): { result: Promise<T>; finished: Promise<void>; physical: Promise<void>; park(): void } {
-    if (this.#poisoned)
-      throw new Error("The component revision is quarantined after a trap", {
-        cause: this.#cause,
-      });
+    if (this.#poisoned) throw this.#quarantined();
     if (this.#closed || this.#active || this.#destroying)
-      throw new Error("Component is closed or busy");
-    if (!this.exports) throw new Error("Component is not instantiated");
+      throw new TembraError(Errors.Unavailable.WasmExecutor, "Component is closed or busy");
+    if (!this.exports)
+      throw new TembraError(Errors.Unavailable.WasmExecutor, "Component is not instantiated");
     const newGroup = this.#callbacks.size === 0;
     let exited!: () => void;
     const exit = new Promise<void>((resolve) => (exited = resolve));
@@ -379,7 +421,7 @@ export class ComponentPort {
     let timeout: Error | undefined;
     const expired = () => {
       if (!timeout) {
-        timeout = new Error("Component callback exceeded its wall time limit");
+        timeout = fault(new Error("Component callback exceeded its wall time limit"));
         this.poison(timeout);
       }
       return timeout;
@@ -441,7 +483,10 @@ export class ComponentPort {
           revoke();
           release();
         }
-        const error = new Error("No generated export task was observed for this callback");
+        const error = new TembraError(
+          Errors.Unavailable.WasmExecutor,
+          "No generated export task was observed for this callback",
+        );
         this.poison(error);
         throw error;
       })();
@@ -464,7 +509,7 @@ export class ComponentPort {
       },
       (error: unknown) => {
         this.poison(error);
-        throw error;
+        throw fault(error);
       },
     );
     const finished = (async () => {
@@ -476,14 +521,11 @@ export class ComponentPort {
         while (callback.pending.size) await bounded(Promise.allSettled([...callback.pending]));
       } catch (error) {
         this.poison(error);
-        throw error;
+        throw fault(error);
       } finally {
         revoke();
       }
-      if (this.#poisoned)
-        throw new Error("The component revision is quarantined after a trap", {
-          cause: this.#cause,
-        });
+      if (this.#poisoned) throw this.#quarantined();
     })();
     result.catch(() => undefined);
     finished.catch(() => undefined);

@@ -220,6 +220,12 @@ export const Errors = Object.freeze({
     OrbScope: define(Code.Unavailable, Reason.OrbScope, "The orb scope is unavailable"),
     NotReady: define(Code.Unavailable, Reason.NotReady, "The object is not ready"),
     Route: define(Code.Unavailable, Reason.Route, "The route is unavailable"),
+    WasmExecutor: define(Code.Unavailable, Reason.WasmExecutor, "The component executor failed"),
+    WasmExecutorQuarantined: define(
+      Code.Unavailable,
+      Reason.WasmExecutorQuarantined,
+      "The component revision is quarantined after a trap",
+    ),
   }),
   Unsupported: Object.freeze({
     EngineEffect: define(

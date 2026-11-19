@@ -6,7 +6,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createHost, directoryFilesystem } from "../dist/node.js";
 
 // The no-std probe component imports WASI 0.3 through its generated WIT bindings.
@@ -178,6 +179,80 @@ test(
       } finally {
         await host.close();
       }
+    }),
+);
+
+/** The structured fields of a call's error. */
+async function refused(call) {
+  try {
+    await call();
+  } catch ({ code, reason, message }) {
+    return { code, reason, message };
+  }
+  assert.fail("the call succeeded");
+}
+
+test(
+  "a trap answers the same reasons in the native worker and in the JS component adapter",
+  { skip: missing("TEMBRA_WASM_PROBE"), timeout: 120000 },
+  () =>
+    scratch(async (directory) => {
+      const bytes = await probeArtifact("probe");
+      const grants = { filesystem: [{ provider: "data", mount: "/data", writable: false }] };
+      // The native worker runs the compiled probe in the Node host.
+      const host = createHost({
+        isolated: { providers: { filesystem: { data: directoryFilesystem(directory) } } },
+      });
+      let native;
+      try {
+        await host.install({ artifact: bytes, grants });
+        const reference = await host.get(`probe::${service}`, "main");
+        native = [await refused(() => reference.trap()), await refused(() => reference.spin(1))];
+        reference.release();
+      } finally {
+        await host.close();
+      }
+      // The JS adapter runs the same artifact's prepared glue, which needs JSPI: a child Node
+      // enables it, and resolves the adapter's SDK import to this package.
+      const { prepareBrowserComponent } = await import("../dist/tooling/index.js");
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      const adapter = await prepareBrowserComponent(bytes, digest, path.join(directory, "adapter"));
+      await mkdir(path.join(directory, "node_modules/@syntropika"), { recursive: true });
+      await symlink(
+        path.resolve(import.meta.dirname, ".."),
+        path.join(directory, "node_modules/@syntropika/tembra-sdk"),
+      );
+      const artifactFile = path.join(directory, "probe.wasm");
+      await writeFile(artifactFile, bytes);
+      const child = spawnSync(
+        process.execPath,
+        [
+          "--experimental-wasm-jspi",
+          path.join(import.meta.dirname, "component-trap-adapter.mjs"),
+          adapter.module,
+          artifactFile,
+        ],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      assert.equal(child.status, 0, child.stderr);
+      const adapted = child.stdout
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const trap = { code: "unavailable", reason: "wasm_executor" };
+      for (const answer of [native[0], adapted[0]]) {
+        assert.deepEqual({ code: answer.code, reason: answer.reason }, trap, answer.message);
+        assert.match(answer.message, /^component trap: /);
+      }
+      // The quarantine names the trap. The Node host passes the native worker's refusal of an
+      // entry as text, so only its reason is compared there.
+      assert.deepEqual(
+        { code: adapted[1].code, reason: adapted[1].reason },
+        { code: "unavailable", reason: "wasm_executor_quarantined" },
+        adapted[1].message,
+      );
+      assert.equal(adapted[1].message, adapted[0].message);
+      assert.match(native[1].message, /^unavailable\/wasm_executor_quarantined: component trap: /);
     }),
 );
 

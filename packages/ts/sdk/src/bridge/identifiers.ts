@@ -180,6 +180,8 @@ export const Reason = Object.freeze({
   ValueGone: "value_gone",
   ValuesExhausted: "values_exhausted",
   Views: "views",
+  WasmExecutor: "wasm_executor",
+  WasmExecutorQuarantined: "wasm_executor_quarantined",
 } as const);
 export type Reason = ValueOf<typeof Reason>;
 
