@@ -6336,6 +6336,7 @@ fn resource_code(
             exports::tembra::guest::resources_init::Declaration {
                 name: ::core::convert::From::from(#name),
                 version: #version,
+                dependencies: __tembra_resource::Vec::new(),
             }
         }
     });

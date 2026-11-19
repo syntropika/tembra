@@ -2276,6 +2276,8 @@ async fn declare(
         let declared = declared
             .as_array()
             .ok_or("the resource declarations are not a list")?;
+        // Each resource follows the resources it depends on, so each dependency's name maps to
+        // the id the kernel already gave it.
         let mut resources = BTreeMap::new();
         for resource in declared {
             let name = resource["name"]
@@ -2285,6 +2287,24 @@ async fn declare(
             let version = resource["version"]
                 .as_u64()
                 .ok_or("a resource declaration carries no version")?;
+            let dependencies = resource["dependencies"]
+                .as_array()
+                .ok_or("a resource declaration carries no dependencies")?
+                .iter()
+                .map(|dependency| {
+                    let dependency = dependency
+                        .as_str()
+                        .ok_or("a resource dependency is not a name")?;
+                    resources
+                        .get(dependency)
+                        .map(|id| json!({ "id": id }))
+                        .ok_or_else(|| {
+                            format!(
+                                "the resource `{name}` depends on `{dependency}`, which the Orb does not declare before it"
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let (open, close) = (environments.callback()?, environments.callback()?);
             let id = declaration(
                 events,
@@ -2294,7 +2314,7 @@ async fn declare(
                     "version": version,
                     "open": open,
                     "close": close,
-                    "dependencies": [],
+                    "dependencies": dependencies,
                 }),
                 limit,
             )
