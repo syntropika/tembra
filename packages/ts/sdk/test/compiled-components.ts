@@ -78,6 +78,9 @@ function instrument(port: ComponentPort, exports: Exports): Exports {
   );
 }
 
+/** A WIT `result` err of an export, as JCO's `ComponentError` carries it. */
+export const refusal = (payload: string) => Object.assign(new Error(payload), { payload });
+
 /** One compiled Orb: each installation and reload gets a fresh revision of `component`. */
 export interface Compiled {
   readonly name: string;

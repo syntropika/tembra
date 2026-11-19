@@ -5,10 +5,7 @@ import { orb } from "../src/orb.ts";
 import type { Context } from "../src/runtime/context.ts";
 import { compiledDescription, type Described } from "../src/interpreter/component/revision.ts";
 import { query } from "../src/interpreter/types.ts";
-import { contract, host, type Compiled } from "./compiled-components.ts";
-
-/** A WIT `result` err of an export, as JCO's `ComponentError` carries it. */
-const refusal = (payload: string) => Object.assign(new Error(payload), { payload });
+import { contract, host, refusal, type Compiled } from "./compiled-components.ts";
 
 const COUNTER = `package test:counter@1.0.0;
 interface counter {

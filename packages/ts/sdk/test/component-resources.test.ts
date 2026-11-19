@@ -23,7 +23,11 @@ import { encode, Encoded } from "../src/interpreter/codec.ts";
 import { ComponentPort } from "../src/interpreter/component/port.ts";
 import type { Session } from "../src/runtime/session.ts";
 import type { ReferenceRecord } from "../src/runtime/records.ts";
-import { contract, host, type Compiled } from "./compiled-components.ts";
+import { createHost } from "../src/node.ts";
+import { orb } from "../src/orb.ts";
+import { Code, TembraError } from "../src/index.ts";
+import type { Host } from "../src/host.ts";
+import { contract, host, refusal, type Compiled } from "./compiled-components.ts";
 
 const binding = "test:resources/sessions@1.0.0";
 const nominal = { interface: binding, name: "session" };
@@ -415,10 +419,14 @@ world chain {
   export probe;
 }`;
 
-/** A compiled Orb whose root lists `declarations` and records each open and close in `events`. */
+/**
+ * A compiled Orb whose root lists `declarations` and records each open and close in `events`;
+ * the opener of each resource named in `refused` answers `err` with its message.
+ */
 const chain = async (
   declarations: readonly { name: string; dependencies: string[] }[],
   events: string[],
+  refused: Readonly<Record<string, string>> = {},
 ): Promise<Compiled> => ({
   name: "chain",
   contract: await contract(CHAIN, "chain"),
@@ -427,6 +435,7 @@ const chain = async (
       declare: () => declarations.map((declaration) => ({ ...declaration, version: 1 })),
       open: (name: string) => {
         events.push(`open ${name}`);
+        if (name in refused) throw refusal(refused[name]!);
         return 0;
       },
       close: (name: string) => void events.push(`close ${name}`),
@@ -478,5 +487,81 @@ describe("dependencies of a compiled Orb's root resources", () => {
     } finally {
       await owner.close();
     }
+  });
+});
+
+describe("a root resource that does not open", () => {
+  /**
+   * Install, through `owner`, an Orb whose root opens `a` and then fails to open `b`: the
+   * installation fails with the failed activation's own error, `failed`, unchanged, and `a`
+   * closes; a later `get` of `service` activates the root again and fails alike. The host
+   * records no error, and no rejection goes unhandled (bun fails the running test on one).
+   */
+  const refused = async (
+    owner: Host,
+    install: () => Promise<void>,
+    service: string,
+    events: string[],
+    failed: { code: string; reason: string; message: string },
+  ) => {
+    try {
+      await expect(install()).rejects.toMatchObject(failed);
+      expect(events).toEqual(["open a", "open b", "close a"]);
+      await expect(owner.get(service, "main")).rejects.toMatchObject(failed);
+      expect(events.slice(3)).toEqual(["open a", "open b", "close a"]);
+      await owner.close();
+      // A rejection nobody handles is reported after the turn that dropped it.
+      await new Promise((settled) => setTimeout(settled, 10));
+      expect(owner.errors()).toEqual([]);
+    } finally {
+      await owner.close();
+    }
+  };
+
+  test("of a compiled Orb fails the waiting calls with the opener's message", async () => {
+    const events: string[] = [];
+    const owner = host([
+      await chain(
+        [
+          { name: "a", dependencies: [] },
+          { name: "b", dependencies: ["a"] },
+        ],
+        events,
+        { b: "down" },
+      ),
+    ]);
+    const install = () => owner.install({ artifact: Uint8Array.of(0) });
+    await refused(owner, install, "chain::test:chain/probe@1.0.0", events, {
+      code: Code.Unavailable,
+      reason: "callback",
+      message: "the resource `b` did not open: down",
+    });
+  });
+
+  test("of a TypeScript Orb fails the waiting calls with the opener's error", async () => {
+    const events: string[] = [];
+    const owner = createHost();
+    const failed = { code: Code.Invalid, reason: "down", message: "the store is down" };
+    const definition = orb({
+      name: "chain",
+      apiVersion: 1,
+      create(self) {
+        const a = self.resource("a", {
+          open: () => void events.push("open a"),
+          close: () => void events.push("close a"),
+        });
+        self.resource("b", {
+          deps: [a],
+          open: () => {
+            events.push("open b");
+            throw new TembraError(failed);
+          },
+          close: () => void events.push("close b"),
+        });
+        return {};
+      },
+      services: { probe: { create: () => ({}), methods: { ping: () => 0 } } },
+    });
+    await refused(owner, () => owner.install(definition), "probe", events, failed);
   });
 });
