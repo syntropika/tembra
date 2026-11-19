@@ -80,7 +80,7 @@ fn local_calls_move_the_bindings_types() {
                 )
                 .await?;
             assert!(matches!(outcome, book::Outcome::Recorded(-700)), "{outcome:?}");
-            let client = keeper::KeeperClient::new(book.clone());
+            let client = keeper::bookkeeping::KeeperClient::new(book.clone());
             let mut pay = entry("pay", 1000, book::Direction::Credit);
             pay.currency = book::Currency::Usd;
             pay.marks = book::Marks::AUDITED | book::Marks::DISPUTED_ONCE;

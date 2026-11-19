@@ -71,7 +71,7 @@ fn a_method_named_clone_is_the_services() {
     let host = Host::new(pool.spawner());
     host.install(vec![orb("the ridge")]).unwrap();
     let guide = Rc::new(host.get(GUIDE, vec!["main".into()], "alice").unwrap());
-    let client = trail::GuideClient::new(guide.clone());
+    let client = trail::guide::GuideClient::new(guide.clone());
     let called = guide.clone();
     let (local, portable) = pool
         .run_until(host.root("alice", move |context| {

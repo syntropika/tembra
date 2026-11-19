@@ -267,7 +267,7 @@ fn local_calls_move_rust_values() {
 fn the_client_calls_each_method_with_its_types() {
     with_main(MATH, |math, context| {
         async move {
-            let math = calculator::MathClient::new(math);
+            let math = calculator::math::MathClient::new(math);
             assert_eq!(math.add(&context, 1, 2).await?, 3);
             assert_eq!(math.negate(&context, 5).await?, -5);
             assert_eq!(math.largest(&context, vec![3, 9, 4]).await?, Some(9));
@@ -545,7 +545,7 @@ fn local_calls_move_the_module_types() {
                 Point { x: 3, y: 2 }
             );
             // The typed client takes and returns the same types.
-            let client = calculator::PlotterClient::new(plotter);
+            let client = calculator::plotter::PlotterClient::new(plotter);
             assert_eq!(
                 client
                     .area(
@@ -1111,7 +1111,7 @@ fn a_newtype_crosses_as_its_field() {
                     unit: unit("s"),
                 },
             ];
-            let client = calculator::UnitsClient::new(units.clone());
+            let client = calculator::units::UnitsClient::new(units.clone());
             assert_eq!(
                 client.tally(&context, measures, unit("m")).await?,
                 (Count::from(1), vec![unit("s")])

@@ -6,22 +6,22 @@
 //! implements an interface of the package in `wit/`, whose types are the bindings'. The module
 //! `notebook` takes host values, which only a native host can lend, `library` shares its root's
 //! value among its objects, and `worker` only runs its root and a resource of it. The module
-//! `metering` imports the meter interface of the package in `wit/deps/`, which `meters`
-//! implements, and its `orb(..)` takes the provider of each import; `exchange` imports an
-//! interface of types only, which needs none; `filter` contributes to the hook of a gate in
-//! `wit/deps/`, and its `orb(..)` takes the gate. The module `counters` rewrites with the
-//! macro a native Orb its test also writes by hand against the runtime's API. `abacus` and
-//! `restrung` are one Orb before and after a reload that gives its root's resource a new version,
-//! and `reframed` that Orb after a reload that gives only its package a new version. `dice`,
-//! `turnstile`, `checkpoint` and `desk` hold what the native side does not cover yet, a WASI
-//! import, a synchronous import, a hook declaration and a record holding a resource: they compile
-//! here all the same, and their `orb()` answers an error naming it. `trail` holds a service and its
-//! root two private modules down, and a service whose method is named `clone`, as a method of `Rc`.
-//! `burrow` and `warren` hold a service in a module below `den` and its WIT resource in `tags`:
-//! private, for a resource without a constructor, and `pub(crate)`, for one with a constructor.
-//! `sett` holds that layout private with a constructor: it compiles, and its `orb()` answers an
-//! error naming the module to make visible.
-//! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
+//! `metering` imports the meter interface of the package in `wit/deps/`, which `meters` implements,
+//! and its `orb(..)` takes the provider of each import; `exchange` imports an interface of types
+//! only, which needs none; `filter` contributes to the hook of a gate in `wit/deps/`, and its
+//! `orb(..)` takes the gate. The module `counters` rewrites with the macro a native Orb its test
+//! also writes by hand against the runtime's API. `abacus` and `restrung` are one Orb before and
+//! after a reload that gives its root's resource a new version, and `reframed` that Orb after a
+//! reload that gives only its package a new version. `dice`, `turnstile`, `checkpoint` and `desk`
+//! hold what the native side does not cover yet, a WASI import, a synchronous import, a hook
+//! declaration and a record holding a resource: they compile here all the same, and their `orb()`
+//! answers an error naming it. `trail` holds its root two private modules down, with a service in a
+//! module below it, and a service whose method is named `clone`, as a method of `Rc`. `burrow` and
+//! `warren` hold a service in a module below `den` and its WIT resource in `tags`: private, for a
+//! resource without a constructor, and `pub(crate)`, for one with a constructor. `sett` holds that
+//! layout private with a constructor: it compiles, and its `orb()` answers an error naming the
+//! module to make visible. The manifest names every Orb of the crate `calculator` at API version 2,
+//! which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
 //!
@@ -110,70 +110,72 @@ async fn additions_released() {
 
 #[tembra::orb(package = "example:calculator@1.0.0", context)]
 pub mod calculator {
-    /// Arithmetic over plain values: numbers, strings, characters, lists, options and tuples.
-    #[service]
-    pub struct Math;
+    pub mod math {
+        /// Arithmetic over plain values: numbers, strings, characters, lists, options and tuples.
+        #[service]
+        pub struct Math;
 
-    impl Math {
-        /// The sum of two numbers.
-        pub fn add(a: u32, b: u32) -> u32 {
-            a + b
-        }
+        impl Math {
+            /// The sum of two numbers.
+            pub fn add(a: u32, b: u32) -> u32 {
+                a + b
+            }
 
-        /// The value, negated: 64-bit integers cross the boundary as exact numbers.
-        pub fn negate(value: i64) -> i64 {
-            -value
-        }
+            /// The value, negated: 64-bit integers cross the boundary as exact numbers.
+            pub fn negate(value: i64) -> i64 {
+                -value
+            }
 
-        /// The largest of the values, if there is one.
-        pub fn largest(values: Vec<u64>) -> Option<u64> {
-            values.into_iter().max()
-        }
+            /// The largest of the values, if there is one.
+            pub fn largest(values: Vec<u64>) -> Option<u64> {
+                values.into_iter().max()
+            }
 
-        /// Each value scaled by the factor.
-        pub fn scale(values: Vec<f64>, factor: f64) -> Vec<f64> {
-            values.into_iter().map(|value| value * factor).collect()
-        }
+            /// Each value scaled by the factor.
+            pub fn scale(values: Vec<f64>, factor: f64) -> Vec<f64> {
+                values.into_iter().map(|value| value * factor).collect()
+            }
 
-        /// The first character of a text, if any.
-        pub fn initial(text: String) -> Option<char> {
-            text.chars().next()
-        }
+            /// The first character of a text, if any.
+            pub fn initial(text: String) -> Option<char> {
+                text.chars().next()
+            }
 
-        /// A label and its count, the other way round.
-        pub fn swap(pair: (String, u32)) -> (u32, String) {
-            (pair.1, pair.0)
-        }
+            /// A label and its count, the other way round.
+            pub fn swap(pair: (String, u32)) -> (u32, String) {
+                (pair.1, pair.0)
+            }
 
-        /// Whether both hold.
-        pub fn both(left: bool, right: bool) -> bool {
-            left && right
-        }
+            /// Whether both hold.
+            pub fn both(left: bool, right: bool) -> bool {
+                left && right
+            }
 
-        /// The sum of the values, awaited.
-        pub async fn total(values: Vec<u32>) -> u64 {
-            values.into_iter().map(u64::from).sum()
-        }
+            /// The sum of the values, awaited.
+            pub async fn total(values: Vec<u32>) -> u64 {
+                values.into_iter().map(u64::from).sum()
+            }
 
-        /// Nothing in, nothing out.
-        pub fn ping() {}
+            /// Nothing in, nothing out.
+            pub fn ping() {}
 
-        /// Zero, the value a calculation starts from. Its client calls it `new_`, since `new`
-        /// builds the client.
-        #[allow(clippy::new_ret_no_self)]
-        pub fn new() -> u32 {
-            0
-        }
+            /// Zero, the value a calculation starts from. Its client calls it `new_`, since `new`
+            /// builds the client.
+            #[allow(clippy::new_ret_no_self)]
+            pub fn new() -> u32 {
+                0
+            }
 
-        /// A value labelled with the context it was computed in. The client names the call's
-        /// context `context` too, and keeps the two apart.
-        pub fn label(value: u32, context: String) -> String {
-            format!("{context}: {value}")
-        }
+            /// A value labelled with the context it was computed in. The client names the call's
+            /// context `context` too, and keeps the two apart.
+            pub fn label(value: u32, context: String) -> String {
+                format!("{context}: {value}")
+            }
 
-        /// The ratio of two numbers, which the boundary carries only when finite and not `-0`.
-        pub fn ratio(dividend: f32, divisor: f32) -> f32 {
-            dividend / divisor
+            /// The ratio of two numbers, which the boundary carries only when finite and not `-0`.
+            pub fn ratio(dividend: f32, divisor: f32) -> f32 {
+                dividend / divisor
+            }
         }
     }
 
@@ -231,171 +233,185 @@ pub mod calculator {
         pub pen: Pen,
     }
 
-    /// Plots on a grid, with records, enums, variants, options, results and 64-bit integers.
-    #[service]
-    pub struct Plotter;
+    pub mod plotter {
+        use super::{Heading, Pen, Point, Shape, Stroke, moves};
 
-    impl Plotter {
-        /// The point `steps` away towards the heading, or the point itself without one.
-        pub fn step(from: Point, heading: Option<Heading>, steps: u64) -> Point {
-            let steps = steps as i64;
-            match heading {
-                None => from,
-                Some(Heading::North) => Point {
-                    y: from.y + steps,
-                    ..from
-                },
-                Some(Heading::East) => Point {
-                    x: from.x + steps,
-                    ..from
-                },
-                Some(Heading::South) => Point {
-                    y: from.y - steps,
-                    ..from
-                },
-                Some(Heading::West) => Point {
-                    x: from.x - steps,
-                    ..from
-                },
-            }
-        }
+        /// Plots on a grid, with records, enums, variants, options, results and 64-bit integers.
+        #[service]
+        pub struct Plotter;
 
-        /// Where a walk from the point ends, heading north until it turns.
-        pub fn walk(from: Point, path: Vec<moves::Move>) -> Point {
-            let mut heading = Heading::North;
-            let mut at = from;
-            for step in path {
-                match step {
-                    moves::Move::Turn(to) => heading = to,
-                    moves::Move::Step(count) => {
-                        at = Self::step(at, Some(heading), u64::from(count));
-                    }
-                    moves::Move::Stay => {}
+        impl Plotter {
+            /// The point `steps` away towards the heading, or the point itself without one.
+            pub fn step(from: Point, heading: Option<Heading>, steps: u64) -> Point {
+                let steps = steps as i64;
+                match heading {
+                    None => from,
+                    Some(Heading::North) => Point {
+                        y: from.y + steps,
+                        ..from
+                    },
+                    Some(Heading::East) => Point {
+                        x: from.x + steps,
+                        ..from
+                    },
+                    Some(Heading::South) => Point {
+                        y: from.y - steps,
+                        ..from
+                    },
+                    Some(Heading::West) => Point {
+                        x: from.x - steps,
+                        ..from
+                    },
                 }
             }
-            at
-        }
 
-        /// The area of a shape, or why it has none.
-        pub fn area(shape: Shape) -> Result<u64, String> {
-            match shape {
-                Shape::Dot => Err("a dot has no area".to_string()),
-                Shape::Square(side) => Ok(u64::from(side) * u64::from(side)),
-                Shape::Rect { width, height } => Ok(u64::from(width) * u64::from(height)),
-            }
-        }
-
-        /// The area, or the fallback when there is none.
-        pub fn settled(area: Result<u64, String>, fallback: u64) -> u64 {
-            area.unwrap_or(fallback)
-        }
-
-        /// The stroke with its shape scaled by the factor and each field of its pen flipped.
-        pub fn redrawn(stroke: Stroke, factor: u32) -> Stroke {
-            let shape = match stroke.shape {
-                Shape::Dot => Shape::Dot,
-                Shape::Square(side) => Shape::Square(side * factor),
-                Shape::Rect { width, height } => Shape::Rect {
-                    width: width * factor,
-                    height: height * factor,
-                },
-            };
-            let pen = Pen {
-                filled: !stroke.pen.filled,
-                dashed_line: !stroke.pen.dashed_line,
-            };
-            Stroke { shape, pen }
-        }
-
-        /// Which of the points lie on a heading's axis from the origin, in order, and how many do
-        /// not: a list of options and a result without values.
-        pub fn sorted(points: Vec<Point>) -> (Vec<Option<Heading>>, Result<(), u32>) {
-            let headings: Vec<Option<Heading>> = points
-                .iter()
-                .map(|point| match (point.x.signum(), point.y.signum()) {
-                    (0, 1) => Some(Heading::North),
-                    (1, 0) => Some(Heading::East),
-                    (0, -1) => Some(Heading::South),
-                    (-1, 0) => Some(Heading::West),
-                    _ => None,
-                })
-                .collect();
-            let off = headings.iter().filter(|heading| heading.is_none()).count() as u32;
-            let result = if off == 0 { Ok(()) } else { Err(off) };
-            (headings, result)
-        }
-    }
-
-    /// Where a walker stands, which the kernel keeps for each walker object: a method reads and
-    /// updates it through the kernel, natively as in a component. The kernel keeps it as the JSON
-    /// serde writes, the same in both, which is that of the runtime fixture's walker: `{"at": {"x":
-    /// 0, "y": 0}, "facing": "North", "moves": 0}` to start with.
-    #[state(service = Walker)]
-    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-    pub struct Position {
-        pub at: Point,
-        pub facing: Heading,
-        pub moves: u32,
-    }
-
-    /// A walker starts at the origin, facing north, without a move.
-    impl Default for Position {
-        fn default() -> Self {
-            Position {
-                at: Point { x: 0, y: 0 },
-                facing: Heading::North,
-                moves: 0,
-            }
-        }
-    }
-
-    impl Position {
-        /// The rule of the state: a walker stays on the grid, at most 1000 steps from the origin
-        /// along each axis, or as many as `set_grid` says. The kernel keeps where it stood when an
-        /// update breaks it, and the running code when a reload inherits a walker it breaks.
-        #[validate]
-        pub fn on_grid(&self) -> Result<(), String> {
-            let steps = super::GRID.with(std::cell::Cell::get);
-            if self.at.x.abs() > steps || self.at.y.abs() > steps {
-                return Err(format!("({}, {}) is off the grid", self.at.x, self.at.y));
-            }
-            Ok(())
-        }
-    }
-
-    /// Walks the plotter's grid: the kernel keeps where each walker object stands.
-    #[service]
-    pub struct Walker;
-
-    impl Walker {
-        /// Make the moves from where the walker stands, heading as it faces, and return where it
-        /// ends, or why the kernel keeps it where it stood.
-        pub fn walk(path: Vec<moves::Move>) -> Result<Position, String> {
-            Position::update(|position| {
-                for step in &path {
-                    match *step {
-                        moves::Move::Turn(heading) => position.facing = heading,
+            /// Where a walk from the point ends, heading north until it turns.
+            pub fn walk(from: Point, path: Vec<moves::Move>) -> Point {
+                let mut heading = Heading::North;
+                let mut at = from;
+                for step in path {
+                    match step {
+                        moves::Move::Turn(to) => heading = to,
                         moves::Move::Step(count) => {
-                            position.at =
-                                Plotter::step(position.at, Some(position.facing), u64::from(count));
+                            at = Self::step(at, Some(heading), u64::from(count));
                         }
                         moves::Move::Stay => {}
                     }
-                    position.moves += 1;
                 }
-            })
+                at
+            }
+
+            /// The area of a shape, or why it has none.
+            pub fn area(shape: Shape) -> Result<u64, String> {
+                match shape {
+                    Shape::Dot => Err("a dot has no area".to_string()),
+                    Shape::Square(side) => Ok(u64::from(side) * u64::from(side)),
+                    Shape::Rect { width, height } => Ok(u64::from(width) * u64::from(height)),
+                }
+            }
+
+            /// The area, or the fallback when there is none.
+            pub fn settled(area: Result<u64, String>, fallback: u64) -> u64 {
+                area.unwrap_or(fallback)
+            }
+
+            /// The stroke with its shape scaled by the factor and each field of its pen flipped.
+            pub fn redrawn(stroke: Stroke, factor: u32) -> Stroke {
+                let shape = match stroke.shape {
+                    Shape::Dot => Shape::Dot,
+                    Shape::Square(side) => Shape::Square(side * factor),
+                    Shape::Rect { width, height } => Shape::Rect {
+                        width: width * factor,
+                        height: height * factor,
+                    },
+                };
+                let pen = Pen {
+                    filled: !stroke.pen.filled,
+                    dashed_line: !stroke.pen.dashed_line,
+                };
+                Stroke { shape, pen }
+            }
+
+            /// Which of the points lie on a heading's axis from the origin, in order, and how many
+            /// do not: a list of options and a result without values.
+            pub fn sorted(points: Vec<Point>) -> (Vec<Option<Heading>>, Result<(), u32>) {
+                let headings: Vec<Option<Heading>> = points
+                    .iter()
+                    .map(|point| match (point.x.signum(), point.y.signum()) {
+                        (0, 1) => Some(Heading::North),
+                        (1, 0) => Some(Heading::East),
+                        (0, -1) => Some(Heading::South),
+                        (-1, 0) => Some(Heading::West),
+                        _ => None,
+                    })
+                    .collect();
+                let off = headings.iter().filter(|heading| heading.is_none()).count() as u32;
+                let result = if off == 0 { Ok(()) } else { Err(off) };
+                (headings, result)
+            }
+        }
+    }
+
+    pub mod walker {
+        use super::plotter::Plotter;
+        use super::{Heading, Point, context, moves};
+
+        /// Where a walker stands, which the kernel keeps for each walker object: a method reads and
+        /// updates it through the kernel, natively as in a component. The kernel keeps it as the
+        /// JSON serde writes, the same in both, which is that of the runtime fixture's walker:
+        /// `{"at": {"x": 0, "y": 0}, "facing": "North", "moves": 0}` to start with.
+        #[state]
+        #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Position {
+            pub at: Point,
+            pub facing: Heading,
+            pub moves: u32,
         }
 
-        /// Where the walker stands.
-        pub fn here() -> Position {
-            Position::read()
+        /// A walker starts at the origin, facing north, without a move.
+        impl Default for Position {
+            fn default() -> Self {
+                Position {
+                    at: Point { x: 0, y: 0 },
+                    facing: Heading::North,
+                    moves: 0,
+                }
+            }
         }
 
-        /// Cancel the call, then make the moves: the kernel refuses the value of a cancelled call
-        /// and keeps where the walker stood, which `update` answers with, as in a component.
-        pub fn stumble(path: Vec<moves::Move>) -> Result<Position, String> {
-            context::cancel();
-            Self::walk(path)
+        impl Position {
+            /// The rule of the state: a walker stays on the grid, at most 1000 steps from the
+            /// origin along each axis, or as many as `set_grid` says. The kernel keeps where it
+            /// stood when an update breaks it, and the running code when a reload inherits a walker
+            /// it breaks.
+            #[validate]
+            pub fn on_grid(&self) -> Result<(), String> {
+                let steps = super::super::GRID.with(std::cell::Cell::get);
+                if self.at.x.abs() > steps || self.at.y.abs() > steps {
+                    return Err(format!("({}, {}) is off the grid", self.at.x, self.at.y));
+                }
+                Ok(())
+            }
+        }
+
+        /// Walks the plotter's grid: the kernel keeps where each walker object stands.
+        #[service]
+        pub struct Walker;
+
+        impl Walker {
+            /// Make the moves from where the walker stands, heading as it faces, and return where
+            /// it ends, or why the kernel keeps it where it stood.
+            pub fn walk(path: Vec<moves::Move>) -> Result<Position, String> {
+                Position::update(|position| {
+                    for step in &path {
+                        match *step {
+                            moves::Move::Turn(heading) => position.facing = heading,
+                            moves::Move::Step(count) => {
+                                position.at = Plotter::step(
+                                    position.at,
+                                    Some(position.facing),
+                                    u64::from(count),
+                                );
+                            }
+                            moves::Move::Stay => {}
+                        }
+                        position.moves += 1;
+                    }
+                })
+            }
+
+            /// Where the walker stands.
+            pub fn here() -> Position {
+                Position::read()
+            }
+
+            /// Cancel the call, then make the moves: the kernel refuses the value of a cancelled
+            /// call and keeps where the walker stood, which `update` answers with, as in a
+            /// component.
+            pub fn stumble(path: Vec<moves::Move>) -> Result<Position, String> {
+                context::cancel();
+                Self::walk(path)
+            }
         }
     }
 
@@ -422,78 +438,86 @@ pub mod calculator {
         }
     }
 
-    /// The memory keys of the calculator, on the memory of the Orb's root.
-    #[service]
-    pub struct Register;
+    pub mod register {
+        use super::Memory;
 
-    impl Register {
-        /// Add the value to the memory and return what it holds.
-        pub fn add(value: i64) -> i64 {
-            Memory::with(|memory| {
-                memory.value += value;
-                memory.value
-            })
-        }
+        /// The memory keys of the calculator, on the memory of the Orb's root.
+        #[service]
+        pub struct Register;
 
-        /// What the memory holds.
-        pub fn recall() -> i64 {
-            Memory::with(|memory| memory.value)
+        impl Register {
+            /// Add the value to the memory and return what it holds.
+            pub fn add(value: i64) -> i64 {
+                Memory::with(|memory| {
+                    memory.value += value;
+                    memory.value
+                })
+            }
+
+            /// What the memory holds.
+            pub fn recall() -> i64 {
+                Memory::with(|memory| memory.value)
+            }
         }
     }
 
-    /// What the kernel tells a method of its call, through the functions of `context`: in a
-    /// component as in a native host.
-    #[service]
-    pub struct Caller;
+    pub mod caller {
+        use super::context;
 
-    impl Caller {
-        /// Who calls and which object answers: the principal before and after the call waits,
-        /// then the key of the object and the principal that acquired it.
-        pub async fn whoami() -> (String, String, Vec<String>, String) {
-            let before = context::principal();
-            waited().await;
-            let object = context::object();
-            (before, context::principal(), object.key, object.principal)
-        }
+        /// What the kernel tells a method of its call, through the functions of `context`: in a
+        /// component as in a native host.
+        #[service]
+        pub struct Caller;
 
-        /// Write the message to the host's log at level warn, once the call has waited.
-        pub async fn warn(message: String) {
-            waited().await;
-            context::log(context::Level::Warn, &message);
-        }
-
-        /// Once the call has waited, whether it reads as cancelled before and after it cancels
-        /// itself, and its principal, which it keeps once cancelled.
-        pub async fn give_up() -> (bool, bool, String) {
-            waited().await;
-            let before = context::cancelled();
-            context::cancel();
-            (before, context::cancelled(), context::principal())
-        }
-
-        /// Wait until the caller cancels the call, then cancel it from inside: a cancelled call's
-        /// cancel changes nothing, so its root and the root's other calls go on.
-        pub async fn abandon() {
-            while !context::cancelled() {
+        impl Caller {
+            /// Who calls and which object answers: the principal before and after the call waits,
+            /// then the key of the object and the principal that acquired it.
+            pub async fn whoami() -> (String, String, Vec<String>, String) {
+                let before = context::principal();
                 waited().await;
+                let object = context::object();
+                (before, context::principal(), object.key, object.principal)
             }
-            context::cancel();
-        }
-    }
 
-    /// Wait once: pending on the first poll, so the method resumes in a later one, after the
-    /// executor has polled whatever else is ready.
-    async fn waited() {
-        let mut first = true;
-        std::future::poll_fn(|cx| {
-            if std::mem::take(&mut first) {
-                cx.waker().wake_by_ref();
-                std::task::Poll::Pending
-            } else {
-                std::task::Poll::Ready(())
+            /// Write the message to the host's log at level warn, once the call has waited.
+            pub async fn warn(message: String) {
+                waited().await;
+                context::log(context::Level::Warn, &message);
             }
-        })
-        .await;
+
+            /// Once the call has waited, whether it reads as cancelled before and after it cancels
+            /// itself, and its principal, which it keeps once cancelled.
+            pub async fn give_up() -> (bool, bool, String) {
+                waited().await;
+                let before = context::cancelled();
+                context::cancel();
+                (before, context::cancelled(), context::principal())
+            }
+
+            /// Wait until the caller cancels the call, then cancel it from inside: a cancelled
+            /// call's cancel changes nothing, so its root and the root's other calls go on.
+            pub async fn abandon() {
+                while !context::cancelled() {
+                    waited().await;
+                }
+                context::cancel();
+            }
+        }
+
+        /// Wait once: pending on the first poll, so the method resumes in a later one, after the
+        /// executor has polled whatever else is ready.
+        async fn waited() {
+            let mut first = true;
+            std::future::poll_fn(|cx| {
+                if std::mem::take(&mut first) {
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready(())
+                }
+            })
+            .await;
+        }
     }
 
     /// A running total for the host's lifetime. The service lives in a sub-module, with its data,
@@ -564,8 +588,8 @@ pub mod calculator {
     pub use memo::Note;
 
     /// Running totals their callers own, in a module of their own: `Accumulator` is a WIT resource
-    /// of the module's only service, which a caller constructs or opens, adds to through its handle,
-    /// and drops.
+    /// of the module's only service, which a caller constructs or opens, adds to through its
+    /// handle, and drops.
     pub mod accumulators {
         use std::cell::Cell;
 
@@ -709,23 +733,27 @@ pub mod calculator {
         pub unit: Unit,
     }
 
-    /// Measures in units: each newtype crosses as its field, read back through its `From`.
-    #[service]
-    pub struct Units;
+    pub mod units {
+        use super::{Count, Measure, Unit};
 
-    impl Units {
-        /// The amount in the unit.
-        pub fn measured(amount: f64, unit: Unit) -> Measure {
-            Measure { amount, unit }
-        }
+        /// Measures in units: each newtype crosses as its field, read back through its `From`.
+        #[service]
+        pub struct Units;
 
-        /// How many of the measures are in the unit, and the units of the others, in order.
-        pub fn tally(measures: Vec<Measure>, unit: Unit) -> (Count, Vec<Unit>) {
-            let (same, others): (Vec<Measure>, Vec<Measure>) = measures
-                .into_iter()
-                .partition(|measure| measure.unit == unit);
-            let others = others.into_iter().map(|measure| measure.unit).collect();
-            (Count::from(same.len() as u32), others)
+        impl Units {
+            /// The amount in the unit.
+            pub fn measured(amount: f64, unit: Unit) -> Measure {
+                Measure { amount, unit }
+            }
+
+            /// How many of the measures are in the unit, and the units of the others, in order.
+            pub fn tally(measures: Vec<Measure>, unit: Unit) -> (Count, Vec<Unit>) {
+                let (same, others): (Vec<Measure>, Vec<Measure>) = measures
+                    .into_iter()
+                    .partition(|measure| measure.unit == unit);
+                let others = others.into_iter().map(|measure| measure.unit).collect();
+                (Count::from(same.len() as u32), others)
+            }
         }
     }
 }
@@ -735,59 +763,65 @@ pub mod calculator {
 /// WIT, which a native caller passes as they are and a portable one as the boundary's JSON.
 #[tembra::orb(package = "example:keeper@1.0.0", wit = "wit")]
 pub mod keeper {
-    use std::cell::RefCell;
+    pub mod bookkeeping {
+        use super::book;
+        use std::cell::RefCell;
 
-    std::thread_local! {
-        /// The entries recorded so far, in order: a service's data lives outside its objects, as
-        /// in the compiled fixtures.
-        static ENTRIES: RefCell<Vec<book::Entry>> = const { RefCell::new(Vec::new()) };
-    }
+        std::thread_local! {
+            /// The entries recorded so far, in order: a service's data lives outside its objects,
+            /// as in the compiled fixtures.
+            static ENTRIES: RefCell<Vec<book::Entry>> = const { RefCell::new(Vec::new()) };
+        }
 
-    #[service("example:ledger/book@1.0.0")]
-    pub struct Keeper;
+        #[service("example:ledger/book@1.0.0")]
+        pub struct Keeper;
 
-    impl Keeper {
-        /// Record the entry, unless it moves no amount, and answer the balance after it.
-        pub fn add(entry: book::Entry) -> book::Outcome {
-            if entry.amount == 0 {
-                return book::Outcome::Refused(format!("`{}` moves no amount", entry.label));
+        impl Keeper {
+            /// Record the entry, unless it moves no amount, and answer the balance after it.
+            pub fn add(entry: book::Entry) -> book::Outcome {
+                if entry.amount == 0 {
+                    return book::Outcome::Refused(format!("`{}` moves no amount", entry.label));
+                }
+                ENTRIES.with(|entries| {
+                    let mut entries = entries.borrow_mut();
+                    entries.push(entry);
+                    book::Outcome::Recorded(entries.iter().map(signed).sum())
+                })
             }
-            ENTRIES.with(|entries| {
-                let mut entries = entries.borrow_mut();
-                entries.push(entry);
-                book::Outcome::Recorded(entries.iter().map(signed).sum())
-            })
+
+            /// The entries recorded in the direction, or all of them, in order.
+            pub fn entries(direction: Option<book::Direction>) -> Vec<book::Entry> {
+                ENTRIES.with(|entries| {
+                    entries
+                        .borrow()
+                        .iter()
+                        .filter(|entry| {
+                            direction.is_none_or(|direction| entry.direction == direction)
+                        })
+                        .cloned()
+                        .collect()
+                })
+            }
+
+            /// The last entries recorded, at most `count` of them, in order: the interface's alias
+            /// of a list of entries, which the bindings name `book::Journal`.
+            pub fn recent(count: u32) -> book::Journal {
+                ENTRIES.with(|entries| {
+                    let entries = entries.borrow();
+                    let from = entries.len().saturating_sub(count as usize);
+                    entries[from..].to_vec()
+                })
+            }
         }
 
-        /// The entries recorded in the direction, or all of them, in order.
-        pub fn entries(direction: Option<book::Direction>) -> Vec<book::Entry> {
-            ENTRIES.with(|entries| {
-                entries
-                    .borrow()
-                    .iter()
-                    .filter(|entry| direction.is_none_or(|direction| entry.direction == direction))
-                    .cloned()
-                    .collect()
-            })
-        }
-
-        /// The last entries recorded, at most `count` of them, in order: the interface's alias of
-        /// a list of entries, which the bindings name `book::Journal`.
-        pub fn recent(count: u32) -> book::Journal {
-            ENTRIES.with(|entries| {
-                let entries = entries.borrow();
-                let from = entries.len().saturating_sub(count as usize);
-                entries[from..].to_vec()
-            })
-        }
-    }
-
-    /// The amount an entry adds to the balance: its amount for a credit, the opposite for a debit.
-    fn signed(entry: &book::Entry) -> i64 {
-        let amount = entry.amount as i64;
-        match entry.direction {
-            book::Direction::Credit => amount,
-            book::Direction::Debit => -amount,
+        /// The amount an entry adds to the balance: its amount for a credit, the opposite for a
+        /// debit.
+        fn signed(entry: &book::Entry) -> i64 {
+            let amount = entry.amount as i64;
+            match entry.direction {
+                book::Direction::Credit => amount,
+                book::Direction::Debit => -amount,
+            }
         }
     }
 }
@@ -800,7 +834,7 @@ pub mod keeper {
 #[tembra::orb(package = "example:notes@1.0.0")]
 pub mod notebook {
     use std::{cell::RefCell, rc::Rc};
-    use tembra::{Context, Declaration, Resource, core::Address};
+    use tembra::core::Address;
 
     /// What the host lends every service of the Orb.
     #[inputs]
@@ -823,182 +857,200 @@ pub mod notebook {
     /// feature adds.
     #[cfg(feature = "archive")]
     #[root]
-    fn share(inputs: &Inputs, _: &Declaration) -> tembra::Result<Archive> {
+    fn share(inputs: &Inputs, _: &tembra::Declaration) -> tembra::Result<Archive> {
         Ok(Archive(inputs.archive.clone()))
     }
 
-    /// The notes of one object, which its create builds once per key and principal.
-    #[service]
-    pub struct Notes {
-        title: String,
-        notes: RefCell<Vec<String>>,
-        journal: Resource<String>,
-        #[cfg(feature = "archive")]
-        archive: Rc<RefCell<Vec<String>>>,
-    }
+    pub mod notes {
+        use super::Inputs;
+        use std::cell::RefCell;
+        use tembra::{Declaration, Resource};
 
-    impl Notes {
-        /// Build an object: its title, which the host resolves from its address, and what it
-        /// declares, each reported to the host: its state, the object's own label; its journal, a
-        /// resource opened once this returns and closed with the object; and a task, run once the
-        /// object is active.
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-            let address = declaration.address()?;
-            let object = format!("{}/{}", address.key.join("/"), address.principal);
-            inputs.events.borrow_mut().push(format!("create {object}"));
-            declaration.state(object.clone(), 1, |_| Ok(()))?;
-            let (opened, closed) = (inputs.events.clone(), inputs.events.clone());
-            let label = object.clone();
-            let journal = declaration.resource(
-                "journal",
-                1,
-                move || {
-                    opened.borrow_mut().push(format!("open {label}"));
-                    Ok(format!("journal of {label}"))
-                },
-                move |journal, _| {
+        /// The notes of one object, which its create builds once per key and principal.
+        #[service]
+        pub struct Notes {
+            title: String,
+            notes: RefCell<Vec<String>>,
+            journal: Resource<String>,
+            #[cfg(feature = "archive")]
+            archive: std::rc::Rc<RefCell<Vec<String>>>,
+        }
+
+        impl Notes {
+            /// Build an object: its title, which the host resolves from its address, and what it
+            /// declares, each reported to the host: its state, the object's own label; its journal,
+            /// a resource opened once this returns and closed with the object; and a task, run once
+            /// the object is active.
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                let address = declaration.address()?;
+                let object = format!("{}/{}", address.key.join("/"), address.principal);
+                inputs.events.borrow_mut().push(format!("create {object}"));
+                declaration.state(object.clone(), 1, |_| Ok(()))?;
+                let (opened, closed) = (inputs.events.clone(), inputs.events.clone());
+                let label = object.clone();
+                let journal = declaration.resource(
+                    "journal",
+                    1,
+                    move || {
+                        opened.borrow_mut().push(format!("open {label}"));
+                        Ok(format!("journal of {label}"))
+                    },
+                    move |journal, _| {
+                        Box::pin(async move {
+                            closed.borrow_mut().push(format!("close {journal}"));
+                            Ok(())
+                        })
+                    },
+                )?;
+                let ran = inputs.events.clone();
+                declaration.task(move |_| {
                     Box::pin(async move {
-                        closed.borrow_mut().push(format!("close {journal}"));
+                        ran.borrow_mut().push(format!("task {object}"));
                         Ok(())
                     })
-                },
-            )?;
-            let ran = inputs.events.clone();
-            declaration.task(move |_| {
-                Box::pin(async move {
-                    ran.borrow_mut().push(format!("task {object}"));
+                })?;
+                Ok(Self {
+                    title: (inputs.title)(&address),
+                    notes: RefCell::default(),
+                    journal,
+                    #[cfg(feature = "archive")]
+                    archive: declaration.orb::<super::Archive>()?.0.clone(),
+                })
+            }
+
+            /// Add a note to the object's notes and return how many it holds.
+            pub fn add(&self, text: String) -> u32 {
+                let mut notes = self.notes.borrow_mut();
+                notes.push(text);
+                notes.len() as u32
+            }
+
+            /// The title of the object's notes.
+            pub fn title(&self) -> String {
+                self.title.clone()
+            }
+
+            /// The object's journal: the value its resource opened with.
+            pub fn journal(&self) -> Option<String> {
+                self.journal.value().ok().map(|journal| journal.to_string())
+            }
+
+            /// The note at the position, or the call's error when there is none: a `tembra::Result`
+            /// is the method's error channel, and its WIT result is the note alone.
+            pub fn note(&self, position: u32) -> tembra::Result<String> {
+                self.notes
+                    .borrow()
+                    .get(position as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        tembra::Error::invalid("no-note", format!("there is no note {position}"))
+                    })
+            }
+
+            /// Where the note is, its absence a value: any other `Result` is a WIT `result`.
+            pub fn position(&self, text: String) -> Result<u32, String> {
+                self.notes
+                    .borrow()
+                    .iter()
+                    .position(|note| *note == text)
+                    .map(|position| position as u32)
+                    .ok_or_else(|| format!("no note {text}"))
+            }
+
+            /// The title with the journal, awaited, through `?` on the object's environment, which
+            /// needs the error channel.
+            pub async fn heading(&self) -> tembra::Result<String> {
+                let journal = self.journal.value()?;
+                Ok(format!("{}: {journal}", self.title))
+            }
+
+            /// Nothing, when the object holds at least `count` notes; the call fails otherwise.
+            pub fn holds(&self, count: u32) -> tembra::Result<()> {
+                let held = self.notes.borrow().len() as u32;
+                if held >= count {
                     Ok(())
-                })
-            })?;
-            Ok(Self {
-                title: (inputs.title)(&address),
-                notes: RefCell::default(),
-                journal,
-                #[cfg(feature = "archive")]
-                archive: declaration.orb::<Archive>()?.0.clone(),
-            })
-        }
+                } else {
+                    Err(tembra::Error::invalid(
+                        "too-few",
+                        format!("{held} notes, not {count}"),
+                    ))
+                }
+            }
 
-        /// Add a note to the object's notes and return how many it holds.
-        pub fn add(&self, text: String) -> u32 {
-            let mut notes = self.notes.borrow_mut();
-            notes.push(text);
-            notes.len() as u32
-        }
-
-        /// The title of the object's notes.
-        pub fn title(&self) -> String {
-            self.title.clone()
-        }
-
-        /// The object's journal: the value its resource opened with.
-        pub fn journal(&self) -> Option<String> {
-            self.journal.value().ok().map(|journal| journal.to_string())
-        }
-
-        /// The note at the position, or the call's error when there is none: a `tembra::Result`
-        /// is the method's error channel, and its WIT result is the note alone.
-        pub fn note(&self, position: u32) -> tembra::Result<String> {
-            self.notes
-                .borrow()
-                .get(position as usize)
-                .cloned()
-                .ok_or_else(|| {
-                    tembra::Error::invalid("no-note", format!("there is no note {position}"))
-                })
-        }
-
-        /// Where the note is, its absence a value: any other `Result` is a WIT `result`.
-        pub fn position(&self, text: String) -> Result<u32, String> {
-            self.notes
-                .borrow()
-                .iter()
-                .position(|note| *note == text)
-                .map(|position| position as u32)
-                .ok_or_else(|| format!("no note {text}"))
-        }
-
-        /// The title with the journal, awaited, through `?` on the object's environment, which
-        /// needs the error channel.
-        pub async fn heading(&self) -> tembra::Result<String> {
-            let journal = self.journal.value()?;
-            Ok(format!("{}: {journal}", self.title))
-        }
-
-        /// Nothing, when the object holds at least `count` notes; the call fails otherwise.
-        pub fn holds(&self, count: u32) -> tembra::Result<()> {
-            let held = self.notes.borrow().len() as u32;
-            if held >= count {
-                Ok(())
-            } else {
-                Err(tembra::Error::invalid(
-                    "too-few",
-                    format!("{held} notes, not {count}"),
-                ))
+            /// Move the object's notes to the host's archive and return how many moved: a method
+            /// the `archive` feature adds to the interface.
+            #[cfg(feature = "archive")]
+            pub fn archive(&self) -> u32 {
+                let notes = self.notes.take();
+                let moved = notes.len() as u32;
+                self.archive.borrow_mut().extend(notes);
+                moved
             }
         }
+    }
 
-        /// Move the object's notes to the host's archive and return how many moved: a method
-        /// the `archive` feature adds to the interface.
-        #[cfg(feature = "archive")]
-        pub fn archive(&self) -> u32 {
-            let notes = self.notes.take();
-            let moved = notes.len() as u32;
-            self.archive.borrow_mut().extend(notes);
-            moved
+    pub mod board {
+        use super::Inputs;
+        use std::{cell::RefCell, rc::Rc};
+        use tembra::Declaration;
+
+        /// The board the host pins notes on: one object, of key `main` and principal `host`, which
+        /// its factory guards.
+        #[service(key = main, principal = "host")]
+        pub struct Board {
+            events: Rc<RefCell<Vec<String>>>,
+        }
+
+        impl Board {
+            /// Report the board built: an address the guard refuses never gets here.
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                let address = declaration.address()?;
+                inputs.events.borrow_mut().push(format!(
+                    "board {}/{}",
+                    address.key.join("/"),
+                    address.principal
+                ));
+                Ok(Self {
+                    events: inputs.events.clone(),
+                })
+            }
+
+            /// Pin a note on the board.
+            pub fn pin(&self, text: String) {
+                self.events.borrow_mut().push(format!("pin {text}"));
+            }
         }
     }
 
-    /// The board the host pins notes on: one object, of key `main` and principal `host`, which
-    /// its factory guards.
-    #[service(key = main, principal = "host")]
-    pub struct Board {
-        events: Rc<RefCell<Vec<String>>>,
-    }
+    pub mod session {
+        use super::Tag;
+        use std::rc::Rc;
+        use tembra::Context;
 
-    impl Board {
-        /// Report the board built: an address the guard refuses never gets here.
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-            let address = declaration.address()?;
-            inputs.events.borrow_mut().push(format!(
-                "board {}/{}",
-                address.key.join("/"),
-                address.principal
-            ));
-            Ok(Self {
-                events: inputs.events.clone(),
-            })
-        }
+        /// What a call carries besides its arguments: a method that takes `&Context` reads the
+        /// call's context, which a native host passes and the WIT leaves out.
+        #[service]
+        pub struct Session;
 
-        /// Pin a note on the board.
-        pub fn pin(&self, text: String) {
-            self.events.borrow_mut().push(format!("pin {text}"));
-        }
-    }
+        impl Session {
+            /// The principal of the caller's root.
+            pub fn caller(context: &Context) -> String {
+                context.principal().unwrap_or_default()
+            }
 
-    /// What a call carries besides its arguments: a method that takes `&Context` reads the call's
-    /// context, which a native host passes and the WIT leaves out.
-    #[service]
-    pub struct Session;
+            /// The value through an operation the caller hands over: a closure, which only exists
+            /// natively and has no serde, so the method is `#[local]` and the WIT leaves it out.
+            #[local]
+            pub fn apply(value: u32, operation: Rc<dyn Fn(u32) -> u32>) -> u32 {
+                operation(value)
+            }
 
-    impl Session {
-        /// The principal of the caller's root.
-        pub fn caller(context: &Context) -> String {
-            context.principal().unwrap_or_default()
-        }
-
-        /// The value through an operation the caller hands over: a closure, which only exists
-        /// natively and has no serde, so the method is `#[local]` and the WIT leaves it out.
-        #[local]
-        pub fn apply(value: u32, operation: Rc<dyn Fn(u32) -> u32>) -> u32 {
-            operation(value)
-        }
-
-        /// The tag, marked as one.
-        pub fn tagged(tag: Tag) -> String {
-            format!("#{}", tag.0)
+            /// The tag, marked as one.
+            pub fn tagged(tag: Tag) -> String {
+                format!("#{}", tag.0)
+            }
         }
     }
 
@@ -1059,7 +1111,7 @@ pub mod notebook {
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:library@1.0.0")]
 pub mod library {
-    use ::tembra::{Context, Declaration};
+    use ::tembra::Declaration;
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -1086,75 +1138,86 @@ pub mod library {
         })
     }
 
-    /// One shelf of the library, an object per key and principal.
-    #[service]
-    pub struct Shelf {
-        catalogue: Rc<Catalogue>,
-    }
+    pub mod shelf {
+        use super::{Catalogue, Inputs};
+        use ::tembra::{Context, Declaration};
+        use std::rc::Rc;
 
-    /// How many books one shelf holds, which the kernel keeps for each shelf.
-    #[state(service = Shelf)]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Shelved {
-        pub books: u32,
-    }
-
-    impl Shelf {
-        /// Build a shelf on the catalogue the root created, and report how many books the
-        /// library held then.
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> ::tembra::Result<Self> {
-            let catalogue = declaration.orb::<Catalogue>()?;
-            let address = declaration.address()?;
-            inputs.events.borrow_mut().push(format!(
-                "shelf {}/{} with {}",
-                address.key.join("/"),
-                address.principal,
-                catalogue.books.get()
-            ));
-            Ok(Self { catalogue })
+        /// One shelf of the library, an object per key and principal.
+        #[service]
+        pub struct Shelf {
+            catalogue: Rc<Catalogue>,
         }
 
-        /// Shelve a book, count it on this shelf, and return how many books the library holds,
-        /// across its shelves.
-        pub fn shelve(&self) -> u32 {
-            Shelved::update(|shelved| shelved.books += 1);
-            let books = self.catalogue.books.get() + 1;
-            self.catalogue.books.set(books);
-            books
+        /// How many books one shelf holds, which the kernel keeps for each shelf.
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Shelved {
+            pub books: u32,
         }
 
-        /// How many books the library holds, read from the catalogue through the call's context,
-        /// as a method that keeps nothing of the root reads it.
-        pub fn books(context: &Context) -> u32 {
-            context
-                .orb::<Catalogue>()
-                .map_or(0, |catalogue| catalogue.books.get())
+        impl Shelf {
+            /// Build a shelf on the catalogue the root created, and report how many books the
+            /// library held then.
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> ::tembra::Result<Self> {
+                let catalogue = declaration.orb::<Catalogue>()?;
+                let address = declaration.address()?;
+                inputs.events.borrow_mut().push(format!(
+                    "shelf {}/{} with {}",
+                    address.key.join("/"),
+                    address.principal,
+                    catalogue.books.get()
+                ));
+                Ok(Self { catalogue })
+            }
+
+            /// Shelve a book, count it on this shelf, and return how many books the library holds,
+            /// across its shelves.
+            pub fn shelve(&self) -> u32 {
+                Shelved::update(|shelved| shelved.books += 1);
+                let books = self.catalogue.books.get() + 1;
+                self.catalogue.books.set(books);
+                books
+            }
+
+            /// How many books the library holds, read from the catalogue through the call's
+            /// context, as a method that keeps nothing of the root reads it.
+            pub fn books(context: &Context) -> u32 {
+                context
+                    .orb::<Catalogue>()
+                    .map_or(0, |catalogue| catalogue.books.get())
+            }
         }
     }
 
-    /// A porter who tidies the library while someone keeps one at hand: its objects have no
-    /// method, only the task their create declares.
-    #[service]
-    pub struct Porter;
+    pub mod porter {
+        use super::Inputs;
+        use ::tembra::Declaration;
 
-    impl Porter {
-        /// Declare the porter's round: a task reported when it starts, once the object is active,
-        /// and when it is cancelled, as the object goes.
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> ::tembra::Result<Self> {
-            let address = declaration.address()?;
-            let porter = format!("{}/{}", address.key.join("/"), address.principal);
-            let events = inputs.events.clone();
-            declaration.task(move |scope| {
-                Box::pin(async move {
-                    events.borrow_mut().push(format!("porter {porter} starts"));
-                    scope.signal().cancelled().await;
-                    events.borrow_mut().push(format!("porter {porter} stops"));
-                    Ok(())
-                })
-            })?;
-            Ok(Self)
+        /// A porter who tidies the library while someone keeps one at hand: its objects have no
+        /// method, only the task their create declares.
+        #[service]
+        pub struct Porter;
+
+        impl Porter {
+            /// Declare the porter's round: a task reported when it starts, once the object is
+            /// active, and when it is cancelled, as the object goes.
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> ::tembra::Result<Self> {
+                let address = declaration.address()?;
+                let porter = format!("{}/{}", address.key.join("/"), address.principal);
+                let events = inputs.events.clone();
+                declaration.task(move |scope| {
+                    Box::pin(async move {
+                        events.borrow_mut().push(format!("porter {porter} starts"));
+                        scope.signal().cancelled().await;
+                        events.borrow_mut().push(format!("porter {porter} stops"));
+                        Ok(())
+                    })
+                })?;
+                Ok(Self)
+            }
         }
     }
 }
@@ -1222,26 +1285,30 @@ pub mod worker {
 /// are all asynchronous, from the package in `wit/deps/`. Each object keeps its own total.
 #[tembra::orb(package = "example:meters@1.0.0", wit = "wit")]
 pub mod meters {
-    /// The total of one meter, which the kernel keeps for each object.
-    #[state(service = Gauge)]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Total {
-        pub total: u64,
-    }
+    pub mod meter {
+        use super::gauge;
 
-    #[service("example:meter/gauge@1.0.0")]
-    pub struct Gauge;
-
-    impl Gauge {
-        /// Add the reading to this meter's total and return the total after it.
-        pub async fn add(reading: gauge::Reading) -> u64 {
-            let added = u64::from(reading.amount) * u64::from(reading.times);
-            Total::update(|total| total.total += added).total
+        /// The total of one meter, which the kernel keeps for each object.
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Total {
+            pub total: u64,
         }
 
-        /// This meter's total.
-        pub async fn total() -> u64 {
-            Total::read().total
+        #[service("example:meter/gauge@1.0.0")]
+        pub struct Gauge;
+
+        impl Gauge {
+            /// Add the reading to this meter's total and return the total after it.
+            pub async fn add(reading: gauge::Reading) -> u64 {
+                let added = u64::from(reading.amount) * u64::from(reading.times);
+                Total::update(|total| total.total += added).total
+            }
+
+            /// This meter's total.
+            pub async fn total() -> u64 {
+                Total::read().total
+            }
         }
     }
 }
@@ -1256,41 +1323,45 @@ pub mod meters {
     import("example:meter/gauge@1.0.0", keyed)
 )]
 pub mod metering {
-    /// Feeds meters.
-    #[service]
-    pub struct Readings;
+    pub mod readings {
+        use super::{gauge, gauge_ref};
 
-    impl Readings {
-        /// Add each amount, counted once, to the provider's `main` meter, and return the total it
-        /// reports after them.
-        pub async fn feed(amounts: Vec<u32>) -> u64 {
-            for amount in amounts {
-                gauge::add(gauge::Reading { amount, times: 1 }).await;
+        /// Feeds meters.
+        #[service]
+        pub struct Readings;
+
+        impl Readings {
+            /// Add each amount, counted once, to the provider's `main` meter, and return the total
+            /// it reports after them.
+            pub async fn feed(amounts: Vec<u32>) -> u64 {
+                for amount in amounts {
+                    gauge::add(gauge::Reading { amount, times: 1 }).await;
+                }
+                gauge::total().await
             }
-            gauge::total().await
-        }
 
-        /// Add the reading to the meter of `key`, and return the total it reports then, or why the
-        /// provider refused the key.
-        pub async fn feed_at(key: String, reading: gauge::Reading) -> Result<u64, String> {
-            let meter = gauge_ref::get(vec![key]).await?;
-            let added = meter.add(reading).await;
-            let total = meter.total().await;
-            assert_eq!(added, total, "one call at a time feeds a meter");
-            Ok(total)
-        }
+            /// Add the reading to the meter of `key`, and return the total it reports then, or why
+            /// the provider refused the key.
+            pub async fn feed_at(key: String, reading: gauge::Reading) -> Result<u64, String> {
+                let meter = gauge_ref::get(vec![key]).await?;
+                let added = meter.add(reading).await;
+                let total = meter.total().await;
+                assert_eq!(added, total, "one call at a time feeds a meter");
+                Ok(total)
+            }
 
-        /// The total of the provider's `main` meter if it answers at once, and 0 otherwise: the
-        /// call the method stops awaiting is cancelled.
-        pub async fn glance() -> u64 {
-            let mut total = std::pin::pin!(gauge::total());
-            std::future::poll_fn(|cx| {
-                std::task::Poll::Ready(match std::future::Future::poll(total.as_mut(), cx) {
-                    std::task::Poll::Ready(total) => total,
-                    std::task::Poll::Pending => 0,
+            /// The total of the provider's `main` meter if it answers at once, and 0 otherwise: the
+            /// call the method stops awaiting is cancelled.
+            pub async fn glance() -> u64 {
+                let mut total = std::pin::pin!(gauge::total());
+                std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(match std::future::Future::poll(total.as_mut(), cx) {
+                        std::task::Poll::Ready(total) => total,
+                        std::task::Poll::Pending => 0,
+                    })
                 })
-            })
-            .await
+                .await
+            }
         }
     }
 }
@@ -1304,16 +1375,20 @@ pub mod metering {
     import = "example:ledger/money@1.0.0"
 )]
 pub mod exchange {
-    /// Swaps currencies.
-    #[service]
-    pub struct Desk;
+    pub mod desk {
+        use super::money;
 
-    impl Desk {
-        /// The other currency of the two.
-        pub fn swap(currency: money::Currency) -> money::Currency {
-            match currency {
-                money::Currency::Eur => money::Currency::Usd,
-                money::Currency::Usd => money::Currency::Eur,
+        /// Swaps currencies.
+        #[service]
+        pub struct Desk;
+
+        impl Desk {
+            /// The other currency of the two.
+            pub fn swap(currency: money::Currency) -> money::Currency {
+                match currency {
+                    money::Currency::Eur => money::Currency::Usd,
+                    money::Currency::Usd => money::Currency::Eur,
+                }
             }
         }
     }
@@ -1372,7 +1447,7 @@ pub mod counters {
         cell::{Cell, RefCell},
         rc::Rc,
     };
-    use tembra::{Context, Declaration, Resource, State, core::Address};
+    use tembra::{Declaration, Resource, core::Address};
 
     /// What the host lends every service of the Orb.
     #[inputs]
@@ -1419,145 +1494,157 @@ pub mod counters {
         })
     }
 
-    /// A counter, an object per key and principal, which counts up to the limit the host resolves
-    /// from its address.
-    #[service]
-    pub struct Counter {
-        /// The object's key and principal, as `a/alice`.
-        name: String,
-        /// The count, the object's state.
-        count: State<u32>,
-        /// What the counter shows its count on, a resource of the object.
-        display: Resource<String>,
-        /// What every counter shares.
-        tally: Rc<Tally>,
-    }
+    pub mod counter {
+        use super::{Inputs, Tally};
+        use std::rc::Rc;
+        use tembra::{Context, Declaration, Resource, State};
 
-    impl Counter {
-        /// Build a counter, reported to the host, and declare what the object holds: its state,
-        /// the count, from zero, which its rule keeps within the counter's limit; its display,
-        /// opened once this returns and closed with the object; and a task, which runs while the
-        /// object is active.
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-            let address = declaration.address()?;
-            let name = format!("{}/{}", address.key.join("/"), address.principal);
-            inputs.events.borrow_mut().push(format!("create {name}"));
-            let limit = (inputs.limit)(&address);
-            let count = declaration.state(0, 1, move |count: &u32| {
-                if *count <= limit {
-                    Ok(())
-                } else {
-                    Err(tembra::Error::invalid(
-                        "limit",
-                        format!("{count} is past the limit of {limit}"),
-                    ))
-                }
-            })?;
-            let (opened, closed) = (inputs.events.clone(), inputs.events.clone());
-            let label = name.clone();
-            let display = declaration.resource(
-                "display",
-                1,
-                move || {
-                    opened.borrow_mut().push(format!("open display of {label}"));
-                    Ok(format!("display of {label}"))
-                },
-                move |display, _| {
+        /// A counter, an object per key and principal, which counts up to the limit the host
+        /// resolves from its address.
+        #[service]
+        pub struct Counter {
+            /// The object's key and principal, as `a/alice`.
+            name: String,
+            /// The count, the object's state.
+            count: State<u32>,
+            /// What the counter shows its count on, a resource of the object.
+            display: Resource<String>,
+            /// What every counter shares.
+            tally: Rc<Tally>,
+        }
+
+        impl Counter {
+            /// Build a counter, reported to the host, and declare what the object holds: its state,
+            /// the count, from zero, which its rule keeps within the counter's limit; its display,
+            /// opened once this returns and closed with the object; and a task, which runs while
+            /// the object is active.
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                let address = declaration.address()?;
+                let name = format!("{}/{}", address.key.join("/"), address.principal);
+                inputs.events.borrow_mut().push(format!("create {name}"));
+                let limit = (inputs.limit)(&address);
+                let count = declaration.state(0, 1, move |count: &u32| {
+                    if *count <= limit {
+                        Ok(())
+                    } else {
+                        Err(tembra::Error::invalid(
+                            "limit",
+                            format!("{count} is past the limit of {limit}"),
+                        ))
+                    }
+                })?;
+                let (opened, closed) = (inputs.events.clone(), inputs.events.clone());
+                let label = name.clone();
+                let display = declaration.resource(
+                    "display",
+                    1,
+                    move || {
+                        opened.borrow_mut().push(format!("open display of {label}"));
+                        Ok(format!("display of {label}"))
+                    },
+                    move |display, _| {
+                        Box::pin(async move {
+                            closed.borrow_mut().push(format!("close {display}"));
+                            Ok(())
+                        })
+                    },
+                )?;
+                let (events, task) = (inputs.events.clone(), name.clone());
+                declaration.task(move |scope| {
                     Box::pin(async move {
-                        closed.borrow_mut().push(format!("close {display}"));
+                        events.borrow_mut().push(format!("task of {task} starts"));
+                        scope.signal().cancelled().await;
+                        events.borrow_mut().push(format!("task of {task} stops"));
                         Ok(())
                     })
-                },
-            )?;
-            let (events, task) = (inputs.events.clone(), name.clone());
-            declaration.task(move |scope| {
-                Box::pin(async move {
-                    events.borrow_mut().push(format!("task of {task} starts"));
-                    scope.signal().cancelled().await;
-                    events.borrow_mut().push(format!("task of {task} stops"));
-                    Ok(())
+                })?;
+                Ok(Self {
+                    name,
+                    count,
+                    display,
+                    tally: declaration.orb::<Tally>()?,
                 })
-            })?;
-            Ok(Self {
-                name,
-                count,
-                display,
-                tally: declaration.orb::<Tally>()?,
-            })
-        }
+            }
 
-        /// Count a step and return the count, or fail past the counter's limit.
-        pub fn step(&self, context: &Context) -> tembra::Result<u32> {
-            self.step_by(context, 1)
-        }
+            /// Count a step and return the count, or fail past the counter's limit.
+            pub fn step(&self, context: &Context) -> tembra::Result<u32> {
+                self.step_by(context, 1)
+            }
 
-        /// Count `steps` steps at once and return the count, or fail past the counter's limit,
-        /// counting none.
-        pub fn step_by(&self, context: &Context, steps: u32) -> tembra::Result<u32> {
-            let count = *self.count.update(context, |count| Ok(count + steps))?;
-            self.tally.steps.set(self.tally.steps.get() + steps);
-            self.tally
-                .tape
-                .value()?
-                .borrow_mut()
-                .push(format!("{} at {count}", self.name));
-            Ok(count)
-        }
+            /// Count `steps` steps at once and return the count, or fail past the counter's limit,
+            /// counting none.
+            pub fn step_by(&self, context: &Context, steps: u32) -> tembra::Result<u32> {
+                let count = *self.count.update(context, |count| Ok(count + steps))?;
+                self.tally.steps.set(self.tally.steps.get() + steps);
+                self.tally
+                    .tape
+                    .value()?
+                    .borrow_mut()
+                    .push(format!("{} at {count}", self.name));
+                Ok(count)
+            }
 
-        /// The count.
-        pub fn count(&self) -> tembra::Result<u32> {
-            Ok(*self.count.value()?)
-        }
+            /// The count.
+            pub fn count(&self) -> tembra::Result<u32> {
+                Ok(*self.count.value()?)
+            }
 
-        /// The count, as the counter's display shows it.
-        pub fn display(&self) -> tembra::Result<String> {
-            Ok(format!(
-                "{}: {}",
-                self.display.value()?,
-                self.count.value()?
-            ))
-        }
+            /// The count, as the counter's display shows it.
+            pub fn display(&self) -> tembra::Result<String> {
+                Ok(format!(
+                    "{}: {}",
+                    self.display.value()?,
+                    self.count.value()?
+                ))
+            }
 
-        /// Set the count to what the host's operation makes of it, and return it, or fail past
-        /// the counter's limit: a closure, which only exists natively and has no serde, so the
-        /// method is `#[local]` and the WIT leaves it out.
-        #[local]
-        pub fn apply(
-            &self,
-            context: &Context,
-            operation: Rc<dyn Fn(u32) -> u32>,
-        ) -> tembra::Result<u32> {
-            Ok(*self.count.update(context, |count| Ok(operation(*count)))?)
+            /// Set the count to what the host's operation makes of it, and return it, or fail past
+            /// the counter's limit: a closure, which only exists natively and has no serde, so the
+            /// method is `#[local]` and the WIT leaves it out.
+            #[local]
+            pub fn apply(
+                &self,
+                context: &Context,
+                operation: Rc<dyn Fn(u32) -> u32>,
+            ) -> tembra::Result<u32> {
+                Ok(*self.count.update(context, |count| Ok(operation(*count)))?)
+            }
         }
     }
 
-    /// The board of the counters: one object, of key `main` and principal `host`, which its
-    /// factory guards.
-    #[service(key = main, principal = "host")]
-    pub struct Board {
-        tally: Rc<Tally>,
-    }
+    pub mod board {
+        use super::{Inputs, Tally};
+        use std::rc::Rc;
+        use tembra::Declaration;
 
-    impl Board {
-        /// Build the board on the tally the root created, reported to the host: an address the
-        /// guard refuses never gets here.
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-            inputs.events.borrow_mut().push("create board".to_string());
-            Ok(Self {
-                tally: declaration.orb::<Tally>()?,
-            })
+        /// The board of the counters: one object, of key `main` and principal `host`, which its
+        /// factory guards.
+        #[service(key = main, principal = "host")]
+        pub struct Board {
+            tally: Rc<Tally>,
         }
 
-        /// How many steps the counters counted in all.
-        pub fn steps(&self) -> u32 {
-            self.tally.steps.get()
-        }
+        impl Board {
+            /// Build the board on the tally the root created, reported to the host: an address the
+            /// guard refuses never gets here.
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                inputs.events.borrow_mut().push("create board".to_string());
+                Ok(Self {
+                    tally: declaration.orb::<Tally>()?,
+                })
+            }
 
-        /// What the tape holds: each count the counters reached, in order.
-        pub fn tape(&self) -> tembra::Result<Vec<String>> {
-            Ok(self.tally.tape.value()?.borrow().clone())
+            /// How many steps the counters counted in all.
+            pub fn steps(&self) -> u32 {
+                self.tally.steps.get()
+            }
+
+            /// What the tape holds: each count the counters reached, in order.
+            pub fn tape(&self) -> tembra::Result<Vec<String>> {
+                Ok(self.tally.tape.value()?.borrow().clone())
+            }
         }
     }
 }
@@ -1588,17 +1675,21 @@ pub mod abacus {
         }
     }
 
-    /// Slides the beads.
-    #[service]
-    pub struct Rod;
+    pub mod rod {
+        use super::Beads;
 
-    impl Rod {
-        /// Slide the beads by `by` and return how far they were slid in all.
-        pub fn slide(by: i64) -> i64 {
-            Beads::with(|beads| {
-                beads.slid += by;
-                beads.slid
-            })
+        /// Slides the beads.
+        #[service]
+        pub struct Rod;
+
+        impl Rod {
+            /// Slide the beads by `by` and return how far they were slid in all.
+            pub fn slide(by: i64) -> i64 {
+                Beads::with(|beads| {
+                    beads.slid += by;
+                    beads.slid
+                })
+            }
         }
     }
 }
@@ -1630,17 +1721,21 @@ pub mod restrung {
         }
     }
 
-    /// Slides the beads.
-    #[service]
-    pub struct Rod;
+    pub mod rod {
+        use super::Beads;
 
-    impl Rod {
-        /// Slide the beads by `by` and return how far they were slid in all.
-        pub fn slide(by: i64) -> i64 {
-            Beads::with(|beads| {
-                beads.slid += by;
-                beads.slid
-            })
+        /// Slides the beads.
+        #[service]
+        pub struct Rod;
+
+        impl Rod {
+            /// Slide the beads by `by` and return how far they were slid in all.
+            pub fn slide(by: i64) -> i64 {
+                Beads::with(|beads| {
+                    beads.slid += by;
+                    beads.slid
+                })
+            }
         }
     }
 }
@@ -1673,17 +1768,21 @@ pub mod reframed {
         }
     }
 
-    /// Slides the beads.
-    #[service]
-    pub struct Rod;
+    pub mod rod {
+        use super::Beads;
 
-    impl Rod {
-        /// Slide the beads by `by` and return how far they were slid in all.
-        pub fn slide(by: i64) -> i64 {
-            Beads::with(|beads| {
-                beads.slid += by;
-                beads.slid
-            })
+        /// Slides the beads.
+        #[service]
+        pub struct Rod;
+
+        impl Rod {
+            /// Slide the beads by `by` and return how far they were slid in all.
+            pub fn slide(by: i64) -> i64 {
+                Beads::with(|beads| {
+                    beads.slid += by;
+                    beads.slid
+                })
+            }
         }
     }
 }
@@ -1693,14 +1792,18 @@ pub mod reframed {
 /// error naming the import.
 #[tembra::orb(package = "example:dice@1.0.0", import = "wasi:random/random@0.3.0")]
 pub mod dice {
-    /// The die.
-    #[service]
-    pub struct Die;
+    pub mod die {
+        use super::random;
 
-    impl Die {
-        /// A roll, from 1 to 6.
-        pub fn roll() -> u64 {
-            random::get_random_u64() % 6 + 1
+        /// The die.
+        #[service]
+        pub struct Die;
+
+        impl Die {
+            /// A roll, from 1 to 6.
+            pub fn roll() -> u64 {
+                random::get_random_u64() % 6 + 1
+            }
         }
     }
 }
@@ -1714,14 +1817,18 @@ pub mod dice {
     import = "example:gate/admissions@1.0.0"
 )]
 pub mod turnstile {
-    /// The entrance.
-    #[service]
-    pub struct Entrance;
+    pub mod entrance {
+        use super::admissions;
 
-    impl Entrance {
-        /// Whether the gate lets the value through.
-        pub fn pass(value: i32) -> bool {
-            !admissions::admit(value).blocked
+        /// The entrance.
+        #[service]
+        pub struct Entrance;
+
+        impl Entrance {
+            /// Whether the gate lets the value through.
+            pub fn pass(value: i32) -> bool {
+                !admissions::admit(value).blocked
+            }
         }
     }
 }
@@ -1741,17 +1848,21 @@ pub mod checkpoint {
         pub stopped: bool,
     }
 
-    /// The inspector.
-    #[service]
-    pub struct Inspector;
+    pub mod inspector {
+        use super::{Inspect, Inspection};
 
-    impl Inspector {
-        /// Run the hook over a fresh inspection of the value.
-        pub fn inspect(value: i32) -> Inspection {
-            Inspect::run(Inspection {
-                value,
-                stopped: false,
-            })
+        /// The inspector.
+        #[service]
+        pub struct Inspector;
+
+        impl Inspector {
+            /// Run the hook over a fresh inspection of the value.
+            pub fn inspect(value: i32) -> Inspection {
+                Inspect::run(Inspection {
+                    value,
+                    stopped: false,
+                })
+            }
         }
     }
 }
@@ -1762,55 +1873,56 @@ pub mod checkpoint {
 /// record's field, where a tuple would carry the resource natively too.
 #[tembra::orb(package = "example:desk@1.0.0")]
 pub mod desk {
-    /// One session.
-    #[wit_resource]
-    pub struct Session {
-        n: u32,
-    }
-
-    impl Session {
-        /// A session numbered `n`.
-        #[constructor]
-        pub fn new(n: u32) -> Session {
-            Session { n }
+    pub mod sessions {
+        /// One session.
+        #[wit_resource]
+        pub struct Session {
+            n: u32,
         }
 
-        /// The session's number.
-        pub fn number(&self) -> u32 {
-            self.n
+        impl Session {
+            /// A session numbered `n`.
+            #[constructor]
+            pub fn new(n: u32) -> Session {
+                Session { n }
+            }
+
+            /// The session's number.
+            pub fn number(&self) -> u32 {
+                self.n
+            }
         }
-    }
 
-    /// A session and its count.
-    pub struct Lease {
-        pub session: Session,
-        pub count: u32,
-    }
+        /// A session and its count.
+        pub struct Lease {
+            pub session: Session,
+            pub count: u32,
+        }
 
-    /// The desk.
-    #[service]
-    pub struct Sessions;
+        /// The desk.
+        #[service]
+        pub struct Sessions;
 
-    impl Sessions {
-        /// Lend a session numbered `n`, counted once.
-        pub fn lend(n: u32) -> Lease {
-            Lease {
-                session: Session::new(n),
-                count: 1,
+        impl Sessions {
+            /// Lend a session numbered `n`, counted once.
+            pub fn lend(n: u32) -> Lease {
+                Lease {
+                    session: Session::new(n),
+                    count: 1,
+                }
             }
         }
     }
 }
 
-/// A trail whose services and root `orb()` reaches wherever the module puts them: the walker and
-/// the Orb's root two private modules below the Orb module, and the guide, whose method shares its
-/// name with a method of the `Rc` each guide object is kept in, which `orb()` calls as the guide's.
-/// Native only, as `notebook`: the guide's create and the root take inputs.
+/// A trail whose services and root `orb()` reaches wherever the module puts them: the Orb's root
+/// two private modules below the Orb module and the walker in a module below it, and the guide,
+/// whose method shares its name with a method of the `Rc` each guide object is kept in, which
+/// `orb()` calls as the guide's. Native only, as `notebook`: the guide's create and the root take
+/// inputs.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:trail@1.0.0")]
 pub mod trail {
-    use tembra::Declaration;
-
     /// What the host lends the Orb.
     #[inputs]
     pub struct Inputs {
@@ -1820,7 +1932,7 @@ pub mod trail {
 
     pub mod a {
         mod b {
-            use tembra::{Context, Declaration};
+            use tembra::Declaration;
 
             /// The map of the trail, which every object of the Orb shares.
             pub struct Map {
@@ -1839,43 +1951,53 @@ pub mod trail {
                 Ok(Map { legs })
             }
 
-            /// A walker, which the Orb module cannot name: the module `b` is private to `a`.
-            #[service]
-            pub struct Walker;
+            pub mod walker {
+                use super::Map;
+                use tembra::Context;
 
-            impl Walker {
-                /// How many steps a walk takes.
-                pub fn steps() -> u32 {
-                    1
-                }
+                /// A walker, which the Orb module cannot name: the module `b` is private to `a`.
+                #[service]
+                pub struct Walker;
 
-                /// How many legs the trail has, as the Orb's root mapped them.
-                pub fn legs(context: &Context) -> u32 {
-                    context.orb::<Map>().map_or(0, |map| map.legs)
+                impl Walker {
+                    /// How many steps a walk takes.
+                    pub fn steps() -> u32 {
+                        1
+                    }
+
+                    /// How many legs the trail has, as the Orb's root mapped them.
+                    pub fn legs(context: &Context) -> u32 {
+                        context.orb::<Map>().map_or(0, |map| map.legs)
+                    }
                 }
             }
         }
     }
 
-    /// A guide of the trail the host names.
-    #[service]
-    pub struct Guide {
-        name: String,
-    }
+    pub mod guide {
+        use super::Inputs;
+        use tembra::Declaration;
 
-    impl Guide {
-        /// Build a guide of the trail.
-        #[create]
-        fn create(inputs: &Inputs, _declaration: &Declaration) -> tembra::Result<Self> {
-            Ok(Self {
-                name: inputs.name.clone(),
-            })
+        /// A guide of the trail the host names.
+        #[service]
+        pub struct Guide {
+            name: String,
         }
 
-        /// A copy of the trail's name, named as `Rc::clone` is.
-        #[allow(clippy::should_implement_trait)]
-        pub fn clone(&self) -> String {
-            format!("a copy of {}", self.name)
+        impl Guide {
+            /// Build a guide of the trail.
+            #[create]
+            fn create(inputs: &Inputs, _declaration: &Declaration) -> tembra::Result<Self> {
+                Ok(Self {
+                    name: inputs.name.clone(),
+                })
+            }
+
+            /// A copy of the trail's name, named as `Rc::clone` is.
+            #[allow(clippy::should_implement_trait)]
+            pub fn clone(&self) -> String {
+                format!("a copy of {}", self.name)
+            }
         }
     }
 }
@@ -1902,31 +2024,35 @@ pub mod sketch {
         pub scale: f64,
     }
 
-    /// The sketch an object keeps.
-    #[state(service = Pad)]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Sketch {
-        pub shape: Shape,
-        #[serde(flatten)]
-        pub size: Size,
-    }
+    pub mod pad {
+        use super::{Shape, Size};
 
-    /// Draws one sketch per object.
-    #[service]
-    pub struct Pad;
+        /// The sketch an object keeps.
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Sketch {
+            pub shape: Shape,
+            #[serde(flatten)]
+            pub size: Size,
+        }
 
-    impl Pad {
-        /// Draw a circle of `radius` at `scale`, and return the radius and the scale the state
-        /// reads back.
-        pub fn circle(radius: f64, scale: f64) -> (f64, f64) {
-            Sketch::update(|sketch| {
-                sketch.shape = Shape::Circle { radius };
-                sketch.size.scale = scale;
-            });
-            let sketch = Sketch::read();
-            match sketch.shape {
-                Shape::Circle { radius } => (radius, sketch.size.scale),
-                Shape::Dot => (0.0, sketch.size.scale),
+        /// Draws one sketch per object.
+        #[service]
+        pub struct Pad;
+
+        impl Pad {
+            /// Draw a circle of `radius` at `scale`, and return the radius and the scale the state
+            /// reads back.
+            pub fn circle(radius: f64, scale: f64) -> (f64, f64) {
+                Sketch::update(|sketch| {
+                    sketch.shape = Shape::Circle { radius };
+                    sketch.size.scale = scale;
+                });
+                let sketch = Sketch::read();
+                match sketch.shape {
+                    Shape::Circle { radius } => (radius, sketch.size.scale),
+                    Shape::Dot => (0.0, sketch.size.scale),
+                }
             }
         }
     }

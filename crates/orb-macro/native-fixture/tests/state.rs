@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::{Code, Host, Reference};
 use tembra_orb_native_fixture::{
-    calculator::{self, Heading, Move, Point, Position},
+    calculator::{self, Heading, Move, Point, walker::Position},
     set_grid,
 };
 

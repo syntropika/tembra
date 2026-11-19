@@ -63,7 +63,7 @@ fn the_memory_opens_once_serves_every_object_and_closes_with_the_orb() {
         ),
         [5, 3]
     );
-    let client = calculator::RegisterClient::new(second.clone());
+    let client = calculator::register::RegisterClient::new(second.clone());
     let recalled = second.clone();
     let (added, recalled) = pool
         .run_until(host.root("host", move |context| {
