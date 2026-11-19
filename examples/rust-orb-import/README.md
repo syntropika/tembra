@@ -117,7 +117,7 @@ WASI interface is imported with `import = "wasi:..."` and granted instead of bou
 Handing out an object for the caller to keep and call repeatedly is
 a WIT resource; see [rust-orb-wit-resource](../rust-orb-wit-resource/README.md).
 
-The consumer method is asynchronous so the same source can await its native imports. The provider
-WIT functions remain synchronous. Component builds use their synchronous bindings; native builds
-await the generated imported functions and resource methods with owned arguments. The source
-shows the platform branches, as described in [native WIT composition](../../docs/native-imports.md).
+The consumer method is asynchronous and awaits the same generated import API in both builds.
+The provider WIT functions remain synchronous. Component wrappers call those synchronous bindings
+when polled, without yielding; native reference admission can suspend. Both APIs take owned
+arguments, as described in [native WIT composition](../../docs/native-imports.md).

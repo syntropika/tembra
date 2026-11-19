@@ -115,6 +115,22 @@ fn async_and_sync_author_functions_must_match_existing_wit() {
 }
 
 #[test]
+fn a_fixed_sync_export_explains_why_it_cannot_await_an_import() {
+    let error = expanded(&IMPLEMENTATION.replace(
+        "pub fn count() -> u32 { 0 }",
+        "pub async fn count() -> u32 { 0 }",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains(
+            "awaiting an Orb import requires `async fn` and an `async func` export in the fixed WIT"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
 fn derived_interfaces_keep_async_functions_and_resources() {
     let source = IMPLEMENTATION.replace("#[service(\"example:events/feed@1.0.0\")]", "#[service]");
     let generated = expanded(&source).unwrap();

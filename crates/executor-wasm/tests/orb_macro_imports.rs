@@ -9,7 +9,7 @@ use tembra_orb_native_fixture::codec::{exporter, importer};
 const CODEC: &str = "example:protocol/codec@1.0.0";
 
 /// Package the real macro component with its fixed WIT and embedded roles.
-fn compiled(engine: &Engine, variable: &str, name: &str, install: Install) -> Orb {
+pub(crate) fn compiled(engine: &Engine, variable: &str, name: &str, install: Install) -> Orb {
     let path = std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} is required"));
     let bytes = std::fs::read(path).unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/runtime-fixture");
@@ -27,6 +27,9 @@ fn compiled(engine: &Engine, variable: &str, name: &str, install: Install) -> Or
         .unwrap();
     engine.load(&artifact, install).unwrap()
 }
+
+#[path = "orb_macro_imports/awaitable.rs"]
+mod awaitable;
 
 /// Each combination must preserve synchronous contracts, identity, suspension and ownership.
 #[test]

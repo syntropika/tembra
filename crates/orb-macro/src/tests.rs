@@ -1418,7 +1418,7 @@ fn an_import_enters_the_world_and_is_reexported() {
         "{}",
         wit(&module)
     );
-    assert!(tokens(&module).contains("pub use self :: example :: ledger :: book ;"));
+    assert!(tokens(&module).contains("pub mod book {"));
 }
 
 /// A Rust name whose WIT name is a keyword of WIT, `list`, `record` or `interface`, is written with
@@ -2475,10 +2475,10 @@ fn a_derived_function_takes_an_imported_handle() {
         .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
     let generated = tokens(&module);
     for expected in [
-        "fn finish (builder : texts :: Builder) -> String { Spelling :: finish (builder) }",
-        "fn count (builders : Vec < texts :: Builder > , odd : texts :: AB) -> u32 { Spelling :: count (builders , odd) }",
-        "fn new (builder : texts :: Builder) -> Self { Note :: new (builder) }",
-        "fn append (& self , more : Option < texts :: Builder >) -> u32 { Note :: append (self , more) }",
+        "fn finish (builder : self :: example :: text :: texts :: Builder) -> String { Spelling :: finish (:: core :: convert :: Into :: into (builder)) }",
+        "fn count (builders : Vec < self :: example :: text :: texts :: Builder > , odd : self :: example :: text :: texts :: AB) -> u32 { Spelling :: count (builders . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , :: core :: convert :: Into :: into (odd)) }",
+        "fn new (builder : self :: example :: text :: texts :: Builder) -> Self { Note :: new (:: core :: convert :: Into :: into (builder)) }",
+        "fn append (& self , more : Option < self :: example :: text :: texts :: Builder >) -> u32 { Note :: append (self , more . map (| item | :: core :: convert :: Into :: into (item))) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -2549,7 +2549,7 @@ fn a_derived_function_takes_an_imported_handle() {
     .unwrap_or_else(|error| panic!("{error}"));
     let generated = tokens(&module);
     for expected in [
-        "fn finish (builder : texts :: Builder) -> u32 { Spelling :: finish (builder) }",
+        "fn finish (builder : self :: example :: text :: texts :: Builder) -> u32 { Spelling :: finish (:: core :: convert :: Into :: into (builder)) }",
         "fn draft () -> super :: exports :: example :: speller :: drafts :: Builder { super :: exports :: example :: speller :: drafts :: Builder :: new (Drafts :: draft ()) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
@@ -8269,7 +8269,7 @@ fn an_import_of_async_functions_is_served_natively() {
         ". service (self :: __TembraRegistry :: < 1 > :: __tembra_service_ledger (name , & imports))",
         "pub struct Providers { # [doc = \" The Orb answering the import of `example:pace/clock@1.0.0`, at its `main` object.\"] pub clock : :: tembra :: Provider , }",
         "let requirement = entry (& mut requirements , & providers . clock) ? ; let service = :: std :: format ! (\"{}::{}\" , providers . clock . name , \"example:pace/clock@1.0.0\") ;",
-        "pub mod clock { # [allow (unused_imports)] pub use super :: example :: pace :: clock :: * ;",
+        "pub mod clock { pub use super :: example :: pace :: clock :: Tick ;",
         "# [doc = \" Wait until `value` and return it.\"] pub async fn wait (value : u64) -> u64 { let __tembra_call = super :: __tembra_import :: current () ;",
         "pub async fn last (labels : :: std :: vec :: Vec < :: std :: string :: String >) -> :: core :: option :: Option < super :: example :: pace :: clock :: Tick > {",
         ". issue (__tembra_call . imports . clock . reference () . issue_portable :: < _ , :: tembra :: portable :: Delivered > (& __tembra_call . context , \"last\" , __tembra_input))",
@@ -8286,8 +8286,7 @@ fn an_import_of_async_functions_is_served_natively() {
         assert!(ledger.contains(expected), "{expected}\n{ledger}");
     }
     assert!(
-        tokens(&module)
-            .contains(":: tembra :: __guest ! { pub use self :: example :: pace :: clock ; }"),
+        tokens(&module).contains("pub mod clock { extern crate alloc as __tembra_alloc ;"),
         "{}",
         tokens(&module)
     );

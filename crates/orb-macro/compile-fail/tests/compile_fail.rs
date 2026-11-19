@@ -30,7 +30,9 @@ fn the_macros_errors_fall_on_the_authors_line() {
     .collect();
     let wit = Path::new(env!("CARGO_MANIFEST_DIR")).join("wit");
     copy(&wit, &project.join("consumed"));
-    trybuild::TestCases::new().compile_fail("tests/ui/*.rs");
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/*.rs");
+    cases.pass("tests/pass/*.rs");
 }
 
 /// A dependency's private module, such as serde's `__private229`, takes its release in its name:

@@ -18,10 +18,7 @@ pub mod packet_reader {
         impl Reader {
             /// Abandon a resource method after admission; the importing callback joins its work.
             pub async fn glance() -> u64 {
-                #[cfg(not(target_arch = "wasm32"))]
                 let received = packets::receive().await;
-                #[cfg(target_arch = "wasm32")]
-                let received = packets::receive();
                 let (batch, ticket) = received.unwrap();
                 drop(batch);
                 {
@@ -34,13 +31,10 @@ pub mod packet_reader {
                 }
                 0
             }
-
+    
             /// Read exact resource identities inside a result, tuple, list, option, variant and record.
             pub async fn read() -> u64 {
-                #[cfg(not(target_arch = "wasm32"))]
                 let received = packets::receive().await;
-                #[cfg(target_arch = "wasm32")]
-                let received = packets::receive();
                 let (batch, ticket) = received.unwrap();
                 let mut total = ticket.value().await;
                 for event in batch.into_iter().flatten() {
@@ -61,7 +55,7 @@ pub mod packet_reader {
 )]
 pub mod sink_reader {
     pub mod probe {
-
+        
         /// Import a foreign owned argument without relabeling its nominal resource type.
         #[service]
         pub struct Probe;

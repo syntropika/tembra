@@ -1253,10 +1253,49 @@ impl ConsumedTypes {
         }
     }
 
+    /// Whether the value contains an owned capability or is a resource declaration itself.
+    pub(crate) fn carries_resource(&self, ty: wit_parser::Type) -> bool {
+        anywhere(&self.resolve, ty, |ty| {
+            matches!(
+                self.definition(ty),
+                Ok((
+                    _,
+                    TypeDefKind::Resource | TypeDefKind::Handle(wit_parser::Handle::Own(_))
+                ))
+            )
+            .then_some(())
+        })
+        .is_some()
+    }
+
+    /// How the pinned component bindings borrow a synchronous import parameter.
+    pub(crate) fn passed(&self, ty: wit_parser::Type) -> Passed {
+        passed(&self.resolve, ty)
+    }
+
     /// The bindings' type of a record, a variant, an enum or a flags, as a module `depth` levels
     /// below the Orb module names it: the module of the interface that defines it, under `exports`
     /// when the world exports that interface and at the root when it imports it, then its name.
     pub(crate) fn path(&self, id: wit_parser::TypeId, depth: usize) -> proc_macro2::TokenStream {
+        self.binding_path(id, depth, false)
+    }
+
+    /// The raw import copy, including when the same interface is also exported.
+    pub(crate) fn imported_path(
+        &self,
+        id: wit_parser::TypeId,
+        depth: usize,
+    ) -> proc_macro2::TokenStream {
+        self.binding_path(id, depth, true)
+    }
+
+    /// Resolve a bindings path without conflating an import with its exported copy.
+    fn binding_path(
+        &self,
+        id: wit_parser::TypeId,
+        depth: usize,
+        imported: bool,
+    ) -> proc_macro2::TokenStream {
         let definition = &self.resolve.types[id];
         let identity = match definition.owner {
             wit_parser::TypeOwner::Interface(owner) => self.resolve.id_of(owner),
@@ -1265,7 +1304,7 @@ impl ConsumedTypes {
         .unwrap_or_default();
         let ident = crate::type_ident(definition.name.as_deref().unwrap_or_default());
         let path = crate::hook_path(&identity);
-        let module = if self.exported.contains(&identity) {
+        let module = if !imported && self.exported.contains(&identity) {
             crate::export_module(depth, &path)
         } else {
             crate::import_module(depth, &path)

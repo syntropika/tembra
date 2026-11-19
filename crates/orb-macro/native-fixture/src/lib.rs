@@ -1956,9 +1956,6 @@ pub mod turnstile {
         impl Entrance {
             /// Whether the gate lets the value through.
             pub async fn pass(value: i32) -> bool {
-                #[cfg(target_arch = "wasm32")]
-                let admitted = admissions::admit(value);
-                #[cfg(not(target_arch = "wasm32"))]
                 let admitted = admissions::admit(value).await;
                 !admitted.blocked
             }
@@ -2316,5 +2313,6 @@ pub mod pier {
 
 pub mod codec;
 
+pub mod rpc_consumer;
 /// Shared native/component provider used by actual RPC client tests.
 pub mod rpc_provider;

@@ -42,6 +42,7 @@
 //! component and packages the artifact.
 mod cfg;
 mod foreign;
+mod imports;
 mod keyed;
 mod metadata;
 mod native;
@@ -768,6 +769,16 @@ struct Module {
 }
 
 impl Module {
+    /// Compile component bridges only where component handles and import wrappers exist.
+    fn guest_generated(&mut self, facade: &Ident) {
+        for generated in &mut self.generated {
+            *generated = quote! { ::#facade::__guest! { #generated } };
+        }
+        for child in &mut self.children {
+            child.guest_generated(facade);
+        }
+    }
+
     /// The module of scope `scope`, which the scan registered below this one.
     fn at(&mut self, scope: usize) -> &mut Module {
         let mut module = self;
@@ -2705,6 +2716,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         }
         _ => wit::ConsumedTypes::default(),
     };
+    let consumed_modules = consumed_modules.with_imported_resources(&consumed_types);
     // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
     // of its resources is a #[wit_resource] struct of the same name with the resource's functions.
     for service in services
@@ -2895,7 +2907,6 @@ fn component(
         callbacks,
         consumed,
         consumed_modules,
-        views,
         parsed,
         serialized,
         shapes,
@@ -3090,19 +3101,19 @@ fn component(
             let [ns, package, interface] = hook_path(identity);
             quote! { pub use exports::#ns::#package::#interface; }
         })
-        .chain(imports.iter().map(|identity| {
-            let [ns, package, interface] = hook_path(identity);
-            guest_only(
-                &interface,
-                quote! { pub use self::#ns::#package::#interface; },
-            )
-        }))
         .chain(
-            views
+            imports
                 .iter()
-                .zip(keyed::reexports(package, views))
-                .map(|(view, reexport)| guest_only(&rust_ident(&view.name), reexport)),
+                .filter(|identity| wasi::is_wasi(identity))
+                .map(|identity| {
+                    let [ns, package, interface] = hook_path(identity);
+                    guest_only(
+                        &interface,
+                        quote! { pub use self::#ns::#package::#interface; },
+                    )
+                }),
         );
+    let import_modules = imports::modules(analysis, served);
     // The kernel's context interface is re-exported as `context`, so the author writes
     // `context::principal()`; only in a component build, as a native host gets the native side's
     // `context` instead.
@@ -3229,6 +3240,23 @@ fn component(
                 .map(|(newtype, _)| newtype.scope),
         )
         .collect();
+    if !served.is_empty()
+        && analysis.imports.iter().any(|identity| {
+            analysis
+                .consumed_types
+                .interface(identity)
+                .is_some_and(|interface| {
+                    interface.types.values().any(|id| {
+                        analysis
+                            .consumed_types
+                            .carries_resource(wit_parser::Type::Id(*id))
+                    })
+                })
+        })
+    {
+        // Native resource wrappers own portable claims, while these bridges own guest handles.
+        tree.guest_generated(&facade);
+    }
     for scope in &alloc_scopes {
         tree.at(*scope)
             .generated
@@ -3364,6 +3392,7 @@ fn component(
         _ => (quote! {}, quote! {}),
     };
     let generate = quote! {
+        mod __tembra_bindings {
         ::#facade::__wit_bindgen::generate!({
             #path
             inline: #inline,
@@ -3374,6 +3403,8 @@ fn component(
             #derives
             #with
         });
+        }
+        use self::__tembra_bindings::*;
         #declared_imports
     };
     let runtime_prelude = options.no_std.then(|| prelude(Some(&options.facade())));
@@ -3424,6 +3455,7 @@ fn component(
 
         #context_module
         #(#consumed_modules)*
+        #import_modules
         #(#hook_modules)*
 
         #body
@@ -3436,10 +3468,10 @@ fn component(
         #state_code
         #resource_code
         // The exports are symbols, which two Orb crates linked into one native binary would
-        // both define. A host build keeps the bridges above, so `cargo check` still checks
-        // them.
+        // both define. Bridges involving portable imported resources are component-only;
+        // the native side checks its codecs and the component build checks these handle bridges.
         #[cfg(target_arch = "wasm32")]
-        export!(__TembraExports);
+        export!(__TembraExports with_types_in self::__tembra_bindings);
     })
 }
 
@@ -3986,10 +4018,15 @@ fn check_async(function: &Function, expected: &wit::ConsumedFunction) -> syn::Re
     } else {
         "fn"
     };
+    let guidance = if expected.asynchronous {
+        ""
+    } else {
+        "; awaiting an Orb import requires `async fn` and an `async func` export in the fixed WIT; the macro does not change that contract"
+    };
     Err(syn::Error::new(
         function.ident.span(),
         format!(
-            "`{}` must be `{required}` to match its WIT declaration",
+            "`{}` must be `{required}` to match its WIT declaration{guidance}",
             function.ident
         ),
     ))
@@ -4167,8 +4204,13 @@ fn with_handles(
     module: &proc_macro2::TokenStream,
     modules: &foreign::Modules,
 ) -> proc_macro2::TokenStream {
-    if modules.named(ty, scope).is_some() {
-        return quote! { #ty };
+    if let Some(named) = modules.named(ty, scope) {
+        if !modules.imported_resource(&named) {
+            return quote! { #ty };
+        }
+        let ident = named.ident;
+        let raw = import_module(modules.depth(scope), &hook_path(&named.interface.identity));
+        return quote! { #raw::#ident };
     }
     // Free JSON is the bindings' string of its text, from the `alloc` of the scopes holding it.
     if wit::free_json(ty) {

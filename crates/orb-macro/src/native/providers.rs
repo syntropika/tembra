@@ -924,7 +924,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
 }
 
 /// The module of each import, in the Orb module, in place of the bindings' import module, whose
-/// types it re-exports: a function of a plain import calls the provider's `main` object, and the
+/// data types it re-exports: a function of a plain import calls the provider's `main` object, and the
 /// view of an import by key has `get`, which acquires the object of a key, and the value it
 /// returns, whose methods call that object. Each native function is awaitable and takes owned
 /// parameters, independently of the provider's WIT calling convention.
@@ -936,9 +936,13 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
         let interface = types
             .interface(import.interface)
             .expect("an imported interface is read");
-        let bindings = import_module(1, &hook_path(&import.binding(&analysis.package)));
         let functions = functions::functions(import, analysis);
         let values = values::Values { types, facade };
+        let defining = import_module(1, &hook_path(import.interface));
+        let data_types = interface.types.iter().filter(|(name, ty)| import.view.is_none_or(|view| view.types.contains(*name)) && super::wit_kind(wit_parser::Type::Id(**ty), types, 1).is_ok()).map(|(name, _)| {
+            let name = type_ident(name);
+            quote! { pub use #defining::#name; }
+        });
         let declarations = interface.types.iter().filter_map(|(name, ty)| values.declaration(name, wit_parser::Type::Id(*ty)));
         let resources = functions::resources(import, analysis);
         let module_doc = match import.view {
@@ -992,8 +996,7 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
         quote! {
             #[doc = #module_doc]
             pub mod #field {
-                #[allow(unused_imports)]
-                pub use #bindings::*;
+                #(#data_types)*
 
                 #body
             }

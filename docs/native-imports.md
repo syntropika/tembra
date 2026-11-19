@@ -7,29 +7,36 @@ provider through the macro-generated `Providers` argument. WIT remains the contr
 ## Calling conventions
 
 A provider implements `func` with a synchronous Rust function and `async func` with an async Rust
-function. Constructors remain synchronous providers. Native imported functions always return
-futures, including constructors, static functions and methods of resources. They take owned data
-parameters and use the current importing callback's context. There is no blocking adapter, nested
-executor or polling loop.
+function. Constructors remain synchronous providers. Imported Orb functions always return
+futures in native and component builds, including constructors, static functions and methods of
+resources. Their public Rust signatures take owned data parameters in both builds, including
+strings, lists and the containers holding them. The component bindings stay private. There is no
+blocking adapter, nested executor or polling loop.
 
 For a synchronous `normalize: func(value: u64) -> u64`, shared consumer source uses:
 
 ```rust,ignore
 pub async fn request(value: u64) -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    let normalized = codec::normalize(value);
-    #[cfg(not(target_arch = "wasm32"))]
-    let normalized = codec::normalize(value).await;
-    normalized
+    codec::normalize(value).await
 }
 ```
 
-For a resource `decoder`, native callers use `codec::Decoder::new(seed).await`,
+For a resource `decoder`, both builds use `codec::Decoder::new(seed).await`,
 `codec::Decoder::zero().await` and `decoder.total().await`. An `async func` method such as
-`next` is awaitable in both builds. Synchronous component bindings can borrow string/list
-arguments, while native imported functions take owned strings/lists. Adapt the call site rather
-than changing a provider's WIT signature. The importing service method may need an asynchronous
-contract if it previously could not await.
+`next` is awaitable in both builds. Authors write `.await` on every imported Orb call. An importing
+service method is authored `async fn`, so its derived WIT exports `async func` in both builds.
+For fixed WIT, update that consumer export explicitly: the macro rejects an async implementation
+of a synchronous export and never silently changes its contract. Rust rejects `.await` inside a
+synchronous function, including calls reached through helpers.
+
+Awaitability does not change the provider's calling convention. A component wrapper for a WIT
+`func` calls the synchronous binding directly when its future is polled; it does not yield. A WIT
+`async func` uses the actual asynchronous binding and can suspend, preserving cancellation and
+receiver lifetime. With the pinned `wit-bindgen` version, both the consumer export and the import
+it awaits must be `async func` for other component work to advance during that import. A native
+reference can suspend admission even for a synchronous provider. The two executors therefore do
+not promise identical interleaving just because the Rust syntax is the same. Keep pure providers
+synchronous and declare operations that need suspension asynchronous.
 
 ## Ownership and delivery
 

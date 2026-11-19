@@ -327,7 +327,23 @@ pub(crate) fn bridged(
                         taken(&handles, quote! { #ident }),
                     )
                 }
-                None => (quote! { #ident: #ty }, quote! { #ident }),
+                None => {
+                    if !modules.holds_imported_resource(ty, scope) {
+                        return (quote! { #ident: #ty }, quote! { #ident });
+                    }
+                    let spelled = with_handles(ty, scope, resources, module, modules);
+                    let at = crate::At {
+                        modules,
+                        scope,
+                        resources,
+                        module,
+                        import: false,
+                    };
+                    (
+                        quote! { #ident: #spelled },
+                        convert(ty, quote! { #ident }, Towards::Author, Some(at)),
+                    )
+                }
             }
         })
         .unzip()

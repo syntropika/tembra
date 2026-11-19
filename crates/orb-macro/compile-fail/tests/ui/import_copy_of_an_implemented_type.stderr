@@ -13,8 +13,8 @@ note: type in trait
  4 | |     import("example:counters/counter@1.0.0", keyed)
  5 | | )]
    | |__^
-   = note: expected signature `fn(exports::example::counters::counter::Tally) -> u32`
-              found signature `fn(proxy::example::counters::counter::Tally) -> u32`
+   = note: expected signature `fn(__tembra_bindings::exports::example::counters::counter::Tally) -> u32`
+              found signature `fn(__tembra_bindings::example::counters::counter::Tally) -> u32`
    = note: this error originates in the macro `::tembra::__wit_bindgen::generate` (in Nightly builds, run with -Z macro-backtrace for more info)
 help: change the parameter type to match the trait
    |
@@ -30,11 +30,11 @@ error[E0308]: `?` operator has incompatible types
 3 | |     wit = "consumed/counters",
 4 | |     import("example:counters/counter@1.0.0", keyed)
 5 | | )]
-  | |__^ expected `proxy::example::counters::counter::Tally`, found `Tally`
+  | |__^ expected `Tally`, found a different `Tally`
   |
-  = note: `?` operator cannot convert from `exports::example::counters::counter::Tally` to `proxy::example::counters::counter::Tally`
-  = note: `Tally` and `proxy::example::counters::counter::Tally` have similar names, but are actually distinct types
-note: `Tally` is defined in module `crate::proxy::exports::example::counters::counter` of the current crate
+  = note: `?` operator cannot convert from `__tembra_bindings::exports::example::counters::counter::Tally` to `__tembra_bindings::example::counters::counter::Tally`
+  = note: `Tally` and `Tally` have similar names, but are actually distinct types
+note: `Tally` is defined in module `crate::proxy::__tembra_bindings::exports::example::counters::counter` of the current crate
  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
   |
 1 | / #[tembra::orb(
@@ -43,7 +43,7 @@ note: `Tally` is defined in module `crate::proxy::exports::example::counters::co
 4 | |     import("example:counters/counter@1.0.0", keyed)
 5 | | )]
   | |__^
-note: `proxy::example::counters::counter::Tally` is defined in module `crate::proxy::example::counters::counter` of the current crate
+note: `Tally` is defined in module `crate::proxy::__tembra_bindings::example::counters::counter` of the current crate
  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
   |
 1 | / #[tembra::orb(
@@ -52,7 +52,7 @@ note: `proxy::example::counters::counter::Tally` is defined in module `crate::pr
 4 | |     import("example:counters/counter@1.0.0", keyed)
 5 | | )]
   | |__^
-note: return type inferred to be `proxy::example::counters::counter::Tally` here
+note: return type inferred to be `__tembra_bindings::example::counters::counter::Tally` here
  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
   |
 1 | / #[tembra::orb(

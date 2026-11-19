@@ -677,7 +677,7 @@ keeps the entries.
 ## Importing another Orb's interface
 
 `import = "ns:name/interface@version"` on the attribute, repeatable, adds `import` of that
-interface to the world and re-exports its generated module under the interface's name:
+interface to the world and generates its awaitable Rust module under the interface's name:
 
 ```rust
 #[tembra::orb(
@@ -693,8 +693,12 @@ mod welcomer {
         pub struct Welcoming;
 
         impl Welcoming {
-            pub fn welcome(names: Vec<String>) -> Vec<String> {
-                names.iter().map(|name| greeting::hello(name)).collect()
+            pub async fn welcome(names: Vec<String>) -> Vec<String> {
+                let mut greetings = Vec::new();
+                for name in names {
+                    greetings.push(greeting::hello(name).await);
+                }
+                greetings
             }
         }
     }
@@ -702,7 +706,7 @@ mod welcomer {
 ```
 
 The package comes from the directory `wit` names, here the contract the provider's own build wrote.
-`greeting::hello` is an ordinary function here and a call through the kernel at run time, under
+`greeting::hello(name).await` calls through the kernel at run time, under
 the caller's principal; a resource an imported function returns is an owned handle with the
 resource's methods, destroyed in the provider when the handle drops. Which Orb answers is the
 installer's choice: it binds the import to a provider Orb with `Install::requires`, as for any
@@ -1564,8 +1568,8 @@ The Orb requires each provider, with the signature of the interface, as the plan
 requires the provider an installation selects, so the host refuses the Orb without it. An import of
 an interface of types only needs no provider, as `cargo tembra build` binds a component's to
 nothing: `Providers` leaves it out. In place of the bindings' import module, the Orb module names a
-module of the same name, with the interface's types and functions, all `async` natively and
-taking their parameters owned: each writes its arguments as the boundary's JSON, calls the provider
+module of the same name, with the interface's types and functions, all `async` in both builds and
+taking their parameters owned. Natively each writes its arguments as the boundary's JSON, calls the provider
 through the kernel, under the context of the method running, and reads the result back. A call the
 method stops awaiting, a future it drops before the answer, is cancelled, and the method ends once
 that call has ended, unless its own call is cancelled, as a component's executor cancels and joins
@@ -1577,12 +1581,22 @@ it at once, as in a component. A call that fails, or whose arguments or result t
 ends the method that made it with that error, where it traps a component. As the `context`
 functions, the imported functions serve the methods and the contributions of the Orb and the
 futures they await, and panic elsewhere. Synchronous WIT providers keep their synchronous
-signatures and implementations. The generated native import is awaitable because reference
-admission and delivery can suspend. Shared source uses a platform branch at synchronous import
-calls: the component calls its synchronous binding, while native code awaits its owned arguments.
-The importing method must itself be able to await; the provider contract does not change.
+signatures and implementations. Authors always await imported Orb calls, including constructors,
+statics and resource methods, and use owned strings and lists in both builds. The component's raw
+bindings stay private. A component wrapper for `func` directly calls its synchronous binding when
+polled; it does not yield. An `async func` import uses the actual asynchronous binding and retains
+its suspension and cancellation. Native reference admission can suspend even for a synchronous
+provider, so matching Rust syntax does not promise matching interleaving.
 
-Imported resources are non-cloneable native wrappers backed by `portable::Owned`. Constructors
+An importing method is `async fn`, deriving an `async func` export in both builds. A fixed-WIT
+export must explicitly declare `async func` when its implementation awaits an import. The macro
+rejects a calling-convention mismatch and does not rewrite that contract. Rust checks that awaits
+occur in an asynchronous function; the macro does not infer indirect calls through helpers or
+traits. For other component work to advance during an import, the pinned bindings require the
+import itself to be `async func` too. Keep synchronous pure providers synchronous.
+
+Imported resources are non-cloneable wrappers backed by `portable::Owned` natively and the existing
+component handles in Wasm. Constructors
 are awaitable `iface::Resource::new(..)` calls, static functions are awaitable associated functions,
 and methods, synchronous or asynchronous in WIT, are awaitable `&self` methods. Results preserve
 nominal identity through lists, options, tuples, results, records and variants. Records and variants
@@ -2051,8 +2065,12 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    options, results and tuples too, a resource of the module wrapped into its handle type or taken
    back from it. The bindings name a field or a case from its WIT name, `type_` for `r#type`, so
    each side keeps its own names;
-   `pub use exports::...::guard;` for each contributed hook, each hook declared from a consumed
-   package and each implemented interface, `pub use ...::counter;`, the import module, for each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
+   `pub use exports::...::guard;` for each contributed hook, each hook declared from a consumed package and each
+   implemented interface, and `pub use ...::guard;`, the import module, for each hook declared from
+   a consumed package. Orb imports get public modules with owned, awaitable functions and resource
+   wrappers; keyed imports get the same API through their view. Raw component bindings live in a
+   private module. `pub use ...::context;` appears with the `context` option, inside
+   `tembra::__guest!`, so only in a component build;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    but that of a service its `#[create]` builds, by forwarding to the author's functions, hook

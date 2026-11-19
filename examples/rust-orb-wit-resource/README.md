@@ -167,7 +167,7 @@ error. A resource belongs to one service's interface, the one of the service who
 it, and only that interface returns it: the runtime returns a resource only from the interface that
 defines it, so another service returning it is a compile error.
 
-The consumer method is asynchronous so the same source can await its native imports. The provider
-WIT functions remain synchronous. Component builds use their synchronous bindings; native builds
-await the generated imported functions and resource methods with owned arguments. The source
-shows the platform branches, as described in [native WIT composition](../../docs/native-imports.md).
+The consumer method is asynchronous and awaits the same generated import API in both builds.
+The provider WIT functions remain synchronous. Component wrappers call those synchronous bindings
+when polled, without yielding; native reference admission can suspend. Both APIs take owned
+arguments, as described in [native WIT composition](../../docs/native-imports.md).
