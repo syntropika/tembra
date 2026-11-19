@@ -1,0 +1,17 @@
+package example:sett@1.0.0;
+
+/// Hands out tokens, from a module only `den` can name.
+interface tokens {
+  /// A numbered token, which `Tokens` hands out.
+  resource token {
+    constructor(n: u32);
+    /// The token's number.
+    number: func() -> u32;
+  }
+  /// A token numbered `n`.
+  open: func(n: u32) -> token;
+}
+
+world sett {
+  export tokens;
+}

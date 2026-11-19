@@ -7,6 +7,8 @@ extern crate alloc;
 
 #[cfg(feature = "authored")]
 mod authored;
+#[cfg(feature = "cellar")]
+mod cellar;
 #[cfg(feature = "configured")]
 mod configured;
 #[cfg(feature = "contributor")]

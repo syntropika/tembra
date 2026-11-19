@@ -567,6 +567,8 @@ struct Resource {
     open: Option<Ident>,
     /// The function marked `#[close]`, if any.
     close: Option<Ident>,
+    /// The resources of `depends = [..]`, by their struct's name, which open before this one.
+    depends: Vec<Ident>,
     /// The module declaring the resource, by scope; 0 is the Orb module.
     scope: usize,
 }
@@ -2081,6 +2083,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             resource.close = Some(signature.ident.clone());
         }
     }
+    let resources = in_dependency_order(resources)?;
     for state in &mut states {
         if let Some(validator) =
             marked_function(&marked, Marker::Validate, &state.ident, state.scope)?
@@ -6314,9 +6317,69 @@ fn state_code(
     }
 }
 
-/// Read a resource: any struct, with the version of its contract (default 1).
+/// The resources in the order the kernel opens them: each after the resources it depends on, and
+/// otherwise in the module's order. A dependency that is not a `#[resource]` of the Orb, the
+/// resource itself, or one that closes a cycle is an error on its name in the attribute.
+fn in_dependency_order(resources: Vec<Resource>) -> syn::Result<Vec<Resource>> {
+    /// Put `index` after its dependencies into `order`; `visiting` holds the resources whose
+    /// dependencies are being put, which a cycle reaches again.
+    fn visit(
+        index: usize,
+        resources: &[Resource],
+        visiting: &mut Vec<usize>,
+        order: &mut Vec<usize>,
+    ) -> syn::Result<()> {
+        if order.contains(&index) {
+            return Ok(());
+        }
+        visiting.push(index);
+        let resource = &resources[index];
+        for name in &resource.depends {
+            if *name == resource.ident {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("the resource `{name}` cannot depend on itself"),
+                ));
+            }
+            let Some(dependency) = resources.iter().position(|other| other.ident == *name) else {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!(
+                        "`{name}` is not a #[resource] of the Orb; `depends` names the struct of a resource the Orb declares"
+                    ),
+                ));
+            };
+            if visiting.contains(&dependency) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!(
+                        "the dependencies of `{}` form a cycle through `{name}`: a resource opens after the resources it depends on",
+                        resource.ident
+                    ),
+                ));
+            }
+            visit(dependency, resources, visiting, order)?;
+        }
+        visiting.pop();
+        order.push(index);
+        Ok(())
+    }
+    let mut order = Vec::new();
+    for index in 0..resources.len() {
+        visit(index, &resources, &mut Vec::new(), &mut order)?;
+    }
+    let mut slots: Vec<Option<Resource>> = resources.into_iter().map(Some).collect();
+    Ok(order
+        .into_iter()
+        .map(|index| slots[index].take().expect("each resource is ordered once"))
+        .collect())
+}
+
+/// Read a resource: any struct, with the version of its contract (default 1) and the resources it
+/// depends on.
 fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resource> {
     let mut version = 1;
+    let mut depends = Vec::new();
     if !matches!(attribute.meta, syn::Meta::Path(_)) {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("version") {
@@ -6325,8 +6388,17 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
                 if !tembra_contracts::valid_version(version) {
                     return Err(syn::Error::new(literal.span(), "versions start at 1"));
                 }
+            } else if meta.path.is_ident("depends") {
+                let names;
+                let value = meta.value()?;
+                syn::bracketed!(names in value);
+                depends.extend(
+                    syn::punctuated::Punctuated::<Ident, Token![,]>::parse_terminated(&names)?,
+                );
             } else {
-                return Err(meta.error("unknown option; use #[resource(version = n)]"));
+                return Err(meta.error(
+                    "unknown option; use #[resource(version = n)] or #[resource(depends = [A, B])]",
+                ));
             }
             Ok(())
         })?;
@@ -6336,6 +6408,7 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
         version,
         open: None,
         close: None,
+        depends,
         scope: 0,
     })
 }
@@ -6362,11 +6435,14 @@ fn resource_code(
     let declarations = resources.iter().map(|resource| {
         let name = wit::kebab(&resource.ident);
         let version = resource.version;
+        let dependencies = resource.depends.iter().map(wit::kebab);
         quote! {
             exports::tembra::guest::resources_init::Declaration {
                 name: ::core::convert::From::from(#name),
                 version: #version,
-                dependencies: __tembra_resource::Vec::new(),
+                dependencies: ::core::convert::From::from([
+                    #(::core::convert::From::from(#dependencies)),*
+                ]),
             }
         }
     });

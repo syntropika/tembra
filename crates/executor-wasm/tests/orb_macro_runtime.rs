@@ -2473,6 +2473,45 @@ fn a_root_resource_opens_and_closes_both_ways() {
     module_natively("lamps,revised");
 }
 
+/// A root resource that depends on another, in a component build, std and freestanding, and
+/// natively: the cache of the `cellar` feature, `#[resource(depends = [Db])]`, comes first in its
+/// module, yet the component declares it after the database with the database as its dependency,
+/// so the kernel opens the database first, whose rows the cache's `#[open]` function reads, and
+/// closes the cache first, whose `#[close]` function writes them back to the database.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_root_resource_opens_after_its_dependency_both_ways() {
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for features in ["cellar", "cellar,no-std"] {
+        let (_, orb) = module_orb(&engine, &module_component(features), "cellar");
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let shelf = ready(&mut pool, &host, "cellar::example:cellar/shelf@1.0.0");
+        assert_eq!(
+            counting_call(&mut pool, &host, &shelf, "alice", "rows", json!([])),
+            json!(3),
+            "{features}"
+        );
+        assert_eq!(logged(), ["open db", "open cache, 3 rows"], "{features}");
+        shelf.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(
+            logged(),
+            ["close cache, 6 rows", "close db, 6 rows"],
+            "{features}"
+        );
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("cellar");
+}
+
 /// An interface with `flags` consumed by a guest that depends on the facade alone, in a component
 /// build, std and freestanding: the module `holder` of the `flagged` feature implements
 /// `example:rights/rights@1.0.0`, whose `access` the bindings generate without `wit-bindgen`'s

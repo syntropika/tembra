@@ -48,6 +48,8 @@ enum Feature {
     WitResources,
     /// The code and reason of a call that fails.
     ErrorCodes,
+    /// The resources of the Orb's root, opened after the resources they depend on.
+    RootResources,
 }
 
 /// One step of a scenario. A step names a service by its interface, `dialing` for
@@ -362,6 +364,14 @@ fn scenarios() -> Vec<Scenario> {
                 Call("names", "red", json!(["red"])),
                 Call("names", "red", json!(["green"])),
                 Call("names", "red", json!(["purple"])),
+            ],
+        ),
+        row(
+            RootResources,
+            "a resource opens after the resource it depends on, whose value its opening reads",
+            vec![
+                Call("stock", "add", json!([2])),
+                Call("stock", "add", json!([4])),
             ],
         ),
         row(

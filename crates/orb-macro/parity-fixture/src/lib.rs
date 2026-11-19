@@ -8,10 +8,11 @@
 //! awaiting a call of the plain import; `ledger` keeps a state, and `sketching` one holding an
 //! internally tagged enum; `tallies` issues WIT resources, and `vault`, a private service's module,
 //! a WIT resource and a state each in a module below it; `checks` takes and returns what the
-//! boundary checks; and `names` names the types of `checks` through a `use` with `as` and an
-//! alias. A new scenario is a module here, or a
-//! function of one, and a row of the test's list. The Orb holds nothing a native host refuses by
-//! design, a hook declaration, a synchronous import or a WASI import, and nothing native only.
+//! boundary checks; `names` names the types of `checks` through a `use` with `as` and an alias;
+//! and `cellar` holds root resources, one depending on the other. A new scenario is a module here,
+//! or a function of one, and a row of the test's list. The Orb holds nothing a native host
+//! refuses by design, a hook declaration, a synchronous import or a WASI import, and nothing
+//! native only.
 
 #[tembra::orb(
     package = "example:parity@1.0.0",
@@ -488,6 +489,59 @@ pub mod parity {
             /// Whether the colour is red.
             pub fn red(hue: Hue) -> bool {
                 matches!(hue, Hue::Red)
+            }
+        }
+    }
+
+    /// Two resources of the Orb's root, the cache depending on the database, whose rows its
+    /// `#[open]` function reads: the cache comes first here, and opens after the database.
+    pub mod cellar {
+        use core::cell::Cell;
+
+        /// The rows the database held when the cache opened.
+        #[resource(depends = [Db])]
+        pub struct Cache {
+            pub seen: u32,
+        }
+
+        impl Cache {
+            #[open]
+            pub fn open() -> Cache {
+                Cache {
+                    seen: Db::with(|db| db.rows.get()),
+                }
+            }
+        }
+
+        /// The database, and its rows.
+        #[resource]
+        pub struct Db {
+            pub rows: Cell<u32>,
+        }
+
+        impl Db {
+            #[open]
+            pub fn open() -> Db {
+                Db { rows: Cell::new(3) }
+            }
+        }
+
+        pub mod stock {
+            use super::{Cache, Db};
+
+            #[service]
+            pub struct Stock;
+
+            impl Stock {
+                /// Add rows to the database: the rows the cache saw when it opened, and the
+                /// database's rows now.
+                pub fn add(rows: u32) -> (u32, u32) {
+                    let now = Db::with(|db| {
+                        db.rows.set(db.rows.get() + rows);
+                        db.rows.get()
+                    });
+                    (Cache::with(|cache| cache.seen), now)
+                }
             }
         }
     }

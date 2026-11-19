@@ -786,12 +786,13 @@ pub(crate) fn state_access(facade: &Ident) -> TokenStream {
 
 /// The resources of the Orb's root natively, in the component's `__tembra_resource`: the table of
 /// one Orb's resources, `Resources`, which `orb(..)` builds and the Orb's create fills, declaring
-/// each with `Declaration::resource` before the `#[root]` runs; the scope each method's future runs
-/// in, set around each of its polls with the table of its Orb; and `with` on each resource type, in
-/// place of the component's, which reaches the resource of the Orb whose method is running. The
-/// host opens each resource once the create returns, once for the Orb, and closes it when it
-/// removes the Orb; the value lives in a `Slot`, as in a component, filled by the `#[open]`
-/// function and emptied, through the `#[close]` one, if any, as the host closes it. Before the host
+/// each, after the resources it depends on, with `Declaration::resource_async` before the `#[root]`
+/// runs; the scope each method's future runs in, set around each of its polls with the table of its
+/// Orb; and `with` on each resource type, in place of the component's, which reaches the resource
+/// of the Orb whose method is running, or whose resource is opening or closing. The host opens each
+/// resource once the create returns, once for the Orb, and closes it when it removes the Orb; the
+/// value lives in a `Slot`, as in a component, filled by the `#[open]` function and emptied,
+/// through the `#[close]` one, if any, as the host closes it. Before the host
 /// opens it and once it has closed it, or outside a method of the Orb, `with` panics, as it traps a
 /// component. After a reload to another module whose resource keeps its name and version, the host
 /// keeps the old code's value, of another Rust type, which `with` could not reach: the scope
@@ -819,6 +820,10 @@ pub(crate) fn resource_access(
             .map(|((resource, field), path)| {
                 let name = wit::kebab(&resource.ident);
                 let version = resource.version;
+                let dependencies = resource
+                    .depends
+                    .iter()
+                    .map(|dependency| rust_ident(&wit::kebab(dependency)));
                 let open = resource
                     .open
                     .as_ref()
@@ -832,15 +837,31 @@ pub(crate) fn resource_access(
                     None => quote! { slot.close(); },
                 };
                 quote! {
-                    let resource = declaration.resource(
+                    let dependencies = [#(
+                        self.#dependencies
+                            .get()
+                            .expect("a resource's dependencies are declared before it")
+                            .key()
+                    ),*];
+                    let table = ::std::rc::Rc::downgrade(self);
+                    let closing = ::std::rc::Weak::clone(&table);
+                    let resource = declaration.resource_async(
                         #name,
                         #version,
-                        || {
-                            let slot = Slot::new();
-                            slot.open(#path::#open());
-                            ::core::result::Result::Ok(slot)
+                        &dependencies,
+                        move |_| {
+                            ::std::boxed::Box::pin(async move {
+                                // The `#[open]` function reads its dependencies with `with`.
+                                let _entered = table.upgrade().map(Entered::enter);
+                                let slot = Slot::new();
+                                slot.open(#path::#open());
+                                ::core::result::Result::Ok(slot)
+                            })
                         },
-                        |slot, _| {
+                        move |slot, _| {
+                            // The `#[close]` function reads its dependencies with `with` too,
+                            // which the host closes after it.
+                            let _entered = closing.upgrade().map(Entered::enter);
                             #close
                             ::std::boxed::Box::pin(async { ::core::result::Result::Ok(()) })
                         },
@@ -881,9 +902,10 @@ pub(crate) fn resource_access(
 
         impl Resources {
             /// Declare each resource of the root, in the Orb's create: the host opens it with the
-            /// `#[open]` function once the create returns, and closes it when it removes the Orb.
+            /// `#[open]` function once the create returns, after the resources it depends on, whose
+            /// `with` the function reaches, and closes it when it removes the Orb.
             pub(crate) fn declare(
-                &self,
+                self: &::std::rc::Rc<Self>,
                 declaration: &::#facade::Declaration,
             ) -> ::#facade::Result<()> {
                 #(#declarations)*

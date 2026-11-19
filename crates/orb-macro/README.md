@@ -480,6 +480,29 @@ struct enters the WIT only when a service method uses it; a resource may hold ty
 spelling for, such as a client of some granted I/O. A native host opens the same resources, see
 [using the Orb natively](#using-the-orb-natively).
 
+A resource that needs another one open names it, by its struct's name, in `depends`:
+
+```rust
+#[resource]
+pub struct Db { /* .. */ }
+
+#[resource(depends = [Db])]
+pub struct Cache { pub rows: u32 }
+
+impl Cache {
+    #[open]
+    pub fn open() -> Cache { Cache { rows: Db::with(|db| db.rows()) } }
+}
+```
+
+The kernel opens `Db` before `Cache` and closes `Cache` before `Db`, as a component and natively,
+so the `#[open]` and `#[close]` functions of `Cache` may use `Db` with its `with`. The component's
+declarations list each resource after the resources it depends on, and otherwise in the module's
+order, with their names as its dependencies; natively the Orb's create declares them in the same
+order with `Declaration::resource_async`, each with the keys of its dependencies. A name that is
+not a `#[resource]` of the Orb, the resource itself and a cycle are errors on the name in the
+attribute.
+
 ## The call's context
 
 A method runs inside a call the kernel admitted, on an object the kernel created for a key and a
@@ -1414,15 +1437,17 @@ its own.
 
 A [`#[resource]`](#resources-of-the-orbs-root) of the Orb's root serves a native host as it serves
 a component. `orb(..)` gives each Orb it builds a table of its resources, which the Orb's create
-fills, declaring each with `Declaration::resource` before the `#[root]`, if any, runs: the host
-opens each with its `#[open]` function once the create returns, once for the Orb and before any
-object of it is built, and closes it, through its `#[close]` function, when it removes the Orb. A
-reload keeps it while its version stays the same, and replaces it at a new version, as
+fills, declaring each with `Declaration::resource_async` before the `#[root]`, if any, runs: the
+host opens each with its `#[open]` function once the create returns, after the resources it
+[depends on](#resources-of-the-orbs-root), once for the Orb and before any object of it is built,
+and closes it, through its `#[close]` function, when it removes the Orb, before the resources it
+depends on. A reload keeps it while its version stays the same, and replaces it at a new version, as
 [above](#resources-of-the-orbs-root). The value lives in the host, one per Orb, so a crate
 installed twice under two names has two of each.
 `with` gives the open value to the methods of every service of the Orb and the functions of their
 WIT resources, which the native side runs with their Orb's table around each poll of their future,
-as for the `context` functions.
+as for the `context` functions, and to the `#[open]` and `#[close]` functions of its resources,
+which run with that table too.
 Elsewhere, in the root, a `#[create]` or a task, and before the host opens the resource or after
 it closes it, `with` panics, as it traps a component. A root that fails fails the create, and no
 resource opens.
@@ -1900,9 +1925,8 @@ the version whose rules the macro follows, and the generated code reaches it the
   `&self`, and none takes `&mut self`. Besides a service's state, a resource's fields, the root's
   resources and the fields of a service its `#[create]` builds, data lives in `static`s, as in
   the compiled fixtures of `executor-wasm`.
-- Root resources, `#[resource]`, belong to the root, declare no dependencies on one another, and
-  are opened in the order the kernel chooses; the `#[open]` and `#[close]` functions take no
-  arguments besides the value.
+- Root resources, `#[resource]`, belong to the root, and are opened after the resources their
+  `depends` names; the `#[open]` and `#[close]` functions take no arguments besides the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary, a consumed type's
   included. The state's `Default` and `serde`'s derives are the author's, on the state and on every
