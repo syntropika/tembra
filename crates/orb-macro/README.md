@@ -40,9 +40,9 @@ mod greeter {
 }
 ```
 
-Each service lives in an inline module of its own, with its `impl`, its state and its WIT
-resources; what lies outside every service's module belongs to the Orb, see
-[organizing the module in sub-modules](#organizing-the-module-in-sub-modules).
+Each service lives in an inline module of its own, with its `impl`, its state, its WIT
+resources and the resources of its objects; what lies outside every service's module belongs to
+the Orb, see [organizing the module in sub-modules](#organizing-the-module-in-sub-modules).
 
 The public Rust facade re-exports this macro. A guest enables only the authoring entry point,
 without linking the application's host runtime:
@@ -136,10 +136,10 @@ starts with this explicit freestanding mode.
 | a unit struct with `#[hook("ns:name/hook@version", composition = c)]`                   | `import` and `export` of that hook interface in the world: a declaration                                                                                             |
 | a unit struct with `#[hook(composition = c, input = Type)]`                             | a hook `interface` of the package under the struct's name, its callback `apply` and the types the input reaches, imported and exported by the world: a declaration   |
 | a struct with named fields and `#[state(version = n)]` in a service's module            | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it                                                  |
-| a struct with `#[resource(version = n)]` and a function marked `#[open]`                | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                                                                |
+| a struct with `#[resource(version = n)]` and a function marked `#[open]`                | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world; in a service's module, `export tembra:guest/service-resources-init` instead   |
 | `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct             | nothing in the WIT: the state's rule, run on every update and on reload                                                                                              |
 | `#[derive(..)]` on a struct or an enum that enters the WIT                              | nothing in the WIT: the type stays the author's, with its derives, attributes and impls as written                                                                   |
-| `#[close]` on a `fn(self)` of a `#[resource]` struct                                    | nothing in the WIT: run by the kernel at teardown                                                                                                                    |
+| `#[close]` on a `fn(self)` of a `#[resource]` struct                                    | nothing in the WIT: run by the kernel at teardown, or when the object owning the resource goes                                                                       |
 | an inline `mod`                                                                         | nothing of its own: a service's module holds the service and what belongs to it, any other module holds items of the Orb or of the service above it                  |
 | `///` comments and `/** */` blocks                                                      | `///` comments in the WIT, one per line                                                                                                                              |
 
@@ -442,7 +442,9 @@ A resource is a value the kernel opens when the Orb is activated and closes when
 in the order its dependencies require, and that every method and hook callback of the Orb can
 use. A struct marked `#[resource]`, with a function marked `#[open]`, `fn() -> Self` or
 `fn() -> Result<Self, E>`, and optionally one marked `#[close]`, `fn(self)`, in its `impl` block,
-outside every service's module, is a resource of the Orb's root:
+outside every service's module, is a resource of the Orb's root; in a service's module it is a
+resource of each of the service's objects, see
+[resources of a service's objects](#resources-of-a-services-objects):
 
 ```rust
 /// What this contributor observed.
@@ -521,6 +523,60 @@ fails with too. The Orb's activation fails, a call waiting on it fails with that
 kernel closes the resources that already opened, in reverse. A panic in `#[open]` is not an
 answer: it traps a component, while a native host catches it. An `E` without `Display` is an
 error on `E`, and any return type other than `Self` or a `Result` of it is an error on the type.
+
+## Resources of a service's objects
+
+A `#[resource]` struct in a service's module, or in a module below it, is a resource of each
+object of that service: the kernel opens one value when it creates the object, before the object
+answers a call, and closes it when the object goes. Its `#[open]`, `#[close]` and `depends` are
+written as for a root resource, and `with`, in a method of the service, gives the value of the
+object running the call:
+
+```rust
+#[resource]
+pub struct Harbor { pub berths: u32, pub taken: u32 }
+
+pub mod ship {
+    #[service]
+    pub struct Ship;
+
+    impl Ship {
+        /// The berth this ship moors at.
+        pub fn berth() -> u32 { Mooring::with(|mooring| mooring.berth) }
+    }
+
+    /// The berth of one ship, taken from the harbor when the kernel creates the ship.
+    #[resource(depends = [Harbor])]
+    pub struct Mooring { pub berth: u32 }
+
+    impl Mooring {
+        #[open]
+        pub fn open() -> Result<Mooring, String> {
+            super::Harbor::with(|harbor| {
+                if harbor.taken < harbor.berths { harbor.taken += 1; Ok(Mooring { berth: harbor.taken }) }
+                else { Err(String::from("no berth is free")) }
+            })
+        }
+    }
+}
+```
+
+Behind it, the world exports `tembra:guest/service-resources-init`, beside `resources-init` when
+the root owns resources too: when the kernel creates an object of the service it asks the component
+for the declarations of the service's resources, by the service's interface, opens each for that
+object after the root's resources it depends on, and closes it when the object goes, before them.
+The `#[open]` function runs once per object; its value lives in the component, in a table of the
+objects' values under the handle the open answered, which `with` reads back from the kernel for the
+object running the call. In the `#[open]` and `#[close]` functions `with` reaches the root's
+resources and the object's earlier ones; the object's state does not exist yet there. An `Err`
+fails the creation of that object with the same words as a failed root open, and the kernel closes
+what the object already opened; the other objects and the root are unaffected. A root resource
+depends on root resources alone, since it opens before any object; a service resource on root
+resources and on resources of its own service, never on another service's, whose objects come and
+go on their own: either dependency is an error on the name in `depends`, as is a second resource
+of a name, since `depends` and the kernel name a resource by its struct's name, wherever the
+struct sits. The native side does not open a service's resources yet: the module compiles, and its
+`orb()` answers an error naming the resource, see [using the Orb natively](#using-the-orb-natively).
 
 ## The call's context
 
@@ -1103,15 +1159,16 @@ mod ledger {
 ```
 
 What a service's module holds, directly or in a module below it, belongs to that service: its
-`#[service]` struct and `impl` blocks, its `#[state]` and its `#[wit_resource]` structs. The owner
-of a state or a WIT resource is the service of the nearest service's module above it, so a state
-may sit in `pinned::kept` as well as in `pinned`. What lies outside every service's module belongs
-to the Orb: the `#[root]`, the `#[inputs]` struct, the root's `#[resource]` structs, the `#[hook]`
-declarations and the contributions. Types and functions that are neither may sit anywhere. The
-macro refuses, on the item, with the fix in the error: a `#[service]` in the Orb module; two
-services in one module, or a service's module inside another's; a `#[state]` or a `#[wit_resource]`
-outside every service's module, and `service = Name` on either, which the rule replaces; and a
-`#[root]`, an `#[inputs]`, a `#[resource]` or a `#[hook]` inside a service's module.
+`#[service]` struct and `impl` blocks, its `#[state]`, its `#[wit_resource]` structs and the
+`#[resource]` structs of its objects. The owner of a state, a WIT resource or a service resource is
+the service of the nearest service's module above it, so a state may sit in `pinned::kept` as well
+as in `pinned`. What lies outside every service's module belongs to the Orb: the `#[root]`, the
+`#[inputs]` struct, the root's `#[resource]` structs, the `#[hook]` declarations and the
+contributions. Types and functions that are neither may sit anywhere. The macro refuses, on the
+item, with the fix in the error: a `#[service]` in the Orb module; two services in one module, or a
+service's module inside another's; a `#[state]` or a `#[wit_resource]` outside every service's
+module, and `service = Name` on either, which the rule replaces; and a `#[root]`, an `#[inputs]` or
+a `#[hook]` inside a service's module.
 
 A service's methods are the `pub fn` of the `impl` blocks of its own module, and a marked function
 goes in the module of its struct. The bridges the macro generates for an item go in the item's
@@ -1533,8 +1590,9 @@ Today the native side covers services whose functions take and return numbers, `
 tuples of them, the types of an implemented or imported interface or of a hook among them, WIT
 resources as above, states, the resources of the Orb's root, the imports of interfaces of
 `async func`s and contributions to hooks. What it does not cover yet, such as a type of a consumed
-interface that holds a resource, an import of an interface with a resource, a WASI import or an
-`Option` of an `Option`, which the boundary's JSON cannot tell from `None`, and the other cases
+interface that holds a resource, an import of an interface with a resource, a WASI import, a
+resource of a service's objects or an `Option` of an `Option`, which the boundary's JSON cannot
+tell from `None`, and the other cases
 above, leaves the module compiling where the runtime is linked: its `orb()` and `orb_named(..)`,
 which take the inputs if the module has an `#[inputs]` struct and no providers, answer an error
 with the code `unsupported` and the reason `native`, naming the item, so only a host that installs
@@ -1898,11 +1956,12 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    the state each method's object declared natively, inside `tembra::__host!`; and the kernel's
    `validate` callback, which reads the value a reload would adopt as the state type and runs the
    state's `#[validate]` function on it;
-9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
-   function and emptied by the `#[close]` one, and the `with` function on each resource type,
-   which reaches the slot in a component build, inside `tembra::__guest!`, and natively, inside
-   `tembra::__host!`, the resource of the Orb whose method runs, from a hidden table of the Orb's
-   resources that the Orb's create fills;
+9. with a resource, one slot in the component's memory per root resource, filled by the `#[open]`
+   function and emptied by the `#[close]` one, and one table per service resource, holding each
+   object's value under the handle its open answered, and the `with` function on each resource
+   type, which reaches the slot, or the running object's value in the table, in a component build,
+   inside `tembra::__guest!`, and natively, inside `tembra::__host!`, the resource of the Orb whose
+   method runs, from a hidden table of the Orb's root resources that the Orb's create fills;
 10. inside `tembra::__host!`, so only in a native build that links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
     `pub fn orb_named(name, api_version, ..)`, whose Orb's create declares the root's resources and

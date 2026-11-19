@@ -1,0 +1,5 @@
+error: `Line` is a resource of each object of the service `Tug`, and `Mooring` one of the service `Ship`: a service resource depends on root resources and on resources of its own service, whose objects open and close together
+  --> tests/ui/resource_depends_on_another_services.rs:36:31
+   |
+36 |         #[resource(depends = [Mooring])]
+   |                               ^^^^^^^

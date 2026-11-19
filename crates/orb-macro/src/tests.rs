@@ -5458,7 +5458,7 @@ fn the_owner_is_the_service_of_the_nearest_services_module() {
 /// The macro refuses an item outside its owner's module, on the item, with the fix: a service in
 /// the Orb module, two services in one module, a service's module inside another's, a state or a
 /// WIT resource outside every service's module, `service = Name` on either, and the Orb's items,
-/// the root, the inputs, a root resource and a hook, inside a service's module.
+/// the root, the inputs and a hook, inside a service's module.
 #[test]
 fn an_item_outside_its_owners_module_is_refused() {
     let service = |name: &str| {
@@ -5537,18 +5537,6 @@ fn an_item_outside_its_owners_module_is_refused() {
                 service("Tickets")
             ),
             "#[wit_resource] takes no `service`: the resource belongs to the service whose module holds it, so put it in that module",
-        ),
-        (
-            format!(
-                "mod desk {{ pub mod tickets {{
-                    #[resource]
-                    pub struct Counts;
-                    impl Counts {{ #[open] fn open() -> Self {{ Counts }} }}
-                    {}
-                }} }}",
-                service("Tickets")
-            ),
-            "the #[resource] `Counts` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module",
         ),
         (
             format!(
@@ -7883,6 +7871,163 @@ fn an_open_returning_a_result_fails_with_its_error_both_ways() {
     ] {
         assert!(resources.contains(expected), "{expected}\n{resources}");
     }
+}
+
+/// A `#[resource]` in a service's module is a resource of each object of the service: the world
+/// exports `service-resources-init`, whose `declare` lists the service's resources, after the root's
+/// ones they depend on, by the service's interface, and whose `open` keeps the object's value in a
+/// table under the handle it answers, which `with` reads back through the kernel; a root resource
+/// keeps its slot. Natively, `orb()` refuses the module, naming the service resource, and the type's
+/// `with` panics, so that the module compiles. A root resource depending on a service's, a service's
+/// depending on another service's, and two resources of one name are errors on the name.
+#[test]
+fn a_resource_in_a_service_module_belongs_to_each_object_of_the_service() {
+    let dock = |mooring: &str, berth: &str| {
+        format!(
+            "mod dock {{
+                #[resource]
+                pub struct Harbor {{ pub berths: u32 }}
+                impl Harbor {{
+                    #[open]
+                    pub fn open() -> Harbor {{ Harbor {{ berths: 0 }} }}
+                }}
+                pub mod ship {{
+                    use super::Harbor;
+                    #[service]
+                    pub struct Ship;
+                    impl Ship {{ pub fn berth() -> u32 {{ Mooring::with(|mooring| mooring.berth) }} }}
+                    {mooring}
+                    pub struct Mooring {{ pub berth: u32 }}
+                    impl Mooring {{
+                        #[open]
+                        pub fn open() -> Result<Mooring, String> {{ Ok(Mooring {{ berth: Harbor::with(|harbor| harbor.berths) }}) }}
+                        #[close]
+                        pub fn close(self) {{}}
+                    }}
+                    #[resource(depends = [Mooring])]
+                    pub struct Line;
+                    impl Line {{
+                        #[open]
+                        pub fn open() -> Line {{ Line }}
+                    }}
+                }}
+                pub mod tug {{
+                    #[service]
+                    pub struct Tug;
+                    impl Tug {{ pub fn pull() -> u32 {{ 0 }} }}
+                    {berth}
+                    pub struct Berth;
+                    impl Berth {{
+                        #[open]
+                        pub fn open() -> Berth {{ Berth }}
+                    }}
+                }}
+            }}"
+        )
+    };
+    let module = expanded(
+        PACKAGE,
+        &dock("#[resource(depends = [Harbor])]", "#[resource]"),
+    );
+    assert!(
+        wit(&module).contains(
+            "world dock {\n  import tembra:guest/resources@1.0.0;\n  export tembra:guest/resources-init@1.0.0;\n  export tembra:guest/service-resources-init@1.0.0;\n  export ship;\n  export tug;\n}"
+        ),
+        "{}",
+        wit(&module)
+    );
+    let generated = tokens(&module);
+    for expected in [
+        // The root's declaration lists the harbor alone.
+        "fn declare () -> __tembra_resource :: Vec < exports :: tembra :: guest :: resources_init :: Declaration > { :: core :: convert :: From :: from ([exports :: tembra :: guest :: resources_init :: Declaration { name : :: core :: convert :: From :: from (\"harbor\") , version : 1u32 , dependencies : :: core :: convert :: From :: from ([]) , }]) }",
+        "\"harbor\" => { __TEMBRA_RESOURCE_HARBOR . open (Harbor :: open ()) ; :: core :: result :: Result :: Ok (1) }",
+        // Each service's declaration lists its own, in dependency order.
+        "fn declare (service : __tembra_resource :: String ,) -> __tembra_resource :: Vec < exports :: tembra :: guest :: service_resources_init :: Declaration > { match service . as_str () { \"example:book/ship@1.0.0\" => :: core :: convert :: From :: from ([exports :: tembra :: guest :: service_resources_init :: Declaration { name : :: core :: convert :: From :: from (\"mooring\") , version : 1u32 , dependencies : :: core :: convert :: From :: from ([:: core :: convert :: From :: from (\"harbor\")]) , } , exports :: tembra :: guest :: service_resources_init :: Declaration { name : :: core :: convert :: From :: from (\"line\") , version : 1u32 , dependencies : :: core :: convert :: From :: from ([:: core :: convert :: From :: from (\"mooring\")]) , }]) , \"example:book/tug@1.0.0\" => :: core :: convert :: From :: from ([exports :: tembra :: guest :: service_resources_init :: Declaration { name : :: core :: convert :: From :: from (\"berth\") , version : 1u32 , dependencies : :: core :: convert :: From :: from ([]) , }]) , _ => __tembra_resource :: Vec :: new () , } }",
+        // An open keeps the object's value in the table and answers its handle; a fallible one
+        // answers its error's text.
+        "(\"example:book/ship@1.0.0\" , \"mooring\") => match ship :: Mooring :: open () { :: core :: result :: Result :: Ok (value) => :: core :: result :: Result :: Ok (__TEMBRA_RESOURCE_MOORING . open (value)) , :: core :: result :: Result :: Err (error) => :: core :: result :: Result :: Err (__tembra_resource :: ToString :: to_string (& error)) , }",
+        "(\"example:book/tug@1.0.0\" , \"berth\") => :: core :: result :: Result :: Ok (__TEMBRA_RESOURCE_BERTH . open (tug :: Berth :: open ())) ,",
+        // A close takes the object's value out of the table by its handle.
+        "(\"example:book/ship@1.0.0\" , \"mooring\") => { if let :: core :: option :: Option :: Some (value) = __TEMBRA_RESOURCE_MOORING . close (handle) { value . close () ; } }",
+        "(\"example:book/ship@1.0.0\" , \"line\") => { __TEMBRA_RESOURCE_LINE . close (handle) ; }",
+        "static __TEMBRA_RESOURCE_MOORING : __tembra_resource :: Table < ship :: Mooring > = __tembra_resource :: Table :: new () ;",
+        "static __TEMBRA_RESOURCE_HARBOR : __tembra_resource :: Slot < Harbor > = __tembra_resource :: Slot :: new () ;",
+        // `with` reads the handle of the running object's value from the kernel.
+        "impl ship :: Mooring { # [doc = \" Use the resource `mooring` of the `Ship` object running the current call, opened by the kernel when it created the object; the kernel names the object's value by its handle, the value lives in this component.\"] pub fn with < R > (use_ : impl :: core :: ops :: FnOnce (& mut Self) -> R) -> R { let handle = self :: tembra :: guest :: resources :: read (\"mooring\") ; __TEMBRA_RESOURCE_MOORING . with (handle , use_) } }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let root = native(&module, &[]);
+    assert!(
+        root.contains("\"the resource `mooring` of each object of the service `Ship` is not supported natively yet: the native side declares the resources of the Orb's root alone, so a service resource works in a component build only\""),
+        "{root}"
+    );
+    let resources = native(&module, &["__tembra_resource"]);
+    for expected in [
+        "pub struct Resources { harbor : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: Harbor >> > , }",
+        "impl super :: ship :: Mooring {",
+        ":: core :: panic ! (\"the resource `mooring` of each object of the service `Ship` is not supported natively yet\")",
+    ] {
+        assert!(resources.contains(expected), "{expected}\n{resources}");
+    }
+    // Without a root resource, the world exports `service-resources-init` alone.
+    let alone = expanded(
+        PACKAGE,
+        &dock("#[resource]", "#[resource]")
+            .replace(
+                "#[resource]\n                pub struct Harbor",
+                "pub struct Harbor",
+            )
+            .replace(
+                "#[open]\n                    pub fn open() -> Harbor",
+                "pub fn open() -> Harbor",
+            ),
+    );
+    assert!(
+        wit(&alone).contains(
+            "world dock {\n  import tembra:guest/resources@1.0.0;\n  export tembra:guest/service-resources-init@1.0.0;\n  export ship;\n  export tug;\n}"
+        ),
+        "{}",
+        wit(&alone)
+    );
+    assert!(
+        !tokens(&alone).contains("exports :: tembra :: guest :: resources_init :: Guest"),
+        "{}",
+        tokens(&alone)
+    );
+    let error = refused(
+        PACKAGE,
+        &dock("#[resource]", "#[resource(depends = [Mooring])]"),
+    );
+    assert_eq!(
+        error,
+        "`Berth` is a resource of each object of the service `Tug`, and `Mooring` one of the service `Ship`: a service resource depends on root resources and on resources of its own service, whose objects open and close together"
+    );
+    let error = refused(
+        PACKAGE,
+        &dock("#[resource]", "#[resource]").replace(
+            "#[resource]\n                pub struct Harbor",
+            "#[resource(depends = [Berth])]\n                pub struct Harbor",
+        ),
+    );
+    assert_eq!(
+        error,
+        "`Harbor` is a resource of the root, and `Berth` one of each object of the service `Tug`: a root resource opens at activation, before any object, so it depends on root resources alone"
+    );
+    let error = refused(
+        PACKAGE,
+        &dock("#[resource]", "#[resource]")
+            .replace("pub struct Berth", "pub struct Mooring")
+            .replace("impl Berth", "impl Mooring")
+            .replace(
+                "pub fn open() -> Berth { Berth }",
+                "pub fn open() -> Mooring { Mooring }",
+            ),
+    );
+    assert_eq!(
+        error,
+        "`Mooring` names two resources, one of the service `Ship` and one of the service `Tug`: the kernel and `depends` name a resource by its struct's name, so give each resource of the Orb a name of its own"
+    );
 }
 
 /// What the native side does not cover yet leaves the module compiling inside the facade's wrapper,

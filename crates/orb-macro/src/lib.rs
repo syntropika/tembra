@@ -558,12 +558,19 @@ struct State {
     scope: usize,
 }
 
-/// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a function
-/// marked `#[open]`, `fn() -> Self` or `fn() -> Result<Self, E>`, and, optionally, one marked
-/// `#[close]`, `fn(self)`.
+/// A resource of the Orb's root, or of each object of a service: a struct marked `#[resource]`
+/// whose `impl` block has a function marked `#[open]`, `fn() -> Self` or `fn() -> Result<Self, E>`,
+/// and, optionally, one marked `#[close]`, `fn(self)`. One in a service's module, or below it, is
+/// the service's; any other is the root's.
 struct Resource {
     ident: Ident,
     version: u32,
+    /// The owning service, when the resource is in a service's module: the service of the nearest
+    /// service's module at or above it. None for a resource of the root.
+    service: Option<Ident>,
+    /// The identity of the owning service's interface, once the owner is resolved; empty for a
+    /// resource of the root.
+    identity: String,
     /// The function marked `#[open]`, once found.
     open: Option<Ident>,
     /// Whether the `#[open]` function returns `Result<Self, E>`, whose error fails the open with
@@ -653,9 +660,9 @@ struct NativeOnly {
 enum Marker {
     /// `#[validate]`: a state's rule, `fn(&self) -> Result<(), String>`.
     Validate,
-    /// `#[open]`: a root resource's opening, `fn() -> Self` or `fn() -> Result<Self, E>`.
+    /// `#[open]`: a resource's opening, `fn() -> Self` or `fn() -> Result<Self, E>`.
     Open,
-    /// `#[close]`: a root resource's closing, `fn(self)`.
+    /// `#[close]`: a resource's closing, `fn(self)`.
     Close,
     /// `#[constructor]`: a WIT resource's constructor, `fn(..) -> Self` without `self`.
     Constructor,
@@ -1508,7 +1515,6 @@ struct Placed<'a> {
     services: &'a [Service],
     states: &'a [State],
     wit_resources: &'a [WitResource],
-    resources: &'a [Resource],
     declared: &'a [Declared],
     contributions: &'a [Contribution],
     root: Option<&'a Root>,
@@ -1519,8 +1525,9 @@ struct Placed<'a> {
 /// Refuse a module whose items break the rule of the services' modules: each `#[service]` sits in
 /// an inline module of its own, below no other service's module; a `#[state]` and a
 /// `#[wit_resource]` sit in their service's module or below it; and the Orb's items, `#[root]`,
-/// `#[inputs]`, `#[resource]` and `#[hook]`, outside every service's module. Each error falls on
-/// the item and names the fix.
+/// `#[inputs]` and `#[hook]`, outside every service's module. A `#[resource]` sits anywhere: in a
+/// service's module it is the service's, elsewhere the root's. Each error falls on the item and
+/// names the fix.
 fn placed_by_service(placed: &Placed) -> syn::Result<()> {
     let Placed {
         services, modules, ..
@@ -1585,15 +1592,9 @@ fn placed_by_service(placed: &Placed) -> syn::Result<()> {
         }
     }
     let orb_items = placed
-        .resources
+        .declared
         .iter()
-        .map(|item| ("#[resource]", &item.ident, item.scope))
-        .chain(
-            placed
-                .declared
-                .iter()
-                .map(|item| ("#[hook]", &item.ident, item.scope)),
-        )
+        .map(|item| ("#[hook]", &item.ident, item.scope))
         .chain(
             placed
                 .contributions
@@ -1650,7 +1651,8 @@ struct Analysis {
     services: Vec<Service>,
     /// The WIT resources, each resolved to the service whose interface defines it.
     wit_resources: Vec<WitResource>,
-    /// The resources of the Orb's root, with their `#[open]` and `#[close]` functions.
+    /// The resources, of the root and of the services' objects, with their `#[open]` and `#[close]`
+    /// functions, each after the resources it depends on.
     resources: Vec<Resource>,
     /// The struct marked `#[inputs]`, if any: the argument of the native `orb(..)`.
     inputs: Option<Inputs>,
@@ -1863,7 +1865,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         services: &services,
         states: &states,
         wit_resources: &wit_resources,
-        resources: &resources,
         declared: &declared,
         contributions: &contributions,
         root: root.as_ref(),
@@ -2091,6 +2092,14 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 ));
             }
             resource.close = Some(signature.ident.clone());
+        }
+    }
+    // A resource in a service's module belongs to the objects of that service; any other is the
+    // root's.
+    for resource in &mut resources {
+        if let Some(owner) = service_of(&services, resource.scope, &modules) {
+            resource.identity = owner.identity(&package);
+            resource.service = Some(owner.ident.clone());
         }
     }
     let resources = in_dependency_order(resources)?;
@@ -2737,7 +2746,8 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &views,
         wit::Kernel {
             state: !states.is_empty(),
-            resources: !resources.is_empty(),
+            resources: resources.iter().any(|resource| resource.service.is_none()),
+            service_resources: resources.iter().any(|resource| resource.service.is_some()),
             context: options.context,
         },
     )?;
@@ -6366,9 +6376,32 @@ fn opens_fallibly(output: &ReturnType, ident: &Ident) -> syn::Result<Option<Span
 }
 
 /// The resources in the order the kernel opens them: each after the resources it depends on, and
-/// otherwise in the module's order. A dependency that is not a `#[resource]` of the Orb, the
-/// resource itself, or one that closes a cycle is an error on its name in the attribute.
+/// otherwise in the module's order. Two resources of one name are an error on the second, since
+/// `depends` and the kernel name a resource by it. A dependency that is not a `#[resource]` of the
+/// Orb, the resource itself, one that closes a cycle, or one the owner rule refuses, a root
+/// resource depending on a service's or a service's on another service's, is an error on its name
+/// in the attribute.
 fn in_dependency_order(resources: Vec<Resource>) -> syn::Result<Vec<Resource>> {
+    for (index, resource) in resources.iter().enumerate() {
+        if let Some(first) = resources[..index]
+            .iter()
+            .find(|other| other.ident == resource.ident)
+        {
+            let owner = |resource: &Resource| match &resource.service {
+                Some(service) => format!("of the service `{service}`"),
+                None => "of the root".to_owned(),
+            };
+            return Err(syn::Error::new(
+                resource.ident.span(),
+                format!(
+                    "`{}` names two resources, one {} and one {}: the kernel and `depends` name a resource by its struct's name, so give each resource of the Orb a name of its own",
+                    resource.ident,
+                    owner(first),
+                    owner(resource)
+                ),
+            ));
+        }
+    }
     /// Put `index` after its dependencies into `order`; `visiting` holds the resources whose
     /// dependencies are being put, which a cycle reaches again.
     fn visit(
@@ -6405,6 +6438,32 @@ fn in_dependency_order(resources: Vec<Resource>) -> syn::Result<Vec<Resource>> {
                         resource.ident
                     ),
                 ));
+            }
+            // A root resource opens at activation, before any object: it depends on root
+            // resources alone. A service resource opens with its object: it depends on root
+            // resources and on earlier resources of its own service, never on another service's,
+            // whose objects come and go on their own.
+            match (&resource.service, &resources[dependency].service) {
+                (_, None) => {}
+                (Some(service), Some(other)) if service == other => {}
+                (None, Some(other)) => {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        format!(
+                            "`{}` is a resource of the root, and `{name}` one of each object of the service `{other}`: a root resource opens at activation, before any object, so it depends on root resources alone",
+                            resource.ident
+                        ),
+                    ));
+                }
+                (Some(service), Some(other)) => {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        format!(
+                            "`{}` is a resource of each object of the service `{service}`, and `{name}` one of the service `{other}`: a service resource depends on root resources and on resources of its own service, whose objects open and close together",
+                            resource.ident
+                        ),
+                    ));
+                }
             }
             visit(dependency, resources, visiting, order)?;
         }
@@ -6454,6 +6513,8 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
     Ok(Resource {
         ident: item.ident.clone(),
         version,
+        service: None,
+        identity: String::new(),
         open: None,
         fallible: false,
         failure: Span::call_site(),
@@ -6464,10 +6525,13 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
 }
 
 /// The Rust side of the resources: the kernel's `resources-init` callbacks listing, opening and
-/// closing them, one slot in the component's memory per resource, and `with` on each type, which
-/// reaches the component's slot in a component build and the Orb's resource natively, where the
-/// native side declares each in the Orb's create and writes its own `with`, through the facade
-/// named `facade`.
+/// closing the root's, and its `service-resources-init` callbacks for those of the services'
+/// objects, listed by the owning service's interface; one slot in the component's memory per root
+/// resource, and one table per service resource, holding the value of each object under the
+/// handle `open` answered; and `with` on each type, which reaches the component's slot, or the
+/// value of the object running the call in the table, in a component build, and the Orb's
+/// resource natively, where the native side declares each root resource in the Orb's create and
+/// writes its own `with`, through the facade named `facade`.
 fn resource_code(
     resources: &[Resource],
     modules: &[Vec<Ident>],
@@ -6482,12 +6546,15 @@ fn resource_code(
             resource.ident.to_string().to_shouty_snake_case()
         )
     };
-    let declarations = resources.iter().map(|resource| {
+    let (root, of_services): (Vec<&Resource>, Vec<&Resource>) = resources
+        .iter()
+        .partition(|resource| resource.service.is_none());
+    let declaration = |resource: &Resource, module: proc_macro2::TokenStream| {
         let name = wit::kebab(&resource.ident);
         let version = resource.version;
         let dependencies = resource.depends.iter().map(wit::kebab);
         quote! {
-            exports::tembra::guest::resources_init::Declaration {
+            exports::tembra::guest::#module::Declaration {
                 name: ::core::convert::From::from(#name),
                 version: #version,
                 dependencies: ::core::convert::From::from([
@@ -6495,66 +6562,194 @@ fn resource_code(
                 ]),
             }
         }
-    });
-    let openers = resources.iter().map(|resource| {
-        let name = wit::kebab(&resource.ident);
-        let path = from_root(&modules[resource.scope], &resource.ident);
-        let open = resource
-            .open
-            .as_ref()
-            .expect("a resource has its #[open] function");
-        let slot = slot(resource);
-        if resource.fallible {
-            // A missing `Display` falls on the error type the author wrote.
-            let text = quote_spanned! {resource.failure=>
-                __tembra_resource::ToString::to_string(&error)
-            };
-            quote! {
-                #name => match #path::#open() {
-                    ::core::result::Result::Ok(value) => {
-                        #slot.open(value);
-                        ::core::result::Result::Ok(1)
+    };
+    // The answer of an open: `keep` puts the value the `#[open]` function gives, the expression
+    // handed to it, where it lives and answers `Ok(handle)`; a fallible function's `Err` answers
+    // the error's text.
+    let opened =
+        |resource: &Resource,
+         keep: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream| {
+            let path = from_root(&modules[resource.scope], &resource.ident);
+            let open = resource
+                .open
+                .as_ref()
+                .expect("a resource has its #[open] function");
+            if resource.fallible {
+                let kept = keep(quote! { value });
+                // A missing `Display` falls on the error type the author wrote.
+                let text = quote_spanned! {resource.failure=>
+                    __tembra_resource::ToString::to_string(&error)
+                };
+                quote! {
+                    match #path::#open() {
+                        ::core::result::Result::Ok(value) => #kept
+                        ::core::result::Result::Err(error) => ::core::result::Result::Err(#text),
                     }
-                    ::core::result::Result::Err(error) => ::core::result::Result::Err(#text),
+                }
+            } else {
+                keep(quote! { #path::#open() })
+            }
+        };
+    // Run the `#[close]` function, if any, on the value `taken` out of its slot or table.
+    let closed = |resource: &Resource, taken: proc_macro2::TokenStream| match &resource.close {
+        Some(close) => quote! {
+            if let ::core::option::Option::Some(value) = #taken {
+                value.#close();
+            }
+        },
+        None => quote! { #taken; },
+    };
+    let root_code = (!root.is_empty()).then(|| {
+        let declarations = root
+            .iter()
+            .map(|resource| declaration(resource, quote! { resources_init }));
+        let openers = root.iter().map(|resource| {
+            let name = wit::kebab(&resource.ident);
+            let slot = slot(resource);
+            let opened = opened(resource, &|value| {
+                quote! { { #slot.open(#value); ::core::result::Result::Ok(1) } }
+            });
+            quote! { #name => #opened }
+        });
+        let closers = root.iter().map(|resource| {
+            let name = wit::kebab(&resource.ident);
+            let slot = slot(resource);
+            let closed = closed(resource, quote! { #slot.close() });
+            quote! { #name => { #closed } }
+        });
+        quote! {
+            // The kernel lists the root's resources when it creates the root, then opens and closes
+            // each of them in its own order through these callbacks.
+            impl exports::tembra::guest::resources_init::Guest for __TembraExports {
+                fn declare() -> __tembra_resource::Vec<exports::tembra::guest::resources_init::Declaration> {
+                    ::core::convert::From::from([#(#declarations),*])
+                }
+                fn open(
+                    name: __tembra_resource::String,
+                ) -> ::core::result::Result<u32, __tembra_resource::String> {
+                    match name.as_str() {
+                        #(#openers)*
+                        _ => ::core::result::Result::Err(::core::convert::From::from("unknown resource")),
+                    }
+                }
+                fn close(name: __tembra_resource::String, _handle: u32) {
+                    match name.as_str() {
+                        #(#closers)*
+                        _ => {}
+                    }
                 }
             }
-        } else {
-            quote! { #name => { #slot.open(#path::#open()); ::core::result::Result::Ok(1) } }
         }
     });
-    let closers = resources.iter().map(|resource| {
-        let name = wit::kebab(&resource.ident);
-        let slot = slot(resource);
-        match &resource.close {
-            Some(close) => {
-                quote! {
-                    #name => {
-                        if let ::core::option::Option::Some(value) = #slot.close() {
-                            value.#close();
-                        }
+    let service_code = (!of_services.is_empty()).then(|| {
+        // One list per owning service, in the order of the resources.
+        let mut by_service: Vec<(&str, Vec<&Resource>)> = Vec::new();
+        for resource in &of_services {
+            match by_service
+                .iter_mut()
+                .find(|(identity, _)| *identity == resource.identity)
+            {
+                Some((_, owned)) => owned.push(resource),
+                None => by_service.push((&resource.identity, vec![resource])),
+            }
+        }
+        let declarations = by_service.iter().map(|(identity, owned)| {
+            let identity = LitStr::new(identity, Span::call_site());
+            let declarations = owned
+                .iter()
+                .map(|resource| declaration(resource, quote! { service_resources_init }));
+            quote! { #identity => ::core::convert::From::from([#(#declarations),*]), }
+        });
+        let openers = of_services.iter().map(|resource| {
+            let identity = LitStr::new(&resource.identity, Span::call_site());
+            let name = wit::kebab(&resource.ident);
+            let slot = slot(resource);
+            let opened = opened(resource, &|value| {
+                quote! { ::core::result::Result::Ok(#slot.open(#value)), }
+            });
+            quote! { (#identity, #name) => #opened }
+        });
+        let closers = of_services.iter().map(|resource| {
+            let identity = LitStr::new(&resource.identity, Span::call_site());
+            let name = wit::kebab(&resource.ident);
+            let slot = slot(resource);
+            let closed = closed(resource, quote! { #slot.close(handle) });
+            quote! { (#identity, #name) => { #closed } }
+        });
+        quote! {
+            // The kernel lists a service's resources when it creates an object of the service, then
+            // opens each for that object, after the root's, and closes it when the object goes,
+            // through these callbacks; the object's value lives in the table under the handle
+            // `open` answered.
+            impl exports::tembra::guest::service_resources_init::Guest for __TembraExports {
+                fn declare(
+                    service: __tembra_resource::String,
+                ) -> __tembra_resource::Vec<exports::tembra::guest::service_resources_init::Declaration> {
+                    match service.as_str() {
+                        #(#declarations)*
+                        _ => __tembra_resource::Vec::new(),
+                    }
+                }
+                fn open(
+                    service: __tembra_resource::String,
+                    name: __tembra_resource::String,
+                ) -> ::core::result::Result<u32, __tembra_resource::String> {
+                    match (service.as_str(), name.as_str()) {
+                        #(#openers)*
+                        _ => ::core::result::Result::Err(::core::convert::From::from("unknown resource")),
+                    }
+                }
+                fn close(
+                    service: __tembra_resource::String,
+                    name: __tembra_resource::String,
+                    handle: u32,
+                ) {
+                    match (service.as_str(), name.as_str()) {
+                        #(#closers)*
+                        _ => {}
                     }
                 }
             }
-            None => quote! { #name => { #slot.close(); } },
         }
     });
     let slots = resources.iter().map(|resource| {
         let path = from_root(&modules[resource.scope], &resource.ident);
         let slot = slot(resource);
         let name = wit::kebab(&resource.ident);
-        let doc = format!(
-            " Use the resource `{name}` of this Orb's root, opened by the kernel at activation; the kernel confirms it is open, the value lives in this component."
-        );
         // A native host gets `with` of its own, in `__tembra_resource`, over the Orb its method
         // runs for.
-        quote! {
-            static #slot: __tembra_resource::Slot<#path> = __tembra_resource::Slot::new();
-            ::#facade::__guest! {
-                impl #path {
-                    #[doc = #doc]
-                    pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
-                        let _handle = self::tembra::guest::resources::read(#name);
-                        #slot.with(use_)
+        match &resource.service {
+            None => {
+                let doc = format!(
+                    " Use the resource `{name}` of this Orb's root, opened by the kernel at activation; the kernel confirms it is open, the value lives in this component."
+                );
+                quote! {
+                    static #slot: __tembra_resource::Slot<#path> = __tembra_resource::Slot::new();
+                    ::#facade::__guest! {
+                        impl #path {
+                            #[doc = #doc]
+                            pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
+                                let _handle = self::tembra::guest::resources::read(#name);
+                                #slot.with(use_)
+                            }
+                        }
+                    }
+                }
+            }
+            Some(service) => {
+                let doc = format!(
+                    " Use the resource `{name}` of the `{service}` object running the current call, opened by the kernel when it created the object; the kernel names the object's value by its handle, the value lives in this component."
+                );
+                quote! {
+                    static #slot: __tembra_resource::Table<#path> = __tembra_resource::Table::new();
+                    ::#facade::__guest! {
+                        impl #path {
+                            #[doc = #doc]
+                            pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
+                                let handle = self::tembra::guest::resources::read(#name);
+                                #slot.with(handle, use_)
+                            }
+                        }
                     }
                 }
             }
@@ -6562,27 +6757,8 @@ fn resource_code(
     });
     let native = native::resource_access(resources, modules, facade);
     quote! {
-        // The kernel lists the root's resources when it creates the root, then opens and closes
-        // each of them in its own order through these callbacks.
-        impl exports::tembra::guest::resources_init::Guest for __TembraExports {
-            fn declare() -> __tembra_resource::Vec<exports::tembra::guest::resources_init::Declaration> {
-                ::core::convert::From::from([#(#declarations),*])
-            }
-            fn open(
-                name: __tembra_resource::String,
-            ) -> ::core::result::Result<u32, __tembra_resource::String> {
-                match name.as_str() {
-                    #(#openers)*
-                    _ => ::core::result::Result::Err(::core::convert::From::from("unknown resource")),
-                }
-            }
-            fn close(name: __tembra_resource::String, _handle: u32) {
-                match name.as_str() {
-                    #(#closers)*
-                    _ => {}
-                }
-            }
-        }
+        #root_code
+        #service_code
         #(#slots)*
         /// A resource's value lives in the component while the resource is open.
         #[doc(hidden)]
@@ -6619,6 +6795,50 @@ fn resource_code(
             }
 
             impl<T> ::core::default::Default for Slot<T> {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+
+            /// The values of one resource of a service's objects, each under the handle its open
+            /// answered the kernel: the handles count up from 1, and never come back.
+            pub struct Table<T>(::core::cell::RefCell<(u32, Vec<(u32, T)>)>);
+
+            // SAFETY: as for `Slot`.
+            unsafe impl<T> ::core::marker::Sync for Table<T> {}
+
+            impl<T> Table<T> {
+                pub const fn new() -> Self {
+                    Self(::core::cell::RefCell::new((0, Vec::new())))
+                }
+
+                /// Keep an object's value and answer its handle.
+                pub fn open(&self, value: T) -> u32 {
+                    let mut table = self.0.borrow_mut();
+                    table.0 += 1;
+                    let handle = table.0;
+                    table.1.push((handle, value));
+                    handle
+                }
+
+                pub fn close(&self, handle: u32) -> ::core::option::Option<T> {
+                    let mut table = self.0.borrow_mut();
+                    let index = table.1.iter().position(|(kept, _)| *kept == handle)?;
+                    ::core::option::Option::Some(table.1.remove(index).1)
+                }
+
+                pub fn with<R>(&self, handle: u32, use_: impl ::core::ops::FnOnce(&mut T) -> R) -> R {
+                    let mut table = self.0.borrow_mut();
+                    let (_, value) = table
+                        .1
+                        .iter_mut()
+                        .find(|(kept, _)| *kept == handle)
+                        .expect("the resource is not open");
+                    use_(value)
+                }
+            }
+
+            impl<T> ::core::default::Default for Table<T> {
                 fn default() -> Self {
                     Self::new()
                 }

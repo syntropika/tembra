@@ -13,6 +13,8 @@ mod cellar;
 mod configured;
 #[cfg(feature = "contributor")]
 mod contributor;
+#[cfg(feature = "dock")]
+mod dock;
 #[cfg(feature = "flagged")]
 mod flagged;
 #[cfg(feature = "hooks")]

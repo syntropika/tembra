@@ -2562,6 +2562,93 @@ fn an_open_that_answers_an_error_fails_the_activation_both_ways() {
     module_natively("kiln");
 }
 
+/// A resource of a service's objects, in a component build, std and freestanding: in the `dock`
+/// feature each `Ship` object owns a mooring, `#[resource(depends = [Harbor])]` in the service's
+/// module, which the kernel opens when it creates the ship, after the root's harbor, whose next
+/// berth the `#[open]` function takes, and closes when the ship goes, before the harbor. Each ship
+/// reads its own mooring, so two ships moor at two berths, in the order the kernel created them;
+/// the harbor's two berths taken, the third ship's mooring answers `Err`, which fails that ship's
+/// creation with `unavailable/resource` and the opener's text, as a failed root open fails the
+/// activation. Natively, `orb()`
+/// answers an error naming the service resource, which the module's native test checks.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_service_resource_opens_per_object_as_a_component() {
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for features in ["dock", "dock,no-std"] {
+        let (_, orb) = module_orb(&engine, &module_component(features), "dock");
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let ship = |key: &str| {
+            Rc::new(
+                host.get("dock::example:dock/ship@1.0.0", vec![key.into()], "alice")
+                    .unwrap(),
+            )
+        };
+        let one = ship("one");
+        pool.run_until(one.ready()).unwrap();
+        let two = ship("two");
+        pool.run_until(two.ready()).unwrap();
+        assert_eq!(
+            logged(),
+            ["open harbor", "open mooring 1", "open mooring 2"],
+            "{features}"
+        );
+        assert_eq!(
+            counting_call(&mut pool, &host, &one, "alice", "berth", json!([])),
+            json!(1),
+            "{features}"
+        );
+        assert_eq!(
+            counting_call(&mut pool, &host, &two, "alice", "berth", json!([])),
+            json!(2),
+            "{features}"
+        );
+        let three = ship("three");
+        let refused = pool
+            .run_until(three.ready())
+            .expect_err("the third ship finds no berth");
+        assert_eq!(
+            (
+                refused.code,
+                refused.reason.as_str(),
+                refused.message.as_str()
+            ),
+            (
+                Code::Unavailable,
+                "resource",
+                "the resource `mooring` did not open: no berth is free"
+            ),
+            "{features}: {refused}"
+        );
+        assert!(logged().is_empty(), "{features}");
+        one.release().unwrap();
+        pool.run_until(host.settled());
+        assert_eq!(logged(), ["close mooring 1"], "{features}");
+        assert_eq!(
+            counting_call(&mut pool, &host, &two, "alice", "berth", json!([])),
+            json!(2),
+            "{features}"
+        );
+        two.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(
+            logged(),
+            ["close mooring 2", "close harbor, 2 taken"],
+            "{features}"
+        );
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("dock");
+}
+
 /// An interface with `flags` consumed by a guest that depends on the facade alone, in a component
 /// build, std and freestanding: the module `holder` of the `flagged` feature implements
 /// `example:rights/rights@1.0.0`, whose `access` the bindings generate without `wit-bindgen`'s

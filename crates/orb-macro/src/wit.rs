@@ -240,10 +240,12 @@ pub(crate) fn placement(
     placed
 }
 
-/// Which kernel interfaces the world uses.
+/// Which kernel interfaces the world uses: `resources` for the root's resources,
+/// `service_resources` for those of the services' objects, which share the import.
 pub(crate) struct Kernel {
     pub state: bool,
     pub resources: bool,
+    pub service_resources: bool,
     pub context: bool,
 }
 
@@ -493,12 +495,14 @@ pub(crate) fn render<'a>(
             guest::STATE_INIT
         ));
     }
+    if kernel.resources || kernel.service_resources {
+        wit.push_str(&format!("  import {};\n", guest::RESOURCE));
+    }
     if kernel.resources {
-        wit.push_str(&format!(
-            "  import {};\n  export {};\n",
-            guest::RESOURCE,
-            guest::RESOURCE_INIT
-        ));
+        wit.push_str(&format!("  export {};\n", guest::RESOURCE_INIT));
+    }
+    if kernel.service_resources {
+        wit.push_str(&format!("  export {};\n", guest::SERVICE_RESOURCE_INIT));
     }
     if kernel.context {
         wit.push_str(&format!("  import {};\n", guest::CONTEXT));

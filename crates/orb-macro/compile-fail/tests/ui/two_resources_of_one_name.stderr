@@ -1,0 +1,5 @@
+error: `Mooring` names two resources, one of the root and one of the service `Ship`: the kernel and `depends` name a resource by its struct's name, so give each resource of the Orb a name of its own
+  --> tests/ui/two_resources_of_one_name.rs:26:20
+   |
+26 |         pub struct Mooring {
+   |                    ^^^^^^^

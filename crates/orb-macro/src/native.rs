@@ -116,7 +116,10 @@ pub(crate) fn emit(
     let mut calls = Vec::new();
     // The resources of the Orb's root, which `orb(..)` keeps for the Orb, for the methods of every
     // service, and so are its imports.
-    let resources = !analysis.resources.is_empty();
+    let resources = analysis
+        .resources
+        .iter()
+        .any(|resource| resource.service.is_none());
     // Each registration is a function of the registry of the module it is written in.
     let registry = format_ident!("{REGISTRY}");
     for (service, items) in analysis.services.iter().zip(registrations) {
@@ -797,12 +800,42 @@ pub(crate) fn state_access(facade: &Ident) -> TokenStream {
 /// component. After a reload to another module whose resource keeps its name and version, the host
 /// keeps the old code's value, of another Rust type, which `with` could not reach: the scope
 /// answers each call with the runtime's refusal of it, `invalid/rust_type`, before the method runs.
-/// The runtime's types are reached through the facade named `facade`.
+/// A resource of a service's objects, which the native side does not declare yet, gets a `with`
+/// that panics, naming it, so that the module compiles: `orb()` refuses such a module before any
+/// method runs (`covered`). The runtime's types are reached through the facade named `facade`.
 pub(crate) fn resource_access(
     resources: &[Resource],
     modules: &[Vec<Ident>],
     facade: &Ident,
 ) -> TokenStream {
+    let unsupported = resources
+        .iter()
+        .filter(|resource| resource.service.is_some())
+        .map(|resource| {
+            let path = crate::relative(1, &modules[resource.scope], &resource.ident);
+            let name = wit::kebab(&resource.ident);
+            let service = resource.service.as_ref().expect("a service resource");
+            let doc = format!(
+                " Use the resource `{name}` of the `{service}` object running the current call, which the native side does not open yet: `orb()` refuses the module, so this panics."
+            );
+            let message = format!(
+                "the resource `{name}` of each object of the service `{service}` is not supported natively yet"
+            );
+            quote! {
+                impl #path {
+                    #[doc = #doc]
+                    pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
+                        let _ = use_;
+                        ::core::panic!(#message)
+                    }
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let resources: Vec<&Resource> = resources
+        .iter()
+        .filter(|resource| resource.service.is_none())
+        .collect();
     let fields: Vec<Ident> = resources
         .iter()
         .map(|resource| rust_ident(&wit::kebab(&resource.ident)))
@@ -1007,6 +1040,7 @@ pub(crate) fn resource_access(
         }
 
         #(#accessors)*
+        #(#unsupported)*
     };
     wrapped(facade, items)
 }
@@ -1075,15 +1109,27 @@ fn unsupported(
     }
 }
 
-/// Whether the native side covers the module's hook declarations: a declared hook's `run` is
-/// synchronous, and natively a method has no fiber to suspend while the kernel runs the hook, so a
-/// declaration works in a component build only. `providers::imports` refuses the imports it does
-/// not cover first, and `providers::contributions` the contributions.
+/// Whether the native side covers the module's hook declarations and resources: a declared hook's
+/// `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the
+/// hook, so a declaration works in a component build only; and the native side declares the
+/// resources of the Orb's root alone, not yet those of a service's objects. `providers::imports`
+/// refuses the imports it does not cover first, and `providers::contributions` the contributions.
 fn covered(analysis: &Analysis) -> Result<(), Refused> {
     if let Some(declaration) = analysis.declared.first() {
         return Err(refused(&format!(
             "the declaration of the hook {} works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook",
             declaration.hook
+        )));
+    }
+    if let Some(resource) = analysis
+        .resources
+        .iter()
+        .find(|resource| resource.service.is_some())
+    {
+        return Err(refused(&format!(
+            "the resource `{}` of each object of the service `{}` is not supported natively yet: the native side declares the resources of the Orb's root alone, so a service resource works in a component build only",
+            wit::kebab(&resource.ident),
+            resource.service.as_ref().expect("a service resource")
         )));
     }
     Ok(())

@@ -33,6 +33,7 @@ versioned = ["dep:tembra"]
 lamps = ["dep:tembra"]
 cellar = ["dep:tembra"]
 kiln = ["dep:tembra"]
+dock = ["dep:tembra"]
 system = ["dep:tembra"]
 io = ["dep:tembra"]
 # The predicate of the `#[cfg]`s in the modules that `configured` and `renamed` select.
