@@ -75,7 +75,7 @@ export interface KernelAccess {
   /**
    * The principal of an admitted call, read when the call was admitted, for a component importing
    * the context interface: the kernel refuses to read it once the call is cancelled, and it never
-   * changes.
+   * changes. A resource's opener and closer run as "host".
    */
   readonly principal?: string | undefined;
 }
@@ -128,6 +128,26 @@ function json(text: unknown, what: string): unknown {
   } catch (error) {
     throw new Error(`${what} is not JSON: ${(error as Error).message}`);
   }
+}
+
+/**
+ * The value an opener of the resource `name` answered in its `result<u32, string>`: its `err`
+ * fails this open with the message, `unavailable/resource` as a native opener's, so the kernel
+ * closes what already opened; an answer that is no such result fails this open the same way,
+ * naming the resource, and never the component. Mirrors `opened` in the native worker.
+ */
+export function opened(name: string, answer: unknown): unknown {
+  const failed = (message: string) =>
+    new TembraError({ code: Code.Unavailable, reason: Reason.Resource, message });
+  const { tag, val } = (answer ?? {}) as { tag?: unknown; val?: unknown };
+  if (tag === "ok") return val;
+  if (tag === "err")
+    throw failed(
+      typeof val === "string"
+        ? `the resource \`${name}\` did not open: ${val}`
+        : `the resource \`${name}\` did not open`,
+    );
+  throw failed(`the resource \`${name}\` did not open: its opener answered no result`);
 }
 
 /** The kernel's interfaces for one prepared component revision. */
@@ -295,6 +315,12 @@ export class ComponentKernel {
     for (const resource of declared as Listed[]) {
       const { name, version, dependencies: names } = resource;
       if (typeof name !== "string") throw new Error("A resource declaration carries no name");
+      // Resource names are unique in the Orb: `read(name)` answers the object's resource in a
+      // call and the root's in a contribution, so a root resource's name is taken.
+      if (service !== undefined && table.root !== table && table.root.resources.has(name))
+        throw new Error(
+          `the resource \`${name}\` of each object of ${service} takes the name of the root's resource \`${name}\`: resource names are unique in the Orb`,
+        );
       if (!isU32(version)) throw new Error("A resource declaration carries no version");
       if (!Array.isArray(names)) throw new Error("A resource declaration carries no dependencies");
       const dependencies = names.map((dependency: unknown) => {
@@ -556,31 +582,21 @@ export class ComponentKernel {
       "context" in authority
         ? environment.exchange(authority.context, execution)
         : environment.callback(authority, execution);
-    // The callback runs under the kernel's opening or closing, where no state is read.
+    // The callback runs under the kernel's opening or closing, where no state is read, as the
+    // host: its principal is "host", as in the native worker.
     const access = issued.kernel;
     let callback = issued;
-    if (access?.table.state !== undefined) {
+    if (access) {
       const { state: _state, ...table } = access.table;
-      callback = { ...issued, kernel: { ...access, table } };
+      callback = { ...issued, kernel: { ...access, table, principal: "host" } };
     }
     const release = await this.owner.gate.enter(undefined, callback.signal);
     try {
       if (numbered.kind === "open") {
         // An opener answers `result<u32, string>`: its error fails this open with the message,
         // `unavailable/resource` as a native opener's, so the kernel closes what already opened.
-        const answer = (await this.#call(environment, callback, exported, named)) as {
-          tag?: unknown;
-          val?: unknown;
-        };
-        if (answer?.tag === "err") {
-          const message =
-            typeof answer.val === "string"
-              ? `the resource \`${numbered.name}\` did not open: ${answer.val}`
-              : `the resource \`${numbered.name}\` did not open`;
-          throw new TembraError({ code: Code.Unavailable, reason: Reason.Resource, message });
-        }
-        if (answer?.tag !== "ok") throw new Error("the resource opener answered no result");
-        const handle = answer.val;
+        const answer = await this.#call(environment, callback, exported, named);
+        const handle = opened(numbered.name, answer);
         if (!isU32(handle)) throw new Error("resource handle is not a u32");
         return handle;
       }
