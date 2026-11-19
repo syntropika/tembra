@@ -100,8 +100,8 @@ native host:
   revision, whose state is at version 2. The test reloads one component into the other; natively,
   one build holds one revision, whose state keeps its version across a reload of the same code;
 - `lamps` selects the module `lamps`, whose root resource, at version 1, notes when it opens and
-  closes, in the host's log in a component and in a journal natively, where the `context` serves
-  only a call's methods; with `revised`, its next revision, whose resource is at version 2;
+  closes in the host's log, through the `context`, as a component and natively; with `revised`,
+  its next revision, whose resource is at version 2;
 - `cellar` selects the module `cellar`, with two root resources, the cache depending on the
   database: the kernel opens the database first, whose rows the cache's `#[open]` function reads,
   and closes the cache first, whose `#[close]` function writes them back;

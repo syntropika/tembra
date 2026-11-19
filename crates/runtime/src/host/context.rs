@@ -92,10 +92,13 @@ pub struct Context {
     owner: Option<Owner>,
 }
 
-/// The owner of a resource, as the context of its opener or closer knows it.
-#[derive(Clone, Copy)]
+/// The owner of a resource, as the context of its opener or closer knows it: the name of the Orb,
+/// read when the resource is declared, since the opener of a resource a reload adds runs before
+/// the kernel commits the new revision, and the closer of one a reload keeps runs after it has
+/// forgotten the revision that declared it; none for a resource of the host, which no Orb owns.
+#[derive(Clone)]
 pub(super) struct Owner {
-    pub(super) orb: core::Id,
+    pub(super) orb: Option<String>,
     pub(super) object: Option<core::Id>,
 }
 
@@ -133,7 +136,7 @@ impl Context {
             call: self.call.clone(),
             frame,
             signal: self.signal.clone(),
-            owner: self.owner,
+            owner: self.owner.clone(),
         })
     }
 
@@ -147,7 +150,7 @@ impl Context {
             call: self.call.clone(),
             frame,
             signal: self.signal.clone(),
-            owner: self.owner,
+            owner: self.owner.clone(),
         })
     }
 
@@ -190,7 +193,7 @@ impl Context {
     /// [`Declaration::address`] reads it while the object declares; in the opener or closer of an
     /// object's resource, the address of that object.
     pub fn address(&self) -> Result<core::Address> {
-        let object = match (&self.call, self.owner) {
+        let object = match (&self.call, &self.owner) {
             (Some(call), _) => call.object,
             (
                 None,
@@ -198,19 +201,23 @@ impl Context {
                     object: Some(object),
                     ..
                 }),
-            ) => object,
+            ) => *object,
             (None, _) => self.invocation()?.object,
         };
         self.host.kernel().object_address(object)
     }
 
-    /// The Orb a record of this context is attributed to: the one running the invocation, or the
-    /// one owning the resource whose opener or closer runs.
-    pub(super) fn attributed(&self) -> Result<core::Id> {
-        match (&self.call, self.owner) {
-            (Some(call), _) => Ok(call.orb),
-            (None, Some(owner)) => Ok(owner.orb),
-            (None, None) => Ok(self.invocation()?.orb),
+    /// The name of the Orb a record of this context is attributed to: the one running the
+    /// invocation, or the one owning the resource whose opener or closer runs, as it was named
+    /// when the resource was declared.
+    pub(super) fn attributed(&self) -> Result<String> {
+        match (&self.call, &self.owner) {
+            (Some(call), _) => Ok(self.host.kernel().orb(call.orb)?.declaration.name),
+            (None, Some(Owner { orb: Some(orb), .. })) => Ok(orb.clone()),
+            (None, _) => {
+                let call = self.invocation()?;
+                Ok(self.host.kernel().orb(call.orb)?.declaration.name)
+            }
         }
     }
 

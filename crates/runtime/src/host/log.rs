@@ -32,7 +32,7 @@ impl Context {
             return Ok(());
         };
         let record = LogRecord {
-            orb: self.host.kernel().orb(orb)?.declaration.name,
+            orb,
             level: level.into(),
             message: message.into(),
         };

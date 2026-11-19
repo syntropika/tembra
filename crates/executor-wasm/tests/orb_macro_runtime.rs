@@ -2692,7 +2692,7 @@ fn a_service_resource_opens_and_closes_per_object_both_ways() {
             logged(),
             [
                 "open mooring 3 at [three] of alice",
-                "close mooring 3, 2 moored"
+                "close mooring 3, 2 moored, by host"
             ],
             "{features}"
         );
@@ -2700,7 +2700,10 @@ fn a_service_resource_opens_and_closes_per_object_both_ways() {
         pool.run_until(host.settled());
         assert_eq!(
             logged(),
-            ["close line at berth 1", "close mooring 1, 1 moored"],
+            [
+                "close line at berth 1",
+                "close mooring 1, 1 moored, by host"
+            ],
             "{features}"
         );
         assert_eq!(
@@ -2714,7 +2717,7 @@ fn a_service_resource_opens_and_closes_per_object_both_ways() {
             logged(),
             [
                 "close line at berth 2",
-                "close mooring 2, 0 moored",
+                "close mooring 2, 0 moored, by host",
                 "close harbor, 3 issued",
             ],
             "{features}"

@@ -167,8 +167,16 @@ impl Declaration {
             .cancellations
             .borrow_mut()
             .insert(resource, signal.clone());
+        // The Orb's name now: a reload opens a new revision's resources before the kernel commits
+        // the revision, and closes a kept resource through the closer of the revision that declared
+        // it, once the kernel has forgotten that revision.
         let owner = super::context::Owner {
-            orb: self.orb,
+            orb: match self.owner {
+                core::Owner::Host => None,
+                core::Owner::Orb(_) | core::Owner::Object(_) => {
+                    Some(self.host.orb_info(self.orb)?.declaration.name)
+                }
+            },
             object: match self.owner {
                 core::Owner::Object(object) => Some(object),
                 core::Owner::Host | core::Owner::Orb(_) => None,
@@ -179,7 +187,7 @@ impl Declaration {
             Box::new(move |context| {
                 async move {
                     signal.check()?;
-                    let context = context.owned(owner, Some(signal.clone()));
+                    let context = context.owned(owner.clone(), Some(signal.clone()));
                     let value = Rc::new(open(context).await?);
                     let id = host.kernel().allocate_handle()?;
                     host.0.values.borrow_mut().insert(

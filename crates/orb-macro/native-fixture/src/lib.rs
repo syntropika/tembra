@@ -1651,8 +1651,10 @@ pub mod counters {
 
 /// An abacus whose beads are a resource of the Orb's root, at version 1: a native host's reload
 /// keeps them, with what was slid on them, while their version stays the same. `restrung` is the
-/// same Orb a revision later, whose beads are at version 2.
-#[tembra::orb(package = "example:abacus@1.0.0")]
+/// same Orb a revision later, whose beads are at version 2. The beads note what they go through in
+/// the journal and in the host's log, through the `context` of their opener and closer, which
+/// names the Orb also when a reload opens or closes them.
+#[tembra::orb(package = "example:abacus@1.0.0", context)]
 pub mod abacus {
     /// The beads, a resource of the Orb's root, at the default version, 1.
     #[resource]
@@ -1665,13 +1667,16 @@ pub mod abacus {
         #[open]
         fn open() -> Self {
             super::note("beads 1 open".to_owned());
+            context::log(context::Level::Info, "beads 1 open");
             Beads { slid: 0 }
         }
 
         /// Note how far the beads were slid, as the host closes them.
         #[close]
         fn close(self) {
-            super::note(format!("beads 1 closed at {}", self.slid));
+            let event = format!("beads 1 closed at {}", self.slid);
+            context::log(context::Level::Info, &event);
+            super::note(event);
         }
     }
 
@@ -1698,7 +1703,7 @@ pub mod abacus {
 /// 2, so a native host's reload from `abacus` closes the beads slid there and opens these. Its
 /// package is at 2.0.0, as two modules of one package in a crate would each remove the other's
 /// contract.
-#[tembra::orb(package = "example:abacus@2.0.0")]
+#[tembra::orb(package = "example:abacus@2.0.0", context)]
 pub mod restrung {
     /// The beads, a resource of the Orb's root, at version 2.
     #[resource(version = 2)]
@@ -1707,17 +1712,20 @@ pub mod restrung {
     }
 
     impl Beads {
-        /// Set the beads at zero, as the host opens them.
+        /// Set the beads at zero, as the host opens them, in the host's log too.
         #[open]
         fn open() -> Self {
             super::note("beads 2 open".to_owned());
+            context::log(context::Level::Info, "beads 2 open");
             Beads { slid: 0 }
         }
 
-        /// Note how far the beads were slid, as the host closes them.
+        /// Note how far the beads were slid, as the host closes them, in the host's log too.
         #[close]
         fn close(self) {
-            super::note(format!("beads 2 closed at {}", self.slid));
+            let event = format!("beads 2 closed at {}", self.slid);
+            context::log(context::Level::Info, &event);
+            super::note(event);
         }
     }
 

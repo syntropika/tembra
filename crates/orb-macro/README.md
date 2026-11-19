@@ -1580,8 +1580,9 @@ component's does. With the `context` option, an `#[open]` or `#[close]` function
 resource's owner, so `log` writes for the Orb, `object()` is the owning object's address for a
 service resource and, for a root resource, an empty key with the principal `host`, as in a hook
 contribution, and `cancelled()` answers the resource's own cancellation in an `#[open]`.
-`principal()` is `host` natively, while a component's opener or closer has no admitted call to
-answer it, so it traps there: read the owner's principal from `object()` instead. The
+`principal()` is `host`, natively and in a component's `#[close]`; a component's `#[open]` runs
+with no admitted call to answer it, so `principal()` traps there: read the owner's principal from
+`object()` instead. The
 [service resource example](../../examples/rust-orb-service-resource/README.md)
 logs from its openers and closers both ways.
 

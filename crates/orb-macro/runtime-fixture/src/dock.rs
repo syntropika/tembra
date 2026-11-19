@@ -140,7 +140,12 @@ pub mod dock {
                     harbor.moored -= 1;
                     harbor.moored
                 });
-                super::super::note(format!("close mooring {}, {moored} moored", self.berth));
+                // The context of a closer: the host's principal, as a component's.
+                super::super::note(format!(
+                    "close mooring {}, {moored} moored, by {}",
+                    self.berth,
+                    super::super::dock::context::principal()
+                ));
             }
         }
 
@@ -266,14 +271,14 @@ mod tests {
             journal(),
             [
                 "open mooring 3 at [three] of alice",
-                "close mooring 3, 2 moored"
+                "close mooring 3, 2 moored, by host"
             ]
         );
         one.release().unwrap();
         pool.run_until(host.settled());
         assert_eq!(
             journal(),
-            ["close line at berth 1", "close mooring 1, 1 moored"]
+            ["close line at berth 1", "close mooring 1, 1 moored, by host"]
         );
         assert_eq!(call(&mut pool, &host, &two, "alice", "tie", json!([1])), 2);
         two.release().unwrap();
@@ -282,7 +287,7 @@ mod tests {
             journal(),
             [
                 "close line at berth 2",
-                "close mooring 2, 0 moored",
+                "close mooring 2, 0 moored, by host",
                 "close harbor, 3 issued",
             ]
         );
