@@ -355,7 +355,13 @@ function clientModule(
     `  options?: AcquisitionOptions,`,
     `): Promise<${service}> {`,
     `  const reference = await scope.get(\`\${address.orb}::\${IDENTITY}\`, address.key, options);`,
-    ...(resources ? [`  const calls = witClient(reference, schema);`] : []),
+    ...(resources
+      ? [
+          `  let calls;`,
+          `  try { calls = witClient(reference, schema); }`,
+          `  catch (error) { reference.release(); throw error; }`,
+        ]
+      : []),
     // Typed by its declaration, not by the async return, which also admits a `PromiseLike`: its
     // `Object` members would leave the arguments of `toString` or `valueOf` untyped.
     `  const client: ${service} = {`,

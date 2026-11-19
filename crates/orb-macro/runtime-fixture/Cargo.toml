@@ -21,6 +21,7 @@ native-only-newtype = ["dep:tembra"]
 # place of `guest`: a component carries the WIT of one Orb module, in its `tembra:wit` section.
 # `executor-wasm/tests/orb_macro_runtime.rs` builds each std and `no-std`, and calls it, then runs
 # its native tests with `native` or `native-sdk`.
+rpc-provider = ["dep:tembra"]
 codec-provider = ["dep:tembra"]
 codec-consumer = ["dep:tembra"]
 keywords = ["dep:tembra"]

@@ -36,9 +36,66 @@ const finalizer =
     ? undefined
     : new FinalizationRegistry<ResourceCapability>((owner) => owner.close());
 
+/** Internal backend for the same generated wrappers and SDK resource capabilities. */
+export interface WitClientBackend {
+  readonly identity: object;
+  /** Keep decoding inside the operation's existing cancellation and physical ownership scope. */
+  run<T>(
+    supplied: Context | undefined,
+    operation: (context: Context | undefined) => Promise<T>,
+  ): Promise<T>;
+  /** Deliver through the backend selected by this issued reference. */
+  invoke(
+    method: string,
+    args: unknown[],
+    capture: CapturedInvocation,
+    context?: Context,
+  ): Promise<void>;
+}
+
+const backends = new WeakMap<object, (schema: WitClientSchema) => WitClientBackend>();
+
+/** Attach RPC delivery metadata to an issued reference; this grants no resource authority. */
+export function bindWitReference(
+  reference: object,
+  backend: (schema: WitClientSchema) => WitClientBackend,
+): void {
+  backends.set(reference, backend);
+}
+
 /** Bind typed wrappers to an SDK reference without creating another capability protocol. */
 export function witClient(reference: DynamicReference, schema: WitClientSchema): WitClient {
+  const remote = backends.get(reference);
+  if (remote) return resourceClient(schema, remote(schema));
   const { session, record } = referenceOrigin(reference);
+  return resourceClient(schema, {
+    identity: session,
+    run(supplied, operation) {
+      const selected = supplied ? context(supplied, session) : record.context;
+      return selected
+        ? session.calls.observe(operation(selected), selected.signal)
+        : session.calls.root(
+            (ctx) => session.calls.observe(operation(ctx), ctx.signal),
+            false,
+            undefined,
+            record.address.principal,
+          );
+    },
+    async invoke(method, args, capture, ctx) {
+      await session.calls.invokePhysical(
+        capture.receiver ? capture.receiver.reference : record,
+        method,
+        args,
+        ctx!,
+        capture,
+      );
+    },
+  });
+}
+
+/** Encode, move and decode once for both local and RPC capability delivery. */
+function resourceClient(schema: WitClientSchema, backend: WitClientBackend): WitClient {
+  const session = backend.identity;
   const compile = shapes(schema);
   const functions = new Map(
     Object.entries(schema.functions).map(([name, fn]) => {
@@ -79,10 +136,10 @@ export function witClient(reference: DynamicReference, schema: WitClientSchema):
     const count = selected.fn.params.length - Number(Boolean(roles.receiver));
     if (args.length === count + 1 && args[count] === undefined) args.pop();
     const last = args.at(-1);
-    const ctx = isContext(last) ? context(args.pop() as Context, session) : record.context;
+    const ctx = isContext(last) ? (args.pop() as Context) : undefined;
     const moved: ResourceCapability[] = [];
     let accepted = false;
-    const call = async (ctx: Context): Promise<unknown> => {
+    const call = async (ctx: Context | undefined): Promise<unknown> => {
       let capture: CapturedInvocation | undefined;
       try {
         const arguments_ = roles.arguments
@@ -121,9 +178,8 @@ export function witClient(reference: DynamicReference, schema: WitClientSchema):
               }
             : {}),
         };
-        const target = receiver ? receiver.reference : record;
-        await session.calls.invokePhysical(target, name, arguments_, ctx, capture);
-        checkSignal(ctx.signal);
+        await backend.invoke(name, arguments_ as unknown[], capture, ctx);
+        if (ctx) checkSignal(ctx.signal);
         if (!capture.output)
           throw new Error("Provider does not support the matching WIT capability signature");
         const value: unknown = lift(shape.result, JSON.parse(capture.output.text));
@@ -156,14 +212,7 @@ export function witClient(reference: DynamicReference, schema: WitClientSchema):
     };
     // The physical operation performs delivery checks and closes undelivered owners even if
     // cancellation wins the observation race before the provider publishes its result.
-    return ctx
-      ? session.calls.observe(call(ctx), ctx.signal)
-      : session.calls.root(
-          (ctx) => session.calls.observe(call(ctx), ctx.signal),
-          false,
-          undefined,
-          record.address.principal,
-        );
+    return backend.run(ctx, call);
   };
   return { call: <T>(name: string, args: readonly unknown[]) => invoke(name, args) as Promise<T> };
 }

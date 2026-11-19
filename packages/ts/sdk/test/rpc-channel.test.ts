@@ -153,7 +153,7 @@ test("cancelled acquisition releases a late claim without attaching its state", 
   connection.receive({ id: 1, ok: { reference: 1, methods: [], state: { value: 0 } } });
   connection.receive({ event: "state", payload: { reference: 1, value: { value: 1 } } });
   expect(connection.sent).toEqual([
-    { id: 1, op: "get", payload: { service: "counter", key: ["cancelled"] } },
+    { id: 1, op: "get", payload: { service: "counter", key: ["cancelled"], resources: 1 } },
     { op: "cancel", payload: { id: 1 } },
     { id: 2, op: "release", payload: { reference: 1 } },
   ]);

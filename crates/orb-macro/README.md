@@ -1477,9 +1477,11 @@ The value belongs to the object that issued it, as a compiled exporter's belongs
 closes, running its `Drop`, with its last owner, or when that object is reloaded or released or the
 host closes. A method may be `async`: its call holds the value until it ends, through the guard of
 `Receiver::guard`, so `&self` stays valid across its awaits, as in a component, also when the Orb is
-reloaded meanwhile, after which the value closes once the call has ended. Natively a resource is
-only returned, or borrowed as a method's `self`: where the runtime is linked, a function taking one
-makes the module's `orb()` answer an error naming it.
+reloaded meanwhile, after which the value closes once the call has ended. An owned resource
+argument consumes the original value at its issuing object. The native client takes its generated
+handle by value, including handles nested in lists, options, results and tuples; the provider still
+takes its authored resource struct. The implicit method receiver remains borrowed. Explicit borrows
+and authored resource records or variants retain their existing restrictions.
 
 These functions have no local entrypoint, so the service's client calls them portably, through the
 codec, and answers each resource as its handle type, `<Resource>Handle`, `BuilderHandle` for

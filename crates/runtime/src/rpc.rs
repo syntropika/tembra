@@ -13,6 +13,12 @@ use std::{
     rc::{Rc, Weak},
 };
 
+mod delivery;
+mod requests;
+pub(crate) mod resources;
+use requests::PreparedCall;
+use resources::{Capabilities, Target};
+
 const MAX_ID: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy, Deserialize)]
@@ -23,6 +29,7 @@ enum Op {
     Release,
     Call,
     Cancel,
+    Accept,
     #[serde(other)]
     Unknown,
 }
@@ -71,7 +78,9 @@ impl Options {
 }
 
 struct Claim {
-    reference: Rc<Reference>,
+    target: Target,
+    resources: bool,
+    delivery: Option<u64>,
     methods: BTreeSet<String>,
     observation: Option<Observation>,
     active: bool,
@@ -171,14 +180,19 @@ impl Connection {
         if bytes.len() > inner.options.max_frame {
             return Err(size_error());
         }
-        let request: Request = serde_json::from_slice(bytes).map_err(invalid)?;
-        if let Op::Cancel = request.op {
+        let mut request: Request = serde_json::from_slice(bytes).map_err(invalid)?;
+        if matches!(request.op, Op::Cancel | Op::Accept) {
             let id = request
                 .payload
                 .get("id")
                 .and_then(Value::as_u64)
                 .filter(|id| *id > 0 && *id <= MAX_ID)
                 .ok_or_else(|| invalid("invalid cancellation id"))?;
+            if matches!(request.op, Op::Accept) {
+                inner.accept(id);
+                return Ok(());
+            }
+            inner.abandon(id);
             if let Some(cancelled) = inner.requests.borrow_mut().get_mut(&id) {
                 *cancelled = true;
             }
@@ -192,9 +206,22 @@ impl Connection {
             .id
             .filter(|id| *id > 0 && *id <= MAX_ID)
             .ok_or_else(|| invalid("invalid request id"))?;
-        if inner.requests.borrow().contains_key(&id) {
+        if inner.requests.borrow().contains_key(&id)
+            || inner
+                .claims
+                .borrow()
+                .values()
+                .any(|claim| claim.delivery == Some(id))
+        {
             return Err(invalid("duplicate request id"));
         }
+        // Release revokes authority in frame order and cannot be blocked by pending callbacks.
+        if matches!(request.op, Op::Release) {
+            return inner.respond(id, inner.release(request.payload));
+        }
+        // Reserve receivers and revoke moves in frame order, before any executor can reorder work.
+        let prepared = matches!(request.op, Op::Call)
+            .then(|| inner.prepare_call(std::mem::take(&mut request.payload)));
         if inner.requests.borrow().len() >= inner.options.max_pending {
             return inner.respond(
                 id,
@@ -208,7 +235,9 @@ impl Connection {
         inner.requests.borrow_mut().insert(id, false);
         let state = inner.clone();
         let spawned = inner.host.rpc_spawn(async move {
-            let result = state.dispatch(id, request.op, request.payload).await;
+            let result = state
+                .dispatch(id, request.op, request.payload, prepared)
+                .await;
             if !state.closed.get() {
                 let activated = if matches!(request.op, Op::Get) {
                     result
@@ -372,25 +401,22 @@ impl Inner {
         }
     }
 
-    async fn dispatch(self: &Rc<Self>, id: u64, op: Op, payload: Value) -> Result<Value> {
+    async fn dispatch(
+        self: &Rc<Self>,
+        id: u64,
+        op: Op,
+        payload: Value,
+        prepared: Option<Result<PreparedCall>>,
+    ) -> Result<Value> {
         if self.closed.get() || self.requests.borrow().get(&id) == Some(&true) {
             return Err(Error::new(Code::Cancelled, "request", "request cancelled"));
         }
         match op {
             Op::Describe => Ok(self.describe()),
             Op::Get => self.get(id, payload).await,
-            Op::Release => {
-                let reference = payload
-                    .get("reference")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| invalid("missing reference"))?;
-                let claim = self.claims.borrow_mut().remove(&reference);
-                drop(claim);
-                Ok(Value::Null)
-            }
-            Op::Call => self.call(id, payload).await,
+            Op::Call => self.call(id, prepared.expect("prepared call")?).await,
             Op::Unknown => Err(Error::invalid("rpc_operation", "unknown RPC operation")),
-            Op::Cancel => unreachable!(),
+            Op::Cancel | Op::Accept | Op::Release => unreachable!(),
         }
     }
 
@@ -409,6 +435,7 @@ impl Inner {
         struct Get {
             service: String,
             key: Vec<String>,
+            resources: Option<u32>,
         }
         let input: Get = serde_json::from_value(payload).map_err(invalid)?;
         if !(self.options.allow)(&input.service, Some(&input.key)) {
@@ -433,18 +460,7 @@ impl Inner {
             ));
         }
         self.check_references()?;
-        let next = self
-            .next
-            .get()
-            .checked_add(1)
-            .filter(|id| *id <= MAX_ID)
-            .ok_or_else(|| {
-                Error::new(
-                    Code::Exhausted,
-                    "remote_references",
-                    "reference ids exhausted",
-                )
-            })?;
+        let next = self.allocate()?;
         let methods = reference.rpc_methods()?;
         let readable = reference.rpc_state()?;
         let mut result = json!({"reference":next,"methods":methods});
@@ -452,11 +468,19 @@ impl Inner {
             result["state"] = (*readable.value()?).clone();
         }
         self.encode(&json!({"id":id,"ok":result}))?;
-        self.next.set(next);
+        let profile = self.host.rpc_contract(&reference)?;
+        let resources = input.resources == Some(1) && profile.is_some();
+        if resources {
+            result["resources"] = json!(1);
+            result["signature"] = json!(profile.as_ref().expect("a profile").signature);
+        }
+        self.encode(&json!({"id":id,"ok":result}))?;
         self.claims.borrow_mut().insert(
             next,
             Claim {
-                reference,
+                target: Target::Service(reference),
+                resources,
+                delivery: None,
                 methods: methods.into_iter().collect(),
                 observation: None,
                 active: false,
@@ -502,43 +526,21 @@ impl Inner {
         }
     }
 
-    async fn call(self: &Rc<Self>, id: u64, payload: Value) -> Result<Value> {
-        #[derive(Deserialize)]
-        struct Call {
-            reference: u64,
-            method: String,
-            arguments: Vec<Value>,
-        }
-        let input: Call = serde_json::from_value(payload).map_err(invalid)?;
-        let reference = {
-            let claims = self.claims.borrow();
-            let claim = claims
-                .get(&input.reference)
-                .ok_or_else(|| Error::new(Code::Forbidden, "method", "unknown reference"))?;
-            if !claim.methods.contains(&input.method) {
-                return Err(Error::new(
-                    Code::Forbidden,
-                    "method",
-                    "method is not admitted",
-                ));
-            }
-            claim.reference.clone()
-        };
-        let state = self.clone();
-        self.host
-            .root(&self.options.principal, move |ctx| {
-                async move {
-                    if state.closed.get() || state.requests.borrow().get(&id) == Some(&true) {
-                        return Err(Error::new(Code::Cancelled, "request", "request cancelled"));
-                    }
-                    state.calls.borrow_mut().insert(id, ctx.clone());
-                    let arguments = Value::Array(input.arguments);
-                    let result = reference.rpc_call(&ctx, &input.method, arguments).await;
-                    state.calls.borrow_mut().remove(&id);
-                    result
-                }
-                .boxed_local()
-            })
-            .await
+    /// Allocate once from the existing connection-local reference identity space.
+    fn allocate(&self) -> Result<u64> {
+        let next = self
+            .next
+            .get()
+            .checked_add(1)
+            .filter(|id| *id <= MAX_ID)
+            .ok_or_else(|| {
+                Error::new(
+                    Code::Exhausted,
+                    "remote_references",
+                    "reference ids exhausted",
+                )
+            })?;
+        self.next.set(next);
+        Ok(next)
     }
 }

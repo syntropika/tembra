@@ -3066,6 +3066,7 @@ fn component(
             &consumed[identity],
             wit_resources,
             modules,
+            consumed_modules,
         )?;
         tree.at(service.scope).generated.push(bridge);
         for (scope, implementation) in implementations {
@@ -3662,7 +3663,7 @@ fn signatures(
             format!("the derived WIT does not resolve as a contract: {error}"),
         )
     })?;
-    services
+    let mut declarations: Vec<_> = services
         .iter()
         .filter(|service| service.planned(wit_resources))
         .map(|service| {
@@ -3679,7 +3680,13 @@ fn signatures(
                 pub const #ident: &str = #digest;
             })
         })
-        .collect()
+        .collect::<syn::Result<_>>()?;
+    let prepared = proc_macro2::Literal::byte_string(&contract.prepared().encode());
+    declarations.push(quote! {
+        #[doc(hidden)]
+        pub const __TEMBRA_CONTRACT: &[u8] = #prepared;
+    });
+    Ok(declarations)
 }
 
 /// The constant holding a service's signature, `__TEMBRA_SIGNATURE_LEDGER` for `Ledger`: written
@@ -4439,10 +4446,32 @@ fn implemented_service(
     interface: &wit::Consumed,
     resources: &[WitResource],
     modules: &[Vec<Ident>],
+    names: &foreign::Modules,
 ) -> syn::Result<(
     proc_macro2::TokenStream,
     Vec<(usize, proc_macro2::TokenStream)>,
 )> {
+    let resource_names = resources
+        .iter()
+        .map(|resource| {
+            (
+                resource.ident.to_string(),
+                type_ident(&wit::kebab(&resource.ident)),
+            )
+        })
+        .collect();
+    let arguments = |params: &[(Ident, Type, String)], scope: usize, values: &[Ident]| {
+        params
+            .iter()
+            .zip(values)
+            .map(
+                |((_, ty, _), value)| match handles_of(ty, scope, &resource_names, names) {
+                    Some(handles) => resource_params::taken(&handles, quote! { #value }),
+                    None => quote! { #value },
+                },
+            )
+            .collect::<Vec<_>>()
+    };
     let depth = modules[service.scope].len();
     let root = supers(depth);
     let module = export_module(depth, &hook_path(identity));
@@ -4460,13 +4489,14 @@ fn implemented_service(
             handles,
         } = signature(&function.params, function.result.as_ref(), depth)?;
         let (asynchronous, await_) = async_bridge(function.asynchronous);
+        let arguments = arguments(&own.params, service.scope, &names);
         let author = &own.ident;
         let body = match own.context {
             Some(_) => native_only(target, author, &names),
             None => wrapped(
                 handles,
                 &module,
-                answered(own, quote! { #target::#author(#(#names),*) #await_ }),
+                answered(own, quote! { #target::#author(#(#arguments),*) #await_ }),
             ),
         };
         functions.push(quote! { #asynchronous fn #ident(#(#params),*) #result { #body } });
@@ -4490,11 +4520,13 @@ fn implemented_service(
             (
                 Some(params),
                 Some(Constructor {
-                    ident: constructor, ..
+                    ident: constructor,
+                    params: authored,
                 }),
             ) => {
                 let Signature { names, params, .. } = signature(params, None, local)?;
-                quote! { fn new(#(#params),*) -> Self { #ident::#constructor(#(#names),*) } }
+                let arguments = arguments(authored, implementation.scope, &names);
+                quote! { fn new(#(#params),*) -> Self { #ident::#constructor(#(#arguments),*) } }
             }
             _ => quote! {},
         };
@@ -4513,6 +4545,7 @@ fn implemented_service(
             let Some(author) = implementing(own.iter().copied(), &function.name)? else {
                 continue;
             };
+            let authored = &author.params;
             let author = &author.ident;
             let name = rust_ident(&function.name);
             let Signature {
@@ -4521,14 +4554,18 @@ fn implemented_service(
                 result,
                 handles,
             } = signature(&function.params, function.result.as_ref(), local)?;
+            let arguments = arguments(authored, implementation.scope, &names);
             let (asynchronous, await_) = async_bridge(function.asynchronous);
             let (receiver, call) = if receiver {
                 (
                     quote! { &self, },
-                    quote! { #ident::#author(self, #(#names),*) #await_ },
+                    quote! { #ident::#author(self, #(#arguments),*) #await_ },
                 )
             } else {
-                (quote! {}, quote! { #ident::#author(#(#names),*) #await_ })
+                (
+                    quote! {},
+                    quote! { #ident::#author(#(#arguments),*) #await_ },
+                )
             };
             let body = wrapped(handles, &local_module, call);
             members

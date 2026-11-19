@@ -987,3 +987,30 @@ fn shared_state_sender_failure_isolates_the_other_connection_and_waits_for_clean
 fn shared_state_frame_limit_isolates_the_other_connection_and_waits_for_cleanup() {
     assert_shared_state_failure_isolated(SharedStateFailure::FrameLimit);
 }
+
+/// Later frames cannot reserve a claim whose release arrived before executor dispatch.
+#[test]
+fn release_revokes_authority_before_a_following_frame_is_prepared() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let entered = Rc::new(Cell::new(0));
+    let calls = entered.clone();
+    host.install(vec![Orb::new("test", 1).service(
+        Service::new("test", |_| Ok(())).method("run", move |_, _, (): ()| {
+            calls.set(calls.get() + 1);
+            async { Ok(()) }
+        }),
+    )])
+    .unwrap();
+    let (connection, frames) = connection(&host, options());
+    get(&connection, 1, "test");
+    pool.run_until_stalled();
+    let reference = response(&frames, 1)["ok"]["reference"].as_u64().unwrap();
+    request(&connection, 2, "release", json!({"reference": reference}));
+    call(&connection, 3, reference, "run", json!([]));
+    pool.run_until_stalled();
+    assert_eq!(response(&frames, 3)["error"]["code"], "forbidden");
+    assert_eq!(entered.get(), 0);
+    connection.close();
+    pool.run_until(host.close()).unwrap();
+}

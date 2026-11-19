@@ -37,6 +37,9 @@ and the CI workflow when updating tools. Older Bun versions can fail in the form
 Markdown worker path even when Node can format the same files.
 
 Run these commands from the repository root.
+For generated resource clients against real native and Wasm RPC providers, run
+`just test-rpc-resources`; `just test-rpc-browser` exercises them in Chrome without a prepared
+browser component. Both commands build their Rust host and component fixtures.
 The root manifest defines the Bun workspaces, development tools and lockfile.
 TypeScript packages are in `packages/ts`.
 

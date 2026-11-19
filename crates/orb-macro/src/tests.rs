@@ -7332,7 +7332,7 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
         "__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\")",
         "pub (crate) fn __tembra_resource_session < E : 'static > (service : :: tembra :: Service < E >) -> :: tembra :: Service < E > { service . payload_method (\"[constructor]session\" ,",
         &format!(
-            "let (n ,) : (u32 ,) = decode (__tembra_payload . into_data () ?) . map_err (| message | {{ :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }}) ? ; let value = Session :: new (n) ; let encode = | value : Session , {issuing}"
+            "let (n ,) : (u32 ,) = decode (__tembra_payload . value () . clone ()) . map_err (| message | {{ :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }}) ? ; if __tembra_arguments . iter () . any (:: core :: option :: Option :: is_some) {{ return :: core :: result :: Result :: Err (:: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , \"unused owned argument\")) ; }} __tembra_payload . into_data () ? ; let value = Session :: new (n) ; let encode = | value : Session , {issuing}"
         ),
         &format!(
             "{issued} (value)))) }} ; let mut __tembra_result = :: tembra :: portable :: Payload :: data (:: tembra :: serde_json :: Value :: Null ,) ; let written = encode (value , & mut __tembra_result) . map_err (| message | :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Result , message)) ? ; __tembra_result . map_value (| _ | :: core :: result :: Result :: Ok (written))"
@@ -7346,7 +7346,7 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
         ),
         ". payload_method (\"[static]session.make\" ,",
         &format!("let value = Session :: make () ; let encode = | value : Session , {issuing}"),
-        ". payload_method (\"open\" , | _ , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | async move {",
+        ". payload_method (\"open\" , | _ , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | async move {",
         &format!("let value = Sessions :: open (n) ; let encode = | value : Session , {issuing}"),
         &format!(
             "let value = Sessions :: many (n) ; let encode = | value : Vec < Session > , {issuing}"
@@ -7376,11 +7376,7 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
     let in_context = self::native(&module, &["sessions"]);
     let scoped = "| self :: super :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ;";
     for function in ["open", "[constructor]session", "[method]session.get"] {
-        let receiver = if function.starts_with("[method]") {
-            "mut __tembra_payload"
-        } else {
-            "__tembra_payload"
-        };
+        let receiver = "mut __tembra_payload";
         let expected = format!(
             ". payload_method (\"{function}\" , | _ , __tembra_context : :: tembra :: Context , {receiver} : :: tembra :: portable :: Payload {scoped}"
         );
@@ -7571,58 +7567,65 @@ fn a_service_with_only_a_resource_has_a_signature() {
     );
     let native = native(&module, &["sessions"]);
     assert!(
-        native.contains("__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\") , move | declaration | Sessions :: create (& inputs , & declaration)) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_SESSIONS))))"),
+        native.contains("__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\") , move | declaration | Sessions :: create (& inputs , & declaration)) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_SESSIONS))) . contract (\"example:desk/sessions@1.0.0\" , super :: __TEMBRA_CONTRACT))"),
         "{native}"
     );
 }
 
-/// Natively a resource is only returned, or borrowed as a method's `self`: a function of a service
-/// or of a resource taking one, itself or inside a container, is refused, and so is a record or a
-/// variant holding one, which the bindings replace with a type holding their handle, which only a
-/// component creates, so it is component-only and the refusal points to a tuple.
+/// Owned native arguments use the same linear payload slots for functions and resource members.
 #[test]
-fn the_native_side_refuses_a_resource_it_cannot_carry() {
-    let taken =
-        "a resource; natively a resource is only returned, or borrowed as a method's `self`";
-    for (from, to, message) in [
+fn native_functions_consume_owned_resources() {
+    for (from, to, method) in [
         (
             "pub fn open(n: u32) -> Session { Session::new(n) }",
-            "pub fn open(n: u32) -> Session { Session::new(n) }
-            pub fn close(session: Session) -> u32 { session.n }",
-            format!("`Sessions::close` takes `Session`, {taken}"),
+            "pub fn open(n: u32) -> Session { Session::new(n) } pub fn close(session: Session) -> u32 { session.n }",
+            "close",
         ),
         (
             "pub fn open(n: u32) -> Session { Session::new(n) }",
-            "pub fn open(n: u32) -> Session { Session::new(n) }
-            pub fn close_all(sessions: Vec<Session>) {}",
-            format!("`Sessions::close_all` takes `Vec<Session>`, which holds `Session`, {taken}"),
+            "pub fn open(n: u32) -> Session { Session::new(n) } pub fn close_all(sessions: Vec<Session>) {}",
+            "close-all",
         ),
         (
             "pub fn get(&self) -> u32 { self.n }",
-            "pub fn get(&self) -> u32 { self.n }
-            pub fn merge(&self, other: Session) -> u32 { self.n + other.n }",
-            format!("`Session::merge` takes `Session`, {taken}"),
+            "pub fn get(&self) -> u32 { self.n } pub fn merge(&self, other: Session) -> u32 { self.n + other.n }",
+            "[method]session.merge",
         ),
         (
             "pub fn new(n: u32) -> Session { Session { n } }",
             "pub fn new(n: u32, from: Option<Session>) -> Session { Session { n } }",
-            format!("`Session::new` takes `Option<Session>`, which holds `Session`, {taken}"),
-        ),
-        (
-            "pub fn open(n: u32) -> Session { Session::new(n) }",
-            "pub fn open(n: u32) -> Session { Session::new(n) }
-            pub fn lend(n: u32) -> Lease { todo!() }
-        }
-        pub struct Lease { pub session: Session, pub count: u32 }
-        impl Sessions {",
-            "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the native boundary carries a resource beside the data, as a handle, never inside the JSON of a record: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`".to_owned(),
+            "[constructor]session",
         ),
     ] {
-        let module = orb_with(options("example:desk@1.0.0", None), &DESK.replace(from, to))
-            .unwrap_or_else(|error| panic!("{message}: {error}"));
-        assert_eq!(native(&module, &[]), unsupported(&message), "{message}");
-        assert!(wit(&module).starts_with("package "), "{message}");
+        let module = expanded("example:desk@1.0.0", &DESK.replace(from, to));
+        let generated = native(&module, &[]);
+        assert!(
+            generated.contains(&format!(". payload_method (\"{method}\"")),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("__tembra_payload . receive :: < Session > (moved)"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("__tembra_input . attach_argument"),
+            "{generated}"
+        );
+        assert!(!generated.contains("\"native\""), "{generated}");
     }
+}
+
+/// Authored resource records still require generated component handle types.
+#[test]
+fn the_native_side_refuses_a_resource_it_cannot_carry() {
+    let source = DESK.replace(
+        "pub fn open(n: u32) -> Session { Session::new(n) }",
+        "pub fn open(n: u32) -> Session { Session::new(n) } pub fn lend(n: u32) -> Lease { todo!() } } pub struct Lease { pub session: Session, pub count: u32 } impl Sessions {",
+    );
+    let module = expanded("example:desk@1.0.0", &source);
+    let message = "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the native boundary carries a resource beside the data, as a handle, never inside the JSON of a record: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`";
+    assert_eq!(native(&module, &[]), unsupported(message));
+    assert!(wit(&module).starts_with("package "));
 }
 
 /// An `async` method of a WIT resource borrows its `self` natively from the guard its call's
@@ -7722,10 +7725,10 @@ fn the_factory_of_its_service_declares_a_state_natively() {
         format!("pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < (() , {stated}) >"),
         "| declaration | { let state = self :: super :: __tembra_state :: declare :: < super :: ledger :: Total > (& declaration , 1u32 , \"Total\" , | _ : & super :: ledger :: Total | :: core :: result :: Result :: Ok (()) ,) ? ; :: core :: result :: Result :: Ok ((() , state)) }".to_owned(),
         format!(". method_with (\"count\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }}) , __TEMBRA_CODEC_COUNT ,)"),
-        format!(". payload_method (\"issue\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{"),
+        format!(". payload_method (\"issue\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{"),
         format!(", | object : & (() , {stated}) | object . 1 . clone ())"),
         format!("pub (crate) fn __tembra_resource_ticket < E : 'static > (service : :: tembra :: Service < E > , __tembra_state_of : fn (& E) -> {stated}) -> :: tembra :: Service < E >"),
-        ". payload_method (\"[constructor]ticket\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
+        ". payload_method (\"[constructor]ticket\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
         ". payload_method (\"[method]ticket.sum\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
     ] {
         assert!(ledger.contains(&expected), "{expected}\n{ledger}");

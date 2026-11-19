@@ -8,6 +8,10 @@ import type { Context } from "../../runtime/context.ts";
 
 import { Channel, type Limits, type Transport } from "./channel.ts";
 import { RemoteState } from "./state.ts";
+import { bindWitReference } from "../../runtime/wit-client.ts";
+import { resourceBackend, resource, type RpcResource } from "./resources.ts";
+import type { CapturedInvocation } from "../../runtime/adapters.ts";
+import type { AcquisitionOptions } from "../../authoring/types.ts";
 
 /** A lost connection revokes its references. Reconnect by creating a peer and acquiring current state. */
 export class RemoteHost {
@@ -71,9 +75,20 @@ export class RemoteHost {
         resolve: (value: any) => {
           try {
             received?.(value);
+            if (
+              op === RpcOp.Call &&
+              typeof payload === "object" &&
+              payload !== null &&
+              "capabilities" in payload
+            ) {
+              void this.channel
+                .send({ op: RpcOp.Accept, payload: { id } })
+                .catch((error) => this.channel.close(error));
+            }
             resolve(value);
           } catch (error) {
             if (op === RpcOp.Get) this.#release(value?.reference);
+            else if (op === RpcOp.Call) this.channel.close(error);
             reject(error);
           }
         },
@@ -82,9 +97,18 @@ export class RemoteHost {
       this.#pending.set(id, pending);
       abort = () => {
         if (this.#pending.get(id) !== pending) return;
-        if (op === RpcOp.Get) {
+        if (
+          op === RpcOp.Get ||
+          (op === RpcOp.Call &&
+            typeof payload === "object" &&
+            payload !== null &&
+            "capabilities" in payload)
+        ) {
           this.#pending.set(id, {
-            resolve: (value) => this.#release(value?.reference),
+            resolve: (value) => {
+              if (op === RpcOp.Get) this.#release(value?.reference);
+              else this.#releaseResult(value);
+            },
             reject: () => {},
           });
         } else {
@@ -95,6 +119,15 @@ export class RemoteHost {
       };
       signal?.addEventListener("abort", abort, { once: true });
       void this.channel.send({ id, op, payload }).catch((error) => {
+        // A rejected send may already have delivered bytes, even if cancellation won first.
+        if (
+          op === RpcOp.Get ||
+          (op === RpcOp.Call &&
+            typeof payload === "object" &&
+            payload !== null &&
+            "capabilities" in payload)
+        )
+          this.channel.close(error);
         if (this.#pending.get(id) !== pending) return;
         this.#pending.delete(id);
         reject(error);
@@ -118,6 +151,29 @@ export class RemoteHost {
     });
   }
 
+  /** Close a late resource result that its cancelled caller can no longer accept. */
+  #releaseResult(value: unknown): void {
+    try {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "owned" in value &&
+        Array.isArray(value.owned)
+      )
+        for (const item of value.owned) this.#releaseResource(resource(item));
+    } catch (error) {
+      this.channel.close(error);
+    }
+  }
+
+  /** Release one checked resource through the same RPC claim operation as service references. */
+  #releaseResource(item: RpcResource): void {
+    if (this.channel.closed) return;
+    void this.request(RpcOp.Release, { reference: item.reference, resource: item }).catch((error) =>
+      this.channel.close(error),
+    );
+  }
+
   /** Request remote orb metadata without service activation. */
   installedOrbs(): Promise<unknown> {
     return this.request(RpcOp.Describe, null);
@@ -127,7 +183,7 @@ export class RemoteHost {
   async get(
     service: string,
     key: string | readonly string[],
-    options: { signal?: AbortSignal } = {},
+    options: AcquisitionOptions & { signal?: AbortSignal } = {},
   ): Promise<DynamicReference> {
     let released = false;
     const check = () => {
@@ -137,7 +193,7 @@ export class RemoteHost {
     let state: RemoteState | undefined;
     const acquired = await this.#request(
       RpcOp.Get,
-      { service, key: typeof key === "string" ? [key] : key },
+      { service, key: typeof key === "string" ? [key] : key, resources: 1 },
       options.signal,
       (value) => {
         if (
@@ -187,7 +243,7 @@ export class RemoteHost {
       },
     };
     const peer = this;
-    return new Proxy(target, {
+    const reference = new Proxy(target, {
       /** Expose only methods included in the acquired remote contract. */
       get: (target, property, receiver) => {
         if (property === "then") return undefined;
@@ -208,6 +264,22 @@ export class RemoteHost {
         };
       },
     }) as DynamicReference;
+    bindWitReference(reference, (schema) =>
+      resourceBackend(
+        {
+          identity: this,
+          reference: id,
+          resources: acquired.resources as unknown,
+          signature: acquired.signature as unknown,
+          check,
+          request: async (payload, _capture: CapturedInvocation, received, signal) =>
+            this.#request(RpcOp.Call, payload, signal, received),
+          release: (item) => this.#releaseResource(item),
+        },
+        schema,
+      ),
+    );
+    return reference;
   }
 
   /** Close the connection and reject pending requests. */

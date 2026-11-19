@@ -5,6 +5,10 @@
 #![cfg_attr(all(target_arch = "wasm32", feature = "no-std"), no_std)]
 extern crate alloc;
 
+#[cfg(feature = "rpc-provider")]
+#[path = "../../native-fixture/src/rpc_provider.rs"]
+mod rpc_provider;
+
 #[cfg(feature = "authored")]
 mod authored;
 #[cfg(feature = "cellar")]

@@ -10,6 +10,7 @@ export const RpcOp = Object.freeze({
   Release: "release",
   Call: "call",
   Cancel: "cancel",
+  Accept: "accept",
 } as const);
 export type RpcOp = ValueOf<typeof RpcOp>;
 

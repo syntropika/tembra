@@ -165,8 +165,13 @@ pub(super) fn contributions<'a>(
             ))
         };
         let (_, input) = &contribution.param;
-        argument(input, contribution.scope, analysis)
+        let input_kind = argument(input, contribution.scope, analysis)
             .map_err(|uncovered| place("takes", input, uncovered))?;
+        if input_kind.resource().is_some() {
+            return Err(refused(
+                "native hook contributions cannot take resource arguments",
+            ));
+        }
         if let Some(result) = &contribution.result {
             kind(result, contribution.scope, analysis)
                 .map_err(|uncovered| place("returns", result, uncovered))?;

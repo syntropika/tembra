@@ -1507,6 +1507,7 @@ fn registration(
     let signed = service.planned(&analysis.wit_resources).then(|| {
         quote! {
             .signature(::core::option::Option::Some(::std::string::String::from(#root #signature)))
+            .contract(#identity, #root __TEMBRA_CONTRACT)
         }
     });
     // Each method runs in the scope of its call, which the native `context` reads, with the
@@ -1541,7 +1542,7 @@ fn registration(
     let mut codecs = Vec::new();
     let mut methods = Vec::new();
     for method in &service.functions {
-        if issues(method, service.scope, analysis) {
+        if carries_resources(method, service.scope, analysis) {
             methods.push(issuing(service, method, analysis, &scopes)?);
             continue;
         }
@@ -1607,12 +1608,15 @@ fn owned_resources<'a>(
         .filter(|resource| resource.service.as_ref() == Some(&service.ident))
 }
 
-/// Whether a function's result holds a resource, which the call issues: the function is then
-/// bound with `payload_method`, without a local entrypoint.
-fn issues(function: &Function, scope: usize, analysis: &Analysis) -> bool {
-    function.result.as_ref().is_some_and(|(ty, _)| {
-        kind(ty, scope, analysis).is_ok_and(|kind| kind.resource().is_some())
-    })
+/// Bind functions with owned arguments or results through the existing portable payload.
+fn carries_resources(function: &Function, scope: usize, analysis: &Analysis) -> bool {
+    function
+        .params
+        .iter()
+        .any(|(_, ty, _)| kind(ty, scope, analysis).is_ok_and(|kind| kind.resource().is_some()))
+        || function.result.as_ref().is_some_and(|(ty, _)| {
+            kind(ty, scope, analysis).is_ok_and(|kind| kind.resource().is_some())
+        })
 }
 
 /// The `payload_method` call binding a function of a service whose result holds a resource, under
@@ -1725,12 +1729,16 @@ fn payload_method(
     let names: Vec<&Ident> = params.iter().map(|(name, _, _)| name).collect();
     let types: Vec<&Type> = params.iter().map(|(_, ty, _)| ty).collect();
     let decode = decode_arguments(kinds, boundary, facade);
+    let mutable = kinds
+        .iter()
+        .any(|kind| kind.resource().is_some())
+        .then(|| quote! { mut });
     let (payload, receiver) = match receiver {
         Some(resource) => (
             quote! { mut __tembra_payload },
             quote! { let __tembra_receiver = __tembra_payload.receiver::<#resource>()?; },
         ),
-        None => (quote! { __tembra_payload }, quote! {}),
+        None => (quote! { mut __tembra_payload }, quote! {}),
     };
     let write = match result {
         None => quote! {
@@ -1776,14 +1784,19 @@ fn payload_method(
         async move {
             __tembra_context.check()?;
             #receiver
-            let decode = |value: ::#facade::serde_json::Value| -> ::core::result::Result<
+            let #mutable __tembra_arguments: ::std::vec::Vec<_> = __tembra_payload.take_arguments().into_iter().map(::core::option::Option::Some).collect();
+            let #mutable decode = |value: ::#facade::serde_json::Value| -> ::core::result::Result<
                 (#(#types,)*),
                 ::std::string::String,
             > { #decode };
-            let (#(#names,)*): (#(#types,)*) = decode(__tembra_payload.into_data()?)
+            let (#(#names,)*): (#(#types,)*) = decode(__tembra_payload.value().clone())
                 .map_err(|message| {
                     ::#facade::Error::invalid(::#facade::core::Reason::Arguments, message)
                 })?;
+            if __tembra_arguments.iter().any(::core::option::Option::is_some) {
+                return ::core::result::Result::Err(::#facade::Error::invalid(::#facade::core::Reason::Arguments, "unused owned argument"));
+            }
+            __tembra_payload.into_data()?;
             #write
         }
     };
@@ -2051,7 +2064,11 @@ fn resource_handle(resource: &WitResource, analysis: &Analysis) -> Result<TokenS
         let params = method
             .params
             .iter()
-            .map(|(name, ty, _)| quote! { #name: #ty });
+            .zip(&kinds)
+            .map(|((name, _, _), kind)| {
+                let ty = delivered_type(kind);
+                quote! { #name: #ty }
+            });
         methods.push(quote! {
             #(#[doc = #docs])*
             pub async fn #function(
@@ -2146,7 +2163,11 @@ fn resource_client(
         let params = constructor
             .params
             .iter()
-            .map(|(name, ty, _)| quote! { #name: #ty });
+            .zip(&kinds)
+            .map(|((name, _, _), kind)| {
+                let ty = delivered_type(kind);
+                quote! { #name: #ty }
+            });
         methods.push(quote! {
             #[doc = #doc]
             pub async fn #method(
@@ -2178,7 +2199,11 @@ fn resource_client(
         let params = function
             .params
             .iter()
-            .map(|(name, ty, _)| quote! { #name: #ty });
+            .zip(&kinds)
+            .map(|((name, _, _), kind)| {
+                let ty = delivered_type(kind);
+                quote! { #name: #ty }
+            });
         methods.push(quote! {
             #(#[doc = #docs])*
             pub async fn #method(
@@ -2504,7 +2529,7 @@ fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused
         } else {
             function.ident.clone()
         };
-        let (returned, body) = if !local && issues(function, service.scope, analysis) {
+        let (returned, body) = if !local && carries_resources(function, service.scope, analysis) {
             let owner = format!("{}::{}", service.ident, function.ident);
             let result = function.result.as_ref().map(|(ty, _)| ty);
             let (kinds, result) =
@@ -2534,10 +2559,20 @@ fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused
             (result, body)
         };
         let docs = &function.docs;
-        let params = function
-            .params
-            .iter()
-            .map(|(name, ty, _)| quote! { #name: #ty });
+        let params = function.params.iter().map(|(name, ty, _)| {
+            let ty = if local {
+                quote! { #ty }
+            } else {
+                let kind = argument(ty, service.scope, analysis)
+                    .unwrap_or_else(|_| unreachable!("checked argument"));
+                if kind.resource().is_some() {
+                    delivered_type(&kind)
+                } else {
+                    quote! { #ty }
+                }
+            };
+            quote! { #name: #ty }
+        });
         methods.push(quote! {
             #(#[doc = #docs])*
             pub async fn #method(
@@ -2594,8 +2629,13 @@ fn portable_call(
         .iter()
         .zip(params)
         .map(|(kind, (name, _, _))| encode(kind, quote! { #name }, boundary, facade));
+    let mutable = kinds
+        .iter()
+        .any(|kind| kind.resource().is_some())
+        .then(|| quote! { mut });
     let arguments = quote! {
-        let __tembra_encode = || -> ::core::result::Result<
+        let #mutable __tembra_input = ::#facade::portable::Payload::data(::#facade::serde_json::Value::Null);
+        let #mutable __tembra_encode = || -> ::core::result::Result<
             ::#facade::serde_json::Value,
             ::std::string::String,
         > {
@@ -2606,6 +2646,7 @@ fn portable_call(
         let __tembra_arguments = __tembra_encode().map_err(|message| {
             ::#facade::Error::invalid(::#facade::core::Reason::Arguments, message)
         })?;
+        let __tembra_arguments = __tembra_input.map_value(|_| ::core::result::Result::Ok(__tembra_arguments))?;
     };
     let call = |answer: TokenStream| {
         quote! {
@@ -2693,7 +2734,7 @@ fn portable_call(
 /// it holds replaced by its handle type.
 fn delivered_type(kind: &Kind<'_>) -> TokenStream {
     match kind {
-        Kind::Resource { handle, .. } => quote! { #handle },
+        Kind::Resource { handle, .. } | Kind::Moved { handle, .. } => quote! { #handle },
         Kind::List(_, element) => {
             let element = delivered_type(element);
             quote! { ::std::vec::Vec<#element> }
@@ -2808,13 +2849,15 @@ enum Kind<'a> {
     /// call's result, whose data names it by its index there. A native caller holds it as its
     /// handle type, `handle`, the path the module that writes `ty` names it by.
     Resource { ty: &'a Type, handle: TokenStream },
+    /// An owned argument consumes the original value; callers move its resource handle.
+    Moved { ty: &'a Type, handle: TokenStream },
 }
 
 impl<'a> Kind<'a> {
     /// The first resource the kind holds, itself or in a container, if any.
     fn resource(&self) -> Option<&'a Type> {
         match self {
-            Kind::Resource { ty, .. } => Some(ty),
+            Kind::Resource { ty, .. } | Kind::Moved { ty, .. } => Some(ty),
             Kind::List(_, inner) | Kind::Option(inner) => inner.resource(),
             Kind::Tuple(kinds) => kinds.iter().find_map(Kind::resource),
             Kind::Result(ok, err) => ok.iter().chain(err).find_map(|side| side.resource()),
@@ -2922,23 +2965,26 @@ fn kind<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>,
     }
 }
 
-/// The kind of a type a function takes, written in the module `scope`: one holding a resource is
-/// refused, since natively a resource is only returned, or borrowed as a method's `self`.
+/// Read owned argument positions as moves, preserving their original resource claim.
 fn argument<'a>(
     ty: &'a Type,
     scope: usize,
     analysis: &Analysis,
 ) -> Result<Kind<'a>, Uncovered<'a>> {
-    let kind = kind(ty, scope, analysis)?;
-    match kind.resource() {
-        Some(resource) => Err(Uncovered {
-            ty: resource,
-            reason:
-                "a resource; natively a resource is only returned, or borrowed as a method's `self`"
-                    .to_owned(),
-        }),
-        None => Ok(kind),
+    fn moved(kind: Kind<'_>) -> Kind<'_> {
+        match kind {
+            Kind::Resource { ty, handle } => Kind::Moved { ty, handle },
+            Kind::List(ty, inner) => Kind::List(ty, Box::new(moved(*inner))),
+            Kind::Option(inner) => Kind::Option(Box::new(moved(*inner))),
+            Kind::Tuple(kinds) => Kind::Tuple(kinds.into_iter().map(moved).collect()),
+            Kind::Result(ok, err) => Kind::Result(
+                ok.map(|inner| Box::new(moved(*inner))),
+                err.map(|inner| Box::new(moved(*inner))),
+            ),
+            other => other,
+        }
     }
+    kind(ty, scope, analysis).map(moved)
 }
 
 /// The kind of a type of the module or of a consumed interface: a type that enters the WIT from
@@ -3195,6 +3241,13 @@ fn decode(
         // Only a native caller reads a resource, from the result it received: the value is the
         // index of one of the result's owned handles, `__tembra_owned`, each taken once, which
         // it holds as the resource's handle type.
+        Kind::Moved { ty, .. } => quote! {
+            #value.as_u64().and_then(|index| ::core::convert::TryFrom::try_from(index).ok())
+                .and_then(|index: usize| __tembra_arguments.get_mut(index))
+                .and_then(::core::option::Option::take)
+                .ok_or_else(|| ::std::string::String::from("invalid owned argument index"))
+                .and_then(|moved| __tembra_payload.receive::<#ty>(moved).map_err(|error| error.to_string()))
+        },
         Kind::Resource { handle, .. } => quote! {
             match #value
                 .as_u64()
@@ -3305,6 +3358,10 @@ fn encode(
             ::#facade::serde_json::to_string(&#value)
                 .map(::#facade::serde_json::Value::String)
                 .map_err(|error| error.to_string())
+        },
+        Kind::Moved { .. } => quote! {
+            __tembra_input.attach_argument(::core::convert::Into::into(#value))
+                .map(::#facade::serde_json::Value::from).map_err(|error| error.to_string())
         },
         Kind::Resource { .. } => {
             let issued = issued(value, facade);

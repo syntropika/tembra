@@ -104,6 +104,7 @@ function diagnostics(files: readonly string[]): Map<string, string[]> {
     paths: {
       "@syntropika/tembra-sdk": [path.join(sdk, "src/index.ts")],
       "@syntropika/tembra-sdk/runtime": [path.join(sdk, "src/host.ts")],
+      "@syntropika/tembra-sdk/rpc": [path.join(sdk, "src/rpc.ts")],
     },
   });
   const reported = new Map(files.map((file) => [file, [] as string[]]));
@@ -593,6 +594,8 @@ test(
         site,
         `import { get, type Decoder, type DecoderAlias } from "./example-decoders-codec.ts";
 import { get as getSink, type ImportedDecoder } from "./example-decoders-sink.ts";
+import type { RemoteHost } from "@syntropika/tembra-sdk/rpc";
+export const remote = (connection: RemoteHost) => get(connection, { orb: "codec", key: "main" });
 export async function check(scope: Parameters<typeof get>[0]) {
   const codec = await get(scope, { orb: "codec", key: "main" });
   const decoder: Decoder = await codec.newDecoder(1n);

@@ -9,7 +9,7 @@ description = "Shared Rust host implementation for Tembra"
 
 [features]
 default = []
-rpc = []
+rpc = ["dep:tembra-contracts", "dep:getrandom"]
 hooks = ["tembra-core/hooks"]
 subscriptions = ["tembra-core/subscriptions"]
 views = ["tembra-core/views"]
@@ -17,6 +17,8 @@ telemetry = ["tembra-core/telemetry"]
 
 [dependencies]
 tembra-core.workspace = true
+tembra-contracts = { workspace = true, default-features = false, optional = true }
+getrandom = { version = "0.4.3", features = ["wasm_js"], optional = true }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

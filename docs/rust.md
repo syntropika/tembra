@@ -369,9 +369,12 @@ their capability carriers are implemented. Compiled callers use ordinary generat
 for owned results nested in records, lists, tuples, simple options, variants and results. Native
 executor adapters receive the same data shape and its separately owned attachments through
 `portable::Delivered`; no numeric value grants authority. Refused or undelivered batches close
-all owners. General resource arguments and futures remain outside this resource profile.
-Byte streams have a separate linear
-attachment described below.
+all owners. Owned arguments move those same claims through supported containers. A native
+exporter uses `Payload::take_arguments` and `Payload::receive::<T>` to redeem a moved value only
+at its original issuing object. Native macro clients take the generated resource handles by value;
+the authored provider takes its original resource struct. Explicit borrows and general futures
+remain unsupported. Generated TypeScript clients can use the same owners through the Rust server's
+[RPC transport](rpc-resources.md). Byte streams have a separate linear attachment described below.
 
 ## Portable byte streams
 

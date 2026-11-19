@@ -250,6 +250,7 @@ for (const suite of selected) {
       TEMBRA_WASM_BROWSER_ENGINE: alternate,
     });
     run(bun, ["run", "test:browser"]);
+    run("just", ["test-rpc-browser"]);
   } else if (suite === "example") {
     const example = fresh("example");
     run(bun, ["examples/wasm-orb/build.ts", "--provider", provider, "--out", example]);

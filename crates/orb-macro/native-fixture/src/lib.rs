@@ -2315,3 +2315,6 @@ pub mod pier {
 }
 
 pub mod codec;
+
+/// Shared native/component provider used by actual RPC client tests.
+pub mod rpc_provider;

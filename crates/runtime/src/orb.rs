@@ -26,6 +26,7 @@ pub(crate) struct Implementation {
     pub local: BTreeMap<String, LocalMethod>,
     pub portable: BTreeMap<String, PortableMethod>,
     pub before_create: Option<BeforeCreate>,
+    pub contract: Option<(String, Rc<[u8]>)>,
     #[cfg(feature = "views")]
     pub access: Option<Access>,
 }
@@ -61,6 +62,7 @@ impl<E: 'static> Service<E> {
                 local: BTreeMap::new(),
                 portable: BTreeMap::new(),
                 before_create: None,
+                contract: None,
                 #[cfg(feature = "views")]
                 access: None,
             },
@@ -85,6 +87,12 @@ impl<E: 'static> Service<E> {
     /// Declare the canonical ABI signature used by typed dependency admission.
     pub fn signature(mut self, signature: Option<String>) -> Self {
         self.metadata.signature = signature;
+        self
+    }
+
+    /// Attach the prepared WIT used to check portable resource transport before execution.
+    pub fn contract(mut self, binding: impl Into<String>, prepared: &[u8]) -> Self {
+        self.implementation.contract = Some((binding.into(), Rc::from(prepared)));
         self
     }
 

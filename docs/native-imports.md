@@ -64,9 +64,10 @@ The wrappers use the matched prepared delivery channel and existing SDK owners. 
 `bigint`, camelCase record fields, `{ tag, val }` variants/results and `T | null` options, including
 inside resource containers. Generation rejects method/name collisions and unsupported profiles.
 
-Prepared browser components provide this SDK capability channel. Existing data-only Node/mobile
-execution, RPC and ordinary JS service handlers cannot carry owners; they remain explicitly
-unsupported for resource calls. Data-only generated clients retain their existing transport.
+Prepared browser components and the Rust RPC server provide this SDK capability channel. RPC
+uses the same generated clients for native and compiled providers without a browser component;
+see [WIT resources over RPC](rpc-resources.md). Data-only Node/mobile execution and ordinary JS
+service handlers remain unsupported for resource calls. Data-only clients retain their transport.
 
 ## Limits
 
