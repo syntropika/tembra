@@ -26,7 +26,10 @@ pub(super) fn spawn(
     thread::Builder::new().name("tembra-node-events".into()).spawn(move || {
         let events=match start.recv() {
             Ok(Ok(events))=>events,
-            Ok(Err(refused))=>{let _=callback.call(complete(Err::<String,_>(refused)),ThreadsafeFunctionCallMode::NonBlocking);return}
+            Ok(Err(refused))=>{
+                let _=callback.call(complete(Err::<String,_>(refused)),ThreadsafeFunctionCallMode::NonBlocking);
+                return;
+            }
             Err(_)=>return,
         };
         let mut delivering=true;

@@ -15,9 +15,9 @@
  * `task.return`. A trap, or a task that exits rejected, quarantines the instance and rejects
  * every waiter racing the trap signal. No event-loop timing is used as a completion signal.
  *
- * A callback answers its faults as the native worker's do: a trap, an uncaught guest exception or
- * a timeout `unavailable/wasm_executor` with a `component trap: ` message, a busy or closed instance
- * `unavailable/wasm_executor`, and every entry of a quarantined instance
+ * A callback answers its faults as the native worker's do. A trap, an uncaught guest exception or
+ * a timeout answers `unavailable/wasm_executor` with a `component trap: ` message. A busy or closed
+ * instance answers `unavailable/wasm_executor`. Every entry of a quarantined instance answers
  * `unavailable/wasm_executor_quarantined` with the trap's message. A structured error that traps
  * the guest, such as a dependency's refusal, is a trap too.
  */
