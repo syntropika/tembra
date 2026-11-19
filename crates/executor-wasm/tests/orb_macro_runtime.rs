@@ -2003,8 +2003,8 @@ fn observer(contract: &Contract, provider: &str, hook: &str, seen: Rc<RefCell<Ve
 /// block the feature adds, telling the contributors to the hook a sub-module the feature adds
 /// declares. The component, its WIT, the hooks its roles declare and the contract `cargo tembra
 /// build` writes from it hold the services, methods and hooks of the build's features, and the
-/// component answers them. Natively, `orb()` serves the notes without the feature, and refuses
-/// the hook's declaration with it.
+/// component answers them. Natively, `orb()` serves the notes without the archive feature.
+/// Enabling the archive also requires the host's hooks feature.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
 fn items_under_cfg_follow_the_features_both_ways() {
@@ -2025,7 +2025,7 @@ fn items_under_cfg_follow_the_features_both_ways() {
         for (declaration, held) in [
             ("add:func(text:string)->u32;", true),
             ("clear:func()->u32;", !archive),
-            ("archive:func()->u32;", archive),
+            ("archive:asyncfunc()->u32;", archive),
             ("interfaceshelf{", archive),
             ("count:func()->u32;", archive),
             ("exportshelf;", archive),
