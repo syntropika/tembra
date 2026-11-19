@@ -1,7 +1,7 @@
 //! `#[cfg(..)]` on the items the macro reads into the WIT and into `orb(..)`: a `#[service]`
 //! struct, an inherent `impl` block of one, a `pub fn` or the `#[create]` of such a block, a free
 //! function marked `#[root]`, a function or a struct marked `#[hook]`, and a sub-module holding
-//! any of these. An attribute macro reads its input before the compiler evaluates the `#[cfg]`s
+//! any of these, a service's own module first. An attribute macro reads its input before the compiler evaluates the `#[cfg]`s
 //! inside it, so the macro cannot tell whether such an item exists in the configuration being
 //! built. Instead, it expands the module once per combination of their distinct predicates, a
 //! predicate under `not(..)` being the same one: each copy of the module leaves out the items its

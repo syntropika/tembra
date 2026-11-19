@@ -92,25 +92,28 @@ fn resolved(module: &ItemMod, dir: &Path) -> String {
 }
 
 const SHOPPER: &str = "mod shopper {
-    /// What a basket holds.
-    pub struct Basket { pub items: Vec<catalog::Item>, pub size: catalog::Size, pub marks: catalog::Marks }
-    /// What a shopper chose.
-    pub enum Choice { Picked(catalog::Pick), Nothing }
-    #[wit_resource]
-    pub struct Till { total: core::cell::Cell<u32> }
-    impl Till {
-        #[constructor]
-        pub fn new(first: catalog::Item) -> Self { Till { total: core::cell::Cell::new(first.price) } }
-        pub fn ring(&self, item: catalog::Label) -> catalog::Status { catalog::Status::Open }
-    }
-    #[service]
-    pub struct Shopping;
-    impl Shopping {
-        pub fn price(item: catalog::Item) -> u32 { item.price }
-        pub fn cheapest(items: catalog::Items, status: Option<catalog::Status>) -> Option<catalog::Item> { None }
-        pub fn fill(items: Vec<catalog::Item>, size: catalog::Size, marks: catalog::Marks) -> Basket { Basket { items, size, marks } }
-        pub fn choose(picks: (catalog::Pick, u32), odd: catalog::AB) -> Result<Choice, String> { todo!() }
-        pub fn open(first: catalog::Item) -> Till { Till::new(first) }
+    pub mod shopping {
+        use super::catalog;
+        /// What a basket holds.
+        pub struct Basket { pub items: Vec<catalog::Item>, pub size: catalog::Size, pub marks: catalog::Marks }
+        /// What a shopper chose.
+        pub enum Choice { Picked(catalog::Pick), Nothing }
+        #[wit_resource]
+        pub struct Till { total: core::cell::Cell<u32> }
+        impl Till {
+            #[constructor]
+            pub fn new(first: catalog::Item) -> Self { Till { total: core::cell::Cell::new(first.price) } }
+            pub fn ring(&self, item: catalog::Label) -> catalog::Status { catalog::Status::Open }
+        }
+        #[service]
+        pub struct Shopping;
+        impl Shopping {
+            pub fn price(item: catalog::Item) -> u32 { item.price }
+            pub fn cheapest(items: catalog::Items, status: Option<catalog::Status>) -> Option<catalog::Item> { None }
+            pub fn fill(items: Vec<catalog::Item>, size: catalog::Size, marks: catalog::Marks) -> Basket { Basket { items, size, marks } }
+            pub fn choose(picks: (catalog::Pick, u32), odd: catalog::AB) -> Result<Choice, String> { todo!() }
+            pub fn open(first: catalog::Item) -> Till { Till::new(first) }
+        }
     }
 }";
 
@@ -141,11 +144,11 @@ fn a_derived_signature_names_an_imported_interfaces_types() {
     for expected in [
         "fn price (item : catalog :: Item) -> u32 { Shopping :: price (item) }",
         "fn cheapest (items : catalog :: Items , status : Option < catalog :: Status >) -> Option < catalog :: Item > { Shopping :: cheapest (items , status) }",
-        "fn choose (picks : (catalog :: Pick , u32) , odd : catalog :: AB) -> Result < exports :: example :: shopper :: shopping :: Choice , String > { match Shopping :: choose (picks , odd) { :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err (:: core :: convert :: Into :: into (item)) , } }",
+        "fn choose (picks : (catalog :: Pick , u32) , odd : catalog :: AB) -> Result < super :: exports :: example :: shopper :: shopping :: Choice , String > { match Shopping :: choose (picks , odd) { :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err (:: core :: convert :: Into :: into (item)) , } }",
         "fn new (first : catalog :: Item) -> Self { Till :: new (first) }",
         "fn ring (& self , item : catalog :: Label) -> catalog :: Status { Till :: ring (self , item) }",
-        "impl :: core :: convert :: From < Basket > for exports :: example :: shopper :: shopping :: Basket { fn from (value : Basket) -> Self { Self { items : value . items . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , size : :: core :: convert :: Into :: into (value . size) , marks : :: core :: convert :: Into :: into (value . marks) } } }",
-        "impl :: core :: convert :: From < Choice > for exports :: example :: shopper :: shopping :: Choice { fn from (value : Choice) -> Self { match value { Choice :: Picked (item) => Self :: Picked (:: core :: convert :: Into :: into (item)) , Choice :: Nothing => Self :: Nothing , } } }",
+        "impl :: core :: convert :: From < Basket > for super :: exports :: example :: shopper :: shopping :: Basket { fn from (value : Basket) -> Self { Self { items : value . items . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , size : :: core :: convert :: Into :: into (value . size) , marks : :: core :: convert :: Into :: into (value . marks) } } }",
+        "impl :: core :: convert :: From < Choice > for super :: exports :: example :: shopper :: shopping :: Choice { fn from (value : Choice) -> Self { match value { Choice :: Picked (item) => Self :: Picked (:: core :: convert :: Into :: into (item)) , Choice :: Nothing => Self :: Nothing , } } }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -198,21 +201,24 @@ fn a_parameter_record_holds_an_imported_interfaces_handle() {
             &["example:texts/texts@1.0.0"],
         ),
         "mod spelling {
-            /// A word to append to the caller's builder.
-            pub struct Job { pub builder: texts::Builder, pub word: String }
-            pub enum Task { Spell(Job), Skip(u32) }
-            #[wit_resource(service = Speller)]
-            pub struct Draft { length: core::cell::Cell<u32> }
-            impl Draft {
-                #[constructor]
-                pub fn new(job: Job) -> Self { Draft { length: core::cell::Cell::new(job.builder.append(&job.word)) } }
-                pub fn add(&self, job: Job) -> u32 { job.builder.append(&job.word) }
-            }
-            #[service]
-            pub struct Speller;
-            impl Speller {
-                pub fn spell_job(job: Job) -> u32 { job.builder.append(&job.word) }
-                pub fn run(tasks: Vec<Task>, last: Option<Job>) -> u32 { 0 }
+            pub mod speller {
+                use super::texts;
+                /// A word to append to the caller's builder.
+                pub struct Job { pub builder: texts::Builder, pub word: String }
+                pub enum Task { Spell(Job), Skip(u32) }
+                #[wit_resource]
+                pub struct Draft { length: core::cell::Cell<u32> }
+                impl Draft {
+                    #[constructor]
+                    pub fn new(job: Job) -> Self { Draft { length: core::cell::Cell::new(job.builder.append(&job.word)) } }
+                    pub fn add(&self, job: Job) -> u32 { job.builder.append(&job.word) }
+                }
+                #[service]
+                pub struct Speller;
+                impl Speller {
+                    pub fn spell_job(job: Job) -> u32 { job.builder.append(&job.word) }
+                    pub fn run(tasks: Vec<Task>, last: Option<Job>) -> u32 { 0 }
+                }
             }
         }",
     );
@@ -231,11 +237,11 @@ fn a_parameter_record_holds_an_imported_interfaces_handle() {
     }
     let generated = tokens(&module);
     for expected in [
-        "fn spell_job (job : exports :: example :: speller :: speller :: Job) -> u32 { Speller :: spell_job (:: core :: convert :: Into :: into (job)) }",
-        "fn run (tasks : Vec < exports :: example :: speller :: speller :: Task > , last : Option < exports :: example :: speller :: speller :: Job >) -> u32 { Speller :: run (tasks . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , last . map (| item | :: core :: convert :: Into :: into (item))) }",
-        "fn new (job : exports :: example :: speller :: speller :: Job) -> Self { Draft :: new (:: core :: convert :: Into :: into (job)) }",
-        "fn add (& self , job : exports :: example :: speller :: speller :: Job) -> u32 { Draft :: add (self , :: core :: convert :: Into :: into (job)) }",
-        "impl :: core :: convert :: From < exports :: example :: speller :: speller :: Job > for Job { fn from (value : exports :: example :: speller :: speller :: Job) -> Self { Self { builder : :: core :: convert :: Into :: into (value . builder) , word : :: core :: convert :: Into :: into (value . word) } } }",
+        "fn spell_job (job : super :: exports :: example :: speller :: speller :: Job) -> u32 { Speller :: spell_job (:: core :: convert :: Into :: into (job)) }",
+        "fn run (tasks : Vec < super :: exports :: example :: speller :: speller :: Task > , last : Option < super :: exports :: example :: speller :: speller :: Job >) -> u32 { Speller :: run (tasks . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , last . map (| item | :: core :: convert :: Into :: into (item))) }",
+        "fn new (job : super :: exports :: example :: speller :: speller :: Job) -> Self { Draft :: new (:: core :: convert :: Into :: into (job)) }",
+        "fn add (& self , job : super :: exports :: example :: speller :: speller :: Job) -> u32 { Draft :: add (self , :: core :: convert :: Into :: into (job)) }",
+        "impl :: core :: convert :: From < super :: exports :: example :: speller :: speller :: Job > for Job { fn from (value : super :: exports :: example :: speller :: speller :: Job) -> Self { Self { builder : :: core :: convert :: Into :: into (value . builder) , word : :: core :: convert :: Into :: into (value . word) } } }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -286,12 +292,18 @@ fn the_interface_defining_a_type_uses_what_its_fields_name() {
         shopping(&dir),
         "mod shopper {
             pub struct Basket { pub items: Vec<catalog::Item> }
-            #[service]
-            pub struct Filling;
-            impl Filling { pub fn fill(count: u32) -> Basket { todo!() } }
-            #[service]
-            pub struct Paying;
-            impl Paying { pub fn pay(basket: Basket) -> u32 { 0 } }
+            pub mod filling {
+                use super::Basket;
+                #[service]
+                pub struct Filling;
+                impl Filling { pub fn fill(count: u32) -> Basket { todo!() } }
+            }
+            pub mod paying {
+                use super::Basket;
+                #[service]
+                pub struct Paying;
+                impl Paying { pub fn pay(basket: Basket) -> u32 { 0 } }
+            }
         }",
     );
     let text = resolved(&module, &dir);
@@ -330,10 +342,13 @@ fn a_path_resolves_in_the_module_that_writes_it_before_the_consumed_interfaces()
                 pub fn keep(entry: super::greeting::Entry) -> u32 { 0 }
             }
         }
-        #[service]
-        pub struct Archive;
-        impl Archive {
-            pub fn latest(entries: Vec<greeting::Entry>) -> Option<greeting::Entry> { None }
+        pub mod archive {
+            use super::greeting;
+            #[service]
+            pub struct Archive;
+            impl Archive {
+                pub fn latest(entries: Vec<greeting::Entry>) -> Option<greeting::Entry> { None }
+            }
         }
     }";
     let with_banner = GREETER.replace(
@@ -396,9 +411,12 @@ fn a_derived_signature_names_a_keyed_imports_types_through_its_view() {
     let routing = |functions: &str| {
         format!(
             "mod router {{
-                #[service]
-                pub struct Routing;
-                impl Routing {{ {functions} }}
+                pub mod routing {{
+                    use super::counter_ref;
+                    #[service]
+                    pub struct Routing;
+                    impl Routing {{ {functions} }}
+                }}
             }}"
         )
     };
@@ -460,9 +478,12 @@ interface counter {
     let routing = |functions: &str| {
         format!(
             "mod router {{
-                #[service]
-                pub struct Routing;
-                impl Routing {{ {functions} }}
+                pub mod routing {{
+                    use super::counter_ref;
+                    #[service]
+                    pub struct Routing;
+                    impl Routing {{ {functions} }}
+                }}
             }}"
         )
     };
@@ -510,20 +531,26 @@ interface gate {
 fn keeper(report: &str) -> String {
     format!(
         "mod keeper {{
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper {{ pub fn add(entry: book::Entry) -> u32 {{ 0 }} }}
-            #[wit_resource(service = Keeper)]
-            pub struct Cursor;
-            impl Cursor {{
-                #[constructor]
-                pub fn new() -> Self {{ Cursor }}
+            pub mod keeper {{
+                use super::book;
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {{ pub fn add(entry: book::Entry) -> u32 {{ 0 }} }}
+                #[wit_resource]
+                pub struct Cursor;
+                impl Cursor {{
+                    #[constructor]
+                    pub fn new() -> Self {{ Cursor }}
+                }}
             }}
             #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
             pub fn admit(input: guard::Admission) -> guard::Admission {{ input }}
-            #[service]
-            pub struct Report;
-            impl Report {{ {report} }}
+            pub mod report {{
+                use super::{{book, guard}};
+                #[service]
+                pub struct Report;
+                impl Report {{ {report} }}
+            }}
         }}"
     )
 }
@@ -609,12 +636,18 @@ fn a_type_of_an_import_depending_on_an_export_is_refused() {
     let keeper = |functions: &str| {
         format!(
             "mod keeper {{
-                #[service(\"example:ledger/book@1.0.0\")]
-                pub struct Keeper;
-                impl Keeper {{ pub fn add(entry: book::Entry) -> u32 {{ 0 }} }}
-                #[service]
-                pub struct Summing;
-                impl Summing {{ {functions} }}
+                pub mod keeper {{
+                    use super::book;
+                    #[service(\"example:ledger/book@1.0.0\")]
+                    pub struct Keeper;
+                    impl Keeper {{ pub fn add(entry: book::Entry) -> u32 {{ 0 }} }}
+                }}
+                pub mod summing {{
+                    use super::reports;
+                    #[service]
+                    pub struct Summing;
+                    impl Summing {{ {functions} }}
+                }}
             }}"
         )
     };
@@ -655,9 +688,12 @@ interface catalog {
     let shopper = |functions: &str| {
         format!(
             "mod shopper {{
-                #[service]
-                pub struct Shopping;
-                impl Shopping {{ {functions} }}
+                pub mod shopping {{
+                    use super::catalog;
+                    #[service]
+                    pub struct Shopping;
+                    impl Shopping {{ {functions} }}
+                }}
             }}"
         )
     };
@@ -718,10 +754,13 @@ interface counter {
     let shopper = |items: &str, functions: &str| {
         format!(
             "mod shopper {{
-                {items}
-                #[service]
-                pub struct Shopping;
-                impl Shopping {{ {functions} }}
+                pub mod shopping {{
+                    use super::{{catalog, counter_ref}};
+                    {items}
+                    #[service]
+                    pub struct Shopping;
+                    impl Shopping {{ {functions} }}
+                }}
             }}"
         )
     };
@@ -790,11 +829,14 @@ fn a_declared_hooks_types_stay_out_of_a_derived_signature() {
             "mod gatekeeper {{
                 #[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
                 pub struct Gate;
-                #[state]
-                pub struct Last {{ pub ticket: Option<gate::Ticket> }}
-                #[service]
-                pub struct Admissions;
-                impl Admissions {{ {admit} }}
+                pub mod admissions {{
+                    use super::{{gate, Gate}};
+                    #[state]
+                    pub struct Last {{ pub ticket: Option<gate::Ticket> }}
+                    #[service]
+                    pub struct Admissions;
+                    impl Admissions {{ {admit} }}
+                }}
             }}"
         )
     };
@@ -853,9 +895,12 @@ fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
             "mod gatekeeper {{
                 #[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
                 pub struct Gate;
-                #[service]
-                pub struct Admissions;
-                impl Admissions {{ {admit} }}
+                pub mod admissions {{
+                    use super::{{gate, gate_ref, Gate}};
+                    #[service]
+                    pub struct Admissions;
+                    impl Admissions {{ {admit} }}
+                }}
             }}"
         )
     };
@@ -913,16 +958,19 @@ fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
             "mod keeper {{
                 #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
                 pub fn admit(input: guard::Admission) -> guard::Admission {{ input }}
-                #[service]
-                pub struct Report;
-                impl Report {{ {report} }}
+                pub mod report {{
+                    use super::guard_ref;
+                    #[service]
+                    pub struct Report;
+                    impl Report {{ {report} }}
+                }}
             }}"
         )
     };
     let module = expanded(
         keyed("example:ledger/guard@1.0.0"),
         &keeper(
-            "pub fn judged(admission: self::example::ledger::guard::Admission) -> bool { admission.blocked }
+            "pub fn judged(admission: super::example::ledger::guard::Admission) -> bool { admission.blocked }
             pub fn viewed(admission: guard_ref::Admission) -> bool { admission.blocked }",
         ),
     );
@@ -940,11 +988,14 @@ fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
         "mod gatekeeper {
             #[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
             pub struct Gate;
-            #[service]
-            pub struct Admissions;
-            impl Admissions {
-                pub fn admit(ticket: gate_ref::Ticket) -> i32 { ticket.value }
-                pub fn ran(value: i32) -> gate_ref::Ticket { Gate::run(gate::Ticket { value }) }
+            pub mod admissions {
+                use super::{gate, gate_ref, Gate};
+                #[service]
+                pub struct Admissions;
+                impl Admissions {
+                    pub fn admit(ticket: gate_ref::Ticket) -> i32 { ticket.value }
+                    pub fn ran(value: i32) -> gate_ref::Ticket { Gate::run(gate::Ticket { value }) }
+                }
             }
         }",
     );
@@ -969,9 +1020,12 @@ fn a_type_a_declared_hook_uses_from_an_import_has_one_copy() {
             "mod gatekeeper {{
                 #[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
                 pub struct Gate;
-                #[service]
-                pub struct Admissions;
-                impl Admissions {{ {admit} }}
+                pub mod admissions {{
+                    use super::{{gate, gate_ref, Gate}};
+                    #[service]
+                    pub struct Admissions;
+                    impl Admissions {{ {admit} }}
+                }}
             }}"
         )
     };
@@ -1010,9 +1064,11 @@ fn one_interface_in_two_roles_is_refused() {
     let orb = |imports: &[&str], items: &str| {
         let module = format!(
             "mod roles {{
-                #[service]
-                pub struct Report;
-                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
+                pub mod report {{
+                    #[service]
+                    pub struct Report;
+                    impl Report {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
                 {items}
             }}"
         );
@@ -1022,14 +1078,21 @@ fn one_interface_in_two_roles_is_refused() {
         pub fn admit(input: guard::Admission) -> guard::Admission { input }";
     let declaration = "#[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
         pub struct Gate;";
-    let guarding = "#[service(\"example:ledger/guard@1.0.0\")]
-        pub struct Guarding;
-        impl Guarding { pub fn apply(input: guard::Admission) -> guard::Admission { input } }";
+    let guarding = "pub mod guarding {
+            use super::guard;
+            #[service(\"example:ledger/guard@1.0.0\")]
+            pub struct Guarding;
+            impl Guarding { pub fn apply(input: guard::Admission) -> guard::Admission { input } }
+        }";
     let gating = |service: &str| {
         format!(
-            "#[service(\"example:ledger/gate@1.0.0\")]
-            pub struct {service};
-            impl {service} {{ pub fn apply(input: gate::Ticket) -> gate::Ticket {{ input }} }}"
+            "pub mod {} {{
+                use super::gate;
+                #[service(\"example:ledger/gate@1.0.0\")]
+                pub struct {service};
+                impl {service} {{ pub fn apply(input: gate::Ticket) -> gate::Ticket {{ input }} }}
+            }}",
+            service.to_lowercase()
         )
     };
     // A role as the attribute's imports and the module's items.
@@ -1119,22 +1182,27 @@ fn a_service_or_a_hook_of_the_kernels_context_is_refused_beside_the_context_opti
         ..options("example:watcher@1.0.0", Some(&dir), &[])
     };
     let service = "mod watcher {
-        #[service(\"tembra:guest/context@1.0.0\")]
-        pub struct Kernel;
-        impl Kernel {
-            pub fn object() -> context::Address { todo!() }
-            pub fn principal() -> String { String::new() }
-            pub fn cancelled() -> bool { false }
-            pub fn cancel() {}
-            pub fn log(level: context::Level, message: String) {}
+        pub mod kernel {
+            use super::context;
+            #[service(\"tembra:guest/context@1.0.0\")]
+            pub struct Kernel;
+            impl Kernel {
+                pub fn object() -> context::Address { todo!() }
+                pub fn principal() -> String { String::new() }
+                pub fn cancelled() -> bool { false }
+                pub fn cancel() {}
+                pub fn log(level: context::Level, message: String) {}
+            }
         }
     }";
     let hooked = |hook: &str| {
         format!(
             "mod watcher {{
-                #[service]
-                pub struct Report;
-                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
+                pub mod report {{
+                    #[service]
+                    pub struct Report;
+                    impl Report {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
                 {hook}
             }}"
         )
@@ -1189,52 +1257,63 @@ fn a_service_or_a_hook_of_the_kernels_context_is_refused_beside_the_context_opti
 #[test]
 fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
     let dir = consumed("refused", SHOP);
-    let service = |functions: &str, items: &str| {
+    let service = |functions: &str, items: &str, hooks: &str| {
         format!(
             "mod shopper {{
-                {items}
-                #[service]
-                pub struct Shopping;
-                impl Shopping {{ {functions} }}
+                {hooks}
+                pub mod shopping {{
+                    use super::catalog;
+                    {items}
+                    #[service]
+                    pub struct Shopping;
+                    impl Shopping {{ {functions} }}
+                }}
             }}"
         )
     };
-    for (functions, items, message) in [
+    for (functions, items, hooks, message) in [
         (
             "pub fn price(item: catalog::Itme) -> u32 { 0 }",
+            "",
             "",
             "`Shopping::price` takes `Itme`, which names no type or resource of the imported interface example:shop/catalog@1.0.0: its types are `Status`, `Item`, `Pick`, `Size`, `Marks`, `Items`, `Label`, `AB`, `Slot`, `Tagged`; its resources are `Cart`",
         ),
         (
             "pub fn hold(slots: Vec<catalog::Slot>) -> u32 { 0 }",
             "",
+            "",
             "`Shopping::hold` takes `Slot`, a record of the imported interface example:shop/catalog@1.0.0 that holds a resource handle: a derived interface names the consumed types that carry data only",
         ),
         (
             "pub fn take(bag: Bag) -> u32 { 0 } pub fn pack() -> Bag { todo!() }",
             "pub struct Bag { pub cart: catalog::Cart }",
+            "",
             "`Shopping::pack` returns `Bag`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn next() -> Vec<Choice> { todo!() }",
             "pub enum Choice { Cart(catalog::Cart), Nothing }",
+            "",
             "`Shopping::next` returns `Vec<Choice>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn open() -> Tally { Tally }",
             "pub struct Bag { pub cart: catalog::Cart }
-            #[wit_resource(service = Shopping)]
+            #[wit_resource]
             pub struct Tally;
             impl Tally { pub fn drain(&self) -> Bag { todo!() } }",
+            "",
             "`Tally::drain` returns `Bag`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
             "pub fn last() -> Option<Receipt> { None }",
             "pub struct Bag { pub cart: catalog::Cart } pub struct Receipt { pub bag: Bag }",
+            "",
             "`Shopping::last` returns `Option<Receipt>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
-            "pub fn order() { Ordered::run(Order { item: todo!() }) }",
+            "pub fn order() { super::Ordered::run(super::Order { item: todo!() }) }",
+            "",
             "#[hook(composition = series, input = Order)]
             pub struct Ordered;
             pub struct Order { pub item: catalog::Item }",
@@ -1242,6 +1321,7 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
         ),
         (
             "pub fn order() {}",
+            "",
             "#[hook(composition = series, input = catalog::Size)]
             pub struct Ordered;",
             "the input of the hook `Ordered` holds `Size`, an enum of the imported interface example:shop/catalog@1.0.0: a derived hook's input holds the types of the module, not those of a consumed interface",
@@ -1249,10 +1329,11 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
         (
             "pub fn price(item: catalog::Item) -> u32 { 0 } pub fn mine() -> Item { todo!() }",
             "pub struct Item { pub count: u32 }",
+            "",
             "`Item`, used from example:shop/catalog@1.0.0, and the type `Item` are both `item` in the interface `shopping`",
         ),
     ] {
-        let error = refused(shopping(&dir), &service(functions, items));
+        let error = refused(shopping(&dir), &service(functions, items, hooks));
         assert!(error.contains(message), "{functions}\n{error}");
     }
     // A resource of another interface in a result falls on the result as written.
@@ -1261,6 +1342,7 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
         &service(
             "pub fn last() -> Option<Receipt> { None }",
             "pub struct Bag { pub cart: catalog::Cart } pub struct Receipt { pub bag: Bag }",
+            "",
         ),
     );
     assert_eq!(at, "Option<Receipt>");
@@ -1272,6 +1354,7 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
         ),
         &service(
             "pub fn wait(span: monotonic_clock::Duration) -> u64 { span }",
+            "use super::monotonic_clock;",
             "",
         ),
     );
@@ -1327,9 +1410,12 @@ fn a_wasi_type_a_consumed_interface_uses_is_refused_as_a_wasi_type() {
     let keeper = |functions: &str| {
         format!(
             "mod filing {{
-                #[service]
-                pub struct Keeper;
-                impl Keeper {{ {functions} }}
+                pub mod keeper {{
+                    use super::files;
+                    #[service]
+                    pub struct Keeper;
+                    impl Keeper {{ {functions} }}
+                }}
             }}"
         )
     };
@@ -1410,12 +1496,15 @@ fn a_state_gives_serde_to_a_consumed_type_in_any_form() {
     ] {
         let module = format!(
             "mod shopper {{
-                {types}
-                #[state]
-                pub struct Kept {{ {field} }}
-                #[service]
-                pub struct Shopping;
-                impl Shopping {{ pub fn count() -> u32 {{ 0 }} }}
+                pub mod shopping {{
+                    use super::catalog;
+                    {types}
+                    #[state]
+                    pub struct Kept {{ {field} }}
+                    #[service]
+                    pub struct Shopping;
+                    impl Shopping {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
             }}"
         );
         let generated = tokens(&expanded(shopping(&dir), &module));
@@ -1440,15 +1529,18 @@ fn a_state_holds_the_consumed_types_serde_writes() {
     let module = |fields: &str, functions: &str| {
         format!(
             "mod shopper {{
-                pub struct Shelf {{ pub slots: Vec<catalog::Slot> }}
-                pub struct Rack {{ pub tagged: catalog::Tagged }}
-                #[state]
-                pub struct Kept {{ {fields} }}
-                #[service]
-                pub struct Shopping;
-                impl Shopping {{
-                    pub fn keep(item: catalog::Item) -> u32 {{ 0 }}
-                    {functions}
+                pub mod shopping {{
+                    use super::catalog;
+                    pub struct Shelf {{ pub slots: Vec<catalog::Slot> }}
+                    pub struct Rack {{ pub tagged: catalog::Tagged }}
+                    #[state]
+                    pub struct Kept {{ {fields} }}
+                    #[service]
+                    pub struct Shopping;
+                    impl Shopping {{
+                        pub fn keep(item: catalog::Item) -> u32 {{ 0 }}
+                        {functions}
+                    }}
                 }}
             }}"
         )
@@ -1538,19 +1630,22 @@ fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
     let module = expanded(
         shopping(&dir),
         "mod shopper {
-            #[state]
-            pub struct Kept { pub last: Option<catalog::Entry>, pub slot: Option<Slot> }
-            #[wit_resource]
-            pub struct Pen { pub ink: u32 }
-            impl Pen { pub fn ink(&self) -> u32 { self.ink } }
-            pub struct Entry { pub pen: Pen }
-            #[derive(serde::Serialize, Hash)]
-            pub struct Slot { pub shelf: u32 }
-            #[service]
-            pub struct Shopping;
-            impl Shopping {
-                pub fn lend() -> Entry { todo!() }
-                pub fn place() -> Slot { todo!() }
+            pub mod shopping {
+                use super::catalog;
+                #[state]
+                pub struct Kept { pub last: Option<catalog::Entry>, pub slot: Option<Slot> }
+                #[wit_resource]
+                pub struct Pen { pub ink: u32 }
+                impl Pen { pub fn ink(&self) -> u32 { self.ink } }
+                pub struct Entry { pub pen: Pen }
+                #[derive(serde::Serialize, Hash)]
+                pub struct Slot { pub shelf: u32 }
+                #[service]
+                pub struct Shopping;
+                impl Shopping {
+                    pub fn lend() -> Entry { todo!() }
+                    pub fn place() -> Slot { todo!() }
+                }
             }
         }",
     );

@@ -5,21 +5,25 @@ use super::{Options, expand, metadata::Metadata};
 use std::path::{Path, PathBuf};
 
 const DICE: &str = "mod dice {
-    #[service]
-    pub struct Chance;
-    impl Chance {
-        pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
+    pub mod chance {
+        #[service]
+        pub struct Chance;
+        impl Chance {
+            pub fn draw(length: u64) -> Vec<u8> { super::random::get_random_bytes(length) }
+        }
     }
 }";
 
 /// `DICE` with a state, which the kernel keeps: the bindings read the kernel's package.
 const DICE_WITH_STATE: &str = "mod dice {
-    #[state]
-    pub struct Rolls { pub count: u32 }
-    #[service]
-    pub struct Chance;
-    impl Chance {
-        pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
+    pub mod chance {
+        #[state]
+        pub struct Rolls { pub count: u32 }
+        #[service]
+        pub struct Chance;
+        impl Chance {
+            pub fn draw(length: u64) -> Vec<u8> { super::random::get_random_bytes(length) }
+        }
     }
 }";
 
@@ -667,10 +671,12 @@ fn an_encoded_copy_of_the_kernel_package_is_refused_where_the_macro_brings_it() 
             #[open]
             pub fn open() -> Cup { Cup { size: 2 } }
         }
-        #[service]
-        pub struct Chance;
-        impl Chance {
-            pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
+        pub mod chance {
+            #[service]
+            pub struct Chance;
+            impl Chance {
+                pub fn draw(length: u64) -> Vec<u8> { super::random::get_random_bytes(length) }
+            }
         }
     }";
     // The modules whose bindings read the kernel's package, by what reads it.

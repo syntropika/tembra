@@ -1,16 +1,16 @@
 error[E0277]: the trait bound `plotter::Point: serde::Serialize` is not satisfied
-  --> tests/ui/state_reaches_a_type_without_serde.rs:4:23
+  --> tests/ui/state_reaches_a_type_without_serde.rs:7:27
    |
- 4 |     #[derive(Default, serde::Serialize, serde::Deserialize)]
-   |                       ^^^^^^^^^^^^^^^^ unsatisfied trait bound
- 5 |     pub struct Drawn {
- 6 |         pub last: Option<Point>,
-   |         --- required by a bound introduced by this call
+ 7 |         #[derive(Default, serde::Serialize, serde::Deserialize)]
+   |                           ^^^^^^^^^^^^^^^^ unsatisfied trait bound
+ 8 |         pub struct Drawn {
+ 9 |             pub last: Option<Point>,
+   |             --- required by a bound introduced by this call
    |
 help: the trait `Serialize` is not implemented for `plotter::Point`
-  --> tests/ui/state_reaches_a_type_without_serde.rs:10:5
+  --> tests/ui/state_reaches_a_type_without_serde.rs:24:5
    |
-10 |     pub struct Point {
+24 |     pub struct Point {
    |     ^^^^^^^^^^^^^^^^
    = note: for local types consider adding `#[derive(serde::Serialize)]` to your `plotter::Point` type
    = note: for types from other crates check whether the crate offers a `serde` feature flag

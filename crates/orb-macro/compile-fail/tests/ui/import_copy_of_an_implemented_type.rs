@@ -4,24 +4,32 @@
     import("example:counters/counter@1.0.0", keyed)
 )]
 mod proxy {
-    #[service("example:counters/counter@1.0.0")]
-    pub struct Counter;
+    pub mod counting {
+        use super::counter;
 
-    impl Counter {
-        pub async fn read() -> counter::Tally {
-            counter::Tally {
-                key: Vec::new(),
-                count: counter::Count { value: 0 },
+        #[service("example:counters/counter@1.0.0")]
+        pub struct Counter;
+
+        impl Counter {
+            pub async fn read() -> counter::Tally {
+                counter::Tally {
+                    key: Vec::new(),
+                    count: counter::Count { value: 0 },
+                }
             }
         }
     }
 
-    #[service]
-    pub struct Relay;
+    pub mod relay {
+        use super::counter_ref;
 
-    impl Relay {
-        pub fn relayed(last: counter_ref::Tally) -> u32 {
-            last.count.value
+        #[service]
+        pub struct Relay;
+
+        impl Relay {
+            pub fn relayed(last: counter_ref::Tally) -> u32 {
+                last.count.value
+            }
         }
     }
 }

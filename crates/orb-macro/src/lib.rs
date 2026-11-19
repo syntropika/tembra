@@ -2,11 +2,13 @@
 //!
 //! The module is the source of truth, and every exported thing is marked. A unit struct with
 //! `#[service]` and an `impl` block of `pub fn` becomes an exported interface whose functions are
-//! the Orb's methods. A free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`
-//! participates in another Orb's hook. A struct with named fields and `#[state]` is the
-//! kernel-managed state of a service's objects. A struct with `#[resource]` and a `pub fn open()`
-//! is a resource of the Orb's root, opened by the kernel at activation and usable by every
-//! method and hook callback. Structs with named fields and enums become `record`s, `enum`s and
+//! the Orb's methods. Each service lives in an inline module of its own, `pub mod <service in
+//! snake_case>`, which holds what belongs to the service and names the Orb's items through
+//! `super::`. A free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`
+//! participates in another Orb's hook. A struct with named fields and `#[state]` in a service's
+//! module is the kernel-managed state of that service's objects. A struct with `#[resource]` and a
+//! `pub fn open()` outside every service's module is a resource of the Orb's root, opened by the
+//! kernel at activation and usable by every method and hook callback. Structs with named fields and enums become `record`s, `enum`s and
 //! `variant`s only when a service method, a WIT resource's function or a hook's input uses them,
 //! directly or through another type; a state alone does not. Such a type stays the author's, with
 //! its derives, attributes and impls as written: the macro converts it to and from the type the
@@ -23,7 +25,7 @@
 //! The hook interfaces come from the provider's WIT, found in the
 //! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
 //! generated modules are re-exported under their own names, so the author writes
-//! `guard::Admission`. A derived signature names a consumed interface's types the same way, and
+//! `guard::Admission`, and `super::guard::Admission` in a service's module. A derived signature names a consumed interface's types the same way, and
 //! the derived interface `use`s them, so they cross as the consumed package's own, with no
 //! conversion. The kernel's `tembra:guest` package is bundled with the macro; with
 //! `context` on the attribute the module imports its `context` interface and reads the call's

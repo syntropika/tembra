@@ -93,6 +93,21 @@ fn native(item: &Item) -> bool {
     })
 }
 
+/// The item without the facade's `__host!`s it holds, in a service's module and below.
+fn component(item: &Item) -> Item {
+    let mut item = item.clone();
+    if let Item::Mod(module) = &mut item
+        && let Some((_, items)) = &mut module.content
+    {
+        *items = items
+            .iter()
+            .filter(|item| !native(item))
+            .map(component)
+            .collect();
+    }
+    item
+}
+
 /// Only the native side reads the manifest, for the name and API version of `orb()`. A manifest
 /// the macro cannot read, one that is no TOML, or none at all, as in a build without Cargo, is a compile
 /// error naming it inside the facade's `__host!`, which a component build drops: the component
@@ -105,7 +120,7 @@ fn a_manifest_the_macro_cannot_read_fails_the_native_side_alone() {
             ..Options::default()
         };
         let module = syn::parse_str(
-            "mod book { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }",
+            "mod book { pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } } }",
         )
         .unwrap();
         let tokens =
@@ -114,7 +129,7 @@ fn a_manifest_the_macro_cannot_read_fails_the_native_side_alone() {
         module.content.unwrap().1
     };
     let component = |items: &[Item]| {
-        let kept = items.iter().filter(|item| !native(item));
+        let kept = items.iter().filter(|item| !native(item)).map(component);
         quote::quote!(#(#kept)*).to_string()
     };
     let read = expanded(Ok(Metadata::named("book")));

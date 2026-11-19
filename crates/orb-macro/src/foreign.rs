@@ -1,5 +1,6 @@
 //! What a derived interface uses from the interfaces the Orb consumes. A derived signature names
-//! a type of such an interface through the module the Orb module re-exports for it:
+//! a type of such an interface through the module the Orb module re-exports for it, which a
+//! service's module reaches through `super::` or a `use super::greeting;`:
 //! `greeting::Entry` for `import = "example:greeter/greeting@1.0.0"`, `counter_ref::Tally` for a
 //! type the view of an interface imported by key uses, `book::Entry` for an implemented
 //! `#[service("example:ledger/book@1.0.0")]`, `guard::Admission` for a hook the module contributes

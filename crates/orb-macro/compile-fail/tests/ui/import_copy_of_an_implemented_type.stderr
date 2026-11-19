@@ -1,8 +1,8 @@
 error[E0053]: method `relayed` has an incompatible type for trait
-  --> tests/ui/import_copy_of_an_implemented_type.rs:23:30
+  --> tests/ui/import_copy_of_an_implemented_type.rs:30:34
    |
-23 |         pub fn relayed(last: counter_ref::Tally) -> u32 {
-   |                              ^^^^^^^^^^^^^^^^^^ expected `Tally`, found `proxy::example::counters::counter::Tally`
+30 |             pub fn relayed(last: counter_ref::Tally) -> u32 {
+   |                                  ^^^^^^^^^^^^^^^^^^ expected `Tally`, found `proxy::example::counters::counter::Tally`
    |
 note: type in trait
   --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
@@ -18,8 +18,8 @@ note: type in trait
    = note: this error originates in the macro `::tembra::__wit_bindgen::generate` (in Nightly builds, run with -Z macro-backtrace for more info)
 help: change the parameter type to match the trait
    |
-23 -         pub fn relayed(last: counter_ref::Tally) -> u32 {
-23 +         pub fn relayed(last: exports::example::counters::counter::Tally) -> u32 {
+30 -             pub fn relayed(last: counter_ref::Tally) -> u32 {
+30 +             pub fn relayed(last: exports::example::counters::counter::Tally) -> u32 {
    |
 
 error[E0308]: `?` operator has incompatible types

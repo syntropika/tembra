@@ -1,10 +1,10 @@
 error[E0428]: the name `exports` is defined multiple times
-  --> tests/ui/module_named_exports.rs:12:5
+  --> tests/ui/module_named_exports.rs:14:5
    |
  1 | #[tembra::orb(package = "example:keeping@1.0.0")]
    | ------------------------------------------------- previous definition of the module `exports` here
 ...
-12 |     pub mod exports {}
+14 |     pub mod exports {}
    |     ^^^^^^^^^^^^^^^ `exports` redefined here
    |
    = note: `exports` must be defined only once in the type namespace of this module

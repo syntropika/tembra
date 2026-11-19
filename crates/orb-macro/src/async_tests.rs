@@ -15,19 +15,21 @@ interface feed {
 world events { import example:pace/clock@1.0.0; export feed; }
 ";
 const IMPLEMENTATION: &str = "mod events {
-    #[service(\"example:events/feed@1.0.0\")]
-    pub struct Feed;
-    impl Feed {
-        pub async fn subscribe() -> Updates { Updates }
-        pub fn count() -> u32 { 0 }
-    }
-    #[wit_resource(service = Feed)]
-    pub struct Updates;
-    impl Updates {
-        #[constructor]
-        pub fn new() -> Self { Self }
-        pub async fn next(&self) -> Option<u64> { Some(1) }
-        pub async fn fresh() -> Updates { Updates }
+    pub mod feed {
+        #[service(\"example:events/feed@1.0.0\")]
+        pub struct Feed;
+        impl Feed {
+            pub async fn subscribe() -> Updates { Updates }
+            pub fn count() -> u32 { 0 }
+        }
+        #[wit_resource]
+        pub struct Updates;
+        impl Updates {
+            #[constructor]
+            pub fn new() -> Self { Self }
+            pub async fn next(&self) -> Option<u64> { Some(1) }
+            pub async fn fresh() -> Updates { Updates }
+        }
     }
 }";
 
