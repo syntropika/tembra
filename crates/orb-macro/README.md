@@ -466,7 +466,8 @@ pub fn block_negative(input: guard::Admission) -> guard::Admission {
 The macro gives the type `Counts::with(|counts| ...)`, which gives the closure the open value and
 returns its result; before the resource is opened, or after it is closed, it traps. Behind it, the world imports
 `tembra:guest/resources` and exports `tembra:guest/resources-init`: when the kernel creates the
-root it asks the component for its resource declarations (name and version), runs the `#[open]`
+root it asks the component for its resource declarations (name, version and the resources it
+depends on), runs the `#[open]`
 function during activation and the `#[close]` one at teardown; `with` asks the kernel for the handle of the open resource
 first. The value lives in the component, one per instance, as the TypeScript guest's root
 resources do: a reload gives the Orb a fresh instance whose resources the kernel opens again. A
@@ -1708,6 +1709,69 @@ that imports the interface was built against the old WIT and no longer pairs wit
 installation, which compares the interface's contract. Raise the version of the providing package
 and rebuild the Orbs that import it together.
 
+An Orb written before every service lived in a module of its own moves in four steps; until
+each is done, the macro or rustc refuses the module on the item, with the fix in the error:
+
+1. Put each `#[service]` in an inline module of its own, `pub mod <service in snake_case>`, with
+   its `impl` blocks, its `#[state]` and its `#[wit_resource]` structs. The `#[root]`, the
+   `#[inputs]` struct, the root's `#[resource]` structs and the `#[hook]` items stay outside every
+   service's module.
+2. Drop `service = Name` from `#[state]` and `#[wit_resource]`: the module that holds the item says
+   which service owns it, the nearest service's module above it.
+3. Name through `super::` what the Orb module holds, from the service's module: `context`, the
+   module of an imported interface, an implemented one or a hook, and the types the services share,
+   `use super::{context, greeting, Entry};`.
+4. A native host names the service's client, and a WIT resource's handle, through the service's
+   module: `english::greeter::GreetingClient` where it named `english::GreetingClient`.
+
+```rust
+// Before.
+#[tembra::orb(package = "example:counter@1.0.0", context)]
+mod tally {
+    #[state(service = Counter)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
+    pub struct Count { pub total: i64 }
+
+    #[service]
+    pub struct Counter;
+
+    impl Counter {
+        pub fn add(by: i64) -> String {
+            let count = Count::update(|count| count.total += by);
+            format!("{} counts {}", context::principal(), count.total)
+        }
+    }
+}
+
+// After.
+#[tembra::orb(package = "example:counter@1.0.0", context)]
+mod tally {
+    pub mod counter {
+        use super::context;
+
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Count { pub total: i64 }
+
+        #[service]
+        pub struct Counter;
+
+        impl Counter {
+            pub fn add(by: i64) -> String {
+                let count = Count::update(|count| count.total += by);
+                format!("{} counts {}", context::principal(), count.total)
+            }
+        }
+    }
+}
+```
+
+The WIT, the interfaces' names and the contract stay the same: only the Rust paths move. The
+compile-fail cases `service_in_the_orb_module`, `two_services_in_one_module`,
+`service_module_inside_another`, `state_outside_every_service`,
+`wit_resource_outside_every_service`, `state_naming_its_service`, `root_in_a_service_module`,
+`inputs_in_a_service_module` and `hook_in_a_service_module` show each error.
+
 Tests: the state's derives, `a_states_default_and_serde_derives_are_the_authors` and the
 compile-fail cases `state_without_default` and `state_reaches_a_type_without_serde`; the `#[flags]`
 struct as a record, `a_struct_of_bool_fields_is_a_record` and `flags_on_a_record`; names of contract
@@ -2023,8 +2087,10 @@ the version whose rules the macro follows, and the generated code reaches it the
   `&self`, and none takes `&mut self`. Besides a service's state, a resource's fields, the root's
   resources and the fields of a service its `#[create]` builds, data lives in `static`s, as in
   the compiled fixtures of `executor-wasm`.
-- Root resources, `#[resource]`, belong to the root, and are opened after the resources their
-  `depends` names; the `#[open]` and `#[close]` functions take no arguments besides the value.
+- A `#[resource]` outside every service's module belongs to the root, one per Orb, and one in a
+  service's module to each object of that service; each opens after the resources its `depends`
+  names and closes before them. The `#[open]` and `#[close]` functions take no arguments besides
+  the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary, a consumed type's
   included. The state's `Default` and `serde`'s derives are the author's, on the state and on every

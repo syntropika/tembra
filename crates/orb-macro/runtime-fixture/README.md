@@ -102,6 +102,19 @@ native host:
 - `lamps` selects the module `lamps`, whose root resource, at version 1, notes when it opens and
   closes, in the host's log in a component and in a journal natively, where the `context` serves
   only a call's methods; with `revised`, its next revision, whose resource is at version 2;
+- `cellar` selects the module `cellar`, with two root resources, the cache depending on the
+  database: the kernel opens the database first, whose rows the cache's `#[open]` function reads,
+  and closes the cache first, whose `#[close]` function writes them back;
+- `kiln` selects the module `kiln`, whose root resources' `#[open]` functions return a `Result`:
+  the wood opens, and the fire, which depends on it, answers an error, which fails the Orb's
+  activation, after which the kernel closes the wood;
+- `dock` selects the module `dock`, with a root resource, the harbor, and two resources of each
+  object of the service `Ship`, in the service's module: its mooring, which depends on the harbor,
+  and its line, which depends on the mooring. The kernel opens them when it creates a ship and
+  closes them in reverse when the ship goes; the third ship finds no berth for its line, which
+  fails its creation after the kernel closes its mooring;
+- `quay` selects the module `quay`, whose root owns no resource and whose service `Barge` owns one
+  per object, its fender: the world exports `service-resources-init` alone;
 - `flagged` selects the module `holder`, which implements the interface of the package in
   `rights/`, whose `flags` the bindings generate without `wit-bindgen`'s `bitflags` feature. The
   native fixture's `tests/flags.rs` runs its native test;
