@@ -4286,7 +4286,7 @@ fn a_converted_type_carries_its_resources_and_reaches_a_derived_hook() {
         ),
         format!("fn apply (_input : {export} :: Decision) -> {export} :: Decision {{"),
         format!(
-            "pub fn run (input : Decision) -> Decision {{ let input : {import} :: Decision = {into} (input) ; let answer = {import} :: apply (& input) ; {into} (answer) }}"
+            "pub async fn run (input : Decision) -> Decision {{ let input : {import} :: Decision = {into} (input) ; let answer = {import} :: apply (& input) ; {into} (answer) }}"
         ),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
@@ -4708,7 +4708,7 @@ fn a_declared_hook_is_derived_from_its_input() {
     let module = expanded("example:gate@1.0.0", GATE);
     assert_eq!(
         wit(&module),
-        "package example:gate@1.0.0;\n\n/// Each contributor may change the admission or block it.\ninterface guard {\n  /// One admission.\n  record admission {\n    value: s32,\n    blocked: bool,\n  }\n  apply: func(input: admission) -> admission;\n}\n\ninterface admissions {\n  use guard.{admission};\n  admit: func(value: s32) -> admission;\n}\n\nworld gate {\n  import guard;\n  export guard;\n  export admissions;\n}\n"
+        "package example:gate@1.0.0;\n\n/// Each contributor may change the admission or block it.\ninterface guard {\n  /// One admission.\n  record admission {\n    value: s32,\n    blocked: bool,\n  }\n  apply: func(input: admission) -> admission;\n}\n\ninterface admissions {\n  use guard.{admission};\n  admit: async func(value: s32) -> admission;\n}\n\nworld gate {\n  import guard;\n  export guard;\n  export admissions;\n}\n"
     );
     assert_eq!(
         manifest(&module).as_deref(),
@@ -4719,7 +4719,7 @@ fn a_declared_hook_is_derived_from_its_input() {
     let generated = tokens(&module);
     for expected in [
         "pub struct Admission { pub value : i32 , pub blocked : bool }",
-        "pub fn run (input : Admission) -> Admission",
+        "pub async fn run (input : Admission) -> Admission",
         "let input : self :: example :: gate :: guard :: Admission = :: core :: convert :: Into :: into (input) ;",
         "let answer = self :: example :: gate :: guard :: apply (input) ;",
         "impl :: core :: convert :: From < Admission > for exports :: example :: gate :: guard :: Admission",
@@ -4728,7 +4728,7 @@ fn a_declared_hook_is_derived_from_its_input() {
         "impl :: core :: convert :: From < self :: example :: gate :: guard :: Admission > for Admission",
         "Self { value : :: core :: convert :: Into :: into (value . value) , blocked : :: core :: convert :: Into :: into (value . blocked) }",
         "fn apply (_input : exports :: example :: gate :: guard :: Admission) -> exports :: example :: gate :: guard :: Admission",
-        "fn admit (value : i32) -> super :: exports :: example :: gate :: admissions :: Admission { :: core :: convert :: Into :: into (Admissions :: admit (value)) }",
+        "async fn admit (value : i32) -> super :: exports :: example :: gate :: admissions :: Admission { :: core :: convert :: Into :: into (Admissions :: admit (value) . await) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -4843,7 +4843,7 @@ fn a_derived_hook_follows_its_composition() {
         wit(&series)
     );
     assert!(
-        tokens(&series).contains("pub fn run (input : Admission) {"),
+        tokens(&series).contains("pub async fn run (input : Admission) {"),
         "{}",
         tokens(&series)
     );
@@ -4858,7 +4858,7 @@ fn a_derived_hook_follows_its_composition() {
     );
     assert!(
         tokens(&bail).contains(
-            "pub fn run (input : Admission) -> :: core :: option :: Option < Admission >"
+            "pub async fn run (input : Admission) -> :: core :: option :: Option < Admission >"
         ),
         "{}",
         tokens(&bail)
@@ -5048,7 +5048,7 @@ fn a_declared_hook_may_name_a_consumed_interface() {
         "{generated}"
     );
     assert!(
-        generated.contains("pub fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Admission"),
+        generated.contains("pub async fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Admission"),
         "{generated}"
     );
     for expected in [
@@ -5249,7 +5249,7 @@ fn a_waterfall_result_is_its_input_type_through_aliases() {
     )
     .unwrap_or_else(|error| panic!("{error}"));
     assert!(
-        tokens(&module).contains("pub fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Out"),
+        tokens(&module).contains("pub async fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Out"),
         "{}",
         tokens(&module)
     );
@@ -8858,9 +8858,9 @@ fn free_json_and_a_newtype_cross_beside_a_resource_and_into_a_derived_hook() {
         "impl __TembraImportNewtype for Code { type Import = String ;".to_owned(),
         "fn __tembra_into_import (self) -> Self :: Import { :: core :: convert :: Into :: into (self . 0) } }".to_owned(),
         "fn apply (_input : exports :: example :: book :: audit :: Event) -> :: core :: option :: Option < exports :: example :: book :: audit :: Event > {".to_owned(),
-        format!("pub fn run (input : Event) -> :: core :: option :: Option < Event > {{ let input : {import} :: Event = {into} (input) ; let answer = {import} :: apply (& input) ; answer . map (| item | {into} (item)) }}"),
+        format!("pub async fn run (input : Event) -> :: core :: option :: Option < Event > {{ let input : {import} :: Event = {into} (input) ; let answer = {import} :: apply (& input) ; answer . map (| item | {into} (item)) }}"),
         "fn apply (_input : < Code as __TembraNewtype > :: Bindings) -> < Code as __TembraNewtype > :: Bindings {".to_owned(),
-        "pub fn run (input : Code) -> Code { let input : < Code as __TembraImportNewtype > :: Import = < Code as __TembraImportNewtype > :: __tembra_into_import (input) ; let answer = self :: example :: book :: coded :: apply (& input) ; < Code as __TembraImportNewtype > :: __tembra_from_import (answer) }".to_owned(),
+        "pub async fn run (input : Code) -> Code { let input : < Code as __TembraImportNewtype > :: Import = < Code as __TembraImportNewtype > :: __tembra_into_import (input) ; let answer = self :: example :: book :: coded :: apply (& input) ; < Code as __TembraImportNewtype > :: __tembra_from_import (answer) }".to_owned(),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }

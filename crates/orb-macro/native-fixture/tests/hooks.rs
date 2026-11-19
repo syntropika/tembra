@@ -244,3 +244,82 @@ fn generated_hook_handles_follow_reload_and_refuse_host_closure() {
     assert_eq!(error.code, tembra::Code::Closed);
     assert_eq!(host.kernel().diagnostics().calls, 0);
 }
+
+#[test]
+fn failed_hook_candidates_leave_the_previous_plan_callable_and_can_be_retried() {
+    use std::{cell::RefCell, rc::Rc};
+    let hook = signed_hook();
+    let contributor = watch().contribute("calculator", &hook, 0, |_, input: Value| async move {
+        Ok(json!({"value": input["value"].as_i64().unwrap() + 1, "stopped": true}))
+    });
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![checkpoint::orb().unwrap(), contributor])
+        .unwrap();
+    let inspector = inspector(&mut pool, &host);
+    let before = host.kernel().diagnostics();
+    let failed = Rc::new(RefCell::new(None));
+    let captured = failed.clone();
+    let marker = Rc::new(());
+    let held = marker.clone();
+    let entered = Rc::new(std::cell::Cell::new(0));
+    let counted = entered.clone();
+    let candidate =
+        checkpoint::orb()
+            .unwrap()
+            .contribute("calculator", &hook, -1, move |_, input: Value| {
+                let _ = Rc::as_ptr(&held);
+                counted.set(counted.get() + 1);
+                async move {
+                    Ok(json!({"value": input["value"].as_i64().unwrap() + 100, "stopped": false}))
+                }
+            })
+            .create(move |declaration| {
+                captured.replace(Some(declaration.hook(&hook)?));
+                Err::<(), _>(tembra::Error::invalid("candidate", "capture refused"))
+            });
+    let error = pool
+        .run_until(host.reload(vec![candidate], 5_000))
+        .unwrap_err();
+    assert_eq!(error.reason, "candidate");
+    assert_eq!(
+        Rc::strong_count(&marker),
+        1,
+        "failed candidate callbacks are released"
+    );
+    assert_eq!(entered.get(), 0);
+    let discarded = failed
+        .borrow_mut()
+        .take()
+        .expect("the candidate bound its hook before failing");
+    let error = pool
+        .run_until(host.root("alice", move |context| {
+            async move {
+                discarded
+                    .run(&context, json!({"value":7,"stopped":false}))
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap_err();
+    assert_eq!(error.code, tembra::Code::Gone);
+    assert_eq!(host.kernel().diagnostics().objects, before.objects);
+    assert_eq!(host.kernel().diagnostics().references, before.references);
+    assert_eq!(host.kernel().diagnostics().calls, 0);
+    for retry in [false, true] {
+        if retry {
+            pool.run_until(host.reload(vec![checkpoint::orb().unwrap()], 5_000))
+                .unwrap();
+        }
+        let called = inspector.clone();
+        let answer: Value = pool
+            .run_until(host.root("alice", move |context| {
+                async move { called.call_portable(&context, "inspect", (7,)).await }.boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(answer, json!({"value":8,"stopped":true}));
+        assert_eq!(entered.get(), 0);
+    }
+    inspector.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}

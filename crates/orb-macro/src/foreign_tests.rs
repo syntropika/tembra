@@ -854,8 +854,8 @@ fn a_declared_hooks_types_enter_a_derived_signature() {
     let module = expanded(
         options("example:gatekeeper@1.0.0", Some(&dir), &[]),
         &module(
-            "pub fn admit(value: i32) -> i32 {
-                let ticket = Gate::run(gate::Ticket { value });
+            "pub async fn admit(value: i32) -> i32 {
+                let ticket = Gate::run(gate::Ticket { value }).await;
                 Last::update(|last| last.ticket = Some(ticket));
                 value
             }",
@@ -910,7 +910,9 @@ fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
     };
     expanded(
         keyed("example:ledger/gate@1.0.0"),
-        &gatekeeper("pub fn admit(value: i32) -> i32 { Gate::run(gate::Ticket { value }).value }"),
+        &gatekeeper(
+            "pub async fn admit(value: i32) -> i32 { Gate::run(gate::Ticket { value }).await.value }",
+        ),
     );
     let module = expanded(
         keyed("example:ledger/gate@1.0.0"),
@@ -1001,7 +1003,7 @@ fn a_type_an_exported_hook_uses_from_an_import_has_one_copy() {
                 pub struct Admissions;
                 impl Admissions {
                     pub fn admit(ticket: gate_ref::Ticket) -> i32 { ticket.value }
-                    pub fn ran(value: i32) -> gate_ref::Ticket { Gate::run(gate::Ticket { value }) }
+                    pub async fn ran(value: i32) -> gate_ref::Ticket { Gate::run(gate::Ticket { value }).await }
                 }
             }
         }",
@@ -1038,14 +1040,14 @@ fn a_type_a_declared_hook_uses_from_an_import_has_one_copy() {
         options("example:gatekeeper@1.0.0", Some(&dir), &[]),
         &gatekeeper(
             "pub fn admit(ticket: gate::Ticket) -> i32 { ticket.value }
-            pub fn ran(value: i32) -> gate::Ticket { Gate::run(gate::Ticket { value }) }",
+            pub async fn ran(value: i32) -> gate::Ticket { Gate::run(gate::Ticket { value }).await }",
         ),
     );
     let text = resolved(&module, &dir);
     for expected in [
         "interface admissions {\n  use example:ledger/gate@1.0.0.{ticket};\n",
         "  admit: func(ticket: ticket) -> s32;\n",
-        "  ran: func(value: s32) -> ticket;\n",
+        "  ran: async func(value: s32) -> ticket;\n",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
@@ -1327,7 +1329,7 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
             "`Shopping::last` returns `Option<Receipt>`, which the runtime refuses in a signature: resource functions require their defining interface; the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
         ),
         (
-            "pub fn order() { super::Ordered::run(super::Order { item: todo!() }) }",
+            "pub async fn order() { super::Ordered::run(super::Order { item: todo!() }).await }",
             "",
             "#[hook(composition = series, input = Order)]
             pub struct Ordered;

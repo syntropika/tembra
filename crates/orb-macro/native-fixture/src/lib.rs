@@ -14,9 +14,8 @@
 //! also writes by hand against the runtime's API. `abacus` and `restrung` are one Orb before and
 //! after a reload that gives its root's resource a new version, and `reframed` that Orb after a
 //! reload that gives only its package a new version. `cistern` and `refilled` are one Orb before
-//! and after a reload that gives a resource's dependency a new version. `dice`, `checkpoint` and `desk`
-//! hold what the native side does not cover yet, a WASI import, a hook
-//! declaration and a record holding a resource: they compile here all the same, and their `orb()`
+//! and after a reload that gives a resource's dependency a new version. `dice` and `desk`
+//! hold what the native side does not cover yet, a WASI import and a record holding a resource: they compile here all the same, and their `orb()`
 //! answers an error naming it. `trail` holds its root two private modules down, with a service in a
 //! module below it, and a service whose method is named `clone`, as a method of `Rc`. `hollow`
 //! holds a service in a private module, its state in a module below it and its WIT resource, with a
