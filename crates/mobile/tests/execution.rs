@@ -804,8 +804,57 @@ fn portable_compiled_handler_streams_through_the_typed_carrier() {
     expected.push(1);
     expected.extend_from_slice(&u64::MAX.to_le_bytes());
     assert_eq!(refused.expect("refused before complete"), expected);
-    port.release(2).unwrap();
-    port.release(1).unwrap();
+    // A trap quarantines the revision. The next request is refused before it begins: its
+    // exchange stays active until `finish`, a disconnect has nothing to drop, and its completion
+    // answers `unavailable/wasm_executor_quarantined` with the trap's message.
+    let ingress = |path: &str| {
+        port.begin_ingress(
+            json!({"kind":"ingress","environment":2,"service":"handler","method":"handle"})
+                .to_string(),
+            MobileRequestHead {
+                method: "GET".into(),
+                scheme: None,
+                authority: None,
+                path_with_query: Some(path.into()),
+                fields: vec![],
+            },
+        )
+    };
+    let completion = || loop {
+        match block_on(port.receive_ingress()).unwrap() {
+            MobileIngressEvent::Complete { result } => {
+                port.finish().unwrap();
+                break serde_json::from_str::<Value>(&result).unwrap();
+            }
+            MobileIngressEvent::RequestPull => {
+                port.supply_request(MobileRequestChunk::End { trailers: vec![] })
+                    .unwrap();
+            }
+            _ => {}
+        }
+    };
+    ingress("/trap").unwrap();
+    let trapped = completion();
+    assert_eq!(trapped["error"]["reason"], "wasm_executor", "{trapped}");
+    ingress("/status").unwrap();
+    port.disconnect().unwrap();
+    assert!(
+        ingress("/status").is_err(),
+        "the refused exchange is still active"
+    );
+    assert!(
+        port.shutdown().is_err(),
+        "the refused exchange is still active"
+    );
+    let refused = completion();
+    assert_eq!(
+        refused["error"],
+        json!({
+            "code": "unavailable",
+            "reason": "wasm_executor_quarantined",
+            "message": trapped["error"]["message"],
+        })
+    );
     port.shutdown().unwrap();
     assert_eq!(backend.instances(), 0);
 }

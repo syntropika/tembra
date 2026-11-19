@@ -259,6 +259,67 @@ test(
     }),
 );
 
+test(
+  "a refused entry keeps the Node port's exchange active until its finish",
+  { skip: missing("TEMBRA_WASM_PROBE"), timeout: 60000 },
+  () =>
+    scratch(async (directory) => {
+      const artifact = new binding.NodeArtifact(await probeArtifact("probe"));
+      const grants = {
+        system: ["clocks"],
+        filesystem: [{ provider: "data", mount: "/data", writable: false }],
+      };
+      const plan = JSON.parse(
+        artifact.request(
+          JSON.stringify({
+            kind: "install",
+            name: "probe",
+            apiVersion: 1,
+            requires: {},
+            grants,
+            filesystem: ["data"],
+            network: [],
+          }),
+        ),
+      ).ok;
+      const interpreter = new binding.NodeInterpreter(
+        JSON.stringify({ filesystem: { data: directory } }),
+        () => {},
+      );
+      const port = interpreter.open(
+        artifact,
+        JSON.stringify(plan.bindings),
+        JSON.stringify(grants),
+      );
+      const created = port.declare(
+        JSON.stringify({ kind: "create", environment: 1, service: "probe" }),
+        () => '{"ok":null}',
+      );
+      assert.ok("ok" in JSON.parse(created), created);
+      /** Dispatch one call; resolves with its completion once the port finished it. */
+      const call = (method, args) =>
+        new Promise((resolve) => {
+          const fn = artifact.bind(service, method, true);
+          port.dispatch(
+            JSON.stringify({ kind: "invoke", environment: 1, function: fn, args }),
+            (raw) => {
+              const event = JSON.parse(raw);
+              if (event.event !== "complete") return;
+              port.finish();
+              resolve(event.result);
+            },
+          );
+        });
+      assert.equal((await call("trap", [])).error.reason, "wasm_executor");
+      // The quarantined revision refuses the entry; its completion is still queued here.
+      const refused = call("spin", [1]);
+      assert.throws(() => port.dispatch("{}", () => {}), /already active/);
+      assert.throws(() => port.close(), /settlement/);
+      assert.equal((await refused).error.reason, "wasm_executor_quarantined");
+      port.close();
+    }),
+);
+
 const pipeline = "example:pipeline/pipeline@1.0.0";
 const requires = {
   "example:pipeline/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 },

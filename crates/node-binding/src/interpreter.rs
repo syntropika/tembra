@@ -140,6 +140,7 @@ impl NodeInterpreter {
             port: Some(port),
             ingress: RefCell::new(None),
             ticket: RefCell::new(None),
+            refused: std::cell::Cell::new(false),
             replies: Arc::default(),
             bridge: RefCell::new(None),
             sequence: Arc::default(),
@@ -160,9 +161,19 @@ pub struct NodeInterpreterPort {
     /// The carrier of the active incoming HTTP exchange, if any.
     ingress: RefCell<Option<Arc<IngressPort>>>,
     ticket: RefCell<Option<PortTicket>>,
+    /// An entry refused before it began: its exchange stays active until `finish`, as one that
+    /// began does, while its `complete` is still queued for JavaScript.
+    refused: std::cell::Cell<bool>,
     replies: Arc<Mutex<BTreeMap<u32, PortReply>>>,
     bridge: RefCell<Option<std::thread::JoinHandle<()>>>,
     sequence: Arc<AtomicU32>,
+}
+
+impl NodeInterpreterPort {
+    /// Whether an exchange, begun or refused, waits for its `finish`.
+    fn active(&self) -> bool {
+        self.ticket.borrow().is_some() || self.refused.get()
+    }
 }
 
 #[napi]
@@ -205,7 +216,7 @@ impl NodeInterpreterPort {
         packet: String,
         callback: Function<'_, String, String>,
     ) -> napi::Result<String> {
-        if self.ticket.borrow().is_some() {
+        if self.active() {
             return Err(js_error("interpreter exchange is already active"));
         }
         let packet = serde_json::from_str(&packet).map_err(js_error)?;
@@ -228,7 +239,7 @@ impl NodeInterpreterPort {
     #[napi]
     pub fn dispatch(&self, packet: String, callback: EventCallback) -> napi::Result<()> {
         let port = self.port()?;
-        if self.ticket.borrow().is_some() {
+        if self.active() {
             return Err(js_error("interpreter exchange is already active"));
         }
         if let Some(thread) = self.bridge.borrow_mut().take() {
@@ -249,6 +260,7 @@ impl NodeInterpreterPort {
                     return Err(js_error(unsent.0.err().expect("the refusal")));
                 }
                 *self.bridge.borrow_mut() = Some(bridge);
+                self.refused.set(true);
                 return Ok(());
             }
         };
@@ -275,7 +287,7 @@ impl NodeInterpreterPort {
         callback: IngressCallback,
     ) -> napi::Result<()> {
         let port = self.port()?;
-        if self.ticket.borrow().is_some() {
+        if self.active() {
             return Err(js_error("interpreter exchange is already active"));
         }
         if let Some(thread) = self.bridge.borrow_mut().take() {
@@ -296,6 +308,7 @@ impl NodeInterpreterPort {
                 if callback.call(refusal, ThreadsafeFunctionCallMode::NonBlocking) != Status::Ok {
                     return Err(js_error("the Node callback is closing"));
                 }
+                self.refused.set(true);
                 return Ok(());
             }
         };
@@ -367,7 +380,9 @@ impl NodeInterpreterPort {
         if let Some(ticket) = self.ticket.borrow_mut().take() {
             ticket.finish().map_err(js_error)?;
         }
-        // The exchange physically completed; its carrier owns nothing any more.
+        // The exchange physically completed, or its refusal was delivered; its carrier owns
+        // nothing any more.
+        self.refused.set(false);
         self.ingress.borrow_mut().take();
         if let Some(thread) = self.bridge.borrow_mut().take() {
             let _ = thread.join();
@@ -378,7 +393,7 @@ impl NodeInterpreterPort {
     /// Release an idle revision only after its host has cleaned up every owning scope.
     #[napi]
     pub fn close(&mut self) -> napi::Result<()> {
-        if self.ticket.borrow().is_some() {
+        if self.active() {
             return Err(js_error(
                 "wait for physical interpreter settlement before closing",
             ));

@@ -440,11 +440,16 @@ impl NativePort {
     }
 
     /// The client went away: the response is dropped and the guest's request body closes.
+    /// Without a live carrier, such as after a refused entry, there is nothing to drop, as in Node.
     pub fn disconnect(&self) -> Result<(), MobileError> {
-        self.carrier(|carrier| {
+        let exchange = self.exchange.lock().map_err(error)?.clone();
+        if let Some(carrier) = exchange
+            .as_ref()
+            .and_then(|exchange| exchange.ingress.as_ref())
+        {
             carrier.disconnect();
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     /// Resolve only the exact host request issued by this active exchange.

@@ -1035,9 +1035,12 @@ test(
         // later request is refused as quarantined until a reload.
         await assert.rejects(host.handleHttp("web", request("/trap")), /trap/);
         await settled(host);
-        await assert.rejects(host.handleHttp("web", request("/status")), (error) =>
-          /quarantined|closing/.test(`${error.reason} ${error.message}`),
-        );
+        await assert.rejects(host.handleHttp("web", request("/status")), (error) => {
+          assert.equal(error.code, "unavailable", error.message);
+          assert.equal(error.reason, "wasm_executor_quarantined", error.message);
+          assert.match(error.message, /^component trap: /);
+          return true;
+        });
         await settled(host);
       } finally {
         await host.close();
