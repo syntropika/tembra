@@ -1291,8 +1291,17 @@ call's `&Context` first and then the function's parameters, which the compiler c
 named `new` is `new_` on the client, since `new` builds the client; its WIT name stays `new`. The
 client of a service in a private module is as unreachable as the module: make the module `pub` for
 a host to use it, or re-export the client where the runtime is linked, since a component build has
-none. A portable caller's JSON array of arguments goes through a codec the macro writes from the
-WIT, so the author's types need no serde. The Orb's name and API version
+none. The client encodes every WIT call with the canonical codec and invokes the existing portable
+entrypoint once, then decodes its result. Its Rust types can therefore differ from a compatible
+implementation's independently generated types, including records and variants. `#[local]`
+methods keep direct native dispatch with the provider's Rust types. This conversion allocates and
+traverses a value tree and reconstructs strings and containers; it is not a zero-copy native fast
+path. Argument conversion failures occur before execution; result conversion failures can occur
+after execution, and are never retried. The portable representation excludes nested nullable
+options, non-finite floats and negative zero. Resource ownership stays in the existing portable
+attachments. See [native WIT composition](../../docs/native-imports.md#generated-rust-clients) for
+the calling and ownership rules. A portable caller's JSON array of arguments goes through a codec
+the macro writes from the WIT, so the author's types need no serde. The Orb's name and API version
 come from `[package.metadata.tembra]` of the crate manifest, with the defaults of
 `cargo tembra build`: the crate name and 1. Only the native side reads the manifest: one the macro
 cannot read fails a native build with an error naming it, and a component build does without it.

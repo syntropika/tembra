@@ -1,5 +1,23 @@
 # Implementation decisions
 
+## Follow-up: automatic native Rust client dispatch
+
+Generated Rust WIT clients currently use canonical codecs and the existing portable entrypoint
+for every WIT method. This allows separately generated implementations to share a client API
+without sharing Rust type identity. `#[local]` retains its native-only direct entrypoint.
+
+Evaluate an automatic native optimization separately, behind that same client API. Representative
+benchmarks must compare actual generated clients with native and compiled providers, including
+scalars, strings, records, variants, results, containers and resource-bearing operations. Record
+the build profile, features, runtime, allocation cost and workload sizes before choosing a design.
+
+Before provider execution, an optimization must establish compatibility of both argument and
+result Rust types. It must preserve the canonical path's validation, resource authority, principal
+checks, ownership, cancellation, physical settlement and error behavior, including values the
+portable representation refuses. Only a pre-execution decision may choose another path. Never
+retry after a type error: a result type error may occur after provider effects have happened.
+No native optimization is implemented by the interoperable client change.
+
 ## Declaration-inferred service acquisition
 
 TypeScript callers may pass an existing service definition to `Host.get`, `Host.hold`,

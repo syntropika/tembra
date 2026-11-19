@@ -38,6 +38,33 @@ reference can suspend admission even for a synchronous provider. The two executo
 not promise identical interleaving just because the Rust syntax is the same. Keep pure providers
 synchronous and declare operations that need suspension asynchronous.
 
+## Generated Rust clients
+
+`<Service>Client` uses the same typed API for compatible native and compiled implementations.
+Every WIT method encodes its arguments with the generated canonical codec, invokes the existing
+portable entrypoint once, and decodes its result into the client's Rust types. Independently
+generated records, variants and aliases therefore interoperate without sharing Rust type identity.
+Callers do not select a dispatch mode. `#[local]` methods retain direct native calls and require
+the provider's Rust argument and result types.
+
+This conversion allocates and traverses a `serde_json::Value` tree on each side. Strings and
+containers are reconstructed rather than moved directly from caller to provider. Resource owners
+travel as existing typed attachments, separately from that data; conversion does not grant new
+authority or duplicate ownership. The existing admission, receiver loans, cancellation, physical
+settlement and transport errors apply. A WIT domain `result` stays inside the outer transport
+`tembra::Result`. Argument encoding can fail before execution; result encoding or decoding can
+fail after execution. Neither failure triggers a retry.
+
+The portable representation retains integer widths, including full-range `u64` and `i64` in the
+Rust value tree, and the canonical WIT record/variant/result encoding. It cannot represent nested
+nullable options, non-finite floats or negative zero. Free JSON crosses as JSON text in a WIT
+string. Existing resource-profile restrictions below still apply. A host that deliberately needs
+native-only values can use `#[local]`; callers should not bypass the client to obtain a WIT fast
+path with different validation.
+
+An automatic native Rust optimization is a separate follow-up in
+[implementation decisions](decisions.md#follow-up-automatic-native-rust-client-dispatch).
+
 ## Ownership and delivery
 
 The wrappers are not cloneable. Each returned handle is an existing `Owned` with its own kernel
@@ -92,8 +119,11 @@ service handlers remain unsupported for resource calls. Data-only clients retain
 
 `just test-native-fixture` executes macro-generated native consumers and the fixed-WIT decoder
 provider, container delivery, physical cancellation/abandonment, failed acquisition and reload.
+Its independent client implementations verify canonical record/variant/result conversion, outer
+errors, one provider invocation per admitted call, and caller-side result refusal without retries.
 `just test-orb-macro` builds the same provider and consumer as components and runs all four
-native/compiled combinations in `orb_macro_imports`. Acceptance builds these fixtures too.
+native/compiled combinations in `orb_macro_imports`, including generated service clients calling
+native and compiled providers through the same API. Acceptance builds these fixtures too.
 `bun test packages/ts/sdk/test/client-tooling.test.ts` checks generated types and actual SDK owner
 delivery, resource methods, moves and release. Run `just ci` for repository checks and
 `just test-wasm-acceptance` separately for the complete artifact-dependent platform suite.

@@ -2600,11 +2600,10 @@ fn client_names(service: &Service, analysis: &Analysis) -> Result<(), Refused> {
 /// The typed client of a service, `MathClient` for `Math`, in the service's module and as visible
 /// as its struct: `new` wraps a reference to one of its objects, and each function of the
 /// interface, and each `#[local]` method, is an async method that takes the call's `&Context` first
-/// and then the function's parameters, which the compiler checks. A function with a local
-/// entrypoint is called there with them as a tuple in WIT order, `()` without parameters, so the
-/// types `Reference::call` checks at run time are the function's; one whose result holds a
-/// resource, which has only its portable entrypoint, is called portably, and answers each resource
-/// as its handle type. A function named `new` is `new_` on the client, since `new` builds the
+/// and then the function's parameters, which the compiler checks. Every WIT function uses its
+/// canonical codec and portable entrypoint, so independently generated Rust types interoperate.
+/// Only `#[local]` methods pass their Rust values directly through `Reference::call`. A resource
+/// result is its handle type. A function named `new` is `new_` on the client, since `new` builds the
 /// client; its WIT name stays `new`. The constructors and static functions of the service's
 /// resources are the client's too, in their resources' modules. The reference is visible to the
 /// crate for them. Two of these methods of one name are refused, naming both. The context's name is
@@ -2627,7 +2626,7 @@ fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused
         } else {
             function.ident.clone()
         };
-        let (returned, body) = if !local && carries_resources(function, service.scope, analysis) {
+        let (returned, body) = if !local {
             let owner = format!("{}::{}", service.ident, function.ident);
             let result = function.result.as_ref().map(|(ty, _)| ty);
             let (kinds, result) =
@@ -2683,7 +2682,7 @@ fn client(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused
         });
     }
     let doc = format!(
-        " A typed client of the service `{}`: one async method per function of its interface and per `#[local]` method, and per constructor and static function of its resources, which takes the call's context first and then the function's parameters. A resource the function answers is its handle type, whose methods are the resource's.",
+        " A typed client of the service `{}`: one async method per function of its interface and per `#[local]` method, and per constructor and static function of its resources, which takes the call's context first and then the function's parameters. A resource the function answers is its handle type, whose methods are the resource's. WIT methods convert through canonical codecs and invoke the portable entrypoint once; `#[local]` methods pass Rust values directly.",
         service.ident
     );
     Ok(quote! {

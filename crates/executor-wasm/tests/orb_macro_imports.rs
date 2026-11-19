@@ -30,6 +30,8 @@ pub(crate) fn compiled(engine: &Engine, variable: &str, name: &str, install: Ins
 
 #[path = "orb_macro_imports/awaitable.rs"]
 mod awaitable;
+#[path = "orb_macro_imports/clients.rs"]
+mod clients;
 #[path = "orb_macro_imports/containers.rs"]
 mod containers;
 

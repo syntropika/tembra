@@ -65,11 +65,10 @@ fn the_declaration_is_the_plan_of_the_contract() {
     assert!(expected.services[0].signature.is_some());
 }
 
-/// A local caller passes and gets the bindings' types as they are, through the client too: the
-/// record, its enums, `use`d from another interface or not, and its flags, the variant, a list of
-/// records and the interface's alias of one, `book::Journal`.
+/// Direct native calls move the bindings' types; generated clients preserve the same values
+/// through canonical codecs: records, imported enums, flags, variants, lists and aliases.
 #[test]
-fn local_calls_move_the_bindings_types() {
+fn direct_calls_and_generated_clients_preserve_the_bindings_values() {
     with_book(|book, context| {
         async move {
             let outcome = book

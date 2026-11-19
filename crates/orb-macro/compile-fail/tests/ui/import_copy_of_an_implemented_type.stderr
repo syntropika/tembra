@@ -22,6 +22,49 @@ help: change the parameter type to match the trait
 30 +             pub fn relayed(last: exports::example::counters::counter::Tally) -> u32 {
    |
 
+error[E0308]: mismatched types
+  --> tests/ui/import_copy_of_an_implemented_type.rs:23:24
+   |
+ 1 | / #[tembra::orb(
+ 2 | |     package = "example:router@1.0.0",
+ 3 | |     wit = "consumed/counters",
+ 4 | |     import("example:counters/counter@1.0.0", keyed)
+ 5 | | )]
+   | |__- arguments to this function are incorrect
+...
+23 |           pub fn relayed(last: counter_ref::Tally) -> u32 {
+   |                          ^^^^ expected `Tally`, found a different `Tally`
+   |
+   = note: `Tally` and `Tally` have similar names, but are actually distinct types
+note: `Tally` is defined in module `crate::proxy::__tembra_bindings::example::counters::counter` of the current crate
+  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+   |
+ 1 | / #[tembra::orb(
+ 2 | |     package = "example:router@1.0.0",
+ 3 | |     wit = "consumed/counters",
+ 4 | |     import("example:counters/counter@1.0.0", keyed)
+ 5 | | )]
+   | |__^
+note: `Tally` is defined in module `crate::proxy::__tembra_bindings::exports::example::counters::counter` of the current crate
+  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+   |
+ 1 | / #[tembra::orb(
+ 2 | |     package = "example:router@1.0.0",
+ 3 | |     wit = "consumed/counters",
+ 4 | |     import("example:counters/counter@1.0.0", keyed)
+ 5 | | )]
+   | |__^
+note: method defined here
+  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+   |
+ 1 | / #[tembra::orb(
+ 2 | |     package = "example:router@1.0.0",
+ 3 | |     wit = "consumed/counters",
+ 4 | |     import("example:counters/counter@1.0.0", keyed)
+ 5 | | )]
+   | |__^
+   = note: this error originates in the macro `::tembra::__wit_bindgen::generate` which comes from the expansion of the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0308]: `?` operator has incompatible types
  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
   |

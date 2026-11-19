@@ -1,0 +1,21 @@
+package example:interoperable@1.0.0;
+
+interface values {
+  record item {
+    label: string,
+    amount: u64,
+  }
+  variant choice {
+    accept(item),
+    reject(string),
+  }
+  echo: func(value: item) -> item;
+  choose: async func(value: choice) -> result<item, string>;
+  fail: func() -> u32;
+  floating: func(value: f64) -> f64;
+  resource cursor {
+    constructor(value: item);
+    read: async func() -> item;
+  }
+  consume: func(value: cursor) -> item;
+}
