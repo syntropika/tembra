@@ -20,7 +20,7 @@ interface packets {
   type ticket-alias = ticket;
   record envelope { ticket: ticket-alias, amount: u64 }
   type packet = envelope;
-  variant event { ok, created(packet) }
+  variant event { ok, created(packet), guest(packet) }
   type event-alias = event;
   type batch = list<option<event-alias>>;
   receive: func() -> result<tuple<batch, ticket>, string>;

@@ -47,3 +47,24 @@ fn component_imports_wrap_sync_bindings_without_adding_an_await_or_a_yield() {
     assert!(!generated.contains("pub use super :: example :: protocol :: codec :: *"));
     assert!(!generated.contains("yield"));
 }
+
+#[test]
+fn resource_variant_cases_do_not_use_the_guest_type_escape() {
+    let analysis = analyze(
+        Options {
+            package: Some(literal("example:consumer@1.0.0")),
+            wit: Some(format!("{}/native-fixture/wit", env!("CARGO_MANIFEST_DIR"))),
+            imports: vec![literal("example:protocol/packets@1.0.0")],
+            ..Options::default()
+        },
+        syn::parse_quote! { mod consumer {
+            #[service]
+            pub struct Pipeline;
+            impl Pipeline { pub fn available() -> bool { true } }
+        } },
+    )
+    .unwrap();
+    let generated = super::modules(&analysis, &Default::default()).to_string();
+    assert!(generated.contains("Guest ("), "{generated}");
+    assert!(!generated.contains("Guest_"), "{generated}");
+}

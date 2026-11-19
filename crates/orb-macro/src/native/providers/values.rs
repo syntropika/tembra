@@ -1,6 +1,6 @@
 //! Native import types and codecs for the existing portable capability containers.
 use super::super::{Kind, boundary_at, decode, encode, wit_kind};
-use crate::{rust_ident, type_ident, wit::ConsumedTypes};
+use crate::{camel_ident, rust_ident, type_ident, wit::ConsumedTypes};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Ident;
@@ -117,7 +117,7 @@ impl Values<'_> {
             }
             TypeDefKind::Variant(variant) => {
                 let cases = variant.cases.iter().map(|c| {
-                    let name = type_ident(&c.name);
+                    let name = camel_ident(&c.name);
                     let payload = c.ty.map(|ty| {
                         let ty = self.ty(ty);
                         quote! { (#ty) }
@@ -227,7 +227,7 @@ impl Values<'_> {
                     .iter()
                     .map(|c| {
                         (c.name.as_str(), c.ty, {
-                            let name = type_ident(&c.name);
+                            let name = camel_ident(&c.name);
                             quote! { #result::#name }
                         })
                     })

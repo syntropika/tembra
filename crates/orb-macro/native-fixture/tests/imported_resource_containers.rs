@@ -6,6 +6,13 @@ use tembra::{Host, Provider};
 /// A native transport fixture issues actual capabilities into the fixed contract's containers.
 #[test]
 fn imported_containers_redeem_resources_without_serializing_their_owners() {
+    for case in ["created", "guest"] {
+        exercise(case);
+    }
+}
+
+/// Decode both ordinary case names and names that are reserved only for binding types.
+fn exercise(case: &'static str) {
     use serde_json::{Value, json};
     use std::cell::Cell;
     use tembra::{
@@ -49,7 +56,7 @@ fn imported_containers_redeem_resources_without_serializing_their_owners() {
                     let mut payload = Payload::data(Value::Null);
                     let first: u32 = payload.issue(Ticket(11, closed.clone())).into();
                     let second: u32 = payload.issue(Ticket(13, closed)).into();
-                    payload.encode(json!({ "tag": "ok", "val": [[null, {"tag": "ok"}, {"tag": "created", "val": {"ticket": first, "amount": 7}}], second] }))
+                    payload.encode(json!({ "tag": "ok", "val": [[null, {"tag": "ok"}, {"tag": case, "val": {"ticket": first, "amount": 7}}], second] }))
                 }
             })
             .payload_method("[method]ticket.value", |_, _, mut payload: Payload| async move {

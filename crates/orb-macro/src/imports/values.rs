@@ -1,5 +1,5 @@
 //! Owned import values and conversions to the private component bindings.
-use crate::{rust_ident, type_ident, wit::ConsumedTypes};
+use crate::{camel_ident, rust_ident, type_ident, wit::ConsumedTypes};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use wit_parser::{Handle, Type, TypeDefKind, TypeId};
@@ -106,7 +106,7 @@ impl Values<'_> {
             }
             TypeDefKind::Variant(variant) => {
                 let cases = variant.cases.iter().map(|c| {
-                    let name = type_ident(&c.name);
+                    let name = camel_ident(&c.name);
                     let ty = c.ty.map(|ty| {
                         let ty = self.ty(ty);
                         quote! { (#ty) }
@@ -178,7 +178,7 @@ impl Values<'_> {
                 let raw = self.types.imported_path(id, 1);
                 let (from, to) = if read { (raw, public) } else { (public, raw) };
                 let cases = variant.cases.iter().map(|case| {
-                    let name = type_ident(&case.name);
+                    let name = camel_ident(&case.name);
                     match case.ty {
                         Some(ty) => {
                             let item = mapped(ty, quote! { item });
