@@ -2,7 +2,7 @@
 //! kernel-managed state, so what survives the release of a reference shows what the lifetime
 //! means: a pinned object stays until the host closes, a lingering one stays a while, a passing
 //! one goes with its last reference and the next reference finds a new object. Each service lives
-//! in a sub-module with its state: the state names no service, because its module has one.
+//! in a module of its own with its state, which belongs to the service whose module holds it.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 

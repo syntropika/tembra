@@ -818,7 +818,7 @@ fn a_resource_beside_a_service_its_cfg_leaves_out_is_refused() {
         .to_string();
     assert_eq!(
         error,
-        "the #[resource] `Mooring` is in `ship`, the module of the service `Ship`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod ship`, so that its resources go with it"
+        "the #[resource] `Mooring` is in `ship`, the module of the service `Ship`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod ship`, so that what it holds goes with it"
     );
     let expanded = expanded(&with);
     let tokens = quote!(#expanded).to_string();
@@ -826,4 +826,75 @@ fn a_resource_beside_a_service_its_cfg_leaves_out_is_refused() {
         tokens.contains("(\"example:notes/ship@1.0.0\" , \"mooring\") =>"),
         "the resource belongs to the objects of `Ship`\n{tokens}"
     );
+}
+
+/// A `#[state]` and a `#[wit_resource]` in the module of a service whose `#[cfg]` sits on the
+/// service alone: the copy that leaves the service out refuses each, on it, naming the fix, rather
+/// than calling it outside every service's module; the copy that keeps the service gives each to
+/// it.
+#[test]
+fn a_state_or_wit_resource_beside_a_service_its_cfg_leaves_out_is_refused() {
+    for (item, message) in [
+        (
+            "#[state]
+            #[derive(Default, serde::Serialize, serde::Deserialize)]
+            pub struct Seats {
+                pub count: u32,
+            }",
+            "the #[state] `Seats` is in `rooms`, the module of the service `Rooms`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod rooms`, so that what it holds goes with it",
+        ),
+        (
+            "#[wit_resource]
+            pub struct Key {
+                pub number: u32,
+            }
+
+            impl Key {
+                pub fn number(&self) -> u32 {
+                    self.number
+                }
+            }",
+            "the #[wit_resource] `Key` is in `rooms`, the module of the service `Rooms`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod rooms`, so that what it holds goes with it",
+        ),
+    ] {
+        let module = format!(
+            r#"mod hotel {{
+                pub mod desk {{
+                    #[service]
+                    pub struct Desk;
+
+                    impl Desk {{
+                        pub fn open() -> bool {{
+                            true
+                        }}
+                    }}
+                }}
+
+                pub mod rooms {{
+                    #[cfg(feature = "rooms")]
+                    #[service]
+                    pub struct Rooms;
+
+                    #[cfg(feature = "rooms")]
+                    impl Rooms {{
+                        pub fn count() -> u32 {{
+                            0
+                        }}
+                    }}
+
+                    {item}
+                }}
+            }}"#
+        );
+        let Ok([(_, without), (_, with)]) = <[(String, ItemMod); 2]>::try_from(copies(&module))
+        else {
+            unreachable!("one predicate, two copies");
+        };
+        let options = || options(attribute()).unwrap();
+        let error = expand(options(), without, Ok(Metadata::named("calculator")), None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, message);
+        expanded(&with);
+    }
 }

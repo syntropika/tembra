@@ -1948,9 +1948,9 @@ it works as anywhere else; on another item the macro reads, such as a `#[state]`
 or a type that enters the WIT, it is a compile error, since the macro would read the item in every
 configuration. A `#[cfg_attr(..)]` wrapping a `#[cfg(..)]` on an item of this section is a compile
 error too: the macro evaluates the plain form alone. A `#[cfg]` on a `#[service]` struct leaves its
-module behind, so a `#[state]` or a `#[resource]` there is a compile error in the configuration
-that leaves the service out; put the `#[cfg]` on the service's module instead, as `shelf` above
-does, and the module's items go with the service.
+module behind, so a `#[state]`, a `#[wit_resource]` or a `#[resource]` there is a compile error in
+the configuration that leaves the service out; put the `#[cfg]` on the service's module instead, as
+`shelf` above does, and the module's items go with the service.
 
 The contract the macro writes follows the last build that compiled the crate for itself, with its
 features: `cargo test --all-features` writes the contract of every feature, and a later

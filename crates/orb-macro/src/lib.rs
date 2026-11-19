@@ -1517,6 +1517,45 @@ fn service_of<'a>(
     None
 }
 
+/// The module of a service that a `#[cfg]` on the service leaves out of this configuration, at or
+/// above the module `scope`, with the service's name (`cfg::gated`).
+fn gated_service<'a>(
+    gated: &'a [(usize, Ident)],
+    scope: usize,
+    modules: &[Vec<Ident>],
+) -> Option<(usize, &'a Ident)> {
+    let mut at = Some(scope);
+    while let Some(scope) = at {
+        if let Some((_, service)) = gated.iter().find(|(gated, _)| *gated == scope) {
+            return Some((scope, service));
+        }
+        at = parent(scope, modules);
+    }
+    None
+}
+
+/// The error on an item of a service's module, `marker` `ident`, whose service a `#[cfg]` on the
+/// service leaves out of this configuration: the fix puts the `#[cfg]` on the service's module,
+/// so that the item goes with it.
+fn gated_error(
+    marker: &str,
+    ident: &Ident,
+    scope: usize,
+    service: &Ident,
+    modules: &[Vec<Ident>],
+) -> syn::Error {
+    syn::Error::new(
+        ident.span(),
+        format!(
+            "the {marker} `{ident}` is in {}, the module of the service `{service}`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod {}`, so that what it holds goes with it",
+            describe(&modules[scope]),
+            modules[scope]
+                .last()
+                .expect("a service's module is a sub-module"),
+        ),
+    )
+}
+
 /// The items of a scan that the rule of the services' modules places, for `placed_by_service`.
 struct Placed<'a> {
     services: &'a [Service],
@@ -1527,6 +1566,8 @@ struct Placed<'a> {
     root: Option<&'a Root>,
     inputs: Option<&'a Inputs>,
     modules: &'a [Vec<Ident>],
+    /// The modules of the services a `#[cfg]` on the service leaves out, with their names.
+    gated: &'a [(usize, Ident)],
 }
 
 /// Refuse a module whose items break the rule of the services' modules: each `#[service]` sits in
@@ -1578,6 +1619,15 @@ fn placed_by_service(placed: &Placed) -> syn::Result<()> {
     }
     for state in placed.states {
         if service_of(services, state.scope, modules).is_none() {
+            if let Some((scope, service)) = gated_service(placed.gated, state.scope, modules) {
+                return Err(gated_error(
+                    "#[state]",
+                    &state.ident,
+                    scope,
+                    service,
+                    modules,
+                ));
+            }
             return Err(syn::Error::new(
                 state.ident.span(),
                 format!(
@@ -1589,6 +1639,15 @@ fn placed_by_service(placed: &Placed) -> syn::Result<()> {
     }
     for resource in placed.wit_resources {
         if service_of(services, resource.scope, modules).is_none() {
+            if let Some((scope, service)) = gated_service(placed.gated, resource.scope, modules) {
+                return Err(gated_error(
+                    "#[wit_resource]",
+                    &resource.ident,
+                    scope,
+                    service,
+                    modules,
+                ));
+            }
             return Err(syn::Error::new(
                 resource.ident.span(),
                 format!(
@@ -1879,6 +1938,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         root: root.as_ref(),
         inputs: inputs.as_ref(),
         modules: &modules,
+        gated: &gated,
     })?;
     // A method's error channel is spelled through the name the crate depends on the facade under.
     let facade = options.facade();
@@ -2113,22 +2173,14 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         }
         // A service whose `#[cfg]` leaves it out of this configuration leaves its module's
         // resource without an owner, which would turn it into a resource of the root.
-        let mut at = Some(resource.scope);
-        while let Some(scope) = at {
-            if let Some((_, service)) = gated.iter().find(|(gated, _)| *gated == scope) {
-                return Err(syn::Error::new(
-                    resource.ident.span(),
-                    format!(
-                        "the #[resource] `{}` is in {}, the module of the service `{service}`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod {}`, so that its resources go with it",
-                        resource.ident,
-                        describe(&modules[scope]),
-                        modules[scope]
-                            .last()
-                            .expect("a service's module is a sub-module"),
-                    ),
-                ));
-            }
-            at = parent(scope, &modules);
+        if let Some((scope, service)) = gated_service(&gated, resource.scope, &modules) {
+            return Err(gated_error(
+                "#[resource]",
+                &resource.ident,
+                scope,
+                service,
+                &modules,
+            ));
         }
     }
     let resources = in_dependency_order(resources)?;

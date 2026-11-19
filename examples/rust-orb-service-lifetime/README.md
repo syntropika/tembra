@@ -67,9 +67,10 @@ mod ledger {
 
 Every service lives in a module of its own, with its state: a state belongs to the service whose
 module holds it, so none of the three names its service; and since a balance stays out of the WIT,
-`add` returns the total, the three states share the name `Balance`, each in its module. The sub-modules are read as part of the
-Orb and left in place: the derived contract is the same as with everything at one level. A state of
-a sub-module is `pub` with `pub` fields, because the Orb module builds and reads it.
+`add` returns the total, the three states share the name `Balance`, each in its module. The
+services' modules are read as part of the Orb and left in place, and add nothing to the WIT: an
+interface takes its service's name, not its module's. A state of a service's module is `pub` with
+`pub` fields, because the Orb module builds and reads it.
 
 ## Build
 

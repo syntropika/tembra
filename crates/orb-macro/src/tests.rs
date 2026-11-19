@@ -2603,8 +2603,10 @@ fn a_struct_of_bool_fields_is_a_record() {
 
 /// What else the Orb module names in a sub-module, a state, a root resource and its marked
 /// functions, and a WIT resource of a service of the Orb module, expands when it is visible to the
-/// Orb module through every module between them. One the Orb module cannot see is left to rustc,
-/// whose error falls on the author's item (the compile-fail cases).
+/// Orb module through every module between them: `pub`, `pub(crate)`, or a restricted visibility
+/// that reaches the Orb module, `pub(super)` one level below it and `pub(in super::super)` two.
+/// One the Orb module cannot see is left to rustc, whose error falls on the author's item (the
+/// compile-fail cases).
 #[test]
 fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
     // A state and a WIT resource sit below their service, in its module; a root resource outside
@@ -2654,9 +2656,16 @@ fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
     ] {
         let item = |vis: &str| item.replace("VIS", vis);
         expanded("example:ledger@1.0.0", &module(owned, "pub", &item("pub")));
+        // `b` sits in `passing::a` when the service owns the item, in `a` otherwise: the
+        // visibility that reaches the Orb module from there.
+        let reaching = if owned {
+            "pub(in super::super)"
+        } else {
+            "pub(super)"
+        };
         expanded(
             "example:ledger@1.0.0",
-            &module(owned, "pub(super)", &item("pub(crate)")),
+            &module(owned, reaching, &item("pub(crate)")),
         );
     }
 }
@@ -5550,6 +5559,17 @@ fn an_item_outside_its_owners_module_is_refused() {
                 service("Tickets")
             ),
             "the #[hook] `Guard` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{
+                    #[hook(\"example:admission/guard@1.0.0\")]
+                    pub fn raise(input: guard::Admission) -> guard::Admission {{ input }}
+                    {}
+                }} }}",
+                service("Tickets")
+            ),
+            "the #[hook] `raise` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module",
         ),
         (
             format!(
