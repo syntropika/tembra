@@ -88,6 +88,9 @@ pub(crate) struct Layout {
     pub state_init: bool,
     /// The component exports `tembra:guest/resources-init`: its root owns resources.
     pub resource_init: bool,
+    /// The component exports `tembra:guest/service-resources-init`: its service objects own
+    /// resources.
+    pub service_resource_init: bool,
     /// The hooks this Orb declares: the import binding of each, to the alias of its export,
     /// which `hook.declare` names.
     pub hooks: BTreeMap<String, String>,
@@ -204,6 +207,9 @@ struct Authority {
     state: Option<u32>,
     /// The root's resource handles by name, for the kernel's resource reads.
     resources: Arc<BTreeMap<String, u32>>,
+    /// The resource handles of the service object the call runs in, by name, in the object's
+    /// own table; a read answers one of them before one of the root's.
+    owned: Arc<BTreeMap<String, u32>>,
     /// The root's hook handles by import binding, for running the hooks this Orb declares.
     hooks: Arc<BTreeMap<String, u32>>,
     /// The kernel address of the environment's object (key and principal), for the context
@@ -494,7 +500,8 @@ enum Packet {
 }
 
 /// Dependency handles issued to Orb root environments, each service's root, the kernel state
-/// handle declared by each service object, and the root's resources with their callbacks.
+/// handle declared by each service object, and the resources of the root and of each service
+/// object with their callbacks.
 #[derive(Default)]
 struct Environments {
     roots: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
@@ -502,6 +509,8 @@ struct Environments {
     /// Every declared, unreleased environment and its service alias (`None` for an Orb root).
     services: BTreeMap<u64, Option<String>>,
     states: BTreeMap<u64, u32>,
+    /// The resource handles each environment declared in its own table, by name: the root's
+    /// resources under the root, a service object's under the object.
     resources: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
     callbacks: BTreeMap<u32, Callback>,
     next_callback: u32,
@@ -513,9 +522,11 @@ struct Environments {
 /// One callback the worker numbered in a declaration, for the kernel to run later.
 #[derive(Clone)]
 enum Callback {
-    /// The opener or the closer of a root resource.
+    /// The opener or the closer of a resource: the root's, or a service object's, told the
+    /// interface identity of its service.
     Resource {
         environment: u64,
+        service: Option<String>,
         name: String,
         open: bool,
     },
@@ -794,6 +805,12 @@ async fn instantiate(
     if layout.resource_init {
         kernel_callbacks(
             guest::RESOURCE_INIT,
+            &[guest::DECLARE, guest::OPEN, guest::CLOSE],
+        )?;
+    }
+    if layout.service_resource_init {
+        kernel_callbacks(
+            guest::SERVICE_RESOURCE_INIT,
             &[guest::DECLARE, guest::OPEN, guest::CLOSE],
         )?;
     }
@@ -1686,8 +1703,9 @@ async fn settle_context(
     store_result(results, lower_result(ty, &value)?)
 }
 
-/// Capture the issuing call's authority and publish one `resource.read` for a root resource the
-/// component named; the kernel answers with the handle the component gave it when it opened.
+/// Capture the issuing call's authority and publish one `resource.read` for a resource the
+/// component named, the running object's own before the root's; the kernel answers with the
+/// handle the component gave it when it opened.
 fn resource_request(
     state: &State,
     function: &str,
@@ -1697,13 +1715,18 @@ fn resource_request(
     let ("read", [Val::String(name)]) = (function, params) else {
         return Err(wasmtime::Error::msg("unknown kernel resource function"));
     };
-    let Some(id) = authority.resources.get(name.as_str()) else {
-        return Err(wasmtime::Error::msg(format!(
-            "the Orb root declares no resource named {name}"
-        )));
+    let (scope, id) = match authority.owned.get(name.as_str()) {
+        Some(id) => (authority.environment, id),
+        None => match authority.resources.get(name.as_str()) {
+            Some(id) => (authority.scope, id),
+            None => {
+                return Err(wasmtime::Error::msg(format!(
+                    "neither this object nor the Orb root declares a resource named {name}"
+                )));
+            }
+        },
     };
-    let packet =
-        json!({"operation": "resource.read", "scope": authority.scope, "id": id}).to_string();
+    let packet = json!({"operation": "resource.read", "scope": scope, "id": id}).to_string();
     synchronous(state, &authority, packet)
 }
 
@@ -1941,48 +1964,41 @@ async fn serve(
         Packet::Callback { callback, value } => {
             let Some(Callback::Resource {
                 environment,
+                service,
                 name,
                 open,
             }) = environments.callbacks.get(&callback).cloned()
             else {
                 return Ok(Err("unknown compiled resource callback".into()));
             };
+            // A service object's callbacks are told its service first, as `declare` was.
+            let interface = match service {
+                Some(_) => guest::SERVICE_RESOURCE_INIT,
+                None => guest::RESOURCE_INIT,
+            };
             let function = if open { guest::OPEN } else { guest::CLOSE };
             let Some(function) = exports
                 .kernel
-                .get(&(guest::RESOURCE_INIT.to_owned(), function.to_owned()))
+                .get(&(interface.to_owned(), function.to_owned()))
                 .copied()
             else {
                 return Ok(Err("component declares no kernel resource callbacks".into()));
             };
-            let args = match (open, value) {
-                (true, _) => json!([name]),
-                (false, Some(handle)) => json!([name, handle]),
+            let mut args = match (open, value) {
+                (true, _) => vec![json!(name)],
+                (false, Some(handle)) => vec![json!(name), json!(handle)],
                 (false, None) => return Ok(Err("resource closer without a handle".into())),
             };
-            let authority = Authority {
-                events: command.events.clone(),
-                scope: environment,
-                handles: environments
-                    .roots
-                    .get(&environment)
-                    .cloned()
-                    .unwrap_or_default(),
-                environment,
-                state: None,
-                resources: environments
-                    .resources
-                    .get(&environment)
-                    .cloned()
-                    .unwrap_or_default(),
-                hooks: environments
-                    .hooks
-                    .get(&environment)
-                    .cloned()
-                    .unwrap_or_default(),
-                address: environments.addresses.get(&environment).cloned(),
-                principal: None,
+            if let Some(service) = service {
+                args.insert(0, json!(service));
+            }
+            let args = Value::Array(args);
+            // The callback runs under the kernel's opening or closing, where no state is read.
+            let mut authority = match authority(environment, layout, environments, command) {
+                Ok(authority) => authority,
+                Err(error) => return Ok(Err(error.into())),
             };
+            authority.state = None;
             let call = Call {
                 function,
                 roles: Resolved::default(),
@@ -2098,7 +2114,8 @@ async fn admitted_principal(layout: &Layout, command: &Command, limit: usize) ->
     .and_then(|principal| principal.as_str().map(Arc::from))
 }
 
-/// The admitted call's authority: its own event channel and its Orb root's dependency handles.
+/// The admitted call's authority: its own event channel, its Orb root's dependency handles and
+/// resources, and the resources of the service object it runs in.
 fn authority(
     environment: u64,
     layout: &Layout,
@@ -2126,6 +2143,14 @@ fn authority(
             .get(&root)
             .cloned()
             .unwrap_or_default(),
+        owned: match environment == root {
+            true => Arc::default(),
+            false => environments
+                .resources
+                .get(&environment)
+                .cloned()
+                .unwrap_or_default(),
+        },
         hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
         address: environments.addresses.get(&environment).cloned(),
         principal: None,
@@ -2171,8 +2196,9 @@ struct Runtime<'a> {
 }
 
 /// Declare one environment. An Orb root acquires default-key references for its dependency
-/// imports; a service object records its root and, when the component owns kernel state, asks
-/// the component for this service's declaration and declares it in the object's own table.
+/// imports and declares its resources; a service object records its root and, when the
+/// component's services own kernel state or resources, asks the component for this service's
+/// declarations and declares them in the object's own table.
 async fn declare(
     environment: u64,
     service: Option<String>,
@@ -2188,7 +2214,11 @@ async fn declare(
         exports,
         groups,
     } = runtime;
-    if layout.imports.is_empty() && !layout.state_init && !layout.resource_init {
+    if layout.imports.is_empty()
+        && !layout.state_init
+        && !layout.resource_init
+        && !layout.service_resource_init
+    {
         return Ok(());
     }
     // The address of this environment's object, which the kernel tells only while the
@@ -2259,6 +2289,7 @@ async fn declare(
             environment,
             state: None,
             resources: Arc::default(),
+            owned: Arc::default(),
             hooks,
             address: environments.addresses.get(&environment).cloned(),
             principal: None,
@@ -2272,71 +2303,8 @@ async fn declare(
             arguments: None,
         };
         let answer = invoke(engine, store, call, &json!([]), authority, groups).await??;
-        let declared: Value = serde_json::from_str(&answer).map_err(|error| error.to_string())?;
-        let declared = declared
-            .as_array()
-            .ok_or("the resource declarations are not a list")?;
-        // Each resource follows the resources it depends on, so each dependency's name maps to
-        // the id the kernel already gave it.
-        let mut resources = BTreeMap::new();
-        for resource in declared {
-            let name = resource["name"]
-                .as_str()
-                .ok_or("a resource declaration carries no name")?
-                .to_owned();
-            let version = resource["version"]
-                .as_u64()
-                .ok_or("a resource declaration carries no version")?;
-            let dependencies = resource["dependencies"]
-                .as_array()
-                .ok_or("a resource declaration carries no dependencies")?
-                .iter()
-                .map(|dependency| {
-                    let dependency = dependency
-                        .as_str()
-                        .ok_or("a resource dependency is not a name")?;
-                    resources
-                        .get(dependency)
-                        .map(|id| json!({ "id": id }))
-                        .ok_or_else(|| {
-                            format!(
-                                "the resource `{name}` depends on `{dependency}`, which the Orb does not declare before it"
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let (open, close) = (environments.callback()?, environments.callback()?);
-            let id = declaration(
-                events,
-                json!({
-                    "operation": "resource.declare",
-                    "name": name,
-                    "version": version,
-                    "open": open,
-                    "close": close,
-                    "dependencies": dependencies,
-                }),
-                limit,
-            )
-            .await?;
-            let id = id
-                .as_u64()
-                .and_then(|id| u32::try_from(id).ok())
-                .ok_or("invalid resource handle")?;
-            for (callback, opens) in [(open, true), (close, false)] {
-                environments.callbacks.insert(
-                    callback,
-                    Callback::Resource {
-                        environment,
-                        name: name.clone(),
-                        open: opens,
-                    },
-                );
-            }
-            if resources.insert(name, id).is_some() {
-                return Err("a resource is declared twice".into());
-            }
-        }
+        let resources =
+            declare_resources(environment, None, &answer, environments, events, limit).await?;
         environments
             .resources
             .insert(environment, Arc::new(resources));
@@ -2348,12 +2316,12 @@ async fn declare(
         .filter(|root| environments.roots.contains_key(root))
         .ok_or("service environment has no declared Orb root")?;
     environments.parents.insert(environment, root);
-    if !layout.state_init {
+    if !layout.state_init && !layout.service_resource_init {
         return Ok(());
     }
-    // Only the objects of a service the component exports own kernel state. The incoming HTTP
-    // handler is created as a service of its own but answers no interface of the component, so
-    // its objects declare none, as in the browser's component kernel.
+    // Only the objects of a service the component exports own kernel state and resources. The
+    // incoming HTTP handler is created as a service of its own but answers no interface of the
+    // component, so its objects declare none, as in the browser's component kernel.
     let Some(interface) = layout
         .exports
         .iter()
@@ -2362,12 +2330,8 @@ async fn declare(
     else {
         return Ok(());
     };
-    let function = exports
-        .kernel
-        .get(&(guest::STATE_INIT.to_owned(), guest::DECLARE.to_owned()))
-        .copied()
-        .ok_or("component declares no kernel state-init callback")?;
-    // The callback runs under the declaration's channel; it may not read state (none exists yet).
+    // The callbacks run under the declaration's channel; they may not read state (none exists
+    // yet) and reach the root's resources only.
     let authority = Authority {
         events: events.clone(),
         scope: root,
@@ -2379,11 +2343,12 @@ async fn declare(
             .get(&root)
             .cloned()
             .unwrap_or_default(),
+        owned: Arc::default(),
         hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
         address: environments.addresses.get(&environment).cloned(),
         principal: None,
     };
-    let call = Call {
+    let call = |function| Call {
         function,
         roles: Resolved::default(),
         environment,
@@ -2391,8 +2356,180 @@ async fn declare(
         stream: None,
         arguments: None,
     };
-    let answer = invoke(engine, store, call, &json!([interface]), authority, groups).await??;
-    let declared: Value = serde_json::from_str(&answer).map_err(|error| error.to_string())?;
+    if layout.state_init {
+        let function = exports
+            .kernel
+            .get(&(guest::STATE_INIT.to_owned(), guest::DECLARE.to_owned()))
+            .copied()
+            .ok_or("component declares no kernel state-init callback")?;
+        let answer = invoke(
+            engine,
+            store,
+            call(function),
+            &json!([interface]),
+            authority.clone(),
+            groups,
+        )
+        .await??;
+        declare_state(
+            environment,
+            interface.clone(),
+            &answer,
+            environments,
+            events,
+            limit,
+        )
+        .await?;
+    }
+    if !layout.service_resource_init {
+        return Ok(());
+    }
+    // This object's resources: the component lists them for the service, the worker declares
+    // each in the object's own table, after the root's resources and the object's earlier ones
+    // it depends on; the kernel opens them before the object answers a call.
+    let function = exports
+        .kernel
+        .get(&(
+            guest::SERVICE_RESOURCE_INIT.to_owned(),
+            guest::DECLARE.to_owned(),
+        ))
+        .copied()
+        .ok_or("component declares no kernel service resource callbacks")?;
+    let answer = invoke(
+        engine,
+        store,
+        call(function),
+        &json!([interface]),
+        authority,
+        groups,
+    )
+    .await??;
+    let root_resources = environments.resources.get(&root).cloned();
+    let resources = declare_resources(
+        environment,
+        Some(Object {
+            interface,
+            root,
+            resources: root_resources.as_deref(),
+        }),
+        &answer,
+        environments,
+        events,
+        limit,
+    )
+    .await?;
+    environments
+        .resources
+        .insert(environment, Arc::new(resources));
+    Ok(())
+}
+
+/// The service object whose resources a component listed: the interface identity of its service,
+/// its root and the root's resources, which its own may depend on.
+struct Object<'a> {
+    interface: String,
+    root: u64,
+    resources: Option<&'a BTreeMap<String, u32>>,
+}
+
+/// Declare the resources a component listed for the root (`object` is `None`) or for one object
+/// of a service, in the environment's own table, with callbacks the worker numbers. Each resource
+/// follows the resources it depends on, so each dependency's name maps to a handle the kernel
+/// already gave: one of this list, in this table, else one of the root's, in the root's table, for
+/// an object. The names declared, with their handles.
+async fn declare_resources(
+    environment: u64,
+    object: Option<Object<'_>>,
+    answer: &str,
+    environments: &mut Environments,
+    events: &Sender<Event>,
+    limit: usize,
+) -> std::result::Result<BTreeMap<String, u32>, Failure> {
+    let declared: Value = serde_json::from_str(answer).map_err(|error| error.to_string())?;
+    let declared = declared
+        .as_array()
+        .ok_or("the resource declarations are not a list")?;
+    let mut resources = BTreeMap::new();
+    for resource in declared {
+        let name = resource["name"]
+            .as_str()
+            .ok_or("a resource declaration carries no name")?
+            .to_owned();
+        let version = resource["version"]
+            .as_u64()
+            .ok_or("a resource declaration carries no version")?;
+        let dependencies = resource["dependencies"]
+            .as_array()
+            .ok_or("a resource declaration carries no dependencies")?
+            .iter()
+            .map(|dependency| {
+                let dependency = dependency
+                    .as_str()
+                    .ok_or("a resource dependency is not a name")?;
+                if let Some(id) = resources.get(dependency) {
+                    return Ok(json!({ "id": id }));
+                }
+                if let Some(Object {
+                    root,
+                    resources: Some(resources),
+                    ..
+                }) = &object
+                    && let Some(id) = resources.get(dependency)
+                {
+                    return Ok(json!({ "scope": root, "id": id }));
+                }
+                Err(format!(
+                    "the resource `{name}` depends on `{dependency}`, which the Orb does not declare before it"
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (open, close) = (environments.callback()?, environments.callback()?);
+        let id = declaration(
+            events,
+            json!({
+                "operation": "resource.declare",
+                "name": name,
+                "version": version,
+                "open": open,
+                "close": close,
+                "dependencies": dependencies,
+            }),
+            limit,
+        )
+        .await?;
+        let id = id
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or("invalid resource handle")?;
+        for (callback, opens) in [(open, true), (close, false)] {
+            environments.callbacks.insert(
+                callback,
+                Callback::Resource {
+                    environment,
+                    service: object.as_ref().map(|object| object.interface.clone()),
+                    name: name.clone(),
+                    open: opens,
+                },
+            );
+        }
+        if resources.insert(name, id).is_some() {
+            return Err("a resource is declared twice".into());
+        }
+    }
+    Ok(resources)
+}
+
+/// Declare the state a component answered for one object of a service, told its interface
+/// identity, in the kernel; `null` is a service without state.
+async fn declare_state(
+    environment: u64,
+    interface: String,
+    answer: &str,
+    environments: &mut Environments,
+    events: &Sender<Event>,
+    limit: usize,
+) -> std::result::Result<(), Failure> {
+    let declared: Value = serde_json::from_str(answer).map_err(|error| error.to_string())?;
     if declared.is_null() {
         return Ok(());
     }

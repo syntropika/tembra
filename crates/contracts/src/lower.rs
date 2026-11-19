@@ -427,10 +427,19 @@ impl PreparedContract {
         }
         // A kernel interface is declared through the export and used through the import: one
         // without the other is a world that can never work.
-        for (import, export) in guest::PAIRS {
-            if guest::imports(self.model(), import) != guest::exports(self.model(), export) {
+        for import in guest::PAIRS.iter().map(|(import, _)| *import) {
+            let exports: Vec<&str> = guest::PAIRS
+                .iter()
+                .filter(|(paired, _)| *paired == import)
+                .map(|(_, export)| *export)
+                .collect();
+            let exported = exports
+                .iter()
+                .any(|export| guest::exports(self.model(), export));
+            if guest::imports(self.model(), import) != exported {
                 return Err(Error(format!(
-                    "a world importing {import} exports {export}, and the other way round"
+                    "a world importing {import} exports {}, and the other way round",
+                    exports.join(" or ")
                 )));
             }
         }

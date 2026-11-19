@@ -30,12 +30,14 @@ interface state-init {
     validate: func(service: string, value: string) -> result<_, string>;
 }
 
-/// The resources of a compiled Orb's root: values its component opens when the Orb is activated
-/// and closes when it is torn down, in the order the kernel decides. The kernel tracks each
-/// resource and the handle the component gave it; the value stays in the component, one per
-/// instance, because guest values cannot cross isolated heaps.
+/// The resources of a compiled Orb: values its component opens and closes when the kernel says,
+/// in the order the kernel decides. The root's open when the Orb is activated and close when it
+/// is torn down; a service object's open when the kernel creates the object and close when it
+/// goes. The kernel tracks each resource and the handle the component gave it; the value stays
+/// in the component, one per instance, because guest values cannot cross isolated heaps.
 interface resources {
-    /// The handle of the named open resource; fails before the resource is ready.
+    /// The handle of the named open resource of the object running the call, else of the root;
+    /// fails before the resource is ready.
     read: func(name: string) -> u32;
 }
 
@@ -55,6 +57,22 @@ interface resources-init {
     open: func(name: string) -> u32;
     /// Close the named resource's value.
     close: func(name: string, handle: u32);
+}
+
+/// Exported by a compiled Orb whose services own resources: one of each per object of the
+/// service. The kernel asks for the declarations when it creates a service object, opens each
+/// resource before the object answers calls and closes it when the object goes, before the
+/// root's resources it depends on.
+interface service-resources-init {
+    use resources-init.{declaration};
+    /// The resources of each object of the service exporting the named interface, each after the
+    /// resources it depends on: the root's, or earlier ones of the same service.
+    declare: func(service: string) -> list<declaration>;
+    /// Open the named resource of the object running the call and return the component's handle
+    /// to its value.
+    open: func(service: string, name: string) -> u32;
+    /// Close the named resource's value.
+    close: func(service: string, name: string, handle: u32);
 }
 
 /// The kernel's view of the call a compiled Orb is serving and of the object it runs on. The
