@@ -88,41 +88,46 @@ pub mod gatehouse {
     #[hook("example:admission/guard@1.0.0", composition = waterfall)]
     pub struct Guard;
 
-    /// Runs the hooks.
-    #[service]
-    pub struct Desk;
+    pub mod desk {
+        use super::{Guard, Hour, Rooms, Spots, Visit, Visits, guard, keys, lobby, places};
+        use alloc::string::String;
 
-    impl Desk {
-        /// Tell every contributor of a visit.
-        pub fn visit(who: String, hour: u32) {
-            Visits::run(Visit {
-                who,
-                hour: Hour(hour),
-            })
-        }
+        /// Runs the hooks.
+        #[service]
+        pub struct Desk;
 
-        /// Tell every contributor where a guest goes.
-        pub fn go(floor: u32, door: String) {
-            Spots::run(places::Spot::from(places::Place { floor, door }))
-        }
+        impl Desk {
+            /// Tell every contributor of a visit.
+            pub fn visit(who: String, hour: u32) {
+                Visits::run(Visit {
+                    who,
+                    hour: Hour(hour),
+                })
+            }
 
-        /// Tell every contributor which door a guest knocks at.
-        pub fn knock(door: String) {
-            lobby::Doors::run(keys::Door::from(door))
-        }
+            /// Tell every contributor where a guest goes.
+            pub fn go(floor: u32, door: String) {
+                Spots::run(places::Spot::from(places::Place { floor, door }))
+            }
 
-        /// The room the first contributor with an answer gives the floor, if any.
-        pub fn room(floor: u32) -> Option<u32> {
-            Rooms::run(floor)
-        }
+            /// Tell every contributor which door a guest knocks at.
+            pub fn knock(door: String) {
+                lobby::Doors::run(keys::Door::from(door))
+            }
 
-        /// The value the contributions admit, and whether they blocked it.
-        pub fn admit(value: i32) -> (i32, bool) {
-            let admission = Guard::run(guard::Admission {
-                value,
-                blocked: false,
-            });
-            (admission.value, admission.blocked)
+            /// The room the first contributor with an answer gives the floor, if any.
+            pub fn room(floor: u32) -> Option<u32> {
+                Rooms::run(floor)
+            }
+
+            /// The value the contributions admit, and whether they blocked it.
+            pub fn admit(value: i32) -> (i32, bool) {
+                let admission = Guard::run(guard::Admission {
+                    value,
+                    blocked: false,
+                });
+                (admission.value, admission.blocked)
+            }
         }
     }
 }

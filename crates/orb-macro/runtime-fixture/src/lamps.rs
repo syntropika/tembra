@@ -53,17 +53,21 @@ pub mod lamps {
         }
     }
 
-    /// Lights the lamp.
-    #[service]
-    pub struct Switch;
+    pub mod switch {
+        use super::Lamp;
 
-    impl Switch {
-        /// Light the lamp and return how many times it was lit.
-        pub fn light() -> u32 {
-            Lamp::with(|lamp| {
-                lamp.lit.set(lamp.lit.get() + 1);
-                lamp.lit.get()
-            })
+        /// Lights the lamp.
+        #[service]
+        pub struct Switch;
+
+        impl Switch {
+            /// Light the lamp and return how many times it was lit.
+            pub fn light() -> u32 {
+                Lamp::with(|lamp| {
+                    lamp.lit.set(lamp.lit.get() + 1);
+                    lamp.lit.get()
+                })
+            }
         }
     }
 }
@@ -101,17 +105,21 @@ pub mod lamps {
         }
     }
 
-    /// Lights the lamp.
-    #[service]
-    pub struct Switch;
+    pub mod switch {
+        use super::Lamp;
 
-    impl Switch {
-        /// Light the lamp and return how many times it was lit.
-        pub fn light() -> u32 {
-            Lamp::with(|lamp| {
-                lamp.lit.set(lamp.lit.get() + 1);
-                lamp.lit.get()
-            })
+        /// Lights the lamp.
+        #[service]
+        pub struct Switch;
+
+        impl Switch {
+            /// Light the lamp and return how many times it was lit.
+            pub fn light() -> u32 {
+                Lamp::with(|lamp| {
+                    lamp.lit.set(lamp.lit.get() + 1);
+                    lamp.lit.get()
+                })
+            }
         }
     }
 }

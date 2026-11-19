@@ -23,38 +23,41 @@
     )
 )]
 pub mod system {
-    use alloc::{format, string::String, vec::Vec};
+    pub mod probe {
+        use super::{environment, insecure, system_clock, types};
+        use alloc::{format, string::String, vec::Vec};
 
-    /// Reads the host through WASI.
-    #[service]
-    pub struct Probe;
+        /// Reads the host through WASI.
+        #[service]
+        pub struct Probe;
 
-    impl Probe {
-        /// The seconds of the host's system clock since the epoch.
-        pub fn seconds() -> i64 {
-            system_clock::now().seconds
-        }
+        impl Probe {
+            /// The seconds of the host's system clock since the epoch.
+            pub fn seconds() -> i64 {
+                system_clock::now().seconds
+            }
 
-        /// The nanoseconds of `seconds` seconds, a duration of the clocks' types.
-        pub fn nanoseconds(seconds: u64) -> u64 {
-            let duration: types::Duration = seconds * 1_000_000_000;
-            duration
-        }
+            /// The nanoseconds of `seconds` seconds, a duration of the clocks' types.
+            pub fn nanoseconds(seconds: u64) -> u64 {
+                let duration: types::Duration = seconds * 1_000_000_000;
+                duration
+            }
 
-        /// The arguments and the environment the installation gives, as `name=value`.
-        pub fn environment() -> Vec<String> {
-            let variables = environment::get_environment()
-                .into_iter()
-                .map(|(name, value)| format!("{name}={value}"));
-            environment::get_arguments()
-                .into_iter()
-                .chain(variables)
-                .collect()
-        }
+            /// The arguments and the environment the installation gives, as `name=value`.
+            pub fn environment() -> Vec<String> {
+                let variables = environment::get_environment()
+                    .into_iter()
+                    .map(|(name, value)| format!("{name}={value}"));
+                environment::get_arguments()
+                    .into_iter()
+                    .chain(variables)
+                    .collect()
+            }
 
-        /// How many insecure random bytes the host gives for `length`.
-        pub fn insecure(length: u64) -> u32 {
-            insecure::get_insecure_random_bytes(length).len() as u32
+            /// How many insecure random bytes the host gives for `length`.
+            pub fn insecure(length: u64) -> u32 {
+                insecure::get_insecure_random_bytes(length).len() as u32
+            }
         }
     }
 }

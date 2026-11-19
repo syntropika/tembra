@@ -8,36 +8,40 @@
     no_std
 )]
 mod events {
-    #[service("example:events/feed@1.0.0")]
-    pub struct Feed;
+    pub mod feeding {
+        use super::clock;
 
-    impl Feed {
-        pub async fn subscribe() -> Updates {
-            Updates(core::cell::Cell::new(clock::wait(7).await))
+        #[service("example:events/feed@1.0.0")]
+        pub struct Feed;
+
+        impl Feed {
+            pub async fn subscribe() -> Updates {
+                Updates(core::cell::Cell::new(clock::wait(7).await))
+            }
+
+            pub fn count() -> u32 {
+                1
+            }
         }
 
-        pub fn count() -> u32 {
-            1
-        }
-    }
+        #[wit_resource]
+        pub struct Updates(core::cell::Cell<u64>);
 
-    #[wit_resource(service = Feed)]
-    pub struct Updates(core::cell::Cell<u64>);
+        impl Updates {
+            #[constructor]
+            pub fn new() -> Self {
+                Self(core::cell::Cell::new(0))
+            }
 
-    impl Updates {
-        #[constructor]
-        pub fn new() -> Self {
-            Self(core::cell::Cell::new(0))
-        }
+            pub async fn next(&self) -> Option<u64> {
+                let value = clock::wait(self.0.get() + 1).await;
+                self.0.set(value);
+                Some(value)
+            }
 
-        pub async fn next(&self) -> Option<u64> {
-            let value = clock::wait(self.0.get() + 1).await;
-            self.0.set(value);
-            Some(value)
-        }
-
-        pub async fn fresh() -> Updates {
-            Updates(core::cell::Cell::new(clock::wait(1).await))
+            pub async fn fresh() -> Updates {
+                Updates(core::cell::Cell::new(clock::wait(1).await))
+            }
         }
     }
 }

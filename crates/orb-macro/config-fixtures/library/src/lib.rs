@@ -4,14 +4,16 @@
 
 #[tembra::orb(package = "example:shelf@1.0.0")]
 pub mod shelf {
-    /// The shelf.
-    #[service]
-    pub struct Books;
+    pub mod books {
+        /// The shelf.
+        #[service]
+        pub struct Books;
 
-    impl Books {
-        /// How many books the shelf holds.
-        pub fn count() -> u32 {
-            3
+        impl Books {
+            /// How many books the shelf holds.
+            pub fn count() -> u32 {
+                3
+            }
         }
     }
 }

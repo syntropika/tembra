@@ -63,134 +63,145 @@ mod versioned;
     )
 )]
 mod guest {
-    use alloc::{format, string::String, vec::Vec};
+    pub mod greeting {
+        use alloc::{format, string::String};
 
-    #[service]
-    pub struct Greeting;
+        #[service]
+        pub struct Greeting;
 
-    impl Greeting {
-        pub fn hello(name: String) -> String {
-            #[cfg(not(feature = "no-std"))]
-            {
-                let names = std::collections::HashMap::from([("name", name)]);
-                format!("Hello, {}!", names["name"])
-            }
-            #[cfg(feature = "no-std")]
-            {
-                format!("Hello, {name}!")
-            }
-        }
-    }
-
-    /// A point on a grid.
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct Point {
-        pub x: i32,
-        pub y: i32,
-    }
-
-    /// Where a walker faces; a fresh walker faces north.
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub enum Heading {
-        #[default]
-        North,
-        East,
-        South,
-        West,
-    }
-
-    /// One move of a walk.
-    #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    pub enum Move {
-        Turn(Heading),
-        Step(u32),
-        Jump(Point),
-        Rest,
-    }
-
-    /// Where a walker stands, kept by the kernel. Its derived `Default` is its initial value: at
-    /// the origin, facing north, without a move.
-    #[state(service = Walker)]
-    #[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-    pub struct Position {
-        pub at: Point,
-        pub facing: Heading,
-        pub moves: u32,
-    }
-
-    #[service]
-    pub struct Walker;
-
-    impl Walker {
-        /// Make the moves from where the walker stands and return where it ends.
-        pub fn walk(moves: Vec<Move>) -> Position {
-            Position::update(|position| {
-                for step in &moves {
-                    match step {
-                        Move::Turn(heading) => position.facing = *heading,
-                        Move::Step(count) => {
-                            let count = *count as i32;
-                            match position.facing {
-                                Heading::North => position.at.y += count,
-                                Heading::East => position.at.x += count,
-                                Heading::South => position.at.y -= count,
-                                Heading::West => position.at.x -= count,
-                            }
-                        }
-                        Move::Jump(to) => position.at = *to,
-                        Move::Rest => {}
-                    }
-                    position.moves += 1;
+        impl Greeting {
+            pub fn hello(name: String) -> String {
+                #[cfg(not(feature = "no-std"))]
+                {
+                    let names = std::collections::HashMap::from([("name", name)]);
+                    format!("Hello, {}!", names["name"])
                 }
-            })
-        }
-
-        /// How many of the moves differ from one another: hashed with std, ordered without it.
-        pub fn distinct(moves: Vec<Move>) -> u32 {
-            #[cfg(not(feature = "no-std"))]
-            let distinct = moves.iter().collect::<std::collections::HashSet<_>>();
-            #[cfg(feature = "no-std")]
-            let distinct = moves.iter().collect::<alloc::collections::BTreeSet<_>>();
-            distinct.len() as u32
-        }
-
-        /// Whether the walker stands where a fresh one starts, whatever its moves.
-        pub fn at_start() -> bool {
-            let position = Position::read();
-            let start = Position {
-                at: Point::default(),
-                facing: Heading::default(),
-                moves: position.moves,
-            };
-            position == start
-        }
-
-        /// Where the walker stands, as `Debug` prints it.
-        pub fn describe() -> String {
-            format!("{:?}", Position::read())
+                #[cfg(feature = "no-std")]
+                {
+                    format!("Hello, {name}!")
+                }
+            }
         }
     }
 
-    /// Draws from the host's secure random source and waits on its monotonic clock, through the
-    /// WASI interfaces the attribute imports: an installation grants `random` and `clocks`, or the
-    /// kernel refuses it.
-    #[service]
-    pub struct Chance;
+    pub mod walker {
+        use alloc::{format, string::String, vec::Vec};
 
-    impl Chance {
-        /// `length` bytes from the host's secure random source.
-        pub fn draw(length: u64) -> Vec<u8> {
-            random::get_random_bytes(length)
+        /// A point on a grid.
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(serde::Serialize, serde::Deserialize)]
+        pub struct Point {
+            pub x: i32,
+            pub y: i32,
         }
 
-        /// Wait `nanoseconds` on the host's monotonic clock and return how long the wait took by
-        /// that clock.
-        pub async fn pause(nanoseconds: u64) -> u64 {
-            let start = monotonic_clock::now();
-            monotonic_clock::wait_for(nanoseconds).await;
-            monotonic_clock::now() - start
+        /// Where a walker faces; a fresh walker faces north.
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(serde::Serialize, serde::Deserialize)]
+        pub enum Heading {
+            #[default]
+            North,
+            East,
+            South,
+            West,
+        }
+
+        /// One move of a walk.
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum Move {
+            Turn(Heading),
+            Step(u32),
+            Jump(Point),
+            Rest,
+        }
+
+        /// Where a walker stands, kept by the kernel. Its derived `Default` is its initial value:
+        /// at the origin, facing north, without a move.
+        #[state]
+        #[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Position {
+            pub at: Point,
+            pub facing: Heading,
+            pub moves: u32,
+        }
+
+        #[service]
+        pub struct Walker;
+
+        impl Walker {
+            /// Make the moves from where the walker stands and return where it ends.
+            pub fn walk(moves: Vec<Move>) -> Position {
+                Position::update(|position| {
+                    for step in &moves {
+                        match step {
+                            Move::Turn(heading) => position.facing = *heading,
+                            Move::Step(count) => {
+                                let count = *count as i32;
+                                match position.facing {
+                                    Heading::North => position.at.y += count,
+                                    Heading::East => position.at.x += count,
+                                    Heading::South => position.at.y -= count,
+                                    Heading::West => position.at.x -= count,
+                                }
+                            }
+                            Move::Jump(to) => position.at = *to,
+                            Move::Rest => {}
+                        }
+                        position.moves += 1;
+                    }
+                })
+            }
+
+            /// How many of the moves differ from one another: hashed with std, ordered without it.
+            pub fn distinct(moves: Vec<Move>) -> u32 {
+                #[cfg(not(feature = "no-std"))]
+                let distinct = moves.iter().collect::<std::collections::HashSet<_>>();
+                #[cfg(feature = "no-std")]
+                let distinct = moves.iter().collect::<alloc::collections::BTreeSet<_>>();
+                distinct.len() as u32
+            }
+
+            /// Whether the walker stands where a fresh one starts, whatever its moves.
+            pub fn at_start() -> bool {
+                let position = Position::read();
+                let start = Position {
+                    at: Point::default(),
+                    facing: Heading::default(),
+                    moves: position.moves,
+                };
+                position == start
+            }
+
+            /// Where the walker stands, as `Debug` prints it.
+            pub fn describe() -> String {
+                format!("{:?}", Position::read())
+            }
+        }
+    }
+
+    pub mod chance {
+        use super::{monotonic_clock, random};
+        use alloc::vec::Vec;
+
+        /// Draws from the host's secure random source and waits on its monotonic clock, through the
+        /// WASI interfaces the attribute imports: an installation grants `random` and `clocks`, or
+        /// the kernel refuses it.
+        #[service]
+        pub struct Chance;
+
+        impl Chance {
+            /// `length` bytes from the host's secure random source.
+            pub fn draw(length: u64) -> Vec<u8> {
+                random::get_random_bytes(length)
+            }
+
+            /// Wait `nanoseconds` on the host's monotonic clock and return how long the wait took
+            /// by that clock.
+            pub async fn pause(nanoseconds: u64) -> u64 {
+                let start = monotonic_clock::now();
+                monotonic_clock::wait_for(nanoseconds).await;
+                monotonic_clock::now() - start
+            }
         }
     }
 
@@ -251,7 +262,7 @@ mod guest {
 
         /// The last tally a readings object took, and how many readings it made, kept by the
         /// kernel as the JSON `serde` writes for the provider's record.
-        #[state(service = Readings)]
+        #[state]
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Recorded {
             pub last: Option<counter::Tally>,
@@ -337,410 +348,447 @@ mod guest {
     /// `lending` reaches by key through the view the macro derives for the attribute's
     /// `import("example:shelves/shelf@1.0.0", keyed)`: the interface this Orb implements.
     pub mod shelves {
-        use super::{shelf, shelf_ref};
-        use alloc::{string::String, vec, vec::Vec};
-        use core::sync::atomic::{AtomicU32, Ordering};
+        pub mod shelf {
+            use super::super::shelf;
+            use core::sync::atomic::{AtomicU32, Ordering};
 
-        /// How many books the shelf holds.
-        static SHELVED: AtomicU32 = AtomicU32::new(0);
+            /// How many books the shelf holds.
+            static SHELVED: AtomicU32 = AtomicU32::new(0);
 
-        #[service("example:shelves/shelf@1.0.0")]
-        pub struct Shelf;
+            #[service("example:shelves/shelf@1.0.0")]
+            pub struct Shelf;
 
-        impl Shelf {
-            pub fn shelve(_book: shelf::Book) -> u32 {
-                SHELVED.fetch_add(1, Ordering::Relaxed) + 1
-            }
-        }
-
-        /// The books of one topic, longest first, and their pages.
-        pub struct Topical {
-            pub books: Vec<shelf::Book>,
-            pub pages: u32,
-        }
-
-        #[service]
-        pub struct Library;
-
-        impl Library {
-            /// The books on `topic`, longest first, with their pages added up.
-            pub fn on_topic(books: Vec<shelf::Book>, topic: shelf::Topic) -> Topical {
-                let mut books: Vec<shelf::Book> = books
-                    .into_iter()
-                    .filter(|book| book.topic == topic)
-                    .collect();
-                books.sort_by(|left, right| right.pages.cmp(&left.pages));
-                let pages = books.iter().map(|book| book.pages).sum();
-                Topical { books, pages }
-            }
-
-            /// The longest book, if any.
-            pub fn longest(books: Vec<shelf::Book>) -> Option<shelf::Book> {
-                books.into_iter().max_by_key(|book| book.pages)
-            }
-        }
-
-        /// Lends books to the shelves of another keeper of `example:shelves/shelf@1.0.0`, the
-        /// interface this Orb implements, selected by key. The world imports the interface only for
-        /// the types the view `use`s, so the installation binds the view alone, and the shelf this
-        /// Orb exports stays a service.
-        #[service]
-        pub struct Lending;
-
-        impl Lending {
-            /// Put `books` on the shelf of `key` of the keeper the view reaches, one by one, and
-            /// return how many books that shelf holds. A key the keeper refuses is the error.
-            pub async fn lend(key: String, books: Vec<shelf::Book>) -> Result<u32, String> {
-                let shelf = shelf_ref::get(vec![key]).await?;
-                let mut held = 0;
-                for book in books {
-                    held = shelf.shelve(&lent(book));
-                }
-                Ok(held)
-            }
-        }
-
-        /// A book as the view takes it. A derived signature names the shelf's types through the
-        /// implemented interface's module, `shelf::Book`, the copy of the export; the view's methods
-        /// take the copy of the import, which the view's module names, `shelf_ref::Book`, and whose
-        /// `Topic` the bindings' import module of the interface defines.
-        fn lent(book: shelf::Book) -> shelf_ref::Book {
-            use super::example::shelves::shelf as imported;
-            shelf_ref::Book {
-                title: book.title,
-                pages: book.pages,
-                topic: match book.topic {
-                    shelf::Topic::Fiction => imported::Topic::Fiction,
-                    shelf::Topic::Science => imported::Topic::Science,
-                },
-            }
-        }
-    }
-
-    /// A running total the caller owns. A function taking it consumes the caller's handle.
-    #[wit_resource(service = Tallies)]
-    pub struct Tally {
-        total: core::cell::Cell<u32>,
-    }
-
-    impl Tally {
-        #[constructor]
-        pub fn new(start: u32) -> Self {
-            Self {
-                total: core::cell::Cell::new(start),
-            }
-        }
-
-        /// Add to the total and return it.
-        pub fn add(&self, by: u32) -> u32 {
-            self.total.set(self.total.get() + by);
-            self.total.get()
-        }
-
-        /// Add another tally's total to this one and return it; the other tally is consumed.
-        pub fn absorb(&self, other: Tally) -> u32 {
-            self.add(other.total.get())
-        }
-    }
-
-    /// How many tallies were destroyed: dropped by their last owner, or consumed by a function
-    /// that took them.
-    static DROPPED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-    impl Drop for Tally {
-        fn drop(&mut self) {
-            DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    /// A tally opened, or why none was: an enum with a case with named fields, which stays this
-    /// one, converted at the boundary, the tally it holds included.
-    pub enum Opening {
-        Opened { tally: Tally, at: u32 },
-        Refused { reason: String },
-    }
-
-    /// The tally under another name, which the tallies' functions take and return as the tally.
-    use self::Tally as Counted;
-
-    #[service]
-    pub struct Tallies;
-
-    impl Tallies {
-        /// Start a tally; the caller owns the returned handle.
-        pub fn start(at: u32) -> Tally {
-            Tally::new(at)
-        }
-
-        /// Take a tally back and return its total.
-        pub fn close(tally: Tally) -> u32 {
-            tally.total.get()
-        }
-
-        /// The totals of the tallies a list and an option hold, in order, each taken back.
-        pub fn close_all(tallies: Vec<Tally>, last: Option<Tally>) -> Vec<u32> {
-            tallies
-                .iter()
-                .chain(&last)
-                .map(|tally| tally.total.get())
-                .collect()
-        }
-
-        /// Open a tally at `at`, or refuse one above a thousand. The tally crosses in the record
-        /// of the case, wrapped into its handle.
-        pub fn open(at: u32) -> Opening {
-            if at > 1000 {
-                Opening::Refused {
-                    reason: String::from("above a thousand"),
-                }
-            } else {
-                Opening::Opened {
-                    tally: Tally::new(at),
-                    at,
+            impl Shelf {
+                pub fn shelve(_book: shelf::Book) -> u32 {
+                    SHELVED.fetch_add(1, Ordering::Relaxed) + 1
                 }
             }
         }
 
-        /// Take an opening back: the total of the tally it holds, taken back from its handle, or
-        /// none.
-        pub fn settle(opening: Opening) -> Option<u32> {
-            match opening {
-                Opening::Opened { tally, .. } => Some(tally.total.get()),
-                Opening::Refused { .. } => None,
+        pub mod library {
+            use super::super::shelf;
+            use alloc::vec::Vec;
+
+            /// The books of one topic, longest first, and their pages.
+            pub struct Topical {
+                pub books: Vec<shelf::Book>,
+                pub pages: u32,
+            }
+
+            #[service]
+            pub struct Library;
+
+            impl Library {
+                /// The books on `topic`, longest first, with their pages added up.
+                pub fn on_topic(books: Vec<shelf::Book>, topic: shelf::Topic) -> Topical {
+                    let mut books: Vec<shelf::Book> = books
+                        .into_iter()
+                        .filter(|book| book.topic == topic)
+                        .collect();
+                    books.sort_by(|left, right| right.pages.cmp(&left.pages));
+                    let pages = books.iter().map(|book| book.pages).sum();
+                    Topical { books, pages }
+                }
+
+                /// The longest book, if any.
+                pub fn longest(books: Vec<shelf::Book>) -> Option<shelf::Book> {
+                    books.into_iter().max_by_key(|book| book.pages)
+                }
             }
         }
 
-        /// Take a tally, named through a `use` that renames it, beside a step: its total plus the
-        /// step.
-        pub fn close_with(pair: (Counted, u32)) -> u32 {
-            pair.0.total.get() + pair.1
-        }
+        pub mod lending {
+            use super::super::{shelf, shelf_ref};
+            use alloc::{string::String, vec, vec::Vec};
 
-        /// Start a tally, named through a `use` that renames it.
-        pub fn restart(at: u32) -> Counted {
-            Tally::new(at)
-        }
+            /// Lends books to the shelves of another keeper of `example:shelves/shelf@1.0.0`, the
+            /// interface this Orb implements, selected by key. The world imports the interface only
+            /// for the types the view `use`s, so the installation binds the view alone, and the
+            /// shelf this Orb exports stays a service.
+            #[service]
+            pub struct Lending;
 
-        /// How many tallies were destroyed.
-        pub fn dropped() -> u32 {
-            DROPPED.load(core::sync::atomic::Ordering::Relaxed)
-        }
-    }
-
-    /// What a holder may do with a document: a record of `bool` fields.
-    #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-    pub struct Access {
-        pub read: bool,
-        pub write: bool,
-        pub share: bool,
-    }
-
-    /// The access granted to someone.
-    pub struct Grant {
-        pub who: String,
-        pub access: Access,
-    }
-
-    /// The last access a permits object granted and how many grants it made, kept by the kernel.
-    #[state(service = Permits)]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Granted {
-        pub last: Access,
-        pub grants: u32,
-    }
-
-    #[service]
-    pub struct Permits;
-
-    impl Permits {
-        /// The access with exactly the fields `access` lacks set.
-        pub fn invert(access: Access) -> Access {
-            Access {
-                read: !access.read,
-                write: !access.write,
-                share: !access.share,
-            }
-        }
-
-        /// Grant `access` to `who`; the kernel keeps it as the last access granted.
-        pub fn give(who: String, access: Access) -> Grant {
-            Granted::update(|granted| {
-                granted.last = access;
-                granted.grants += 1;
-            });
-            Grant { who, access }
-        }
-
-        /// The fields any of the grants or `extra` sets.
-        pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Access {
-            grants
-                .iter()
-                .map(|grant| grant.access)
-                .chain(extra)
-                .fold(Access::default(), |all, access| Access {
-                    read: all.read || access.read,
-                    write: all.write || access.write,
-                    share: all.share || access.share,
-                })
-        }
-
-        /// What the kernel keeps for this object.
-        pub fn kept() -> Granted {
-            Granted::read()
-        }
-    }
-
-    /// What a reviewer decided about a text. The case with named fields enters the WIT as a record
-    /// of its own, `outcome-refused`; the enum stays this one, converted at the boundary.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum Outcome {
-        Accepted,
-        Refused { reason: String, severity: u32 },
-        Deferred(u32),
-    }
-
-    /// A decision with its reviewer; it holds the enum, so it stays the author's too.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Decision {
-        pub reviewer: String,
-        pub outcome: Outcome,
-    }
-
-    #[service]
-    pub struct Reviews;
-
-    impl Reviews {
-        /// Decide on `text` for `reviewer`: an empty text is refused, one under four characters
-        /// deferred by the characters it lacks, any other accepted.
-        pub fn decide(reviewer: String, text: String) -> Decision {
-            let outcome = match text.chars().count() {
-                0 => Outcome::Refused {
-                    reason: String::from("empty"),
-                    severity: 3,
-                },
-                length if length < 4 => Outcome::Deferred(4 - length as u32),
-                _ => Outcome::Accepted,
-            };
-            Decision { reviewer, outcome }
-        }
-
-        /// The refusals among the decisions, each as `reviewer: reason (severity)`.
-        pub fn reasons(decisions: Vec<Decision>) -> Vec<String> {
-            decisions
-                .into_iter()
-                .filter_map(|decision| match decision.outcome {
-                    Outcome::Refused { reason, severity } => {
-                        Some(format!("{}: {reason} ({severity})", decision.reviewer))
+            impl Lending {
+                /// Put `books` on the shelf of `key` of the keeper the view reaches, one by one,
+                /// and return how many books that shelf holds. A key the keeper refuses is the
+                /// error.
+                pub async fn lend(key: String, books: Vec<shelf::Book>) -> Result<u32, String> {
+                    let shelf = shelf_ref::get(vec![key]).await?;
+                    let mut held = 0;
+                    for book in books {
+                        held = shelf.shelve(&lent(book));
                     }
-                    _ => None,
-                })
-                .collect()
-        }
-
-        /// The worst of the outcomes, a refusal before a deferral before an acceptance, else
-        /// `fallback`; the error when there is neither.
-        pub fn worst(outcomes: Vec<Outcome>, fallback: Option<Outcome>) -> Result<Outcome, String> {
-            let rank = |outcome: &Outcome| match outcome {
-                Outcome::Refused { severity, .. } => 200 + *severity,
-                Outcome::Deferred(by) => 100 + *by,
-                Outcome::Accepted => 0,
-            };
-            outcomes
-                .into_iter()
-                .max_by_key(rank)
-                .or(fallback)
-                .ok_or_else(|| String::from("no outcome"))
-        }
-    }
-
-    /// A titled document: free JSON in a record, which the macro keeps the author's, converted to
-    /// and from the bindings' record of its text.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Note {
-        pub title: String,
-        pub body: serde_json::Value,
-    }
-
-    /// Free JSON, `serde_json::Value`, crosses as a WIT `string` that holds its text: alone, in a
-    /// list, in an option and in a record of the module.
-    #[service]
-    pub struct Documents;
-
-    impl Documents {
-        /// The document, with `note` under the key `note` when it is an object.
-        pub fn annotated(document: serde_json::Value, note: String) -> serde_json::Value {
-            let mut document = document;
-            if let Some(object) = document.as_object_mut() {
-                object.insert(String::from("note"), serde_json::Value::String(note));
+                    Ok(held)
+                }
             }
-            document
-        }
 
-        /// A note of each document, titled by its position.
-        pub fn notes(documents: Vec<serde_json::Value>) -> Vec<Note> {
-            documents
-                .into_iter()
-                .enumerate()
-                .map(|(index, body)| Note {
-                    title: format!("{index}"),
-                    body,
-                })
-                .collect()
-        }
-
-        /// The body of the note when it is an object.
-        pub fn object(note: Note) -> Option<serde_json::Value> {
-            note.body.is_object().then_some(note.body)
-        }
-    }
-
-    /// A unit of measure, by its symbol: a newtype, which the WIT spells as a `string`, and which
-    /// every symbol makes, through `From`, as a component reads a newtype.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Unit(String);
-
-    impl From<String> for Unit {
-        fn from(symbol: String) -> Self {
-            Self(symbol)
+            /// A book as the view takes it. A derived signature names the shelf's types through the
+            /// implemented interface's module, `shelf::Book`, the copy of the export; the view's
+            /// methods take the copy of the import, which the view's module names,
+            /// `shelf_ref::Book`, and whose `Topic` the bindings' import module of the interface
+            /// defines.
+            fn lent(book: shelf::Book) -> shelf_ref::Book {
+                use super::super::example::shelves::shelf as imported;
+                shelf_ref::Book {
+                    title: book.title,
+                    pages: book.pages,
+                    topic: match book.topic {
+                        shelf::Topic::Fiction => imported::Topic::Fiction,
+                        shelf::Topic::Science => imported::Topic::Science,
+                    },
+                }
+            }
         }
     }
 
-    /// How many there are: a newtype every `u32` makes, through `From`.
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    pub struct Count(u32);
+    pub mod tallies {
+        use alloc::{string::String, vec::Vec};
 
-    impl From<u32> for Count {
-        fn from(count: u32) -> Self {
-            Self(count)
+        /// A running total the caller owns. A function taking it consumes the caller's handle.
+        #[wit_resource]
+        pub struct Tally {
+            total: core::cell::Cell<u32>,
+        }
+
+        impl Tally {
+            #[constructor]
+            pub fn new(start: u32) -> Self {
+                Self {
+                    total: core::cell::Cell::new(start),
+                }
+            }
+
+            /// Add to the total and return it.
+            pub fn add(&self, by: u32) -> u32 {
+                self.total.set(self.total.get() + by);
+                self.total.get()
+            }
+
+            /// Add another tally's total to this one and return it; the other tally is consumed.
+            pub fn absorb(&self, other: Tally) -> u32 {
+                self.add(other.total.get())
+            }
+        }
+
+        /// How many tallies were destroyed: dropped by their last owner, or consumed by a function
+        /// that took them.
+        static DROPPED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+        impl Drop for Tally {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        /// A tally opened, or why none was: an enum with a case with named fields, which stays this
+        /// one, converted at the boundary, the tally it holds included.
+        pub enum Opening {
+            Opened { tally: Tally, at: u32 },
+            Refused { reason: String },
+        }
+
+        /// The tally under another name, which the tallies' functions take and return as the tally.
+        use self::Tally as Counted;
+
+        #[service]
+        pub struct Tallies;
+
+        impl Tallies {
+            /// Start a tally; the caller owns the returned handle.
+            pub fn start(at: u32) -> Tally {
+                Tally::new(at)
+            }
+
+            /// Take a tally back and return its total.
+            pub fn close(tally: Tally) -> u32 {
+                tally.total.get()
+            }
+
+            /// The totals of the tallies a list and an option hold, in order, each taken back.
+            pub fn close_all(tallies: Vec<Tally>, last: Option<Tally>) -> Vec<u32> {
+                tallies
+                    .iter()
+                    .chain(&last)
+                    .map(|tally| tally.total.get())
+                    .collect()
+            }
+
+            /// Open a tally at `at`, or refuse one above a thousand. The tally crosses in the
+            /// record of the case, wrapped into its handle.
+            pub fn open(at: u32) -> Opening {
+                if at > 1000 {
+                    Opening::Refused {
+                        reason: String::from("above a thousand"),
+                    }
+                } else {
+                    Opening::Opened {
+                        tally: Tally::new(at),
+                        at,
+                    }
+                }
+            }
+
+            /// Take an opening back: the total of the tally it holds, taken back from its handle,
+            /// or none.
+            pub fn settle(opening: Opening) -> Option<u32> {
+                match opening {
+                    Opening::Opened { tally, .. } => Some(tally.total.get()),
+                    Opening::Refused { .. } => None,
+                }
+            }
+
+            /// Take a tally, named through a `use` that renames it, beside a step: its total plus
+            /// the step.
+            pub fn close_with(pair: (Counted, u32)) -> u32 {
+                pair.0.total.get() + pair.1
+            }
+
+            /// Start a tally, named through a `use` that renames it.
+            pub fn restart(at: u32) -> Counted {
+                Tally::new(at)
+            }
+
+            /// How many tallies were destroyed.
+            pub fn dropped() -> u32 {
+                DROPPED.load(core::sync::atomic::Ordering::Relaxed)
+            }
         }
     }
 
-    /// An amount in a unit: a record holding a newtype, which the macro keeps the author's,
-    /// converted to and from the bindings' record of the unit's symbol.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Measure {
-        pub amount: f64,
-        pub unit: Unit,
-    }
+    pub mod permits {
+        use alloc::{string::String, vec::Vec};
 
-    /// A newtype crosses as its field, read back through its `From`: alone, in a list, in a tuple
-    /// and in a record of the module.
-    #[service]
-    pub struct Units;
-
-    impl Units {
-        /// The amount in the unit.
-        pub fn measured(amount: f64, unit: Unit) -> Measure {
-            Measure { amount, unit }
+        /// What a holder may do with a document: a record of `bool` fields.
+        #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Access {
+            pub read: bool,
+            pub write: bool,
+            pub share: bool,
         }
 
-        /// How many of the measures are in the unit, and the units of the others, in order.
-        pub fn tally(measures: Vec<Measure>, unit: Unit) -> (Count, Vec<Unit>) {
-            let (same, others): (Vec<Measure>, Vec<Measure>) = measures
-                .into_iter()
-                .partition(|measure| measure.unit == unit);
-            let others = others.into_iter().map(|measure| measure.unit).collect();
-            (Count::from(same.len() as u32), others)
+        /// The access granted to someone.
+        pub struct Grant {
+            pub who: String,
+            pub access: Access,
+        }
+
+        /// The last access a permits object granted and how many grants it made, kept by the
+        /// kernel.
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Granted {
+            pub last: Access,
+            pub grants: u32,
+        }
+
+        #[service]
+        pub struct Permits;
+
+        impl Permits {
+            /// The access with exactly the fields `access` lacks set.
+            pub fn invert(access: Access) -> Access {
+                Access {
+                    read: !access.read,
+                    write: !access.write,
+                    share: !access.share,
+                }
+            }
+
+            /// Grant `access` to `who`; the kernel keeps it as the last access granted.
+            pub fn give(who: String, access: Access) -> Grant {
+                Granted::update(|granted| {
+                    granted.last = access;
+                    granted.grants += 1;
+                });
+                Grant { who, access }
+            }
+
+            /// The fields any of the grants or `extra` sets.
+            pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Access {
+                grants.iter().map(|grant| grant.access).chain(extra).fold(
+                    Access::default(),
+                    |all, access| Access {
+                        read: all.read || access.read,
+                        write: all.write || access.write,
+                        share: all.share || access.share,
+                    },
+                )
+            }
+
+            /// What the kernel keeps for this object.
+            pub fn kept() -> Granted {
+                Granted::read()
+            }
+        }
+    }
+
+    pub mod reviews {
+        use alloc::{format, string::String, vec::Vec};
+
+        /// What a reviewer decided about a text. The case with named fields enters the WIT as a
+        /// record of its own, `outcome-refused`; the enum stays this one, converted at the
+        /// boundary.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub enum Outcome {
+            Accepted,
+            Refused { reason: String, severity: u32 },
+            Deferred(u32),
+        }
+
+        /// A decision with its reviewer; it holds the enum, so it stays the author's too.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct Decision {
+            pub reviewer: String,
+            pub outcome: Outcome,
+        }
+
+        #[service]
+        pub struct Reviews;
+
+        impl Reviews {
+            /// Decide on `text` for `reviewer`: an empty text is refused, one under four characters
+            /// deferred by the characters it lacks, any other accepted.
+            pub fn decide(reviewer: String, text: String) -> Decision {
+                let outcome = match text.chars().count() {
+                    0 => Outcome::Refused {
+                        reason: String::from("empty"),
+                        severity: 3,
+                    },
+                    length if length < 4 => Outcome::Deferred(4 - length as u32),
+                    _ => Outcome::Accepted,
+                };
+                Decision { reviewer, outcome }
+            }
+
+            /// The refusals among the decisions, each as `reviewer: reason (severity)`.
+            pub fn reasons(decisions: Vec<Decision>) -> Vec<String> {
+                decisions
+                    .into_iter()
+                    .filter_map(|decision| match decision.outcome {
+                        Outcome::Refused { reason, severity } => {
+                            Some(format!("{}: {reason} ({severity})", decision.reviewer))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            /// The worst of the outcomes, a refusal before a deferral before an acceptance, else
+            /// `fallback`; the error when there is neither.
+            pub fn worst(
+                outcomes: Vec<Outcome>,
+                fallback: Option<Outcome>,
+            ) -> Result<Outcome, String> {
+                let rank = |outcome: &Outcome| match outcome {
+                    Outcome::Refused { severity, .. } => 200 + *severity,
+                    Outcome::Deferred(by) => 100 + *by,
+                    Outcome::Accepted => 0,
+                };
+                outcomes
+                    .into_iter()
+                    .max_by_key(rank)
+                    .or(fallback)
+                    .ok_or_else(|| String::from("no outcome"))
+            }
+        }
+    }
+
+    pub mod documents {
+        use alloc::{format, string::String, vec::Vec};
+
+        /// A titled document: free JSON in a record, which the macro keeps the author's, converted
+        /// to and from the bindings' record of its text.
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct Note {
+            pub title: String,
+            pub body: serde_json::Value,
+        }
+
+        /// Free JSON, `serde_json::Value`, crosses as a WIT `string` that holds its text: alone, in
+        /// a list, in an option and in a record of the module.
+        #[service]
+        pub struct Documents;
+
+        impl Documents {
+            /// The document, with `note` under the key `note` when it is an object.
+            pub fn annotated(document: serde_json::Value, note: String) -> serde_json::Value {
+                let mut document = document;
+                if let Some(object) = document.as_object_mut() {
+                    object.insert(String::from("note"), serde_json::Value::String(note));
+                }
+                document
+            }
+
+            /// A note of each document, titled by its position.
+            pub fn notes(documents: Vec<serde_json::Value>) -> Vec<Note> {
+                documents
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, body)| Note {
+                        title: format!("{index}"),
+                        body,
+                    })
+                    .collect()
+            }
+
+            /// The body of the note when it is an object.
+            pub fn object(note: Note) -> Option<serde_json::Value> {
+                note.body.is_object().then_some(note.body)
+            }
+        }
+    }
+
+    pub mod units {
+        use alloc::{string::String, vec::Vec};
+
+        /// A unit of measure, by its symbol: a newtype, which the WIT spells as a `string`, and
+        /// which every symbol makes, through `From`, as a component reads a newtype.
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct Unit(String);
+
+        impl From<String> for Unit {
+            fn from(symbol: String) -> Self {
+                Self(symbol)
+            }
+        }
+
+        /// How many there are: a newtype every `u32` makes, through `From`.
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        pub struct Count(u32);
+
+        impl From<u32> for Count {
+            fn from(count: u32) -> Self {
+                Self(count)
+            }
+        }
+
+        /// An amount in a unit: a record holding a newtype, which the macro keeps the author's,
+        /// converted to and from the bindings' record of the unit's symbol.
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct Measure {
+            pub amount: f64,
+            pub unit: Unit,
+        }
+
+        /// A newtype crosses as its field, read back through its `From`: alone, in a list, in a
+        /// tuple and in a record of the module.
+        #[service]
+        pub struct Units;
+
+        impl Units {
+            /// The amount in the unit.
+            pub fn measured(amount: f64, unit: Unit) -> Measure {
+                Measure { amount, unit }
+            }
+
+            /// How many of the measures are in the unit, and the units of the others, in order.
+            pub fn tally(measures: Vec<Measure>, unit: Unit) -> (Count, Vec<Unit>) {
+                let (same, others): (Vec<Measure>, Vec<Measure>) = measures
+                    .into_iter()
+                    .partition(|measure| measure.unit == unit);
+                let others = others.into_iter().map(|measure| measure.unit).collect();
+                (Count::from(same.len() as u32), others)
+            }
         }
     }
 }
@@ -752,30 +800,32 @@ mod guest {
 #[cfg(feature = "native-only-newtype")]
 #[tembra::orb(package = "example:refusing@1.0.0")]
 mod refusing {
-    use alloc::string::String;
+    pub mod symbols {
+        use alloc::string::String;
 
-    /// A symbol, which is never empty.
-    pub struct Symbol(String);
+        /// A symbol, which is never empty.
+        pub struct Symbol(String);
 
-    impl TryFrom<String> for Symbol {
-        type Error = String;
+        impl TryFrom<String> for Symbol {
+            type Error = String;
 
-        fn try_from(symbol: String) -> Result<Self, String> {
-            if symbol.is_empty() {
-                Err(String::from("a symbol is never empty"))
-            } else {
-                Ok(Self(symbol))
+            fn try_from(symbol: String) -> Result<Self, String> {
+                if symbol.is_empty() {
+                    Err(String::from("a symbol is never empty"))
+                } else {
+                    Ok(Self(symbol))
+                }
             }
         }
-    }
 
-    #[service]
-    pub struct Symbols;
+        #[service]
+        pub struct Symbols;
 
-    impl Symbols {
-        /// The symbol, as given.
-        pub fn echo(symbol: Symbol) -> Symbol {
-            symbol
+        impl Symbols {
+            /// The symbol, as given.
+            pub fn echo(symbol: Symbol) -> Symbol {
+                symbol
+            }
         }
     }
 }

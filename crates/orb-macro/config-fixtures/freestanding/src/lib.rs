@@ -5,16 +5,18 @@ extern crate alloc;
 
 #[tembra::orb(package = "example:greeter@1.0.0", no_std)]
 pub mod greeter {
-    use alloc::{format, string::String};
+    pub mod greeting {
+        use alloc::{format, string::String};
 
-    /// Greets.
-    #[service]
-    pub struct Greeting;
+        /// Greets.
+        #[service]
+        pub struct Greeting;
 
-    impl Greeting {
-        /// Greet `name`.
-        pub fn hello(name: String) -> String {
-            format!("Hello, {name}!")
+        impl Greeting {
+            /// Greet `name`.
+            pub fn hello(name: String) -> String {
+                format!("Hello, {name}!")
+            }
         }
     }
 }

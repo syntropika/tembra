@@ -3,20 +3,22 @@
 
 #[tembra::orb(package = "example:shelf@1.0.0")]
 mod probe {
-    /// The echo.
-    #[service]
-    pub struct Echo;
+    pub mod echo {
+        /// The echo.
+        #[service]
+        pub struct Echo;
 
-    impl Echo {
-        /// One ping.
-        pub fn ping() -> u32 {
-            1
+        impl Echo {
+            /// One ping.
+            pub fn ping() -> u32 {
+                1
+            }
         }
     }
 }
 
 #[test]
 fn the_module_of_the_test_derives_its_own_world() {
-    assert_eq!(probe::Echo::ping(), 1);
+    assert_eq!(probe::echo::Echo::ping(), 1);
     assert!(probe::WIT.contains("world probe"), "{}", probe::WIT);
 }

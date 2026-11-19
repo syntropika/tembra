@@ -1,16 +1,15 @@
-/// Notes, with what the crate's `archive` feature changes under `#[cfg]`s: a method of `Notes`
-/// for each value of the feature, the service `Shelf`, its struct and its block, and the
-/// sub-module `archiving` with the hook it declares. The macro expands the module once per value
-/// and the compiler keeps the one being built, so the component, its WIT and the contract
-/// `cargo tembra build` writes from it are those of the build's features, and so is `orb()`.
+/// Notes, with what the crate's `archive` feature changes under `#[cfg]`s: a method of `Notes` for
+/// each value of the feature, the service `Shelf` with its module, and the sub-module `archiving`
+/// with the hook it declares. The macro expands the module once per value and the compiler keeps
+/// the one being built, so the component, its WIT and the contract `cargo tembra build` writes from
+/// it are those of the build's features, and so is `orb()`.
 #[cfg_attr(
     feature = "no-std",
     tembra::orb(package = "example:notes@1.0.0", no_std)
 )]
 #[cfg_attr(not(feature = "no-std"), tembra::orb(package = "example:notes@1.0.0"))]
 pub mod notebook {
-    use alloc::string::String;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::AtomicU32;
 
     /// How many notes are kept.
     static KEPT: AtomicU32 = AtomicU32::new(0);
@@ -19,43 +18,54 @@ pub mod notebook {
     #[cfg(feature = "archive")]
     static SHELVED: AtomicU32 = AtomicU32::new(0);
 
-    /// Keeps notes.
-    #[service]
-    pub struct Notes;
+    pub mod notes {
+        use super::KEPT;
+        use alloc::string::String;
+        use core::sync::atomic::Ordering;
 
-    impl Notes {
-        /// Keep a note and return how many are kept.
-        pub fn add(_text: String) -> u32 {
-            KEPT.fetch_add(1, Ordering::Relaxed) + 1
-        }
+        /// Keeps notes.
+        #[service]
+        pub struct Notes;
 
-        /// Throw the notes away, without an archive to keep them, and return how many there were.
-        #[cfg(not(feature = "archive"))]
-        pub fn clear() -> u32 {
-            KEPT.swap(0, Ordering::Relaxed)
-        }
+        impl Notes {
+            /// Keep a note and return how many are kept.
+            pub fn add(_text: String) -> u32 {
+                KEPT.fetch_add(1, Ordering::Relaxed) + 1
+            }
 
-        /// Move the notes onto the shelf, tell the contributors to the archive's hook how many,
-        /// and return how many there were.
-        #[cfg(feature = "archive")]
-        pub fn archive() -> u32 {
-            let notes = KEPT.swap(0, Ordering::Relaxed);
-            SHELVED.fetch_add(notes, Ordering::Relaxed);
-            archiving::Archived::run(notes);
-            notes
+            /// Throw the notes away, without an archive to keep them, and return how many there
+            /// were.
+            #[cfg(not(feature = "archive"))]
+            pub fn clear() -> u32 {
+                KEPT.swap(0, Ordering::Relaxed)
+            }
+
+            /// Move the notes onto the shelf, tell the contributors to the archive's hook how many,
+            /// and return how many there were.
+            #[cfg(feature = "archive")]
+            pub fn archive() -> u32 {
+                let notes = KEPT.swap(0, Ordering::Relaxed);
+                super::SHELVED.fetch_add(notes, Ordering::Relaxed);
+                super::archiving::Archived::run(notes);
+                notes
+            }
         }
     }
 
-    /// Holds the archived notes: the service's struct and its block go with the `archive` feature.
+    /// Holds the archived notes: the service's module goes with the `archive` feature.
     #[cfg(feature = "archive")]
-    #[service]
-    pub struct Shelf;
+    pub mod shelf {
+        use super::SHELVED;
+        use core::sync::atomic::Ordering;
 
-    #[cfg(feature = "archive")]
-    impl Shelf {
-        /// How many notes the shelf holds.
-        pub fn count() -> u32 {
-            SHELVED.load(Ordering::Relaxed)
+        #[service]
+        pub struct Shelf;
+
+        impl Shelf {
+            /// How many notes the shelf holds.
+            pub fn count() -> u32 {
+                SHELVED.load(Ordering::Relaxed)
+            }
         }
     }
 

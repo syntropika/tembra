@@ -198,7 +198,7 @@ fn a_crate_with_two_orbs_builds_natively_and_fails_as_a_component() {
         "{errors}"
     );
     assert!(
-        errors.contains("src/lib.rs:27:"),
+        errors.contains("src/lib.rs:29:"),
         "not on the second module\n{errors}"
     );
 }
