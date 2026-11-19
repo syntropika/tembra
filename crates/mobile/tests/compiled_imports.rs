@@ -123,8 +123,8 @@ fn portable_compiled_imports_use_scoped_host_events() {
 }
 
 /// A refused dependency call traps the synchronous import and quarantines only this Store. The
-/// trap names the platform's structured refusal by its code and reason, and a bare text as
-/// `invalid/platform_reply`.
+/// trap names the platform's structured refusal by its code and reason, and a bare text or an
+/// unknown code as `invalid/platform_reply`.
 #[test]
 fn portable_compiled_import_refusal_quarantines_the_importer() {
     for (refusal, named) in [
@@ -134,6 +134,10 @@ fn portable_compiled_import_refusal_quarantines_the_importer() {
         ),
         (
             json!({"error": "provider refused"}),
+            "dependency call failed: invalid/platform_reply: provider refused",
+        ),
+        (
+            json!({"error": {"code": "other", "reason": "reference", "message": "provider refused"}}),
             "dependency call failed: invalid/platform_reply: provider refused",
         ),
     ] {

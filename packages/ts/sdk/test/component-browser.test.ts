@@ -362,9 +362,11 @@ describe("component port", () => {
       "released/reference: The reference has been released",
     ],
     [
+      // The kernel's refusal of a cancelled root, which the native worker's trap names too
+      // (`cancellation_settles_inflight_work_then_refuses_later_imports`).
       "a caller's cancellation",
-      () => new TembraError(Errors.Cancelled.Root),
-      "cancelled/root: The operation was cancelled",
+      () => new TembraError(Errors.Cancelled.Root, "scope is cancelled"),
+      "cancelled/root: scope is cancelled",
     ],
   ] as const) {
     test(`${what} traps its caller as the native worker's does`, async () => {

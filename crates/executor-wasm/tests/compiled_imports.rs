@@ -6,7 +6,7 @@
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc, time::Duration};
-use tembra::{Host, Orb, Reference, Service};
+use tembra::{Host, Orb, Reference, Service, core::Code};
 use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
 #[path = "support/components.rs"]
@@ -329,11 +329,34 @@ fn cancellation_settles_inflight_work_then_refuses_later_imports() {
         "the in-flight import settled and no import ran after cancellation"
     );
     assert_eq!(engine.instances(), 0, "the quarantined Store was retired");
+    // The refused import traps with the kernel's refusal of the cancelled root, as the JS adapter
+    // words it (`component-browser.test.ts`): every later entry names that trap.
     let quarantined = call(&mut pool, &host, &calc, "alice", "quadruple", 1).unwrap_err();
-    assert!(
-        quarantined.message.contains("component trap"),
+    assert_eq!(
+        (quarantined.code, quarantined.reason.as_str()),
+        (Code::Unavailable, "wasm_executor_quarantined"),
         "{quarantined}"
     );
+    assert!(
+        quarantined.message.starts_with("component trap: ")
+            && quarantined
+                .message
+                .ends_with("dependency call failed: cancelled/root: scope is cancelled"),
+        "{quarantined}"
+    );
+    // The caller answers that trap, or the cancellation itself when its root ended first.
+    if error.reason == "wasm_executor" {
+        assert_eq!(
+            (error.code, error.message.as_str()),
+            (Code::Unavailable, quarantined.message.as_str())
+        );
+    } else {
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            (Code::Cancelled, "root"),
+            "{error}"
+        );
+    }
     calc.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }

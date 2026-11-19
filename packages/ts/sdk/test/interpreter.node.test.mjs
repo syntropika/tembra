@@ -1065,3 +1065,68 @@ test(
     for (const host of hosts) assertRetired(host, engines);
   },
 );
+
+test(
+  "Node: a refused incoming exchange stays active until its finish",
+  { skip: missing("TEMBRA_WASM_HTTP_HANDLER"), timeout: 60000 },
+  async () => {
+    const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
+    const artifact = new binding.NodeArtifact(
+      new Uint8Array(
+        new binding.NodeContract(handlerWit, "handler").componentArtifact(
+          new Uint8Array(await readFile(httpHandler)),
+          "web",
+          1,
+        ),
+      ),
+    );
+    const bindings = {
+      "wasi:http/types@0.3.0": { kind: "host", provider: "wasi:http/handler@0.3.0" },
+    };
+    const port = new binding.NodeInterpreter("{}", () => {}).open(
+      artifact,
+      JSON.stringify(bindings),
+      "{}",
+    );
+    for (const [environment, service] of [
+      [1, null],
+      [2, "handler"],
+    ])
+      assert.ok(
+        "ok" in
+          JSON.parse(
+            port.declare(JSON.stringify({ kind: "create", environment, service }), () => "null"),
+          ),
+      );
+    const packet = JSON.stringify({
+      kind: "ingress",
+      environment: 2,
+      service: "handler",
+      method: "handle",
+    });
+    /** Serve one request; resolves with its completion once the port finished it. */
+    const serve = (pathWithQuery) =>
+      new Promise((resolve) => {
+        port.ingress(packet, { method: "GET", pathWithQuery, fields: [] }, (event) => {
+          if (event.kind === "request-pull") port.supplyRequest(null, [], null);
+          if (event.kind !== "complete") return;
+          port.finish();
+          resolve(JSON.parse(event.result));
+        });
+      });
+    const trapped = await serve("/trap");
+    assert.equal(trapped.error.reason, "wasm_executor", trapped.error.message);
+    // The quarantined revision refuses the request; its completion is still queued here.
+    const refused = serve("/status");
+    assert.throws(() => port.ingress(packet, { method: "GET", fields: [] }, () => {}), /active/);
+    assert.throws(() => port.dispatch("{}", () => {}), /active/);
+    assert.throws(() => port.close(), /settlement/);
+    port.disconnect();
+    assert.deepEqual((await refused).error, {
+      code: "unavailable",
+      reason: "wasm_executor_quarantined",
+      message: trapped.error.message,
+    });
+    port.close();
+  },
+);
