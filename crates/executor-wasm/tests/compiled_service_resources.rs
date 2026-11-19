@@ -6,7 +6,8 @@
 //! The fixture is a real component encoded from a small core module, so the test runs without a
 //! guest toolchain. Its root owns `a`; each object of its service owns `x`, which depends on `a`,
 //! and `y`, which depends on `x`. Its callbacks log each open at level info and each close at
-//! level warn, with the resource's name as the message, and hand out handles in opening order.
+//! level warn, with the resource's name as the message, and hand out handles in opening order;
+//! when `down` says so, the `y` that would get the handle 5 answers `err("down")` instead.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
@@ -48,11 +49,12 @@ const PROBE: &str = "sockets::example:sockets/probe@1.0.0";
 
 /// The names `a`, `x` and `y` at 64, 65 and 66; the dependency lists `[a]` at 96 and `[x]` at
 /// 104; the root's one declaration of 20 bytes at 256 and the service's two from 276; the root's
-/// list at the return area 128 and the service's at 136. Without a root resource, `x` depends on
-/// nothing.
-fn module(root: bool) -> String {
+/// list at the return area 128 and the service's at 136; the message `down` at 72. Without a root
+/// resource, `x` depends on nothing. The result of an open is written at 512.
+fn module(root: bool, down: bool) -> String {
+    let down = i32::from(down);
     let data = [
-        r#"(data (i32.const 64) "axy")"#.to_owned(),
+        r#"(data (i32.const 64) "axy") (data (i32.const 72) "down")"#.to_owned(),
         names(96, 64),
         names(104, 65),
         list(128, 256, 1),
@@ -92,12 +94,24 @@ fn module(root: bool) -> String {
     local.get $size i32.add
     global.set $heap
     local.get $block)
-  ;; open: log the name at level info (2) and answer the next handle.
+  ;; open -> result<u32, string>: the `y` that would be 5 is down when the module says so;
+  ;; otherwise log the name at level info (2) and answer the next handle.
   (func $open (param $name i32) (param $len i32) (result i32)
-    i32.const 2 local.get $name local.get $len call $log
-    global.get $last i32.const 1 i32.add
-    global.set $last
-    global.get $last)
+    local.get $name i32.load8_u i32.const 121 i32.eq
+    global.get $last i32.const 4 i32.eq i32.and
+    i32.const {down} i32.and
+    if
+      (i32.store8 (i32.const 512) (i32.const 1))
+      (i32.store (i32.const 516) (i32.const 72))
+      (i32.store (i32.const 520) (i32.const 4))
+    else
+      i32.const 2 local.get $name local.get $len call $log
+      global.get $last i32.const 1 i32.add
+      global.set $last
+      (i32.store8 (i32.const 512) (i32.const 0))
+      (i32.store (i32.const 516) (global.get $last))
+    end
+    i32.const 512)
   ;; close: log the name at level warn (3).
   (func $close (param $name i32) (param $len i32)
     i32.const 3 local.get $name local.get $len call $log)
@@ -141,11 +155,11 @@ fn words(at: u32, words: &[u32]) -> String {
     format!(r#"(data (i32.const {at}) "{bytes}")"#)
 }
 
-fn artifact(root: bool) -> Vec<u8> {
+fn artifact(root: bool, down: bool) -> Vec<u8> {
     components::encode(
         &wit(root),
         "sockets",
-        &module(root),
+        &module(root, down),
         "sockets",
         &ComponentRoles::default(),
     )
@@ -209,7 +223,9 @@ fn each_object_opens_its_resources_after_the_roots_and_closes_them_before() {
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![
-        engine.load(&artifact(true), Install::default()).unwrap(),
+        engine
+            .load(&artifact(true, false), Install::default())
+            .unwrap(),
     ])
     .unwrap();
     let one = object(&mut pool, &host, "one");
@@ -253,7 +269,9 @@ fn a_service_owns_resources_without_the_root() {
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![
-        engine.load(&artifact(false), Install::default()).unwrap(),
+        engine
+            .load(&artifact(false, false), Install::default())
+            .unwrap(),
     ])
     .unwrap();
     let one = object(&mut pool, &host, "one");
@@ -264,5 +282,50 @@ fn a_service_owns_resources_without_the_root() {
     assert_eq!(
         logged(&records),
         expected(&[("info", "x"), ("info", "y"), ("warn", "y"), ("warn", "x")])
+    );
+}
+
+/// The second object's `y` answers `err("down")` after its `x` opened: that object's creation
+/// fails with the message and the kernel closes its `x`; the first object and the root's `a`
+/// keep working, and close as before.
+#[test]
+fn an_object_whose_open_answers_an_error_is_not_created_and_closes_what_opened() {
+    let (engine, records) = engine();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine
+            .load(&artifact(true, true), Install::default())
+            .unwrap(),
+    ])
+    .unwrap();
+    let one = object(&mut pool, &host, "one");
+    let two = Rc::new(host.get(PROBE, vec!["two".into()], "alice").unwrap());
+    let refused = pool
+        .run_until(two.ready())
+        .expect_err("the object is not created")
+        .to_string();
+    assert!(
+        refused.contains("the resource `y` did not open: down"),
+        "{refused}"
+    );
+    assert_eq!(
+        logged(&records),
+        expected(&[
+            ("info", "a"),
+            ("info", "x"),
+            ("info", "y"),
+            ("info", "x"),
+            ("warn", "x"),
+        ])
+    );
+    assert_eq!(call(&mut pool, &host, &one, "mine"), 3);
+    assert_eq!(call(&mut pool, &host, &one, "shared"), 1);
+    one.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(
+        logged(&records)[5..],
+        expected(&[("warn", "y"), ("warn", "x"), ("warn", "a")])
     );
 }

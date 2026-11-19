@@ -1,10 +1,11 @@
 //! A compiled Orb's root resources and their dependencies: the component lists each resource
 //! after the resources it depends on, the kernel opens them in that order and closes them in
-//! reverse, and a dependency the component did not declare before it refuses the Orb.
+//! reverse, a dependency the component did not declare before it refuses the Orb, and an open
+//! that answers an error fails the activation and closes what already opened.
 //!
 //! The fixture is a real component encoded from a small core module, so the test runs without a
 //! guest toolchain. Its callbacks log each open at level info and each close at level warn, with
-//! the resource's name as the message.
+//! the resource's name as the message; opening `c` answers `err("down")` when `down` says so.
 use futures::executor::LocalPool;
 use std::sync::{Arc, Mutex};
 use tembra::Host;
@@ -30,15 +31,19 @@ world stack {
 const PROBE: &str = "stack::example:stack/probe@1.0.0";
 
 /// The module with `$declarations`, the data segments that list the resources: the names `a`,
-/// `b` and `c` at 64, 65 and 66, dependency lists from 96, three declarations of 20 bytes
-/// (name, version, dependencies) from 256, and the list itself at the return area 128.
-fn module(declarations: &str) -> String {
+/// `b` and `c` at 64, 65 and 66, the message `down` at 72, dependency lists from 96, three
+/// declarations of 20 bytes (name, version, dependencies) from 256, and the list itself at the
+/// return area 128. The result of an open is written at 512: `ok(7)`, or `err("down")` for `c`
+/// when `down` says so.
+fn module(declarations: &str, down: bool) -> String {
+    let down = i32::from(down);
     format!(
         r#"(module
   (import "tembra:guest/context@1.0.0" "log" (func $log (param i32 i32 i32)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 1024))
   (data (i32.const 64) "abc")
+  (data (i32.const 72) "down")
   {declarations}
   (func (export "cabi_realloc") (param $old i32) (param $old_size i32) (param $align i32) (param $size i32) (result i32)
     (local $block i32)
@@ -51,10 +56,21 @@ fn module(declarations: &str) -> String {
     local.get $block)
   (func (export "tembra:guest/resources-init@1.0.0#declare") (result i32)
     i32.const 128)
-  ;; open(name) -> u32: log the name at level info (2); the handle is 7.
+  ;; open(name) -> result<u32, string>: `c` is down when the module says so; otherwise log the
+  ;; name at level info (2) and answer the handle 7.
   (func (export "tembra:guest/resources-init@1.0.0#open") (param i32 i32) (result i32)
-    i32.const 2 local.get 0 local.get 1 call $log
-    i32.const 7)
+    local.get 0 i32.load8_u i32.const 99 i32.eq
+    i32.const {down} i32.and
+    if
+      (i32.store8 (i32.const 512) (i32.const 1))
+      (i32.store (i32.const 516) (i32.const 72))
+      (i32.store (i32.const 520) (i32.const 4))
+    else
+      i32.const 2 local.get 0 local.get 1 call $log
+      (i32.store8 (i32.const 512) (i32.const 0))
+      (i32.store (i32.const 516) (i32.const 7))
+    end
+    i32.const 512)
   ;; close(name, handle): log the name at level warn (3).
   (func (export "tembra:guest/resources-init@1.0.0#close") (param i32 i32 i32)
     i32.const 3 local.get 0 local.get 1 call $log)
@@ -89,14 +105,27 @@ fn names(at: u32, name: u32) -> String {
     format!(r#"(data (i32.const {at}) "{bytes}")"#)
 }
 
-fn artifact(declarations: &str) -> Vec<u8> {
+fn artifact(declarations: &str, down: bool) -> Vec<u8> {
     components::encode(
         WIT,
         "stack",
-        &module(declarations),
+        &module(declarations, down),
         "stack",
         &ComponentRoles::default(),
     )
+}
+
+/// The declarations of `a`, `b` depending on `a` and `c` depending on `b`.
+fn chain() -> String {
+    [
+        list(),
+        names(96, 64),
+        names(104, 65),
+        declaration(256, 64, 96, 0),
+        declaration(276, 65, 96, 1),
+        declaration(296, 66, 104, 1),
+    ]
+    .join("\n  ")
 }
 
 fn engine() -> (Engine, Arc<Mutex<Vec<LogRecord>>>) {
@@ -111,21 +140,12 @@ fn engine() -> (Engine, Arc<Mutex<Vec<LogRecord>>>) {
 /// `c` depends on `b`, `b` on `a`: the kernel opens `a`, `b`, `c` and closes `c`, `b`, `a`.
 #[test]
 fn root_resources_open_after_their_dependencies_and_close_before_them() {
-    let declarations = [
-        list(),
-        names(96, 64),
-        names(104, 65),
-        declaration(256, 64, 96, 0),
-        declaration(276, 65, 96, 1),
-        declaration(296, 66, 104, 1),
-    ]
-    .join("\n  ");
     let (engine, records) = engine();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![
         engine
-            .load(&artifact(&declarations), Install::default())
+            .load(&artifact(&chain(), false), Install::default())
             .unwrap(),
     ])
     .unwrap();
@@ -169,7 +189,7 @@ fn a_dependency_not_declared_before_its_resource_refuses_the_orb() {
     let installed = host
         .install(vec![
             engine
-                .load(&artifact(&declarations), Install::default())
+                .load(&artifact(&declarations, false), Install::default())
                 .unwrap(),
         ])
         .and_then(|()| {
@@ -190,4 +210,39 @@ fn a_dependency_not_declared_before_its_resource_refuses_the_orb() {
             .all(|record| record.level != "info"),
         "no resource opens"
     );
+}
+
+/// Opening `c` answers `err("down")` after `a` and `b` opened: the activation fails, and the
+/// kernel closes `b`, then `a`, through the component, which stays serving.
+#[test]
+fn an_open_that_answers_an_error_fails_the_activation_and_closes_what_opened() {
+    let (engine, records) = engine();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine
+            .load(&artifact(&chain(), true), Install::default())
+            .unwrap(),
+    ])
+    .unwrap();
+    let probe = host.get(PROBE, vec!["main".into()], "alice").unwrap();
+    let refused = pool
+        .run_until(probe.ready())
+        .expect_err("the activation fails")
+        .to_string();
+    // The object waiting on the root's activation is told that the root's scope is closing, as
+    // it is for a native Orb whose root resource fails to open; the opener's message stays with
+    // the root's activation program.
+    assert!(refused.contains("scope_closed"), "{refused}");
+    pool.run_until(host.close()).unwrap();
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let records: Vec<(String, String)> = records
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|record| (record.level.clone(), record.message.clone()))
+        .collect();
+    let expected = [("info", "a"), ("info", "b"), ("warn", "b"), ("warn", "a")]
+        .map(|(level, name)| (level.to_owned(), name.to_owned()));
+    assert_eq!(records, expected);
 }

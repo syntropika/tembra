@@ -44,8 +44,8 @@ interface resources {
 /// Exported by a compiled Orb whose root owns resources. The kernel asks for the declarations
 /// when it creates the root, opens each resource during activation and closes it at teardown.
 interface resources-init {
-    /// A resource of the root: its name, the version of its contract and the names of the
-    /// resources that open before it and close after it.
+    /// A resource: its name, the version of its contract and the names of the resources that
+    /// open before it and close after it.
     record declaration {
         name: string,
         version: u32,
@@ -53,8 +53,9 @@ interface resources-init {
     }
     /// The resources the root declares, each after the resources it depends on.
     declare: func() -> list<declaration>;
-    /// Open the named resource and return the component's handle to its value.
-    open: func(name: string) -> u32;
+    /// Open the named resource and return the component's handle to its value; an error fails
+    /// the Orb's activation with its message, and the kernel closes what already opened.
+    open: func(name: string) -> result<u32, string>;
     /// Close the named resource's value.
     close: func(name: string, handle: u32);
 }
@@ -69,8 +70,9 @@ interface service-resources-init {
     /// resources it depends on: the root's, or earlier ones of the same service.
     declare: func(service: string) -> list<declaration>;
     /// Open the named resource of the object running the call and return the component's handle
-    /// to its value.
-    open: func(service: string, name: string) -> u32;
+    /// to its value; an error fails the object's creation with its message, and the kernel closes
+    /// what the object already opened.
+    open: func(service: string, name: string) -> result<u32, string>;
     /// Close the named resource's value.
     close: func(service: string, name: string, handle: u32);
 }

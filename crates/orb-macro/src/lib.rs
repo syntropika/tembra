@@ -6454,7 +6454,7 @@ fn resource_code(
             .as_ref()
             .expect("a resource has its #[open] function");
         let slot = slot(resource);
-        quote! { #name => { #slot.open(#path::#open()); 1 } }
+        quote! { #name => { #slot.open(#path::#open()); ::core::result::Result::Ok(1) } }
     });
     let closers = resources.iter().map(|resource| {
         let name = wit::kebab(&resource.ident);
@@ -6502,10 +6502,12 @@ fn resource_code(
             fn declare() -> __tembra_resource::Vec<exports::tembra::guest::resources_init::Declaration> {
                 ::core::convert::From::from([#(#declarations),*])
             }
-            fn open(name: __tembra_resource::String) -> u32 {
+            fn open(
+                name: __tembra_resource::String,
+            ) -> ::core::result::Result<u32, __tembra_resource::String> {
                 match name.as_str() {
                     #(#openers)*
-                    _ => ::core::panic!("unknown resource"),
+                    _ => ::core::result::Result::Err(::core::convert::From::from("unknown resource")),
                 }
             }
             fn close(name: __tembra_resource::String, _handle: u32) {

@@ -506,7 +506,20 @@ export class ComponentKernel {
     const release = await this.owner.gate.enter(undefined, callback.signal);
     try {
       if (numbered.kind === "open") {
-        const handle = await this.#call(environment, callback, exported, [numbered.name]);
+        // An opener answers `result<u32, string>`: its error fails this open with the message,
+        // so the kernel closes what already opened, as for a native opener.
+        const answer = (await this.#call(environment, callback, exported, [numbered.name])) as {
+          tag?: unknown;
+          val?: unknown;
+        };
+        if (answer?.tag === "err")
+          throw new Error(
+            typeof answer.val === "string"
+              ? `the resource \`${numbered.name}\` did not open: ${answer.val}`
+              : `the resource \`${numbered.name}\` did not open`,
+          );
+        if (answer?.tag !== "ok") throw new Error("the resource opener answered no result");
+        const handle = answer.val;
         if (!isU32(handle)) throw new Error("resource handle is not a u32");
         return handle;
       }
