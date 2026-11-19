@@ -329,8 +329,9 @@ fn cancellation_settles_inflight_work_then_refuses_later_imports() {
         "the in-flight import settled and no import ran after cancellation"
     );
     assert_eq!(engine.instances(), 0, "the quarantined Store was retired");
-    // The refused import traps with the kernel's refusal of the cancelled root, as the JS adapter
-    // words it (`component-browser.test.ts`): every later entry names that trap.
+    // The refused import traps with the kernel's refusal of the cancelled root, `cancelled/root`,
+    // the code and reason the JS adapter answers too (`component-browser.test.ts`), whose runtime
+    // words the cancellation differently. Every later entry names that trap.
     let quarantined = call(&mut pool, &host, &calc, "alice", "quadruple", 1).unwrap_err();
     assert_eq!(
         (quarantined.code, quarantined.reason.as_str()),

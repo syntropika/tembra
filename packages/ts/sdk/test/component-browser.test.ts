@@ -362,11 +362,12 @@ describe("component port", () => {
       "released/reference: The reference has been released",
     ],
     [
-      // The kernel's refusal of a cancelled root, which the native worker's trap names too
-      // (`cancellation_settles_inflight_work_then_refuses_later_imports`).
+      // The JS runtime's own cancellation. The native worker answers the same code and reason,
+      // `cancelled/root` in a `wasm_executor` trap, but its kernel's text differs ("scope is
+      // cancelled", `cancellation_settles_inflight_work_then_refuses_later_imports`).
       "a caller's cancellation",
-      () => new TembraError(Errors.Cancelled.Root, "scope is cancelled"),
-      "cancelled/root: scope is cancelled",
+      () => new TembraError(Errors.Cancelled.Root),
+      "cancelled/root: The operation was cancelled",
     ],
   ] as const) {
     test(`${what} traps its caller as the native worker's does`, async () => {

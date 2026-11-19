@@ -1088,45 +1088,52 @@ test(
       JSON.stringify(bindings),
       "{}",
     );
-    for (const [environment, service] of [
-      [1, null],
-      [2, "handler"],
-    ])
-      assert.ok(
-        "ok" in
-          JSON.parse(
-            port.declare(JSON.stringify({ kind: "create", environment, service }), () => "null"),
-          ),
-      );
-    const packet = JSON.stringify({
-      kind: "ingress",
-      environment: 2,
-      service: "handler",
-      method: "handle",
-    });
-    /** Serve one request; resolves with its completion once the port finished it. */
-    const serve = (pathWithQuery) =>
-      new Promise((resolve) => {
-        port.ingress(packet, { method: "GET", pathWithQuery, fields: [] }, (event) => {
-          if (event.kind === "request-pull") port.supplyRequest(null, [], null);
-          if (event.kind !== "complete") return;
-          port.finish();
-          resolve(JSON.parse(event.result));
-        });
+    /** The last request served, awaited before the port closes. */
+    let pending = Promise.resolve();
+    try {
+      for (const [environment, service] of [
+        [1, null],
+        [2, "handler"],
+      ])
+        assert.ok(
+          "ok" in
+            JSON.parse(
+              port.declare(JSON.stringify({ kind: "create", environment, service }), () => "null"),
+            ),
+        );
+      const packet = JSON.stringify({
+        kind: "ingress",
+        environment: 2,
+        service: "handler",
+        method: "handle",
       });
-    const trapped = await serve("/trap");
-    assert.equal(trapped.error.reason, "wasm_executor", trapped.error.message);
-    // The quarantined revision refuses the request; its completion is still queued here.
-    const refused = serve("/status");
-    assert.throws(() => port.ingress(packet, { method: "GET", fields: [] }, () => {}), /active/);
-    assert.throws(() => port.dispatch("{}", () => {}), /active/);
-    assert.throws(() => port.close(), /settlement/);
-    port.disconnect();
-    assert.deepEqual((await refused).error, {
-      code: "unavailable",
-      reason: "wasm_executor_quarantined",
-      message: trapped.error.message,
-    });
-    port.close();
+      /** Serve one request; resolves with its completion once the port finished it. */
+      const serve = (pathWithQuery) =>
+        (pending = new Promise((resolve) => {
+          port.ingress(packet, { method: "GET", pathWithQuery, fields: [] }, (event) => {
+            if (event.kind === "request-pull") port.supplyRequest(null, [], null);
+            if (event.kind !== "complete") return;
+            port.finish();
+            resolve(JSON.parse(event.result));
+          });
+        }));
+      const trapped = await serve("/trap");
+      assert.equal(trapped.error.reason, "wasm_executor", trapped.error.message);
+      // The quarantined revision refuses the request; its completion is still queued here.
+      const refused = serve("/status");
+      assert.throws(() => port.ingress(packet, { method: "GET", fields: [] }, () => {}), /active/);
+      assert.throws(() => port.dispatch("{}", () => {}), /active/);
+      assert.throws(() => port.close(), /settlement/);
+      port.disconnect();
+      assert.deepEqual((await refused).error, {
+        code: "unavailable",
+        reason: "wasm_executor_quarantined",
+        message: trapped.error.message,
+      });
+    } finally {
+      // An exchange a failed assertion left behind completes before the port closes.
+      await pending;
+      port.close();
+    }
   },
 );
