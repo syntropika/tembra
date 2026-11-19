@@ -99,3 +99,65 @@ fn portable_compiled_filesystem_enforces_standard_preopen_permissions() {
         assert_eq!(backend.instances(), 0);
     }
 }
+
+/// A trap answers `unavailable/wasm_executor`, and the next entry, which the quarantined revision
+/// refuses before it begins, completes with `unavailable/wasm_executor_quarantined` and the same
+/// message, as a callback's own failure completes.
+#[test]
+#[ignore = "requires TEMBRA_WASM_PROBE"]
+fn portable_refused_entry_after_a_trap_keeps_its_code_and_reason() {
+    let raw = std::fs::read(std::env::var_os("TEMBRA_WASM_PROBE").unwrap()).unwrap();
+    let contract = Contract::from_source(
+        "probe.wit",
+        include_str!("../../executor-wasm/tests/wit/probe/probe.wit"),
+        Some("probe-provider"),
+    )
+    .unwrap();
+    let artifact = NativeArtifact::new(
+        contract
+            .component_artifact(&raw, "probe", 1, &Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let backend = NativeInterpreter::new(
+        json!({"filesystem":{"data":directory.path()}}).to_string(),
+        vec![],
+    )
+    .unwrap();
+    let grants = json!({"system":["clocks"],"filesystem":[{"provider":"data","mount":"/data","writable":false}]});
+    let plan: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"probe","apiVersion":1,"requires":{},"grants":grants,"filesystem":["data"],"network":[]}).to_string())).unwrap();
+    let port = backend
+        .open(
+            artifact,
+            plan["ok"]["bindings"].to_string(),
+            grants.to_string(),
+            None,
+        )
+        .unwrap();
+    exchange(
+        &port,
+        json!({"kind":"create","environment":1,"service":"probe"}),
+        true,
+    );
+    let invoke = |method: &str, args: Value| {
+        let function = contract
+            .bind("example:probe/probe@1.0.0", method, true)
+            .unwrap();
+        exchange(
+            &port,
+            json!({"kind":"invoke","environment":1,"function":function,"args":args}),
+            false,
+        )
+    };
+    let trapped = invoke("trap", json!([]));
+    assert_eq!(trapped["error"]["code"], "unavailable", "{trapped}");
+    assert_eq!(trapped["error"]["reason"], "wasm_executor", "{trapped}");
+    let message = trapped["error"]["message"].as_str().unwrap().to_owned();
+    assert!(message.starts_with("component trap: "), "{message}");
+    let refused = invoke("spin", json!([1]));
+    assert_eq!(
+        refused["error"],
+        json!({"code": "unavailable", "reason": "wasm_executor_quarantined", "message": message})
+    );
+}

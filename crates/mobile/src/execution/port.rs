@@ -121,7 +121,10 @@ struct State {
     ticket: Option<PortTicket>,
 }
 struct Exchange {
-    events: PortEvents,
+    /// The exchange's events; none when its entry was refused.
+    events: Option<PortEvents>,
+    /// A refused entry, answered once as the exchange's completion.
+    refused: Mutex<Option<tembra::Error>>,
     /// The carrier of an incoming HTTP exchange.
     ingress: Option<IngressPort>,
     closed: AtomicBool,
@@ -190,6 +193,19 @@ impl NativePort {
             .call(job)
     }
 
+    /// An exchange whose entry was refused, such as one into a quarantined revision: it completes
+    /// once with the refusal's code, reason and message, as a callback's own failure completes.
+    fn refusal(&self, refused: tembra::Error) -> Arc<Exchange> {
+        Arc::new(Exchange {
+            events: None,
+            refused: Mutex::new(Some(refused)),
+            ingress: None,
+            closed: AtomicBool::new(false),
+            replies: Mutex::default(),
+            sequence: self.sequence.clone(),
+        })
+    }
+
     /// Retain the current exchange without holding a platform lock across an await.
     fn active(&self) -> Result<Arc<Exchange>, MobileError> {
         self.exchange
@@ -218,18 +234,27 @@ impl NativePort {
         if active.is_some() {
             return Err(error("An interpreter exchange is already active"));
         }
-        let events = self.command(move |state| {
-            let (ticket, events) = if declaration {
+        let begun = self.command(move |state| {
+            Ok(if declaration {
                 state.port.begin_declaration(packet)
             } else {
                 state.port.begin(packet)
             }
-            .map_err(error)?;
-            state.ticket = Some(ticket);
-            Ok(events)
+            .map(|(ticket, events)| {
+                state.ticket = Some(ticket);
+                events
+            }))
         })?;
+        let events = match begun {
+            Ok(events) => events,
+            Err(refused) => {
+                *active = Some(self.refusal(refused));
+                return Ok(());
+            }
+        };
         *active = Some(Arc::new(Exchange {
-            events,
+            events: Some(events),
+            refused: Mutex::default(),
             ingress: None,
             closed: AtomicBool::new(false),
             replies: Mutex::default(),
@@ -242,8 +267,15 @@ impl NativePort {
     /// next event available to a later receive.
     pub async fn receive(&self) -> Result<String, MobileError> {
         let exchange = self.active()?;
+        if let Some(refused) = exchange.refused.lock().map_err(error)?.take() {
+            return Ok(serde_json::to_string(&Event::Complete {
+                result: Reply::from(Err::<String, _>(refused)),
+            })
+            .expect("serializable completion"));
+        }
         super::deliver(async move {
-            match exchange.events.receive_async().await.map_err(error)? {
+            let events = exchange.events.as_ref().ok_or(MobileError::Closed)?;
+            match events.receive_async().await.map_err(error)? {
                 PortEvent::Host {
                     packet,
                     asynchronous,
@@ -301,14 +333,25 @@ impl NativePort {
             path_with_query: head.path_with_query,
             fields: ingress_fields(head.fields),
         };
-        let (events, carrier) = self.command(move |state| {
-            let (ticket, events, carrier) =
-                state.port.begin_ingress(packet, head).map_err(error)?;
-            state.ticket = Some(ticket);
-            Ok((events, carrier))
+        let begun = self.command(move |state| {
+            Ok(state
+                .port
+                .begin_ingress(packet, head)
+                .map(|(ticket, events, carrier)| {
+                    state.ticket = Some(ticket);
+                    (events, carrier)
+                }))
         })?;
+        let (events, carrier) = match begun {
+            Ok(exchange) => exchange,
+            Err(refused) => {
+                *active = Some(self.refusal(refused));
+                return Ok(());
+            }
+        };
         *active = Some(Arc::new(Exchange {
-            events,
+            events: Some(events),
+            refused: Mutex::default(),
             ingress: Some(carrier),
             closed: AtomicBool::new(false),
             replies: Mutex::default(),
@@ -321,59 +364,60 @@ impl NativePort {
     /// leaves the next event available to a later receive.
     pub async fn receive_ingress(&self) -> Result<MobileIngressEvent, MobileError> {
         let exchange = self.active()?;
+        if let Some(refused) = exchange.refused.lock().map_err(error)?.take() {
+            return Ok(MobileIngressEvent::Complete {
+                result: serde_json::to_string(&Reply::from(Err::<String, _>(refused)))
+                    .expect("serializable completion"),
+            });
+        }
         super::deliver(async move {
-            Ok(
-                match exchange.events.receive_async().await.map_err(error)? {
-                    PortEvent::Host {
-                        packet,
+            let events = exchange.events.as_ref().ok_or(MobileError::Closed)?;
+            Ok(match events.receive_async().await.map_err(error)? {
+                PortEvent::Host {
+                    packet,
+                    asynchronous,
+                    reply,
+                } => {
+                    let id = exchange
+                        .sequence
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                        .map_err(|_| error("Response identity space exhausted"))?
+                        + 1;
+                    let mut replies = exchange.replies.lock().map_err(error)?;
+                    if exchange.closed.load(Ordering::Acquire) {
+                        return Err(MobileError::Closed);
+                    }
+                    replies.insert(id, reply);
+                    MobileIngressEvent::Host {
+                        id,
                         asynchronous,
-                        reply,
-                    } => {
-                        let id = exchange
-                            .sequence
-                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                            .map_err(|_| error("Response identity space exhausted"))?
-                            + 1;
-                        let mut replies = exchange.replies.lock().map_err(error)?;
-                        if exchange.closed.load(Ordering::Acquire) {
-                            return Err(MobileError::Closed);
-                        }
-                        replies.insert(id, reply);
-                        MobileIngressEvent::Host {
-                            id,
-                            asynchronous,
-                            packet,
-                        }
+                        packet,
                     }
-                    PortEvent::Complete(value) => {
-                        exchange.replies.lock().map_err(error)?.clear();
-                        MobileIngressEvent::Complete {
-                            result: serde_json::to_string(&Reply::from(value))
-                                .expect("serializable completion"),
-                        }
+                }
+                PortEvent::Complete(value) => {
+                    exchange.replies.lock().map_err(error)?.clear();
+                    MobileIngressEvent::Complete {
+                        result: serde_json::to_string(&Reply::from(value))
+                            .expect("serializable completion"),
                     }
-                    PortEvent::Ingress(IngressEvent::Head(head)) => MobileIngressEvent::Head {
-                        status: head.status,
-                        fields: mobile_fields(head.fields),
-                    },
-                    PortEvent::Ingress(IngressEvent::RequestPull) => {
-                        MobileIngressEvent::RequestPull
-                    }
-                    PortEvent::Ingress(IngressEvent::Refused(code)) => {
-                        MobileIngressEvent::Refused { code }
-                    }
-                    PortEvent::Ingress(IngressEvent::Response(frame)) => match frame {
-                        IngressResponseFrame::Data(bytes) => MobileIngressEvent::Data { bytes },
-                        IngressResponseFrame::Trailers(fields) => MobileIngressEvent::Trailers {
-                            fields: mobile_fields(fields),
-                        },
-                        IngressResponseFrame::End => MobileIngressEvent::End,
-                        IngressResponseFrame::Error(message) => {
-                            MobileIngressEvent::Error { message }
-                        }
-                    },
+                }
+                PortEvent::Ingress(IngressEvent::Head(head)) => MobileIngressEvent::Head {
+                    status: head.status,
+                    fields: mobile_fields(head.fields),
                 },
-            )
+                PortEvent::Ingress(IngressEvent::RequestPull) => MobileIngressEvent::RequestPull,
+                PortEvent::Ingress(IngressEvent::Refused(code)) => {
+                    MobileIngressEvent::Refused { code }
+                }
+                PortEvent::Ingress(IngressEvent::Response(frame)) => match frame {
+                    IngressResponseFrame::Data(bytes) => MobileIngressEvent::Data { bytes },
+                    IngressResponseFrame::Trailers(fields) => MobileIngressEvent::Trailers {
+                        fields: mobile_fields(fields),
+                    },
+                    IngressResponseFrame::End => MobileIngressEvent::End,
+                    IngressResponseFrame::Error(message) => MobileIngressEvent::Error { message },
+                },
+            })
         })
         .await?
     }
@@ -482,7 +526,9 @@ impl NativePort {
             if let Some(carrier) = &exchange.ingress {
                 carrier.disconnect();
             }
-            exchange.events.close();
+            if let Some(events) = &exchange.events {
+                events.close();
+            }
         }
         let owner = self.owner.lock().unwrap_or_else(|e| e.into_inner()).take();
         drop(owner);

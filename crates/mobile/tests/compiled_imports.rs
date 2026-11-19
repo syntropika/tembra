@@ -150,12 +150,16 @@ fn portable_compiled_import_refusal_quarantines_the_importer() {
     assert!(message.contains("component trap"), "{message}");
     assert!(message.contains("provider refused"), "{message}");
     assert_eq!(backend.instances(), 0);
-    let error = port
-        .begin(
-            json!({"kind":"invoke","environment":2,"function":quadruple(),"args":[1]}).to_string(),
-            false,
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("component trap"), "{error}");
+    // The quarantined revision refuses the next entry with its code and reason.
+    let refused = exchange(
+        &port,
+        json!({"kind":"invoke","environment":2,"function":quadruple(),"args":[1]}),
+        false,
+        &mut |_, _| unreachable!("a refused entry issues no host request"),
+    );
+    assert_eq!(
+        refused["error"],
+        json!({"code": "unavailable", "reason": "wasm_executor_quarantined", "message": message})
+    );
     port.shutdown().unwrap();
 }
