@@ -20,23 +20,7 @@
     )
 )]
 pub mod steady {
-    use alloc::{format, string::String};
     use core::cell::Cell;
-
-    /// The count of one counter object, kept by the kernel: the consumed record.
-    #[state]
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct Kept {
-        pub count: counter::Count,
-    }
-
-    impl Default for Kept {
-        fn default() -> Self {
-            Kept {
-                count: counter::Count { total: 0, steps: 0 },
-            }
-        }
-    }
 
     /// How many additions the Orb's counters made, a resource of the root.
     #[resource]
@@ -51,25 +35,45 @@ pub mod steady {
         }
     }
 
-    /// The counter of the consumed contract.
-    #[service("example:counter/counter@1.0.0")]
-    pub struct Counter;
+    pub mod counting {
+        use super::{Additions, context, counter};
+        use alloc::{format, string::String};
 
-    impl Counter {
-        pub fn add(by: i64) -> Result<counter::Count, String> {
-            if context::principal() == "mallory" {
-                return Err(format!("{} may not count", context::principal()));
-            }
-            Additions::with(|additions| additions.made.set(additions.made.get() + 1));
-            let kept = Kept::update(|kept| {
-                kept.count.total += by;
-                kept.count.steps += 1;
-            });
-            Ok(kept.count)
+        /// The count of one counter object, kept by the kernel: the consumed record.
+        #[state]
+        #[derive(serde::Serialize, serde::Deserialize)]
+        pub struct Kept {
+            pub count: counter::Count,
         }
 
-        pub fn read() -> counter::Count {
-            Kept::read().count
+        impl Default for Kept {
+            fn default() -> Self {
+                Kept {
+                    count: counter::Count { total: 0, steps: 0 },
+                }
+            }
+        }
+
+        /// The counter of the consumed contract.
+        #[service("example:counter/counter@1.0.0")]
+        pub struct Counter;
+
+        impl Counter {
+            pub fn add(by: i64) -> Result<counter::Count, String> {
+                if context::principal() == "mallory" {
+                    return Err(format!("{} may not count", context::principal()));
+                }
+                Additions::with(|additions| additions.made.set(additions.made.get() + 1));
+                let kept = Kept::update(|kept| {
+                    kept.count.total += by;
+                    kept.count.steps += 1;
+                });
+                Ok(kept.count)
+            }
+
+            pub fn read() -> counter::Count {
+                Kept::read().count
+            }
         }
     }
 }

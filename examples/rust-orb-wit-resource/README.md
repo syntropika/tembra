@@ -19,30 +19,32 @@ builders itself.
 ## The resource
 
 ```rust
-/// A text under construction: the caller owns it and pushes one character per call.
-#[wit_resource]
-pub struct Builder { text: RefCell<String> }
+pub mod texts {
+    /// A text under construction: the caller owns it and pushes one character per call.
+    #[wit_resource]
+    pub struct Builder { text: RefCell<String> }
 
-impl Builder {
-    #[constructor]
-    pub fn new() -> Builder { /* the constructor */ }
-    pub fn push(&self, ch: char) -> u32 { /* a method */ }
-    pub fn text(&self) -> String { /* a method */ }
-}
+    impl Builder {
+        #[constructor]
+        pub fn new() -> Builder { /* the constructor */ }
+        pub fn push(&self, ch: char) -> u32 { /* a method */ }
+        pub fn text(&self) -> String { /* a method */ }
+    }
 
-#[service]
-pub struct Texts;
+    #[service]
+    pub struct Texts;
 
-impl Texts {
-    /// Start an empty text; the caller owns the returned handle.
-    pub fn start() -> Builder { Builder::new() }
-    /// How many builders were destroyed, when their last owner dropped them.
-    pub fn dropped() -> u32 { /* a counter incremented by Builder's Drop */ }
+    impl Texts {
+        /// Start an empty text; the caller owns the returned handle.
+        pub fn start() -> Builder { Builder::new() }
+        /// How many builders were destroyed, when their last owner dropped them.
+        pub fn dropped() -> u32 { /* a counter incremented by Builder's Drop */ }
+    }
 }
 ```
 
 A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose
-methods hand it out: the function marked `#[constructor]` is its constructor, the `pub fn` taking
+module holds it: the function marked `#[constructor]` is its constructor, the `pub fn` taking
 `&self` are its methods, the other `pub fn` its static functions; a `pub fn new` without the
 marker is one of those. The struct keeps its fields and its `Drop`; a method returning the struct
 returns an owned handle. Interior mutability (`Cell`, `RefCell`) is how a method changes the text,
@@ -74,17 +76,21 @@ owner drops the handle the kernel destroys the value, which runs `Drop`, and `dr
     import = "example:text/texts@1.0.0"
 )]
 mod speller {
-    impl Spelling {
-        pub fn spell(word: String) -> String {
-            let builder = texts::start();
-            for (index, letter) in word.chars().enumerate() {
-                if index > 0 {
-                    builder.push('-');
+    pub mod spelling {
+        use super::texts;
+
+        impl Spelling {
+            pub fn spell(word: String) -> String {
+                let builder = texts::start();
+                for (index, letter) in word.chars().enumerate() {
+                    if index > 0 {
+                        builder.push('-');
+                    }
+                    builder.push(letter);
                 }
-                builder.push(letter);
+                builder.text()
+                // the handle is dropped here
             }
-            builder.text()
-            // the handle is dropped here
         }
     }
 }
@@ -143,7 +149,6 @@ A function takes a resource only owned, either one its own interface defines or 
 interface's handle, such as a `texts::Builder` taken by a function of the speller, as
 [the macro's README](../../crates/orb-macro/README.md#taking-a-resource) shows; a borrowed
 parameter is not expressed by the macro. Methods borrow `self`; a `&mut self` method is a compile
-error. A resource belongs to one service's interface, the one named by `#[wit_resource(service =
-Name)]` or the module's only service, and only that interface returns it: the runtime returns a
-resource only from the interface that defines it, so another service returning it is a compile
-error.
+error. A resource belongs to one service's interface, the one of the service whose module holds
+it, and only that interface returns it: the runtime returns a resource only from the interface that
+defines it, so another service returning it is a compile error.

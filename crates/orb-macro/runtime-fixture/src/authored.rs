@@ -11,8 +11,6 @@
     tembra::orb(package = "example:authored@1.0.0")
 )]
 pub mod requests {
-    use alloc::{format, string::String};
-
     pub mod model {
         use alloc::string::String;
 
@@ -56,64 +54,69 @@ pub mod requests {
         }
     }
 
-    /// Why the router refuses a request.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum Refusal {
-        /// The path is empty.
-        Empty,
-        /// The path is longer than the router accepts.
-        TooLong { length: u32 },
-        /// The request was routed as often as the router allows.
-        Stale { seen: u32 },
-    }
+    pub mod router {
+        use super::model;
+        use alloc::{format, string::String};
 
-    impl core::fmt::Display for Refusal {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            match self {
-                Refusal::Empty => f.write_str("the path is empty"),
-                Refusal::TooLong { length } => write!(f, "the path has {length} characters"),
-                Refusal::Stale { seen } => write!(f, "the request was routed {seen} times"),
-            }
-        }
-    }
-
-    /// Routes requests.
-    #[service]
-    pub struct Router;
-
-    impl Router {
-        /// A request of `path` over `HTTP`, never routed.
-        pub fn fresh(path: String) -> model::Request {
-            model::Request::new(path, model::Scheme::HTTP)
+        /// Why the router refuses a request.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub enum Refusal {
+            /// The path is empty.
+            Empty,
+            /// The path is longer than the router accepts.
+            TooLong { length: u32 },
+            /// The request was routed as often as the router allows.
+            Stale { seen: u32 },
         }
 
-        /// Route `request`: refused when its path is empty or longer than eight characters, or
-        /// when it was routed three times already, otherwise routed once more, over `Https` when
-        /// the path starts with `secure`.
-        pub fn route(request: model::Request) -> Result<model::Request, Refusal> {
-            let length = request.path.chars().count() as u32;
-            if length == 0 {
-                return Err(Refusal::Empty);
+        impl core::fmt::Display for Refusal {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                match self {
+                    Refusal::Empty => f.write_str("the path is empty"),
+                    Refusal::TooLong { length } => write!(f, "the path has {length} characters"),
+                    Refusal::Stale { seen } => write!(f, "the request was routed {seen} times"),
+                }
             }
-            if length > 8 {
-                return Err(Refusal::TooLong { length });
-            }
-            if request.seen() >= 3 {
-                return Err(Refusal::Stale {
-                    seen: request.seen(),
-                });
-            }
-            let r#type = if request.path.starts_with("secure") {
-                model::Scheme::Https
-            } else {
-                request.r#type
-            };
-            Ok(request.routed(r#type))
         }
 
-        /// The words of a refusal, as its `Display` writes them.
-        pub fn explain(refusal: Refusal) -> String {
-            format!("{refusal}")
+        /// Routes requests.
+        #[service]
+        pub struct Router;
+
+        impl Router {
+            /// A request of `path` over `HTTP`, never routed.
+            pub fn fresh(path: String) -> model::Request {
+                model::Request::new(path, model::Scheme::HTTP)
+            }
+
+            /// Route `request`: refused when its path is empty or longer than eight characters, or
+            /// when it was routed three times already, otherwise routed once more, over `Https`
+            /// when the path starts with `secure`.
+            pub fn route(request: model::Request) -> Result<model::Request, Refusal> {
+                let length = request.path.chars().count() as u32;
+                if length == 0 {
+                    return Err(Refusal::Empty);
+                }
+                if length > 8 {
+                    return Err(Refusal::TooLong { length });
+                }
+                if request.seen() >= 3 {
+                    return Err(Refusal::Stale {
+                        seen: request.seen(),
+                    });
+                }
+                let r#type = if request.path.starts_with("secure") {
+                    model::Scheme::Https
+                } else {
+                    request.r#type
+                };
+                Ok(request.routed(r#type))
+            }
+
+            /// The words of a refusal, as its `Display` writes them.
+            pub fn explain(refusal: Refusal) -> String {
+                format!("{refusal}")
+            }
         }
     }
 }
@@ -121,8 +124,9 @@ pub mod requests {
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::requests::{
-        self, Refusal,
+        self,
         model::{Request, Scheme},
+        router::Refusal,
     };
     use crate::native::{call, hosting, ready};
     use futures::FutureExt;
@@ -135,7 +139,7 @@ mod tests {
     fn the_authors_types_answer_natively() {
         let (mut pool, host) = hosting(requests::orb().unwrap());
         let reference = ready(&mut pool, &host, "example:authored/router@1.0.0");
-        let client = requests::RouterClient::new(reference.clone());
+        let client = requests::router::RouterClient::new(reference.clone());
         let request = Request::new("secure".into(), Scheme::HTTP);
         let routed = pool
             .run_until(host.root("alice", move |context| {

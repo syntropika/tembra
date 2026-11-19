@@ -567,6 +567,30 @@ fn kernel_interfaces_bind_to_the_kernel_without_a_provider_or_grant() {
         let error = contract.plan("counter", 1, &bindings).unwrap_err();
         assert!(error.0.contains(name), "{error}");
     }
+    // The resources import pairs with either export: a world exporting
+    // `service-resources-init` alone imports `resources`, and one importing `resources` exports
+    // one of the two.
+    let service_only = STATEFUL.replace(
+        "    export tembra:guest/resources-init@1.0.0;\n",
+        "    export tembra:guest/service-resources-init@1.0.0;\n",
+    );
+    let contract = Contract::from_source("service.wit", &service_only, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    contract.plan("counter", 1, &bindings).unwrap();
+    let unimported = service_only.replace("    import tembra:guest/resources@1.0.0;\n", "");
+    let contract = Contract::from_source("unimported.wit", &unimported, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    let error = contract.plan("counter", 1, &bindings).unwrap_err();
+    assert!(
+        error
+            .0
+            .contains("a world importing tembra:guest/resources@1.0.0 exports"),
+        "{error}"
+    );
 
     // The namespace is reserved: other kernel interfaces are refused, and the package cannot
     // be redefined by an Orb.

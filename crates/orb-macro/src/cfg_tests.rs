@@ -90,19 +90,23 @@ fn constant(module: &ItemMod, name: &str) -> Option<String> {
         })
 }
 
-/// The functions of the impl blocks of a copy, in order.
+/// The functions of the impl blocks of a copy and of its sub-modules, in order.
 fn functions(copy: &ItemMod) -> Vec<String> {
     let items = &copy.content.as_ref().expect("a body").1;
     items
         .iter()
-        .filter_map(|item| match item {
-            Item::Impl(block) => Some(block.items.iter().filter_map(|member| match member {
-                ImplItem::Fn(function) => Some(function.sig.ident.to_string()),
-                _ => None,
-            })),
-            _ => None,
+        .flat_map(|item| match item {
+            Item::Impl(block) => block
+                .items
+                .iter()
+                .filter_map(|member| match member {
+                    ImplItem::Fn(function) => Some(function.sig.ident.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            Item::Mod(module) if module.content.is_some() => functions(module),
+            _ => Vec::new(),
         })
-        .flatten()
         .collect()
 }
 
@@ -114,31 +118,35 @@ const NOTEBOOK: &str = r#"mod notebook {
         pub shelf: String,
     }
 
-    #[service]
-    pub struct Notes;
+    pub mod notes {
+        #[service]
+        pub struct Notes;
 
-    impl Notes {
-        pub fn add(text: String) -> u32 {
-            text.len() as u32
+        impl Notes {
+            pub fn add(text: String) -> u32 {
+                text.len() as u32
+            }
+
+            #[cfg(feature = "archive")]
+            pub fn archive() -> u32 {
+                0
+            }
+
+            #[cfg(test)]
+            fn helper() {}
         }
-
-        #[cfg(feature = "archive")]
-        pub fn archive() -> u32 {
-            0
-        }
-
-        #[cfg(test)]
-        fn helper() {}
     }
 
-    #[cfg(feature = "archive")]
-    #[service]
-    pub struct Shelf;
+    pub mod shelf {
+        #[cfg(feature = "archive")]
+        #[service]
+        pub struct Shelf;
 
-    #[cfg(feature = "archive")]
-    impl Shelf {
-        pub fn count() -> u32 {
-            0
+        #[cfg(feature = "archive")]
+        impl Shelf {
+            pub fn count() -> u32 {
+                0
+            }
         }
     }
 }"#;
@@ -213,7 +221,7 @@ fn a_cfg_on_a_service_or_a_method_expands_one_copy_per_combination() {
         for registered in [
             "fn archive () -> u32 { Notes :: archive () }",
             ". method_with (\"archive\"",
-            ". service (self :: __TembraRegistry :: < 0 > :: __tembra_service_shelf (name))",
+            ". service (self :: __TembraRegistry :: < 2 > :: __tembra_service_shelf (name))",
         ] {
             assert_eq!(
                 tokens.contains(registered),
@@ -236,36 +244,38 @@ fn each_copy_keeps_the_items_whose_predicates_hold() {
                 pub label: String,
             }
 
-            #[service]
-            pub struct Notes;
+            pub mod notes {
+                #[service]
+                pub struct Notes;
 
-            impl Notes {
-                pub fn always() -> u32 {
-                    0
+                impl Notes {
+                    pub fn always() -> u32 {
+                        0
+                    }
+
+                    #[cfg(feature = "a")]
+                    pub fn first() -> u32 {
+                        1
+                    }
+
+                    #[cfg(feature = "a")]
+                    #[cfg(feature = "b")]
+                    pub fn both() -> u32 {
+                        2
+                    }
+
+                    #[cfg(feature = "b")]
+                    #[create]
+                    fn create(_: &super::Inputs, _: &tembra::Declaration) -> tembra::Result<Self> {
+                        Ok(Self)
+                    }
                 }
 
-                #[cfg(feature = "a")]
-                pub fn first() -> u32 {
-                    1
-                }
-
-                #[cfg(feature = "a")]
                 #[cfg(feature = "b")]
-                pub fn both() -> u32 {
-                    2
-                }
-
-                #[cfg(feature = "b")]
-                #[create]
-                fn create(_: &Inputs, _: &tembra::Declaration) -> tembra::Result<Self> {
-                    Ok(Self)
-                }
-            }
-
-            #[cfg(feature = "b")]
-            impl Notes {
-                pub fn second() -> u32 {
-                    3
+                impl Notes {
+                    pub fn second() -> u32 {
+                        3
+                    }
                 }
             }
         }"#,
@@ -304,7 +314,7 @@ fn each_copy_keeps_the_items_whose_predicates_hold() {
         let built = guard.ends_with(", feature = \"b\")");
         assert_eq!(
             module.contains(
-                "self :: __TembraRegistry :: < 0 > :: __tembra_service_notes (name , & inputs)"
+                "self :: __TembraRegistry :: < 1 > :: __tembra_service_notes (name , & inputs)"
             ),
             built,
             "{guard}\n{module}"
@@ -320,30 +330,34 @@ fn more_than_four_predicates_are_refused() {
     let module = |fifth: &str| {
         format!(
             r#"mod notebook {{
-                #[service]
-                pub struct Notes;
+                pub mod notes {{
+                    #[service]
+                    pub struct Notes;
 
-                impl Notes {{
-                    #[cfg(feature = "a")]
-                    pub fn a() {{}}
-                    #[cfg(feature = "b")]
-                    pub fn b() {{}}
-                    #[cfg(feature = "c")]
-                    pub fn c() {{}}
-                    #[cfg(feature = "a")]
-                    pub fn again() {{}}
-                    #[cfg(not(feature = "a"))]
-                    pub fn otherwise() {{}}
-                    pub fn always() {{}}
+                    impl Notes {{
+                        #[cfg(feature = "a")]
+                        pub fn a() {{}}
+                        #[cfg(feature = "b")]
+                        pub fn b() {{}}
+                        #[cfg(feature = "c")]
+                        pub fn c() {{}}
+                        #[cfg(feature = "a")]
+                        pub fn again() {{}}
+                        #[cfg(not(feature = "a"))]
+                        pub fn otherwise() {{}}
+                        pub fn always() {{}}
+                    }}
                 }}
 
-                #[cfg({fifth})]
-                #[service]
-                pub struct Shelf;
+                pub mod shelf {{
+                    #[cfg({fifth})]
+                    #[service]
+                    pub struct Shelf;
 
-                #[cfg({fifth})]
-                impl Shelf {{
-                    pub fn count() {{}}
+                    #[cfg({fifth})]
+                    impl Shelf {{
+                        pub fn count() {{}}
+                    }}
                 }}
             }}"#
         )
@@ -402,28 +416,30 @@ fn a_module_without_such_a_cfg_expands_at_once() {
                     pub notes: Vec<String>,
                 }
 
-                #[service]
-                pub struct Notes;
+                pub mod notes {
+                    #[service]
+                    pub struct Notes;
 
-                impl Notes {
-                    pub fn add(text: String) -> u32 {
-                        text.len() as u32
+                    impl Notes {
+                        pub fn add(text: String) -> u32 {
+                            text.len() as u32
+                        }
+
+                        #[cfg(feature = "archive")]
+                        pub(crate) fn archived() -> super::Archive {
+                            super::Archive { notes: Vec::new() }
+                        }
+
+                        #[cfg]
+                        pub fn malformed() {}
                     }
-
-                    #[cfg(feature = "archive")]
-                    pub(crate) fn archived() -> Archive {
-                        Archive { notes: Vec::new() }
-                    }
-
-                    #[cfg]
-                    pub fn malformed() {}
                 }
 
                 #[cfg(test)]
                 mod tests {
                     #[test]
                     fn adds() {
-                        assert_eq!(super::Notes::add("a".into()), 1);
+                        assert_eq!(super::notes::Notes::add("a".into()), 1);
                     }
                 }
             }"#,
@@ -451,23 +467,27 @@ fn a_module_without_such_a_cfg_expands_at_once() {
 fn a_sub_module_holding_a_service_follows_its_cfg() {
     let copies = copies(
         r#"mod notebook {
-            #[service]
-            pub struct Notes;
+            pub mod notes {
+                #[service]
+                pub struct Notes;
 
-            impl Notes {
-                pub fn add(text: String) -> u32 {
-                    text.len() as u32
+                impl Notes {
+                    pub fn add(text: String) -> u32 {
+                        text.len() as u32
+                    }
                 }
             }
 
             #[cfg(feature = "archive")]
-            pub mod shelf {
-                #[service]
-                pub struct Shelf;
+            pub mod archive {
+                pub mod shelf {
+                    #[service]
+                    pub struct Shelf;
 
-                impl Shelf {
-                    pub fn count() -> u32 {
-                        0
+                    impl Shelf {
+                        pub fn count() -> u32 {
+                            0
+                        }
                     }
                 }
 
@@ -501,7 +521,7 @@ fn a_sub_module_holding_a_service_follows_its_cfg() {
     for ((_, copy), archive) in copies.iter().zip([false, true]) {
         let tokens = quote!(#copy).to_string();
         assert!(!tokens.contains("# [cfg (feature"), "{tokens}");
-        assert_eq!(tokens.contains("pub mod shelf"), archive, "{tokens}");
+        assert_eq!(tokens.contains("pub mod archive"), archive, "{tokens}");
         assert!(tokens.contains("# [cfg (test)] mod tests"), "{tokens}");
         let module = expanded(copy);
         let wit = constant(&module, "WIT").expect("the WIT");
@@ -533,12 +553,14 @@ fn a_root_follows_its_cfg() {
                 pub label: String,
             }
 
-            #[service]
-            pub struct Notes;
+            pub mod notes {
+                #[service]
+                pub struct Notes;
 
-            impl Notes {
-                pub fn add(text: String) -> u32 {
-                    text.len() as u32
+                impl Notes {
+                    pub fn add(text: String) -> u32 {
+                        text.len() as u32
+                    }
                 }
             }
 
@@ -596,12 +618,14 @@ fn a_hook_follows_its_cfg() {
     let copies = copies_with(
         attribute.clone(),
         r#"mod gate {
-            #[service]
-            pub struct Ledger;
+            pub mod ledger {
+                #[service]
+                pub struct Ledger;
 
-            impl Ledger {
-                pub fn count() -> u32 {
-                    0
+                impl Ledger {
+                    pub fn count() -> u32 {
+                        0
+                    }
                 }
             }
 
@@ -635,23 +659,25 @@ fn a_hook_follows_its_cfg() {
 fn a_negated_predicate_is_the_same_predicate() {
     let read: Vec<(String, Vec<String>)> = copies(
         r#"mod notebook {
-            #[service]
-            pub struct Notes;
+            pub mod notes {
+                #[service]
+                pub struct Notes;
 
-            impl Notes {
-                #[cfg(feature = "a")]
-                pub fn on() -> u32 {
-                    1
-                }
+                impl Notes {
+                    #[cfg(feature = "a")]
+                    pub fn on() -> u32 {
+                        1
+                    }
 
-                #[cfg(not(feature = "a"))]
-                pub fn off() -> u32 {
-                    0
-                }
+                    #[cfg(not(feature = "a"))]
+                    pub fn off() -> u32 {
+                        0
+                    }
 
-                #[cfg(not(not(feature = "a")))]
-                pub fn again() -> u32 {
-                    1
+                    #[cfg(not(not(feature = "a")))]
+                    pub fn again() -> u32 {
+                        1
+                    }
                 }
             }
         }"#,
@@ -684,14 +710,16 @@ fn nothing_to_export_names_the_configuration() {
     for (module, message) in [
         (
             r#"mod notebook {
-                #[cfg(feature = "archive")]
-                #[service]
-                pub struct Shelf;
+                pub mod shelf {
+                    #[cfg(feature = "archive")]
+                    #[service]
+                    pub struct Shelf;
 
-                #[cfg(feature = "archive")]
-                impl Shelf {
-                    pub fn count() -> u32 {
-                        0
+                    #[cfg(feature = "archive")]
+                    impl Shelf {
+                        pub fn count() -> u32 {
+                            0
+                        }
                     }
                 }
             }"#,
@@ -724,5 +752,149 @@ fn nothing_to_export_names_the_configuration() {
         assert_eq!(error, message);
         expand(options(), with, Ok(Metadata::named("calculator")), None)
             .unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+/// A `#[resource]` in the module of a service whose `#[cfg]` sits on the service alone: the copy
+/// that leaves the service out refuses the resource, on it, naming the fix, rather than turning it
+/// into a resource of the root; the copy that keeps the service gives the resource to its objects.
+#[test]
+fn a_resource_beside_a_service_its_cfg_leaves_out_is_refused() {
+    let module = r#"mod dock {
+        #[resource]
+        pub struct Harbor {
+            pub berths: u32,
+        }
+
+        impl Harbor {
+            #[open]
+            pub fn open() -> Self {
+                Harbor { berths: 0 }
+            }
+        }
+
+        pub mod quay {
+            #[service]
+            pub struct Quay;
+
+            impl Quay {
+                pub fn length() -> u32 {
+                    0
+                }
+            }
+        }
+
+        pub mod ship {
+            #[cfg(feature = "ships")]
+            #[service]
+            pub struct Ship;
+
+            #[cfg(feature = "ships")]
+            impl Ship {
+                pub fn berth() -> u32 {
+                    0
+                }
+            }
+
+            #[resource(depends = [Harbor])]
+            pub struct Mooring {
+                pub berth: u32,
+            }
+
+            impl Mooring {
+                #[open]
+                pub fn open() -> Self {
+                    Mooring { berth: 0 }
+                }
+            }
+        }
+    }"#;
+    let Ok([(_, without), (_, with)]) = <[(String, ItemMod); 2]>::try_from(copies(module)) else {
+        unreachable!("one predicate, two copies");
+    };
+    let options = || options(attribute()).unwrap();
+    let error = expand(options(), without, Ok(Metadata::named("calculator")), None)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "the #[resource] `Mooring` is in `ship`, the module of the service `Ship`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod ship`, so that what it holds goes with it"
+    );
+    let expanded = expanded(&with);
+    let tokens = quote!(#expanded).to_string();
+    assert!(
+        tokens.contains("(\"example:notes/ship@1.0.0\" , \"mooring\") =>"),
+        "the resource belongs to the objects of `Ship`\n{tokens}"
+    );
+}
+
+/// A `#[state]` and a `#[wit_resource]` in the module of a service whose `#[cfg]` sits on the
+/// service alone: the copy that leaves the service out refuses each, on it, naming the fix, rather
+/// than calling it outside every service's module; the copy that keeps the service gives each to
+/// it.
+#[test]
+fn a_state_or_wit_resource_beside_a_service_its_cfg_leaves_out_is_refused() {
+    for (item, message) in [
+        (
+            "#[state]
+            #[derive(Default, serde::Serialize, serde::Deserialize)]
+            pub struct Seats {
+                pub count: u32,
+            }",
+            "the #[state] `Seats` is in `rooms`, the module of the service `Rooms`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod rooms`, so that what it holds goes with it",
+        ),
+        (
+            "#[wit_resource]
+            pub struct Key {
+                pub number: u32,
+            }
+
+            impl Key {
+                pub fn number(&self) -> u32 {
+                    self.number
+                }
+            }",
+            "the #[wit_resource] `Key` is in `rooms`, the module of the service `Rooms`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod rooms`, so that what it holds goes with it",
+        ),
+    ] {
+        let module = format!(
+            r#"mod hotel {{
+                pub mod desk {{
+                    #[service]
+                    pub struct Desk;
+
+                    impl Desk {{
+                        pub fn open() -> bool {{
+                            true
+                        }}
+                    }}
+                }}
+
+                pub mod rooms {{
+                    #[cfg(feature = "rooms")]
+                    #[service]
+                    pub struct Rooms;
+
+                    #[cfg(feature = "rooms")]
+                    impl Rooms {{
+                        pub fn count() -> u32 {{
+                            0
+                        }}
+                    }}
+
+                    {item}
+                }}
+            }}"#
+        );
+        let Ok([(_, without), (_, with)]) = <[(String, ItemMod); 2]>::try_from(copies(&module))
+        else {
+            unreachable!("one predicate, two copies");
+        };
+        let options = || options(attribute()).unwrap();
+        let error = expand(options(), without, Ok(Metadata::named("calculator")), None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, message);
+        expanded(&with);
     }
 }

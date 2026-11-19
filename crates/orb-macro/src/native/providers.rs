@@ -226,6 +226,7 @@ pub(super) fn contribution(
             .context
             .then(|| quote! { self::#root context::__scoped }),
         state: None,
+        object_resources: None,
         resources: (!analysis.resources.is_empty())
             .then(|| quote! { self::#root __tembra_resource::scoped }),
         imports: imported.then(|| quote! { self::#root __tembra_import::scoped }),

@@ -177,16 +177,19 @@ extern crate alloc;
 
 #[tembra::orb(package = "{package}", no_std)]
 pub mod {module} {{
-    use alloc::{{format, string::String}};
+    // Each service lives in a module of its own, with its state and its WIT resources.
+    pub mod api {{
+        use alloc::{{format, string::String}};
 
-    /// The service: a unit struct marked #[service], with an impl block of public functions.
-    #[service]
-    pub struct Api;
+        /// The service: a unit struct marked #[service], with an impl block of public functions.
+        #[service]
+        pub struct Api;
 
-    impl Api {{
-        /// A first method.
-        pub fn hello(name: String) -> String {{
-            format!("Hello, {{name}}!")
+        impl Api {{
+            /// A first method.
+            pub fn hello(name: String) -> String {{
+                format!("Hello, {{name}}!")
+            }}
         }}
     }}
 }}

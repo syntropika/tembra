@@ -2146,7 +2146,33 @@ const SPOTS: &str = "example:gatehouse/spots@1.0.0";
 const DOORS: &str = "example:gatehouse/doors@1.0.0";
 const ROOMS: &str = "example:gatehouse/rooms@1.0.0";
 const GUARD: &str = "example:admission/guard@1.0.0";
+const GUARD_VIEW: &str = "example:gatehouse/guard-ref@1.0.0";
 const DESK: &str = "gatehouse::example:gatehouse/desk@1.0.0";
+
+/// The native Orb that serves the guard by key, which the gatehouse's view of its keyed import
+/// is bound to: a service of `example:admission/guard@1.0.0` answering each admission as it is.
+const GUARDS: &str = "guards";
+
+fn guards() -> Orb {
+    let wit = format!(
+        "{}\nworld provider {{ export guard; }}\n",
+        include_str!("../../orb-macro/runtime-fixture/admission/admission.wit")
+    );
+    let service = Contract::from_source("admission.wit", &wit, Some("provider"))
+        .unwrap()
+        .plan(GUARDS, 1, &BTreeMap::new())
+        .unwrap()
+        .orb
+        .services
+        .remove(0);
+    Orb::new(GUARDS, 1).service(
+        Service::new(service.name, |_| Ok(()))
+            .signature(service.signature)
+            .method("apply", |_, _, (admission,): (Value,)| async move {
+                Ok(admission)
+            }),
+    )
+}
 
 /// A native Orb contributing twice to each hook of the gatehouse, at the priorities -1 and 1:
 /// both see each visit and each spot, which they note in `seen`; the first answers a room above the ground floor
@@ -2217,10 +2243,13 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
 /// a series whose input holds a newtype, a series whose input is a newtype holding a record of the
 /// module, a series in a module of no imports whose input is a newtype of a `String` declared in
 /// another, and a bail from their input, and the waterfall of a consumed package by its identity,
-/// which the component's roles name with their compositions. Native contributions answer them in
-/// plan order: every contribution to a series sees each visit, spot and door, a newtype as its
-/// field, the first answer of the bail gives the room, and each contribution to the waterfall
-/// changes the admission in turn. Without contributions, the series end, the bail answers nothing
+/// which the component's roles name with their compositions, and whose admission a function of the
+/// desk takes and returns as the hook's own type, the desk's state keeps, and the view of the
+/// hook's keyed import names, and whose verdict, a type the hook uses from another interface, a
+/// function returns. Native contributions answer them in plan order:
+/// every contribution to a series sees each visit, spot and door, a newtype as its field, the first
+/// answer of the bail gives the room, and each contribution to the waterfall changes the admission
+/// in turn. Without contributions, the series end, the bail answers nothing
 /// and the waterfall hands its input back. Natively, the module compiles, and its `orb()` refuses
 /// the declarations, which only a component serves.
 #[test]
@@ -2259,7 +2288,15 @@ fn compose_the_declared_hooks(engine: &Engine) {
         );
         let seen = Rc::new(RefCell::new(Vec::new()));
         for contributed in [false, true] {
-            let mut orbs = vec![engine.load(&artifact, Install::default()).unwrap()];
+            let mut orbs = vec![
+                engine
+                    .load(
+                        &artifact,
+                        Install::default().requires(GUARD_VIEW, GUARDS, 1),
+                    )
+                    .unwrap(),
+                guards(),
+            ];
             if contributed {
                 orbs.push(contributions(module.contract(), seen.clone()));
             }
@@ -2275,6 +2312,16 @@ fn compose_the_declared_hooks(engine: &Engine) {
             assert_eq!(call("knock", json!(["east"])), Value::Null, "{features}");
             let rooms = [0, 3].map(|floor| call("room", json!([floor])));
             let admitted = [5, 10].map(|value| call("admit", json!([value])));
+            assert_eq!(call("last", json!([])), Value::Null, "{features}");
+            let admissions =
+                [5, 10].map(|value| call("admitted", json!([{"value": value, "blocked": false}])));
+            // The state keeps the last admission, in the hook's own type.
+            assert_eq!(call("last", json!([])), admissions[1], "{features}");
+            // The view of the hook's keyed import names the same type.
+            let viewed = json!({"value": 3, "blocked": true});
+            assert_eq!(call("viewed", json!([viewed])), viewed, "{features}");
+            // The verdict, a type the hook uses from another interface of its package.
+            let judged = call("judged", json!([7]));
             let visit = json!({"who": "ada", "hour": 9});
             let spot = json!({"floor": 3, "door": "east"});
             let door = json!("east");
@@ -2297,6 +2344,15 @@ fn compose_the_declared_hooks(engine: &Engine) {
                     [json!([6, false]), json!([11, true])],
                     "{features}"
                 );
+                assert_eq!(
+                    admissions,
+                    [
+                        json!({"value": 6, "blocked": false}),
+                        json!({"value": 11, "blocked": true})
+                    ],
+                    "{features}"
+                );
+                assert_eq!(judged, json!({"value": 8, "blocked": false}), "{features}");
             } else {
                 assert!(seen.borrow().is_empty(), "{features}");
                 assert_eq!(rooms, [Value::Null, Value::Null], "{features}");
@@ -2305,6 +2361,15 @@ fn compose_the_declared_hooks(engine: &Engine) {
                     [json!([5, false]), json!([10, false])],
                     "{features}"
                 );
+                assert_eq!(
+                    admissions,
+                    [
+                        json!({"value": 5, "blocked": false}),
+                        json!({"value": 10, "blocked": false})
+                    ],
+                    "{features}"
+                );
+                assert_eq!(judged, json!({"value": 7, "blocked": false}), "{features}");
             }
             desk.release().unwrap();
             pool.run_until(host.close()).unwrap();
@@ -2452,6 +2517,331 @@ fn a_root_resource_opens_and_closes_both_ways() {
     assert_eq!(engine.instances(), 0);
     module_natively("lamps");
     module_natively("lamps,revised");
+}
+
+/// A root resource that depends on another, in a component build, std and freestanding, and
+/// natively: the cache of the `cellar` feature, `#[resource(depends = [Db])]`, comes first in its
+/// module, yet the component declares it after the database with the database as its dependency,
+/// so the kernel opens the database first, whose rows the cache's `#[open]` function reads, and
+/// closes the cache first, whose `#[close]` function writes them back to the database. A reload
+/// gives the component a fresh instance, whose database and cache open in the same order before
+/// the old ones close; natively, `a_reload_reopens_a_resource_whose_dependency_reopens` in the
+/// native fixture's `tests/resource.rs` reopens a resource whose dependency moves to a new version.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_root_resource_opens_after_its_dependency_both_ways() {
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for features in ["cellar", "cellar,no-std"] {
+        let component = module_component(features);
+        let (_, orb) = module_orb(&engine, &component, "cellar");
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let shelf = ready(&mut pool, &host, "cellar::example:cellar/shelf@1.0.0");
+        assert_eq!(
+            counting_call(&mut pool, &host, &shelf, "alice", "rows", json!([])),
+            json!(3),
+            "{features}"
+        );
+        assert_eq!(
+            logged(),
+            ["open db at [] of host", "open cache, 3 rows"],
+            "{features}"
+        );
+        shelf.release().unwrap();
+        let (_, orb) = module_orb(&engine, &component, "cellar");
+        pool.run_until(host.reload(vec![orb], 5_000)).unwrap();
+        pool.run_until(host.settled());
+        assert_eq!(
+            logged(),
+            [
+                "open db at [] of host",
+                "open cache, 3 rows",
+                "close cache, 6 rows",
+                "close db, 6 rows"
+            ],
+            "{features}"
+        );
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(
+            logged(),
+            ["close cache, 6 rows", "close db, 6 rows"],
+            "{features}"
+        );
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("cellar");
+}
+
+/// An `#[open]` that returns `Result`, in a component build, std and freestanding, and natively:
+/// in the `kiln` feature the wood opens through `Ok`, and the fire, which depends on it, answers
+/// `Err`, so the activation fails as it does for a native Orb whose resource fails to open, and
+/// the kernel closes the wood. The object waiting on the activation fails with the opener's
+/// error, the same both ways: its code, reason and the error's `Display` text.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn an_open_that_answers_an_error_fails_the_activation_both_ways() {
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for features in ["kiln", "kiln,no-std"] {
+        let (_, orb) = module_orb(&engine, &module_component(features), "kiln");
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let hearth = host
+            .get(
+                "kiln::example:kiln/hearth@1.0.0",
+                vec!["main".into()],
+                "alice",
+            )
+            .unwrap();
+        let refused = pool
+            .run_until(hearth.ready())
+            .expect_err("the activation fails");
+        assert_eq!(
+            (
+                refused.code,
+                refused.reason.as_str(),
+                refused.message.as_str()
+            ),
+            (
+                Code::Unavailable,
+                "resource",
+                "the resource `fire` did not open: 2 damp logs"
+            ),
+            "{features}: {refused}"
+        );
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+        assert_eq!(logged(), ["open wood", "close wood"], "{features}");
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("kiln");
+}
+
+/// The resources of a service's objects, in a component build, std and freestanding, and natively:
+/// in the `dock` feature each `Ship` object owns a mooring, `#[resource(depends = [Harbor])]` in the
+/// service's module, and a line, `#[resource(depends = [Mooring])]`. The kernel opens them when it
+/// creates the ship, after the root's harbor, the mooring's `#[open]` function taking the harbor's
+/// next berth and the line's reading the mooring's berth, both with `with`, and closes them in
+/// reverse when the ship goes, the mooring's `#[close]` function giving the berth back to the
+/// harbor. Each ship reads its own, so two ships moor at two berths and tie their own lines; the
+/// third ship's mooring takes berth 3, where no line reaches, so its line answers `Err`, which
+/// fails that ship's creation with `unavailable/resource` and the opener's text, and the kernel
+/// closes the mooring it opened. A ship owns a state beside its resources, which `sail` updates,
+/// and hands out a WIT resource, its manifest, whose method reads the ship's mooring. Natively the
+/// module's own test checks the same.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_service_resource_opens_and_closes_per_object_both_ways() {
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for features in ["dock", "dock,no-std"] {
+        let (_, orb) = module_orb(&engine, &module_component(features), "dock");
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let ship = |key: &str| {
+            Rc::new(
+                host.get("dock::example:dock/ship@1.0.0", vec![key.into()], "alice")
+                    .unwrap(),
+            )
+        };
+        let one = ship("one");
+        pool.run_until(one.ready()).unwrap();
+        let two = ship("two");
+        pool.run_until(two.ready()).unwrap();
+        assert_eq!(
+            logged(),
+            [
+                "open harbor by host",
+                "open mooring 1 at [one] of alice",
+                "open line at berth 1",
+                "open mooring 2 at [two] of alice",
+                "open line at berth 2",
+            ],
+            "{features}"
+        );
+        let answer = |pool: &mut LocalPool, ship: &Rc<Reference>, method, arguments| {
+            counting_call(pool, &host, ship, "alice", method, arguments)
+        };
+        assert_eq!(
+            answer(&mut pool, &one, "berth", json!([])),
+            json!(1),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &two, "berth", json!([])),
+            json!(2),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &one, "tie", json!([3])),
+            json!(3),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &one, "tie", json!([2])),
+            json!(5),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &two, "tie", json!([1])),
+            json!(1),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &one, "sail", json!([])),
+            json!([1, 5]),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &one, "sail", json!([])),
+            json!([2, 5]),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &two, "sail", json!([])),
+            json!([1, 1]),
+            "{features}"
+        );
+        let manifest = two.clone();
+        let described: String = pool
+            .run_until(host.root("alice", move |context| {
+                async move {
+                    let manifest: Owned = manifest
+                        .call_portable(&context, "[constructor]manifest", ("cargo".to_owned(),))
+                        .await?;
+                    manifest
+                        .call_portable(&context, "[method]manifest.describe", json!([]))
+                        .await
+                }
+                .boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(described, "cargo at berth 2", "{features}");
+        let three = ship("three");
+        let refused = pool
+            .run_until(three.ready())
+            .expect_err("the third ship's line reaches no berth");
+        assert_eq!(
+            (
+                refused.code,
+                refused.reason.as_str(),
+                refused.message.as_str()
+            ),
+            (
+                Code::Unavailable,
+                "resource",
+                "the resource `line` did not open: no line reaches berth 3"
+            ),
+            "{features}: {refused}"
+        );
+        assert_eq!(
+            logged(),
+            [
+                "open mooring 3 at [three] of alice",
+                "close mooring 3, 2 moored, by host"
+            ],
+            "{features}"
+        );
+        one.release().unwrap();
+        pool.run_until(host.settled());
+        assert_eq!(
+            logged(),
+            [
+                "close line at berth 1",
+                "close mooring 1, 1 moored, by host"
+            ],
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &two, "tie", json!([1])),
+            json!(2),
+            "{features}"
+        );
+        two.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(
+            logged(),
+            [
+                "close line at berth 2",
+                "close mooring 2, 0 moored, by host",
+                "close harbor, 3 issued",
+            ],
+            "{features}"
+        );
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("dock");
+}
+
+/// The resources of a service's objects in an Orb whose root owns none, in a component build, std
+/// and freestanding, and natively: in the `quay` feature each `Barge` object owns a fender, which
+/// the kernel opens when it creates the barge and closes when the barge goes, and each barge
+/// counts its own bumps in it. The world exports `service-resources-init` without
+/// `resources-init`.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_service_resource_opens_without_a_root_resource_both_ways() {
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for features in ["quay", "quay,no-std"] {
+        let (module, orb) = module_orb(&engine, &module_component(features), "quay");
+        assert!(
+            words(&module).contains("worldquay{importtembra:guest/resources@1.0.0;exporttembra:guest/service-resources-init@1.0.0;importtembra:guest/context@1.0.0;exportbarge;}"),
+            "{features}: {}",
+            module.text()
+        );
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let barge = |pool: &mut LocalPool, key: &str| {
+            let barge = Rc::new(
+                host.get("quay::example:quay/barge@1.0.0", vec![key.into()], "alice")
+                    .unwrap(),
+            );
+            pool.run_until(barge.ready()).unwrap();
+            barge
+        };
+        let one = barge(&mut pool, "one");
+        let two = barge(&mut pool, "two");
+        assert_eq!(logged(), ["open fender", "open fender"], "{features}");
+        let bump = |pool: &mut LocalPool, barge: &Rc<Reference>| {
+            counting_call(pool, &host, barge, "alice", "bump", json!([]))
+        };
+        assert_eq!(bump(&mut pool, &one), json!(1), "{features}");
+        assert_eq!(bump(&mut pool, &one), json!(2), "{features}");
+        assert_eq!(bump(&mut pool, &two), json!(1), "{features}");
+        one.release().unwrap();
+        pool.run_until(host.settled());
+        assert_eq!(logged(), ["close fender, 2 bumps"], "{features}");
+        two.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(logged(), ["close fender, 1 bumps"], "{features}");
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("quay");
 }
 
 /// An interface with `flags` consumed by a guest that depends on the facade alone, in a component

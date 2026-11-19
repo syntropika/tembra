@@ -14,10 +14,12 @@ fn guest(no_std: bool) -> syn::ItemMod {
             },
             syn::parse_quote! {
                 mod guest {
-                    #[service]
-                    pub struct Greeting;
-                    impl Greeting {
-                        pub fn hello(name: String) -> String { name }
+                    pub mod greeting {
+                        #[service]
+                        pub struct Greeting;
+                        impl Greeting {
+                            pub fn hello(name: String) -> String { name }
+                        }
                     }
                 }
             },

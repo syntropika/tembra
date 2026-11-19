@@ -1,0 +1,5 @@
+error: `Totals` is not a #[resource] of the Orb; `depends` names the struct of a resource the Orb declares
+ --> tests/ui/resource_depends_on_an_unknown_name.rs:3:27
+  |
+3 |     #[resource(depends = [Totals])]
+  |                           ^^^^^^

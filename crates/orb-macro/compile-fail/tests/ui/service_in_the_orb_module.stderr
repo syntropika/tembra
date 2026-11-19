@@ -1,0 +1,5 @@
+error: `Tickets` is a #[service] of the Orb module: put each service in a module of its own, with its impl, its state and its WIT resources, `pub mod tickets { #[service] pub struct Tickets; .. }`
+ --> tests/ui/service_in_the_orb_module.rs:4:16
+  |
+4 |     pub struct Tickets;
+  |                ^^^^^^^

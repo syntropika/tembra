@@ -2,18 +2,20 @@
 mod keeping {
     use crate::util::tembra::{self};
 
-    #[state]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Balance {
-        pub total: i64,
-    }
+    pub mod report {
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Balance {
+            pub total: i64,
+        }
 
-    #[service]
-    pub struct Report;
+        #[service]
+        pub struct Report;
 
-    impl Report {
-        pub fn count() -> u32 {
-            0
+        impl Report {
+            pub fn count() -> u32 {
+                0
+            }
         }
     }
 }

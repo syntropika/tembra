@@ -36,7 +36,7 @@ fn an_import_of_types_only_needs_no_provider() {
                 let portable = called
                     .call_portable::<_, Value>(&context, "swap", json!(["eur"]))
                     .await?;
-                let local = exchange::DeskClient::new(called)
+                let local = exchange::desk::DeskClient::new(called)
                     .swap(&context, money::Currency::Usd)
                     .await?;
                 Ok((portable, local))

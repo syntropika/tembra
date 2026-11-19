@@ -87,12 +87,14 @@ fn checksums_keep_the_lines_of_the_files_a_build_did_not_write() {
 /// An Orb whose manifest names no crate type.
 const CALCULATOR: &str = r#"#[tembra::orb(package = "example:calculator@1.0.0")]
 mod calculator {
-    #[service]
-    pub struct Math;
+    pub mod math {
+        #[service]
+        pub struct Math;
 
-    impl Math {
-        pub fn add(a: u32, b: u32) -> u32 {
-            a + b
+        impl Math {
+            pub fn add(a: u32, b: u32) -> u32 {
+                a + b
+            }
         }
     }
 }

@@ -1,0 +1,12 @@
+error[E0277]: the trait bound `ledger::Closed: ToString` is not satisfied
+  --> tests/ui/open_error_without_display.rs:13:39
+   |
+13 |         pub fn open() -> Result<Self, Closed> {
+   |                                       ^^^^^^ unsatisfied trait bound
+   |
+help: the trait `std::fmt::Display` is not implemented for `ledger::Closed`
+  --> tests/ui/open_error_without_display.rs:4:5
+   |
+ 4 |     pub struct Closed;
+   |     ^^^^^^^^^^^^^^^^^
+   = note: required for `ledger::Closed` to implement `ToString`

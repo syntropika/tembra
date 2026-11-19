@@ -72,7 +72,7 @@ struct Object {
     versions: BTreeMap<core::Id, Environment>,
     activation: Option<Shared<LocalBoxFuture<'static, Result<()>>>>,
 }
-type Opener = Box<dyn FnOnce() -> LocalBoxFuture<'static, Result<()>>>;
+type Opener = Box<dyn FnOnce(Context) -> LocalBoxFuture<'static, Result<()>>>;
 type Closer = Box<dyn FnOnce(Context) -> LocalBoxFuture<'static, Result<()>>>;
 /// Physical work a call keeps doing after its logical result was published.
 pub(crate) type Physical = LocalBoxFuture<'static, Result<()>>;

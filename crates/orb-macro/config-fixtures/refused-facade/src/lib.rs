@@ -5,14 +5,16 @@
 
 #[sdk::orb(package = "example:greeter@1.0.0", crate = "my-sdk", no_std)]
 pub mod greeter {
-    /// Greets.
-    #[service]
-    pub struct Greeting;
+    pub mod greeting {
+        /// Greets.
+        #[service]
+        pub struct Greeting;
 
-    impl Greeting {
-        /// The greeting.
-        pub fn hello() -> u32 {
-            1
+        impl Greeting {
+            /// The greeting.
+            pub fn hello() -> u32 {
+                1
+            }
         }
     }
 }

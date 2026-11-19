@@ -1,5 +1,6 @@
 //! What a derived interface uses from the interfaces the Orb consumes. A derived signature names
-//! a type of such an interface through the module the Orb module re-exports for it:
+//! a type of such an interface through the module the Orb module re-exports for it, which a
+//! service's module reaches through `super::` or a `use super::greeting;`:
 //! `greeting::Entry` for `import = "example:greeter/greeting@1.0.0"`, `counter_ref::Tally` for a
 //! type the view of an interface imported by key uses, `book::Entry` for an implemented
 //! `#[service("example:ledger/book@1.0.0")]`, `guard::Admission` for a hook the module contributes
@@ -16,10 +17,10 @@
 //! the world exports, an implemented one or a hook, gets a copy of its types in its export module,
 //! but of those it `use`s from an interface the world only imports, which its import and its
 //! export alias alike, and a derived interface, exported too, uses that copy: the Orb module
-//! re-exports the export module of an implemented interface and of a contributed hook, but the
-//! import module of a hook it declares, which `run` calls, so where the two copies differ a
-//! derived interface names none of a declared hook's types, and none of an exported interface's,
-//! an implemented one's or a hook's, through the view of its keyed import, the import's copy. A
+//! re-exports the export module of an implemented interface and of a hook, and where the two
+//! copies differ a derived interface names none of an implemented interface's or a contributed
+//! hook's types through the view of its keyed import, the import's copy. A hook the module
+//! declares has the export's copy alone, which its import's bindings name too. A
 //! WASI interface's names stay out of a derived interface, named through the WASI interface's
 //! module or through a consumed interface that `use`s them, and a consumed type crosses one when it
 //! carries data only. A state may hold a consumed type that `serde` can write, which the bindings
@@ -98,11 +99,10 @@ pub(crate) struct Modules {
 }
 
 /// A name a type path reaches through a consumed interface's module, `greeting::Entry`: the
-/// interface, the module's name, the name and the path itself, for the errors.
+/// interface, the name and the path itself, for the errors.
 #[derive(Clone)]
 pub(crate) struct Named<'m, 't> {
     pub interface: &'m Reexported,
-    pub module: &'m str,
     /// The type's name in the interface, which a `use` may have imported under another.
     pub ident: Ident,
     pub ty: &'t Type,
@@ -442,7 +442,7 @@ impl Modules {
         let [.., module, item] = leads.segments.as_slice() else {
             return None;
         };
-        let (module, interface) = self.reexported.get_key_value(&module.to_string())?;
+        let interface = self.reexported.get(&module.to_string())?;
         if interface.role == Role::Context {
             return None;
         }
@@ -450,7 +450,6 @@ impl Modules {
         ident.set_span(written.ident.span());
         Some(Named {
             interface,
-            module,
             ident,
             ty,
         })
@@ -894,22 +893,6 @@ impl Modules {
         });
     }
 
-    /// The module the Orb module re-exports for the interface `identity` when the world exports
-    /// it, with the role the module holds it in: `counter` for an implemented
-    /// `example:counters/counter@1.0.0`, the export module, whose types a derived interface takes,
-    /// as for a hook the module contributes to; the import module for a hook it declares.
-    fn exporting(&self, identity: &str) -> Option<(&str, Role)> {
-        self.reexported
-            .iter()
-            .find(|(_, reexported)| {
-                matches!(
-                    reexported.role,
-                    Role::Implemented | Role::Contributed | Role::Declared
-                ) && reexported.identity == identity
-            })
-            .map(|(module, reexported)| (module.as_str(), reexported.role))
-    }
-
     /// The module types the fields of a struct or the payloads of an enum's cases mention, the
     /// item declared in the module `scope`, each with the module of the Orb the field's path names
     /// it in (`references_in`).
@@ -1189,10 +1172,6 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<Consumption> {
         found
             .iter()
             .map(|(named, _)| named.interface.identity.as_str()),
-        &exported
-            .iter()
-            .map(|interface| interface.identity.as_str())
-            .collect(),
     )?;
     let mut foreign: BTreeMap<String, Vec<Foreign>> = BTreeMap::new();
     let mut serialized = BTreeSet::new();
@@ -1229,7 +1208,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<Consumption> {
         let dependency = exported
             .iter()
             .find(|interface| items.depends.contains(&interface.identity));
-        let checked = checked(named, definition, place, declared, dependency, modules)?;
+        let checked = checked(named, definition, place, dependency)?;
         if let (
             Place::State { .. },
             wit::Kind::Type {
@@ -1294,9 +1273,7 @@ fn checked<'a>(
     named: &Named<'_, '_>,
     definition: &wit::Definition,
     place: &Place<'a>,
-    declared: &[Declared],
     dependency: Option<&Reexported>,
-    modules: &Modules,
 ) -> syn::Result<Option<&'a Ident>> {
     let subject = place.subject();
     let ident = &named.ident;
@@ -1355,32 +1332,8 @@ fn checked<'a>(
     // import's copy of its types, as the view of its keyed import does, while a derived interface,
     // exported, takes the copy of the export, which the module the Orb module re-exports for an
     // implemented interface and a contributed hook names: rustc reports the mismatch on the
-    // author's signature. A declared hook's module is the import's too, which its rule refuses
-    // below.
-    // The `run` of a hook the module declares, for the errors.
-    let run = || {
-        declared
-            .iter()
-            .find(|declaration| declaration.hook == interface.identity)
-            .map(|declaration| format!("`{}::run`", declaration.ident))
-            .unwrap_or_else(|| "`run`".to_owned())
-    };
-    // The view of an interface the world exports, one the module implements or a hook it
-    // contributes to or declares, names the import's copy of the interface's types, while a
-    // derived interface, exported, takes the copy of its export, which the implemented interface's
-    // or the contributed hook's module names, so rustc reports the mismatch on the author's
-    // signature; a declared hook's module names the import's too, so no path names the export's.
-    // The two copies are one type where the export holds none of its own.
-    if interface.role == Role::Keyed
-        && definition.copied
-        && let Some((module, Role::Declared)) = modules.exporting(&interface.identity)
-    {
-        let view = named.module;
-        return refuse(format!(
-            "{what} of {of} and declares: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{view}::{ident}`, `{module}::{ident}` and {} are the import's; use a type of the module",
-            run()
-        ));
-    }
+    // author's signature. A hook the module declares has the export's copy alone, which its
+    // module, the view of its keyed import and `run` name (`wit::DeclaredBindings`).
     // A WASI interface's type or resource, named through the WASI interface's module or through
     // a consumed interface that `use`s it: the runtime carries neither between Orbs.
     if interface.role == Role::Wasi || definition.wasi.is_some() {
@@ -1410,16 +1363,6 @@ fn checked<'a>(
     match (interface.role, &definition.kind) {
         (Role::Wasi, _) => unreachable!("checked above"),
         (Role::Context, _) => unreachable!("`Modules::named` reaches no name of the context"),
-        // The Orb module re-exports the import of a hook it declares, a copy of the hook's types
-        // other than the export's, but for a type the hook `use`s from an interface the world only
-        // imports, which both alias; a resource stays the hook's, as a contributed hook's does.
-        (Role::Declared, _) if definition.copied => {
-            let module = named.module;
-            refuse(format!(
-                "{what} of {of}: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{module}::{ident}` and {} are the import's; use a type of the module",
-                run()
-            ))
-        }
         // Where the runtime carries the handle is tembra-contracts' check of the derived WIT,
         // `check_profile`'s.
         (

@@ -10,25 +10,27 @@
     tembra::orb(package = "example:keywords@1.0.0")
 )]
 pub mod list {
-    use alloc::string::String;
+    pub mod words {
+        use alloc::string::String;
 
-    /// How a word is written.
-    pub struct Marks {
-        pub bold: bool,
-        pub type_: bool,
-    }
+        /// How a word is written.
+        pub struct Marks {
+            pub bold: bool,
+            pub type_: bool,
+        }
 
-    /// Records words.
-    #[service]
-    pub struct Words;
+        /// Records words.
+        #[service]
+        pub struct Words;
 
-    impl Words {
-        /// The marks of `word`: those of `marks`, and `type` when the word starts with a capital
-        /// letter too.
-        pub fn record(word: String, marks: Marks) -> Marks {
-            Marks {
-                bold: marks.bold,
-                type_: marks.type_ || word.starts_with(char::is_uppercase),
+        impl Words {
+            /// The marks of `word`: those of `marks`, and `type` when the word starts with a
+            /// capital letter too.
+            pub fn record(word: String, marks: Marks) -> Marks {
+                Marks {
+                    bold: marks.bold,
+                    type_: marks.type_ || word.starts_with(char::is_uppercase),
+                }
             }
         }
     }
@@ -36,7 +38,7 @@ pub mod list {
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    use super::list::{self, Marks};
+    use super::list::{self, words::Marks};
     use crate::native::{ORB, call, hosting, ready};
     use futures::FutureExt;
     use serde_json::json;
@@ -71,7 +73,7 @@ mod tests {
     fn names_that_are_wit_keywords_answer_natively() {
         let (mut pool, host) = hosting(list::orb().unwrap());
         let reference = ready(&mut pool, &host, "example:keywords/words@1.0.0");
-        let client = list::WordsClient::new(reference.clone());
+        let client = list::words::WordsClient::new(reference.clone());
         let marks = Marks {
             bold: true,
             type_: false,

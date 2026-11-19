@@ -1,0 +1,5 @@
+error: the resource `Counts` cannot depend on itself
+ --> tests/ui/resource_depends_on_itself.rs:3:27
+  |
+3 |     #[resource(depends = [Counts])]
+  |                           ^^^^^^

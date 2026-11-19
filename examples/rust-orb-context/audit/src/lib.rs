@@ -18,31 +18,36 @@ mod audit {
         pub owner: String,
     }
 
-    /// The service: it reports its callers and writes to the host's log.
-    #[service]
-    pub struct Auditor;
+    pub mod auditor {
+        use super::{Caller, context};
+        use alloc::string::String;
 
-    impl Auditor {
-        /// The call's principal and the address of the object running it; a log record too.
-        pub fn whoami() -> Caller {
-            let object = context::object();
-            context::log(context::Level::Info, "whoami was asked");
-            Caller {
-                principal: context::principal(),
-                key: object.key,
-                owner: object.principal,
+        /// The service: it reports its callers and writes to the host's log.
+        #[service]
+        pub struct Auditor;
+
+        impl Auditor {
+            /// The call's principal and the address of the object running it; a log record too.
+            pub fn whoami() -> Caller {
+                let object = context::object();
+                context::log(context::Level::Info, "whoami was asked");
+                Caller {
+                    principal: context::principal(),
+                    key: object.key,
+                    owner: object.principal,
+                }
             }
-        }
 
-        /// Write a message to the host's log, at level warn, attributed to this Orb by the host.
-        pub fn warn(message: String) {
-            context::log(context::Level::Warn, &message);
-        }
+            /// Write a message to the host's log, at level warn, attributed to this Orb by the host.
+            pub fn warn(message: String) {
+                context::log(context::Level::Warn, &message);
+            }
 
-        /// Cancel the current call from inside, then report whether the kernel sees it cancelled.
-        pub fn give_up() -> bool {
-            context::cancel();
-            context::cancelled()
+            /// Cancel the current call from inside, then report whether the kernel sees it cancelled.
+            pub fn give_up() -> bool {
+                context::cancel();
+                context::cancelled()
+            }
         }
     }
 }

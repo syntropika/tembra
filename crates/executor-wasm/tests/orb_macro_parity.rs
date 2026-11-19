@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tembra::{
-    Context, Host, Orb, Provider, Reference, Service,
+    AcquisitionOptions, Context, Host, Orb, Provider, Reference, Service,
     core::Code,
     portable::{Delivered, Owned},
 };
@@ -48,6 +48,11 @@ enum Feature {
     WitResources,
     /// The code and reason of a call that fails.
     ErrorCodes,
+    /// The resources of the Orb's root, opened after the resources they depend on.
+    RootResources,
+    /// The resources of a service's objects, opened for each object after the root's resources and
+    /// the object's earlier ones they depend on.
+    ServiceResources,
 }
 
 /// One step of a scenario. A step names a service by its interface, `dialing` for
@@ -58,6 +63,9 @@ enum Step {
     /// answers the result, whose resources are numbered in it, or the error. The scenario keeps the
     /// handles of the resources a result holds, in order, after those it kept before.
     Call(&'static str, &'static str, Value),
+    /// Call a function of the object of a key of a service, once it is ready, as `Call` does: a
+    /// creation that fails answers its error.
+    At(&'static str, &'static str, &'static str, Value),
     /// Call a function through the handle the scenario kept at a position, as `Call` does.
     Method(usize, &'static str, Value),
     /// Drop the handle the scenario kept at a position, which drops the resource: it answers `null`.
@@ -281,6 +289,21 @@ fn scenarios() -> Vec<Scenario> {
         ),
         row(
             WitResources,
+            "a service in a private module issues tokens of a module below it, whose constructor counts in the state of another module below it",
+            vec![
+                State("vault"),
+                Call("vault", "[constructor]token", json!([3])),
+                Method(0, "[method]token.number", json!([])),
+                Call("vault", "open", json!([4])),
+                Method(1, "[method]token.number", json!([])),
+                Call("vault", "issued", json!([])),
+                State("vault"),
+                Drop(0),
+                Drop(1),
+            ],
+        ),
+        row(
+            WitResources,
             "a function returns tallies nested in a list, an option and a tuple, each handle naming its own tally",
             vec![
                 Call("tallies", "dropped", json!([])),
@@ -347,6 +370,42 @@ fn scenarios() -> Vec<Scenario> {
                 Call("names", "red", json!(["red"])),
                 Call("names", "red", json!(["green"])),
                 Call("names", "red", json!(["purple"])),
+            ],
+        ),
+        row(
+            RootResources,
+            "a resource opens after the resource it depends on, whose value its opening reads",
+            vec![
+                Call("stock", "add", json!([2])),
+                Call("stock", "add", json!([4])),
+            ],
+        ),
+        row(
+            ServiceResources,
+            "an object's resources open after the root's and the object's earlier ones, whose values their openings read, and keep their values from call to call",
+            vec![
+                Call("ship", "berth", json!([])),
+                Call("ship", "tie", json!([3])),
+                Call("ship", "tie", json!([2])),
+            ],
+        ),
+        row(
+            ServiceResources,
+            "each object has resources of its own: a second ship takes the next berth and ties a line of its own, which the first ship's line does not see",
+            vec![
+                At("second", "ship", "berth", json!([])),
+                At("second", "ship", "tie", json!([4])),
+                Call("ship", "tie", json!([1])),
+                At("second", "ship", "tie", json!([1])),
+            ],
+        ),
+        row(
+            ServiceResources,
+            "an object whose resource's open answers an error is not created, and a call of it answers unavailable/resource",
+            vec![
+                Call("raft", "buoy", json!([])),
+                At("second", "raft", "buoy", json!([])),
+                Call("raft", "buoy", json!([])),
             ],
         ),
         row(
@@ -547,6 +606,8 @@ struct Build {
     host: Host,
     watch: Watch,
     services: BTreeMap<String, Rc<Reference>>,
+    /// The name of each service, `<orb>::<identity>`, by its identity.
+    names: BTreeMap<String, String>,
 }
 
 impl Build {
@@ -563,6 +624,7 @@ impl Build {
             .collect();
         host.install(vec![dials(watch.clone()), orb]).unwrap();
         let mut services = BTreeMap::new();
+        let mut names = BTreeMap::new();
         for service in declared {
             let reference = Rc::new(host.get(&service, vec!["main".into()], "alice").unwrap());
             pool.run_until(reference.ready()).unwrap();
@@ -571,6 +633,7 @@ impl Build {
                 .split_once("::")
                 .map_or(service.as_str(), |(_, identity)| identity);
             services.insert(identity.to_owned(), reference);
+            names.insert(identity.to_owned(), service.clone());
         }
         Self {
             name,
@@ -578,6 +641,7 @@ impl Build {
             host,
             watch,
             services,
+            names,
         }
     }
 
@@ -587,6 +651,7 @@ impl Build {
     fn run(&mut self, steps: Vec<Step>) -> Vec<Answer> {
         let kernel = self.host.kernel();
         let services = self.services.clone();
+        let names = self.names.clone();
         let watch = self.watch.clone();
         self.pool
             .run_until(self.host.root("alice", move |context| {
@@ -616,6 +681,31 @@ impl Build {
                                     kept(result, &mut handles)
                                 }
                                 Err(missing) => missing,
+                            },
+                            Step::At(key, wanted, function, arguments) => match names
+                                .iter()
+                                .find(|(identity, _)| interface(identity) == wanted)
+                            {
+                                Some((_, name)) => {
+                                    let result = async {
+                                        let reference = context.get(
+                                            name,
+                                            vec![key.into()],
+                                            AcquisitionOptions::default(),
+                                        )?;
+                                        reference.ready().await?;
+                                        reference
+                                            .call_portable::<_, Delivered>(
+                                                &context, function, arguments,
+                                            )
+                                            .await
+                                    }
+                                    .await;
+                                    kept(result, &mut handles)
+                                }
+                                None => Outcome::Missing(format!(
+                                    "no service of the interface `{wanted}`"
+                                )),
                             },
                             Step::Method(handle, function, arguments) => {
                                 let result = match handles.get(handle).and_then(Option::as_ref) {

@@ -231,8 +231,9 @@ impl Environment {
             name,
             version,
             &dependencies,
-            move |signal| {
+            move |context| {
                 async move {
+                    let signal = context.signal();
                     let cancellation = signal.clone();
                     let value = opening
                         .execute(

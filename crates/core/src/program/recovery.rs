@@ -11,9 +11,21 @@ impl Host {
     ) -> Result<Option<Step>> {
         if program.ticket.is_none() {
             let mut inner = self.inner.borrow_mut();
+            // The activations waiting on the failed activation's own scopes, the objects below
+            // them, fail as it did; those of other owners that depend on one of its resources,
+            // and the scopes of a release or a retirement, which activate nothing, only close.
+            let told = match program.activation_scope {
+                Some(_) => inner.failed_scope_children(&program.scopes),
+                None => BTreeSet::new(),
+            };
             program.scopes = inner.failed_scope_dependents(&program.scopes);
             program.scope_set = program.scopes.iter().copied().collect();
-            inner.begin_cleanup(&program.scopes);
+            let (own, others): (Vec<Id>, Vec<Id>) = program
+                .scopes
+                .iter()
+                .partition(|scope| told.contains(scope));
+            inner.begin_cleanup_after(&own, program.error.as_ref());
+            inner.begin_cleanup_after(&others, None);
         }
         effects.extend(program.scopes.iter().map(|scope| Effect::Stop {
             scope: *scope,

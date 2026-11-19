@@ -4,14 +4,16 @@
 
 #[tembra::orb(package = "example:demo@1.0.0")]
 mod demo {
-    /// The demonstration.
-    #[service]
-    pub struct Show;
+    pub mod show {
+        /// The demonstration.
+        #[service]
+        pub struct Show;
 
-    impl Show {
-        /// One act.
-        pub fn act() -> u32 {
-            1
+        impl Show {
+            /// One act.
+            pub fn act() -> u32 {
+                1
+            }
         }
     }
 }
@@ -19,7 +21,7 @@ mod demo {
 fn main() {
     println!(
         "{} act, {} bytes of WIT",
-        demo::Show::act(),
+        demo::show::Show::act(),
         demo::WIT.len()
     );
 }

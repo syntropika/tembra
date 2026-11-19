@@ -104,8 +104,9 @@ fn provider_with_close(activated: Rc<RefCell<Vec<String>>>, close: Option<CloseG
                     "connection",
                     1,
                     &[],
-                    move |signal| {
+                    move |context| {
                         async move {
+                            let signal = context.signal();
                             let wait = std::pin::pin!(futures_timer::Delay::new(
                                 Duration::from_millis(delay)
                             ));

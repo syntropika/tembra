@@ -2,11 +2,13 @@
 //!
 //! The module is the source of truth, and every exported thing is marked. A unit struct with
 //! `#[service]` and an `impl` block of `pub fn` becomes an exported interface whose functions are
-//! the Orb's methods. A free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`
-//! participates in another Orb's hook. A struct with named fields and `#[state]` is the
-//! kernel-managed state of a service's objects. A struct with `#[resource]` and a `pub fn open()`
-//! is a resource of the Orb's root, opened by the kernel at activation and usable by every
-//! method and hook callback. Structs with named fields and enums become `record`s, `enum`s and
+//! the Orb's methods. Each service lives in an inline module of its own, `pub mod <service in
+//! snake_case>`, which holds what belongs to the service and names the Orb's items through
+//! `super::`. A free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`
+//! participates in another Orb's hook. A struct with named fields and `#[state]` in a service's
+//! module is the kernel-managed state of that service's objects. A struct with `#[resource]` and a
+//! `pub fn open()` outside every service's module is a resource of the Orb's root, opened by the
+//! kernel at activation and usable by every method and hook callback. Structs with named fields and enums become `record`s, `enum`s and
 //! `variant`s only when a service method, a WIT resource's function or a hook's input uses them,
 //! directly or through another type; a state alone does not. Such a type stays the author's, with
 //! its derives, attributes and impls as written: the macro converts it to and from the type the
@@ -23,7 +25,7 @@
 //! The hook interfaces come from the provider's WIT, found in the
 //! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
 //! generated modules are re-exported under their own names, so the author writes
-//! `guard::Admission`. A derived signature names a consumed interface's types the same way, and
+//! `guard::Admission`, and `super::guard::Admission` in a service's module. A derived signature names a consumed interface's types the same way, and
 //! the derived interface `use`s them, so they cross as the consumed package's own, with no
 //! conversion. The kernel's `tembra:guest` package is bundled with the macro; with
 //! `context` on the attribute the module imports its `context` interface and reads the call's
@@ -438,7 +440,7 @@ impl Service {
 struct WitResource {
     ident: Ident,
     docs: Vec<String>,
-    /// The owning service, as named by `service = ...` or resolved to the module's only one.
+    /// The owning service: the service of the nearest service's module at or above it.
     service: Option<Ident>,
     constructor: Option<Constructor>,
     methods: Vec<Function>,
@@ -543,7 +545,7 @@ impl Composition {
 /// of one service.
 struct State {
     ident: Ident,
-    /// The owning service, as named by `service = ...` or resolved to the module's only one.
+    /// The owning service: the service of the nearest service's module at or above it.
     service: Option<Ident>,
     version: u32,
     /// The function marked `#[validate]`, `fn(&self) -> Result<(), String>`: every update runs it
@@ -556,15 +558,31 @@ struct State {
     scope: usize,
 }
 
-/// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a function
-/// marked `#[open]`, `fn() -> Self`, and, optionally, one marked `#[close]`, `fn(self)`.
+/// A resource of the Orb's root, or of each object of a service: a struct marked `#[resource]`
+/// whose `impl` block has a function marked `#[open]`, `fn() -> Self` or `fn() -> Result<Self, E>`,
+/// and, optionally, one marked `#[close]`, `fn(self)`. One in a service's module, or below it, is
+/// the service's; any other is the root's.
 struct Resource {
     ident: Ident,
     version: u32,
+    /// The owning service, when the resource is in a service's module: the service of the nearest
+    /// service's module at or above it. None for a resource of the root.
+    service: Option<Ident>,
+    /// The identity of the owning service's interface, once the owner is resolved; empty for a
+    /// resource of the root.
+    identity: String,
     /// The function marked `#[open]`, once found.
     open: Option<Ident>,
+    /// Whether the `#[open]` function returns `Result<Self, E>`, whose error fails the open with
+    /// its `Display` text.
+    fallible: bool,
+    /// Where a fallible `#[open]` names its error type, which the generated code asks for
+    /// `Display` there.
+    failure: Span,
     /// The function marked `#[close]`, if any.
     close: Option<Ident>,
+    /// The resources of `depends = [..]`, by their struct's name, which open before this one.
+    depends: Vec<Ident>,
     /// The module declaring the resource, by scope; 0 is the Orb module.
     scope: usize,
 }
@@ -642,9 +660,9 @@ struct NativeOnly {
 enum Marker {
     /// `#[validate]`: a state's rule, `fn(&self) -> Result<(), String>`.
     Validate,
-    /// `#[open]`: a root resource's opening, `fn() -> Self`.
+    /// `#[open]`: a resource's opening, `fn() -> Self` or `fn() -> Result<Self, E>`.
     Open,
-    /// `#[close]`: a root resource's closing, `fn(self)`.
+    /// `#[close]`: a resource's closing, `fn(self)`.
     Close,
     /// `#[constructor]`: a WIT resource's constructor, `fn(..) -> Self` without `self`.
     Constructor,
@@ -679,7 +697,7 @@ impl Marker {
     fn shape(self) -> &'static str {
         match self {
             Self::Validate => "`fn(&self) -> Result<(), String>` of a #[state] struct",
-            Self::Open => "`fn() -> Self` of a #[resource] struct",
+            Self::Open => "`fn() -> Self` or `fn() -> Result<Self, E>` of a #[resource] struct",
             Self::Close => "`fn(self)` of a #[resource] struct",
             Self::Constructor => "`fn(..) -> Self`, without self, of a #[wit_resource] struct",
             Self::Create => {
@@ -798,10 +816,6 @@ struct Scan {
     package: String,
     /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
     modules: Vec<Vec<Ident>>,
-    /// Where each module of each module's path is visible, by scope: the depth of the module of
-    /// the path it is visible in, and so in every module below that one. The macro names an item
-    /// through every module of its path.
-    seen_from: Vec<Vec<usize>>,
     candidates: Vec<Candidate>,
     services: Vec<Service>,
     contributions: Vec<Contribution>,
@@ -825,6 +839,9 @@ struct Scan {
     /// module writes resolves to one of them before a resource or a record of another module, and
     /// they tell the type an `impl` names apart from a namesake a `use` brings in.
     own_types: Vec<(usize, Ident)>,
+    /// The modules whose `#[service]` struct this copy of the module leaves out under its
+    /// `#[cfg]`, by scope, with the service's name (`cfg::gated`).
+    gated: Vec<(usize, Ident)>,
 }
 
 /// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
@@ -957,71 +974,6 @@ impl Uses {
     }
 }
 
-/// How many modules above the one declaring it an item of this visibility is visible in: none
-/// when private, one for `pub(super)`, as many as the `super`s of `pub(in ..)`, and all of them for
-/// `pub`, `pub(crate)` and a path from `crate`, which the macro cannot place and leaves to the
-/// compiler.
-fn reach(vis: &Visibility) -> usize {
-    match vis {
-        Visibility::Public(_) => usize::MAX,
-        Visibility::Restricted(restricted) => {
-            let segments = &restricted.path.segments;
-            if segments
-                .first()
-                .is_some_and(|segment| segment.ident == "crate")
-            {
-                usize::MAX
-            } else {
-                segments
-                    .iter()
-                    .filter(|segment| segment.ident == "super")
-                    .count()
-            }
-        }
-        Visibility::Inherited => 0,
-    }
-}
-
-/// Why the native side cannot build an Orb whose WIT resource `resource`, with a constructor or a
-/// static function, sits in the module at `from`, when that module cannot name the native client
-/// of its service, `service`, declared in the module at `path`, where `seen_from` says each module
-/// of the path is visible: the native side writes those functions on the client, in the resource's
-/// module. The message names the module of the path and the service to make visible to it; the
-/// Orb's `orb()` answers it, and a component build, which needs no client, is never refused for
-/// it. Writing the calls in the service's module instead would name the parameter types from
-/// there, and raising a visibility would change the author's code. A `pub(in crate::..)` module or
-/// service counts as visible everywhere, as `reach` leaves it to the compiler, which reports one
-/// the resource's module cannot see.
-fn client_seen(
-    service: &Service,
-    path: &[Ident],
-    seen_from: &[usize],
-    from: &[Ident],
-    resource: &Ident,
-) -> Result<(), String> {
-    let module = seen_from
-        .iter()
-        .position(|&depth| !from.starts_with(&path[..depth]))
-        .map(|position| format!("the module `{}`", path[position]));
-    let declared = path.len().saturating_sub(reach(&service.vis));
-    let hidden =
-        (!from.starts_with(&path[..declared])).then(|| format!("the service `{}`", service.ident));
-    let hidden: Vec<String> = module.into_iter().chain(hidden).collect();
-    if hidden.is_empty() {
-        return Ok(());
-    }
-    let viewer = if from.is_empty() {
-        "the Orb module".to_owned()
-    } else {
-        format!("the module {}", describe(from))
-    };
-    Err(format!(
-        "`{resource}` has a constructor or a static function, which a native build writes on the client of its service `{}` in {viewer}, which cannot see it: make {} visible to {viewer}, at least `pub(crate)`",
-        service.ident,
-        hidden.join(" and ")
-    ))
-}
-
 /// Whether a type alias names a namesake, `pub type Token = super::sessions::Token;`: a path
 /// ending in the alias's own name, with generics on neither, which the alias stands for as
 /// `use super::sessions::Token;` would.
@@ -1044,7 +996,6 @@ impl Scan {
     fn scan(&mut self, items: Vec<Item>, scope: usize) -> syn::Result<(Vec<Item>, Vec<Module>)> {
         let mut passthrough = Vec::new();
         let mut children = Vec::new();
-        let depth = self.modules[scope].len();
         for item in items {
             self.uses[scope].add_item(&item);
             let declared_type = match &item {
@@ -1060,7 +1011,8 @@ impl Scan {
                 self.own_types.push((scope, ident.clone()));
             }
             match item {
-                Item::Mod(module) => {
+                Item::Mod(mut module) => {
+                    let gated = cfg::gated(&mut module.attrs);
                     let Some((_, inner)) = module.content else {
                         return Err(syn::Error::new(
                             module.ident.span(),
@@ -1068,12 +1020,12 @@ impl Scan {
                         ));
                     };
                     let child = self.modules.len();
+                    if let Some(service) = gated {
+                        self.gated.push((child, service));
+                    }
                     let mut path = self.modules[scope].clone();
                     path.push(module.ident.clone());
                     self.modules.push(path);
-                    let mut seen_from = self.seen_from[scope].clone();
-                    seen_from.push(depth.saturating_sub(reach(&module.vis)));
-                    self.seen_from.push(seen_from);
                     self.uses.push(Uses::default());
                     let (items, grandchildren) = self.scan(inner, child)?;
                     // The code the macro writes for an item it marks names the item in every
@@ -1548,32 +1500,192 @@ fn describe(path: &[Ident]) -> String {
         .join("::")
 }
 
-/// The service owning a state or a WIT resource: the one named, else the only service of the
-/// item's module, else the only service of the Orb.
-fn owner_of<'a>(
+/// The service whose module holds the module `scope`: the service of that module, else of the
+/// nearest module above it that is a service's. None outside every service's module.
+fn service_of<'a>(
     services: &'a [Service],
-    named: Option<&Ident>,
     scope: usize,
-    span: Span,
-    hint: &str,
-) -> syn::Result<&'a Service> {
-    if let Some(ident) = named {
-        return services
+    modules: &[Vec<Ident>],
+) -> Option<&'a Service> {
+    let mut at = Some(scope);
+    while let Some(scope) = at {
+        if let Some(service) = services.iter().find(|service| service.scope == scope) {
+            return Some(service);
+        }
+        at = parent(scope, modules);
+    }
+    None
+}
+
+/// The module of a service that a `#[cfg]` on the service leaves out of this configuration, at or
+/// above the module `scope`, with the service's name (`cfg::gated`).
+fn gated_service<'a>(
+    gated: &'a [(usize, Ident)],
+    scope: usize,
+    modules: &[Vec<Ident>],
+) -> Option<(usize, &'a Ident)> {
+    let mut at = Some(scope);
+    while let Some(scope) = at {
+        if let Some((_, service)) = gated.iter().find(|(gated, _)| *gated == scope) {
+            return Some((scope, service));
+        }
+        at = parent(scope, modules);
+    }
+    None
+}
+
+/// The error on an item of a service's module, `marker` `ident`, whose service a `#[cfg]` on the
+/// service leaves out of this configuration: the fix puts the `#[cfg]` on the service's module,
+/// so that the item goes with it.
+fn gated_error(
+    marker: &str,
+    ident: &Ident,
+    scope: usize,
+    service: &Ident,
+    modules: &[Vec<Ident>],
+) -> syn::Error {
+    syn::Error::new(
+        ident.span(),
+        format!(
+            "the {marker} `{ident}` is in {}, the module of the service `{service}`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod {}`, so that what it holds goes with it",
+            describe(&modules[scope]),
+            modules[scope]
+                .last()
+                .expect("a service's module is a sub-module"),
+        ),
+    )
+}
+
+/// The items of a scan that the rule of the services' modules places, for `placed_by_service`.
+struct Placed<'a> {
+    services: &'a [Service],
+    states: &'a [State],
+    wit_resources: &'a [WitResource],
+    declared: &'a [Declared],
+    contributions: &'a [Contribution],
+    root: Option<&'a Root>,
+    inputs: Option<&'a Inputs>,
+    modules: &'a [Vec<Ident>],
+    /// The modules of the services a `#[cfg]` on the service leaves out, with their names.
+    gated: &'a [(usize, Ident)],
+}
+
+/// Refuse a module whose items break the rule of the services' modules: each `#[service]` sits in
+/// an inline module of its own, below no other service's module; a `#[state]` and a
+/// `#[wit_resource]` sit in their service's module or below it; and the Orb's items, `#[root]`,
+/// `#[inputs]` and `#[hook]`, outside every service's module. A `#[resource]` sits anywhere: in a
+/// service's module it is the service's, elsewhere the root's. Each error falls on the item and
+/// names the fix.
+fn placed_by_service(placed: &Placed) -> syn::Result<()> {
+    let Placed {
+        services, modules, ..
+    } = *placed;
+    for (index, service) in services.iter().enumerate() {
+        let ident = &service.ident;
+        if service.scope == 0 {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` is a #[service] of the Orb module: put each service in a module of its own, with its impl, its state and its WIT resources, `pub mod {} {{ #[service] pub struct {ident}; .. }}`",
+                    ident.to_string().to_snake_case()
+                ),
+            ));
+        }
+        if let Some(first) = services[..index]
             .iter()
-            .find(|service| &service.ident == ident)
-            .ok_or_else(|| {
-                syn::Error::new(
-                    ident.span(),
-                    format!("`{ident}` is not a #[service] of this module"),
-                )
-            });
+            .find(|other| other.scope == service.scope)
+        {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` shares the module {} with the service `{}`: put each service in a module of its own",
+                    describe(&modules[service.scope]),
+                    first.ident
+                ),
+            ));
+        }
+        if let Some(outer) =
+            parent(service.scope, modules).and_then(|above| service_of(services, above, modules))
+        {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "the module of `{ident}` is inside {}, the module of the service `{}`: put each service's module outside every other service's module",
+                    describe(&modules[outer.scope]),
+                    outer.ident
+                ),
+            ));
+        }
     }
-    let mut local = services.iter().filter(|service| service.scope == scope);
-    match (local.next(), local.next(), services.len()) {
-        (Some(only), None, _) => Ok(only),
-        (_, _, 1) => Ok(&services[0]),
-        _ => Err(syn::Error::new(span, hint)),
+    for state in placed.states {
+        if service_of(services, state.scope, modules).is_none() {
+            if let Some((scope, service)) = gated_service(placed.gated, state.scope, modules) {
+                return Err(gated_error(
+                    "#[state]",
+                    &state.ident,
+                    scope,
+                    service,
+                    modules,
+                ));
+            }
+            return Err(syn::Error::new(
+                state.ident.span(),
+                format!(
+                    "the #[state] `{}` is outside every service's module: put it in the module of the service whose objects own it",
+                    state.ident
+                ),
+            ));
+        }
     }
+    for resource in placed.wit_resources {
+        if service_of(services, resource.scope, modules).is_none() {
+            if let Some((scope, service)) = gated_service(placed.gated, resource.scope, modules) {
+                return Err(gated_error(
+                    "#[wit_resource]",
+                    &resource.ident,
+                    scope,
+                    service,
+                    modules,
+                ));
+            }
+            return Err(syn::Error::new(
+                resource.ident.span(),
+                format!(
+                    "the #[wit_resource] `{}` is outside every service's module: put it in the module of the service whose interface defines it",
+                    resource.ident
+                ),
+            ));
+        }
+    }
+    let orb_items = placed
+        .declared
+        .iter()
+        .map(|item| ("#[hook]", &item.ident, item.scope))
+        .chain(
+            placed
+                .contributions
+                .iter()
+                .map(|item| ("#[hook]", &item.ident, item.scope)),
+        )
+        .chain(placed.root.map(|item| ("#[root]", &item.ident, item.scope)))
+        .chain(
+            placed
+                .inputs
+                .map(|item| ("#[inputs]", &item.ident, item.scope)),
+        );
+    for (marker, ident, scope) in orb_items {
+        if let Some(service) = service_of(services, scope, modules) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "the {marker} `{ident}` is in {}, the module of the service `{}`: it belongs to the Orb, so put it outside every service's module",
+                    describe(&modules[service.scope]),
+                    service.ident
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The module as the analysis leaves it for the emitters: the head of the Orb module and the
@@ -1595,9 +1707,6 @@ struct Analysis {
     ident: Ident,
     /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
     modules: Vec<Vec<Ident>>,
-    /// Where each module of each module's path is visible, by scope, as the scan found it: the
-    /// depth of the module of the path it is visible in, and so in every module below that one.
-    seen_from: Vec<Vec<usize>>,
     /// The Orb module and its sub-modules with the author's items that stay theirs: the types
     /// that stay out of the WIT, with the serde derives a state needs of them, and the types the
     /// macro converts, `converted`, with the serde derives a state needs of them. Every other type
@@ -1608,7 +1717,8 @@ struct Analysis {
     services: Vec<Service>,
     /// The WIT resources, each resolved to the service whose interface defines it.
     wit_resources: Vec<WitResource>,
-    /// The resources of the Orb's root, with their `#[open]` and `#[close]` functions.
+    /// The resources, of the root and of the services' objects, with their `#[open]` and `#[close]`
+    /// functions, each after the resources it depends on.
     resources: Vec<Resource>,
     /// The struct marked `#[inputs]`, if any: the argument of the native `orb(..)`.
     inputs: Option<Inputs>,
@@ -1770,7 +1880,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     let mut scan = Scan {
         package: package.clone(),
         modules: vec![Vec::new()],
-        seen_from: vec![Vec::new()],
         candidates: Vec::new(),
         services: Vec::new(),
         contributions: Vec::new(),
@@ -1786,6 +1895,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         marked: Vec::new(),
         uses: vec![Uses::default()],
         own_types: Vec::new(),
+        gated: Vec::new(),
     };
     let (items, children) = scan.scan(items, 0)?;
     let mut tree = Module {
@@ -1800,7 +1910,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     };
     let Scan {
         modules,
-        seen_from,
         mut candidates,
         mut services,
         contributions,
@@ -1816,8 +1925,21 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         marked,
         uses,
         own_types,
+        gated,
         ..
     } = scan;
+    // Each service's module holds the service and what belongs to it; the Orb's items lie outside.
+    placed_by_service(&Placed {
+        services: &services,
+        states: &states,
+        wit_resources: &wit_resources,
+        declared: &declared,
+        contributions: &contributions,
+        root: root.as_ref(),
+        inputs: inputs.as_ref(),
+        modules: &modules,
+        gated: &gated,
+    })?;
     // A method's error channel is spelled through the name the crate depends on the facade under.
     let facade = options.facade();
     // A service's methods are the pub fn of the impl blocks of its own module, but its create;
@@ -2021,6 +2143,9 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 format!("#[open] marks {}", Marker::Open.shape()),
             ));
         }
+        let failure = opens_fallibly(&signature.output, &resource.ident)?;
+        resource.fallible = failure.is_some();
+        resource.failure = failure.unwrap_or_else(Span::call_site);
         resource.open = Some(signature.ident.clone());
         if let Some(close) =
             marked_function(&marked, Marker::Close, &resource.ident, resource.scope)?
@@ -2038,6 +2163,27 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             resource.close = Some(signature.ident.clone());
         }
     }
+    // A resource in a service's module belongs to the objects of that service; any other is the
+    // root's.
+    for resource in &mut resources {
+        if let Some(owner) = service_of(&services, resource.scope, &modules) {
+            resource.identity = owner.identity(&package);
+            resource.service = Some(owner.ident.clone());
+            continue;
+        }
+        // A service whose `#[cfg]` leaves it out of this configuration leaves its module's
+        // resource without an owner, which would turn it into a resource of the root.
+        if let Some((scope, service)) = gated_service(&gated, resource.scope, &modules) {
+            return Err(gated_error(
+                "#[resource]",
+                &resource.ident,
+                scope,
+                service,
+                &modules,
+            ));
+        }
+    }
+    let resources = in_dependency_order(resources)?;
     for state in &mut states {
         if let Some(validator) =
             marked_function(&marked, Marker::Validate, &state.ident, state.scope)?
@@ -2291,17 +2437,12 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             ));
         }
     }
-    // Each state belongs to the objects of one service, the one named, the only one of its
-    // module or the only one of the Orb, and an object declares exactly one state.
+    // Each state belongs to the objects of the service whose module holds it, and an object
+    // declares exactly one state.
     let mut owners = BTreeMap::new();
     for state in &mut states {
-        let owner = owner_of(
-            &services,
-            state.service.as_ref(),
-            state.scope,
-            state.ident.span(),
-            "name the service whose objects own this state, #[state(service = Name)], or put the state in the service's sub-module",
-        )?;
+        let owner = service_of(&services, state.scope, &modules)
+            .expect("a state placed in a service's module");
         if let Some(previous) = owners.insert(owner.ident.to_string(), state.ident.to_string()) {
             return Err(syn::Error::new(
                 state.ident.span(),
@@ -2314,16 +2455,10 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         state.identity = owner.identity(&package);
         state.service = Some(owner.ident.clone());
     }
-    // Each WIT resource belongs to the interface of one service, found the same way. The bindings
-    // name it from that service's module, through every module of its path.
+    // Each WIT resource belongs to the interface of the service whose module holds it.
     for resource in &mut wit_resources {
-        let owner = owner_of(
-            &services,
-            resource.service.as_ref(),
-            resource.scope,
-            resource.ident.span(),
-            "name the service whose interface defines this resource, #[wit_resource(service = Name)], or put the resource in the service's sub-module",
-        )?;
+        let owner = service_of(&services, resource.scope, &modules)
+            .expect("a WIT resource placed in a service's module");
         resource.service = Some(owner.ident.clone());
     }
     // The modules the Orb module re-exports for the consumed interfaces name the consumed types and
@@ -2618,7 +2753,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 return Err(syn::Error::new(
                     service.ident.span(),
                     format!(
-                        "{identity} defines the resource `{}`: mark a struct `{ident}` with #[wit_resource(service = {})] and give it the resource's functions",
+                        "{identity} defines the resource `{}`: mark a struct `{ident}` with #[wit_resource] in the module of `{}` and give it the resource's functions",
                         resource.name, service.ident
                     ),
                 ));
@@ -2692,7 +2827,8 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &views,
         wit::Kernel {
             state: !states.is_empty(),
-            resources: !resources.is_empty(),
+            resources: resources.iter().any(|resource| resource.service.is_none()),
+            service_resources: resources.iter().any(|resource| resource.service.is_some()),
             context: options.context,
         },
     )?;
@@ -2705,7 +2841,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         vis: module.vis,
         ident: module.ident,
         modules,
-        seen_from,
         tree,
         services,
         wit_resources,
@@ -2974,23 +3109,20 @@ fn component(
         .context
         .then(|| quote! { ::#facade::__guest! { pub use self::tembra::guest::context; } });
     // Each hook's generated module is re-exported under its interface name: the export module
-    // of a contributed hook, whose callback forwards to the author's function, and the import
-    // module of a hook declared from a consumed package, whose types `run` takes and returns.
+    // of a contributed hook, whose callback forwards to the author's function, and of a hook
+    // declared from a consumed package, whose types `run` takes and returns.
     let hook_modules = hooks
         .keys()
-        .map(|hook| {
-            let [ns, package, interface] = hook_path(hook);
-            quote! { pub use exports::#ns::#package::#interface; }
-        })
         .chain(
             declarations
                 .iter()
                 .filter(|(_, declaration)| declaration.input.is_none())
-                .map(|(hook, _)| {
-                    let [ns, package, interface] = hook_path(hook);
-                    quote! { pub use self::#ns::#package::#interface; }
-                }),
-        );
+                .map(|(hook, _)| hook),
+        )
+        .map(|hook| {
+            let [ns, package, interface] = hook_path(hook);
+            quote! { pub use exports::#ns::#package::#interface; }
+        });
     for contribution in contributions {
         let depth = modules[contribution.scope].len();
         let root = supers(depth);
@@ -3117,7 +3249,7 @@ fn component(
         tree.at(declaration.scope).generated.push(code);
     }
     let state_code = state_code(states, modules, &facade);
-    let resource_code = resource_code(resources, modules, &facade);
+    let resource_code = resource_code(resources, modules, &facade, options.context);
     // The native side's items of each sub-module, after the component's, with the services they
     // register and the types whose JSON they write; a component build expands them to nothing.
     for (scope, items) in nested {
@@ -3139,14 +3271,13 @@ fn component(
     if let Some(literal) = &options.package {
         wit::claim_package(literal, parsed, &copies, guest, &nested)?;
     }
-    let inline = if guest {
-        LitStr::new(
-            &format!("{wit}\n{}{standard}", wit::guest_package()?),
-            Span::call_site(),
-        )
+    // The packages beside the author's, given after its WIT, which a world added to it precedes.
+    let beside = if guest {
+        format!("\n{}{standard}", wit::guest_package()?)
     } else {
-        LitStr::new(&format!("{wit}{standard}"), Span::call_site())
+        standard.clone()
     };
+    let inline = LitStr::new(&format!("{wit}{beside}"), Span::call_site());
     let path = parsed.dir().map(|dir| {
         let dir = LitStr::new(&dir.path().display().to_string(), Span::call_site());
         quote! { path: #dir, }
@@ -3172,6 +3303,65 @@ fn component(
         &format!("::{facade}::__wit_bindgen::rt::bitflags"),
         Span::call_site(),
     );
+    // The hooks declared from a consumed package have one copy of their types, the export's, which
+    // `run` and a derived interface share: the bindings of the world spell each hook's import as
+    // its export module, and a second invocation, in `__tembra_declared`, generates the hooks'
+    // imports, which `run` calls, with their types spelled as the export's.
+    let declared_hooks: Vec<&String> = declared
+        .iter()
+        .filter(|declaration| declaration.input.is_none())
+        .map(|declaration| &declaration.hook)
+        .collect();
+    let (with, declared_imports) = match parsed.dir() {
+        Some(dir) if !declared_hooks.is_empty() => {
+            let exported: BTreeSet<&str> = services
+                .iter()
+                .filter_map(|service| service.implements.as_deref())
+                .chain(hooks.keys().map(String::as_str))
+                .chain(declared_hooks.iter().map(|hook| hook.as_str()))
+                .collect();
+            let bindings = wit::declared_bindings(dir, &declared_hooks, &exported)?;
+            let entries = |entries: &[(String, String)]| -> syn::Result<proc_macro2::TokenStream> {
+                let entries = entries
+                    .iter()
+                    .map(|(name, path)| {
+                        let name = LitStr::new(name, Span::call_site());
+                        let path: syn::Path = syn::parse_str(path)?;
+                        Ok(quote! { #name: #path })
+                    })
+                    .collect::<syn::Result<Vec<_>>>()?;
+                Ok(quote! { with: { #(#entries),* }, })
+            };
+            let world_with = entries(&bindings.world)?;
+            let imports_with = entries(&bindings.imports)?;
+            let imports_world = wit::declared_world(wit);
+            let imports_text = declared_hooks
+                .iter()
+                .map(|hook| format!("  import {hook};\n"))
+                .collect::<String>();
+            let imports_inline = LitStr::new(
+                &format!("{wit}\nworld {imports_world} {{\n{imports_text}}}\n{beside}"),
+                Span::call_site(),
+            );
+            let imports_world = LitStr::new(&imports_world, Span::call_site());
+            let imports = quote! {
+                #[doc(hidden)]
+                mod __tembra_declared {
+                    ::#facade::__wit_bindgen::generate!({
+                        #path
+                        inline: #imports_inline,
+                        world: #imports_world,
+                        generate_all,
+                        runtime_path: #runtime,
+                        bitflags_path: #bitflags,
+                        #imports_with
+                    });
+                }
+            };
+            (world_with, imports)
+        }
+        _ => (quote! {}, quote! {}),
+    };
     let generate = quote! {
         ::#facade::__wit_bindgen::generate!({
             #path
@@ -3181,7 +3371,9 @@ fn component(
             runtime_path: #runtime,
             bitflags_path: #bitflags,
             #derives
+            #with
         });
+        #declared_imports
     };
     let runtime_prelude = options.no_std.then(|| prelude(Some(&options.facade())));
     // A component cannot serve a native-only module, so its build refuses the module at each
@@ -3609,23 +3801,22 @@ fn service_attribute(
     })
 }
 
-/// Read a WIT resource: a struct, with the service whose interface defines it.
+/// Read a WIT resource: a struct, which belongs to the service of its module.
 fn wit_resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<WitResource> {
-    let mut service = None;
     if !matches!(attribute.meta, syn::Meta::Path(_)) {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("service") {
-                service = Some(meta.value()?.parse::<Ident>()?);
-            } else {
-                return Err(meta.error("unknown option; use #[wit_resource(service = Name)]"));
+                return Err(meta.error(
+                    "#[wit_resource] takes no `service`: the resource belongs to the service whose module holds it, so put it in that module",
+                ));
             }
-            Ok(())
+            Err(meta.error("#[wit_resource] takes no options"))
         })?;
     }
     Ok(WitResource {
         ident: item.ident.clone(),
         docs: wit::docs(&item.attrs)?,
-        service,
+        service: None,
         constructor: None,
         methods: Vec::new(),
         statics: Vec::new(),
@@ -5138,7 +5329,6 @@ fn declaration_code(
     let path = hook_path(&declaration.hook);
     let root = supers(depth);
     let export = export_module(depth, &path);
-    let import = import_module(depth, &path);
     if let Some((input, _)) = &declaration.input {
         let defining = defining.expect("a derived hook defines types");
         return Ok(derived_hook_code(
@@ -5162,20 +5352,18 @@ fn declaration_code(
         wit::Passed::Str | wit::Passed::List | wit::Passed::Named => quote! { &input },
         parts => lent(parts, quote! { &input }),
     };
-    let export_input: Type = syn::parse_str(&rooted(&callback.input.export, depth))?;
-    let import_input: Type = syn::parse_str(&rooted(&callback.input.import, depth))?;
-    let output = |spelling: &str| -> syn::Result<proc_macro2::TokenStream> {
-        let ty: Type = syn::parse_str(&rooted(spelling, depth))?;
-        Ok(quote! { -> #ty })
-    };
-    let export_result = match &callback.result {
-        Some(spelled) => output(&spelled.export)?,
+    // `run` takes and returns the export's types, which the hook's import, generated in
+    // `__tembra_declared`, takes and returns too (`wit::DeclaredBindings`).
+    let input: Type = syn::parse_str(&rooted(&callback.input.export, depth))?;
+    let result = match &callback.result {
+        Some(spelled) => {
+            let ty: Type = syn::parse_str(&rooted(&spelled.export, depth))?;
+            quote! { -> #ty }
+        }
         None => quote! {},
     };
-    let import_result = match &callback.result {
-        Some(spelled) => output(&spelled.import)?,
-        None => quote! {},
-    };
+    let [ns, package, interface] = &path;
+    let import = quote! { #root __tembra_declared::#ns::#package::#interface };
     let ident = &declaration.ident;
     let message = format!(
         "the hook {} is declared by this Orb: its contributions answer it, this export never does",
@@ -5187,13 +5375,13 @@ fn declaration_code(
     );
     Ok(quote! {
         impl #export::Guest for #root __TembraExports {
-            fn #name(_input: #export_input) #export_result {
+            fn #name(_input: #input) #result {
                 ::core::panic!(#message)
             }
         }
         impl #ident {
             #[doc = #doc]
-            pub fn run(input: #import_input) #import_result {
+            pub fn run(input: #input) #result {
                 #import::#name(#argument)
             }
         }
@@ -5986,7 +6174,8 @@ fn refusal(ty: &Type) -> bool {
             if path.path.segments.last().is_some_and(|segment| segment.ident == "String"))
 }
 
-/// Read a state: a struct with named fields, the owning service and the version (default 1).
+/// Read a state: a struct with named fields and its version (default 1); it belongs to the service
+/// whose module holds it.
 fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
     let Fields::Named(_) = &item.fields else {
         return Err(syn::Error::new(
@@ -5994,12 +6183,13 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
             "a state is a struct with named fields",
         ));
     };
-    let mut service = None;
     let mut version = 1;
     if !matches!(attribute.meta, syn::Meta::Path(_)) {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("service") {
-                service = Some(meta.value()?.parse::<Ident>()?);
+                return Err(meta.error(
+                    "#[state] takes no `service`: the state belongs to the service whose module holds it, so put it in that module",
+                ));
             } else if meta.path.is_ident("version") {
                 let literal: LitInt = meta.value()?.parse()?;
                 version = literal.base10_parse::<u32>()?;
@@ -6007,14 +6197,14 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
                     return Err(syn::Error::new(literal.span(), "versions start at 1"));
                 }
             } else {
-                return Err(meta.error("unknown option; use #[state(service = Name, version = n)]"));
+                return Err(meta.error("unknown option; use #[state(version = n)]"));
             }
             Ok(())
         })?;
     }
     Ok(State {
         ident: item.ident.clone(),
-        service,
+        service: None,
         version,
         validator: None,
         identity: String::new(),
@@ -6228,9 +6418,166 @@ fn state_code(
     }
 }
 
-/// Read a resource: any struct, with the version of its contract (default 1).
+/// Where an `#[open]` function returning `output` names its error, if it may fail: `Self`, or a
+/// path to the resource's struct `ident`, opens always, and a `Result` of either, `Result<Self, E>`
+/// or an alias such as `io::Result<Self>`, fails with the error's `Display` text, which `E`, or the
+/// alias, names. Any other type is an error on it.
+fn opens_fallibly(output: &ReturnType, ident: &Ident) -> syn::Result<Option<Span>> {
+    let ReturnType::Type(_, ty) = output else {
+        return Ok(None);
+    };
+    let is_self = |ty: &Type| {
+        matches!(ty, Type::Path(path) if path.qself.is_none()
+        && (path.path.is_ident("Self")
+            || path.path.segments.last().is_some_and(|last| {
+                last.ident == *ident && matches!(last.arguments, syn::PathArguments::None)
+            })))
+    };
+    if is_self(ty) {
+        return Ok(None);
+    }
+    if let Type::Path(path) = &**ty
+        && path.qself.is_none()
+        && let Some(last) = path.path.segments.last()
+        && last.ident == "Result"
+        && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
+        && matches!(arguments.args.first(), Some(syn::GenericArgument::Type(ok)) if is_self(ok))
+    {
+        return Ok(Some(match arguments.args.iter().nth(1) {
+            Some(error) => error.span(),
+            None => last.ident.span(),
+        }));
+    }
+    Err(syn::Error::new_spanned(
+        ty,
+        format!(
+            "#[open] returns `Self` or a `Result<Self, E>` with `E: Display`, whose error fails the open of `{ident}` with its text"
+        ),
+    ))
+}
+
+/// The resources in the order the kernel opens them: each after the resources it depends on, and
+/// otherwise in the module's order. Two resources of one name are an error on the second, since
+/// `depends` and the kernel name a resource by it. A dependency that is not a `#[resource]` of the
+/// Orb, the resource itself, one that closes a cycle, or one the owner rule refuses, a root
+/// resource depending on a service's or a service's on another service's, is an error on its name
+/// in the attribute.
+fn in_dependency_order(resources: Vec<Resource>) -> syn::Result<Vec<Resource>> {
+    for (index, resource) in resources.iter().enumerate() {
+        // The kernel, the component's statics and the native table name a resource by the kebab
+        // form of its struct's name, which two names may share, `DbPool` and `DBPool`.
+        let name = wit::kebab(&resource.ident);
+        if let Some(first) = resources[..index]
+            .iter()
+            .find(|other| wit::kebab(&other.ident) == name)
+        {
+            let owner = |resource: &Resource| match &resource.service {
+                Some(service) => format!("of the service `{service}`"),
+                None => "of the root".to_owned(),
+            };
+            let names = if first.ident == resource.ident {
+                format!("`{}` names two resources", resource.ident)
+            } else {
+                format!(
+                    "`{}` and `{}` name the same resource `{name}`",
+                    first.ident, resource.ident
+                )
+            };
+            return Err(syn::Error::new(
+                resource.ident.span(),
+                format!(
+                    "{names}, one {} and one {}: the kernel and `depends` name a resource by its struct's name, in kebab-case, so give each resource of the Orb a name of its own",
+                    owner(first),
+                    owner(resource)
+                ),
+            ));
+        }
+    }
+    /// Put `index` after its dependencies into `order`; `visiting` holds the resources whose
+    /// dependencies are being put, which a cycle reaches again.
+    fn visit(
+        index: usize,
+        resources: &[Resource],
+        visiting: &mut Vec<usize>,
+        order: &mut Vec<usize>,
+    ) -> syn::Result<()> {
+        if order.contains(&index) {
+            return Ok(());
+        }
+        visiting.push(index);
+        let resource = &resources[index];
+        for name in &resource.depends {
+            if *name == resource.ident {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("the resource `{name}` cannot depend on itself"),
+                ));
+            }
+            let Some(dependency) = resources.iter().position(|other| other.ident == *name) else {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!(
+                        "`{name}` is not a #[resource] of the Orb; `depends` names the struct of a resource the Orb declares"
+                    ),
+                ));
+            };
+            if visiting.contains(&dependency) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!(
+                        "the dependencies of `{}` form a cycle through `{name}`: a resource opens after the resources it depends on",
+                        resource.ident
+                    ),
+                ));
+            }
+            // A root resource opens at activation, before any object: it depends on root
+            // resources alone. A service resource opens with its object: it depends on root
+            // resources and on earlier resources of its own service, never on another service's,
+            // whose objects come and go on their own.
+            match (&resource.service, &resources[dependency].service) {
+                (_, None) => {}
+                (Some(service), Some(other)) if service == other => {}
+                (None, Some(other)) => {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        format!(
+                            "`{}` is a resource of the root, and `{name}` one of each object of the service `{other}`: a root resource opens at activation, before any object, so it depends on root resources alone",
+                            resource.ident
+                        ),
+                    ));
+                }
+                (Some(service), Some(other)) => {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        format!(
+                            "`{}` is a resource of each object of the service `{service}`, and `{name}` one of the service `{other}`: a service resource depends on root resources and on resources of its own service, whose objects open and close together",
+                            resource.ident
+                        ),
+                    ));
+                }
+            }
+            visit(dependency, resources, visiting, order)?;
+        }
+        visiting.pop();
+        order.push(index);
+        Ok(())
+    }
+    let mut order = Vec::new();
+    for index in 0..resources.len() {
+        visit(index, &resources, &mut Vec::new(), &mut order)?;
+    }
+    let mut slots: Vec<Option<Resource>> = resources.into_iter().map(Some).collect();
+    Ok(order
+        .into_iter()
+        .map(|index| slots[index].take().expect("each resource is ordered once"))
+        .collect())
+}
+
+/// Read a resource: any struct, with the version of its contract (default 1) and the resources it
+/// depends on.
 fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resource> {
     let mut version = 1;
+    let mut depends = Vec::new();
     if !matches!(attribute.meta, syn::Meta::Path(_)) {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("version") {
@@ -6239,8 +6586,17 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
                 if !tembra_contracts::valid_version(version) {
                     return Err(syn::Error::new(literal.span(), "versions start at 1"));
                 }
+            } else if meta.path.is_ident("depends") {
+                let names;
+                let value = meta.value()?;
+                syn::bracketed!(names in value);
+                depends.extend(
+                    syn::punctuated::Punctuated::<Ident, Token![,]>::parse_terminated(&names)?,
+                );
             } else {
-                return Err(meta.error("unknown option; use #[resource(version = n)]"));
+                return Err(meta.error(
+                    "unknown option; use #[resource(version = n)] or #[resource(depends = [A, B])]",
+                ));
             }
             Ok(())
         })?;
@@ -6248,21 +6604,31 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
     Ok(Resource {
         ident: item.ident.clone(),
         version,
+        service: None,
+        identity: String::new(),
         open: None,
+        fallible: false,
+        failure: Span::call_site(),
         close: None,
+        depends,
         scope: 0,
     })
 }
 
 /// The Rust side of the resources: the kernel's `resources-init` callbacks listing, opening and
-/// closing them, one slot in the component's memory per resource, and `with` on each type, which
-/// reaches the component's slot in a component build and the Orb's resource natively, where the
-/// native side declares each in the Orb's create and writes its own `with`, through the facade
-/// named `facade`.
+/// closing the root's, and its `service-resources-init` callbacks for those of the services'
+/// objects, listed by the owning service's interface; one slot in the component's memory per root
+/// resource, and one table per service resource, holding the value of each object under the
+/// handle `open` answered; and `with` on each type, which reaches the component's slot, or the
+/// value of the object running the call in the table, in a component build, and the Orb's
+/// resource natively, where the native side declares each root resource in the Orb's create and
+/// writes its own `with`, through the facade named `facade`; with the `context` option, the native
+/// `#[open]` and `#[close]` functions run in the context the host gives them.
 fn resource_code(
     resources: &[Resource],
     modules: &[Vec<Ident>],
     facade: &Ident,
+    context: bool,
 ) -> proc_macro2::TokenStream {
     if resources.is_empty() {
         return quote! {};
@@ -6273,91 +6639,229 @@ fn resource_code(
             resource.ident.to_string().to_shouty_snake_case()
         )
     };
-    let declarations = resources.iter().map(|resource| {
+    let (root, of_services): (Vec<&Resource>, Vec<&Resource>) = resources
+        .iter()
+        .partition(|resource| resource.service.is_none());
+    let declaration = |resource: &Resource, module: proc_macro2::TokenStream| {
         let name = wit::kebab(&resource.ident);
         let version = resource.version;
+        let dependencies = resource.depends.iter().map(wit::kebab);
         quote! {
-            exports::tembra::guest::resources_init::Declaration {
+            exports::tembra::guest::#module::Declaration {
                 name: ::core::convert::From::from(#name),
                 version: #version,
+                dependencies: ::core::convert::From::from([
+                    #(::core::convert::From::from(#dependencies)),*
+                ]),
             }
         }
-    });
-    let openers = resources.iter().map(|resource| {
-        let name = wit::kebab(&resource.ident);
-        let path = from_root(&modules[resource.scope], &resource.ident);
-        let open = resource
-            .open
-            .as_ref()
-            .expect("a resource has its #[open] function");
-        let slot = slot(resource);
-        quote! { #name => { #slot.open(#path::#open()); 1 } }
-    });
-    let closers = resources.iter().map(|resource| {
-        let name = wit::kebab(&resource.ident);
-        let slot = slot(resource);
-        match &resource.close {
-            Some(close) => {
+    };
+    // The answer of an open: `keep` puts the value the `#[open]` function gives, the expression
+    // handed to it, where it lives and answers `Ok(handle)`; a fallible function's `Err` answers
+    // the error's text.
+    let opened =
+        |resource: &Resource,
+         keep: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream| {
+            let path = from_root(&modules[resource.scope], &resource.ident);
+            let open = resource
+                .open
+                .as_ref()
+                .expect("a resource has its #[open] function");
+            if resource.fallible {
+                let kept = keep(quote! { value });
+                // A missing `Display` falls on the error type the author wrote.
+                let text = quote_spanned! {resource.failure=>
+                    __tembra_resource::ToString::to_string(&error)
+                };
                 quote! {
-                    #name => {
-                        if let ::core::option::Option::Some(value) = #slot.close() {
-                            value.#close();
-                        }
+                    match #path::#open() {
+                        ::core::result::Result::Ok(value) => #kept
+                        ::core::result::Result::Err(error) => ::core::result::Result::Err(#text),
+                    }
+                }
+            } else {
+                keep(quote! { #path::#open() })
+            }
+        };
+    // Run the `#[close]` function, if any, on the value `taken` out of its slot or table.
+    let closed = |resource: &Resource, taken: proc_macro2::TokenStream| match &resource.close {
+        Some(close) => quote! {
+            if let ::core::option::Option::Some(value) = #taken {
+                value.#close();
+            }
+        },
+        None => quote! { #taken; },
+    };
+    let root_code = (!root.is_empty()).then(|| {
+        let declarations = root
+            .iter()
+            .map(|resource| declaration(resource, quote! { resources_init }));
+        let openers = root.iter().map(|resource| {
+            let name = wit::kebab(&resource.ident);
+            let slot = slot(resource);
+            let opened = opened(resource, &|value| {
+                quote! { { #slot.open(#value); ::core::result::Result::Ok(1) } }
+            });
+            quote! { #name => #opened }
+        });
+        let closers = root.iter().map(|resource| {
+            let name = wit::kebab(&resource.ident);
+            let slot = slot(resource);
+            let closed = closed(resource, quote! { #slot.close() });
+            quote! { #name => { #closed } }
+        });
+        quote! {
+            // The kernel lists the root's resources when it creates the root, then opens and closes
+            // each of them in its own order through these callbacks.
+            impl exports::tembra::guest::resources_init::Guest for __TembraExports {
+                fn declare() -> __tembra_resource::Vec<exports::tembra::guest::resources_init::Declaration> {
+                    ::core::convert::From::from([#(#declarations),*])
+                }
+                fn open(
+                    name: __tembra_resource::String,
+                ) -> ::core::result::Result<u32, __tembra_resource::String> {
+                    match name.as_str() {
+                        #(#openers)*
+                        _ => ::core::result::Result::Err(::core::convert::From::from("unknown resource")),
+                    }
+                }
+                fn close(name: __tembra_resource::String, _handle: u32) {
+                    match name.as_str() {
+                        #(#closers)*
+                        _ => {}
                     }
                 }
             }
-            None => quote! { #name => { #slot.close(); } },
+        }
+    });
+    let service_code = (!of_services.is_empty()).then(|| {
+        // One list per owning service, in the order of the resources.
+        let mut by_service: Vec<(&str, Vec<&Resource>)> = Vec::new();
+        for resource in &of_services {
+            match by_service
+                .iter_mut()
+                .find(|(identity, _)| *identity == resource.identity)
+            {
+                Some((_, owned)) => owned.push(resource),
+                None => by_service.push((&resource.identity, vec![resource])),
+            }
+        }
+        let declarations = by_service.iter().map(|(identity, owned)| {
+            let identity = LitStr::new(identity, Span::call_site());
+            let declarations = owned
+                .iter()
+                .map(|resource| declaration(resource, quote! { service_resources_init }));
+            quote! { #identity => ::core::convert::From::from([#(#declarations),*]), }
+        });
+        let openers = of_services.iter().map(|resource| {
+            let identity = LitStr::new(&resource.identity, Span::call_site());
+            let name = wit::kebab(&resource.ident);
+            let slot = slot(resource);
+            let opened = opened(resource, &|value| {
+                quote! { #slot.open(#value), }
+            });
+            quote! { (#identity, #name) => #opened }
+        });
+        let closers = of_services.iter().map(|resource| {
+            let identity = LitStr::new(&resource.identity, Span::call_site());
+            let name = wit::kebab(&resource.ident);
+            let slot = slot(resource);
+            let closed = closed(resource, quote! { #slot.close(handle) });
+            quote! { (#identity, #name) => { #closed } }
+        });
+        quote! {
+            // The kernel lists a service's resources when it creates an object of the service, then
+            // opens each for that object, after the root's, and closes it when the object goes,
+            // through these callbacks; the object's value lives in the table under the handle
+            // `open` answered.
+            impl exports::tembra::guest::service_resources_init::Guest for __TembraExports {
+                fn declare(
+                    service: __tembra_resource::String,
+                ) -> __tembra_resource::Vec<exports::tembra::guest::service_resources_init::Declaration> {
+                    match service.as_str() {
+                        #(#declarations)*
+                        _ => __tembra_resource::Vec::new(),
+                    }
+                }
+                fn open(
+                    service: __tembra_resource::String,
+                    name: __tembra_resource::String,
+                ) -> ::core::result::Result<u32, __tembra_resource::String> {
+                    match (service.as_str(), name.as_str()) {
+                        #(#openers)*
+                        _ => ::core::result::Result::Err(::core::convert::From::from("unknown resource")),
+                    }
+                }
+                fn close(
+                    service: __tembra_resource::String,
+                    name: __tembra_resource::String,
+                    handle: u32,
+                ) {
+                    match (service.as_str(), name.as_str()) {
+                        #(#closers)*
+                        _ => {}
+                    }
+                }
+            }
         }
     });
     let slots = resources.iter().map(|resource| {
         let path = from_root(&modules[resource.scope], &resource.ident);
         let slot = slot(resource);
         let name = wit::kebab(&resource.ident);
-        let doc = format!(
-            " Use the resource `{name}` of this Orb's root, opened by the kernel at activation; the kernel confirms it is open, the value lives in this component."
-        );
         // A native host gets `with` of its own, in `__tembra_resource`, over the Orb its method
         // runs for.
-        quote! {
-            static #slot: __tembra_resource::Slot<#path> = __tembra_resource::Slot::new();
-            ::#facade::__guest! {
-                impl #path {
-                    #[doc = #doc]
-                    pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
-                        let _handle = self::tembra::guest::resources::read(#name);
-                        #slot.with(use_)
+        match &resource.service {
+            None => {
+                let doc = format!(
+                    " Use the resource `{name}` of this Orb's root, opened by the kernel at activation; the kernel confirms it is open, the value lives in this component."
+                );
+                quote! {
+                    static #slot: __tembra_resource::Slot<#path> = __tembra_resource::Slot::new();
+                    ::#facade::__guest! {
+                        impl #path {
+                            #[doc = #doc]
+                            pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
+                                let _handle = self::tembra::guest::resources::read(#name);
+                                #slot.with(use_)
+                            }
+                        }
+                    }
+                }
+            }
+            Some(service) => {
+                let doc = format!(
+                    " Use the resource `{name}` of the `{service}` object running the current call, opened by the kernel when it created the object; the kernel names the object's value by its handle, the value lives in this component."
+                );
+                quote! {
+                    static #slot: __tembra_resource::Table<#path> = __tembra_resource::Table::new();
+                    ::#facade::__guest! {
+                        impl #path {
+                            #[doc = #doc]
+                            pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
+                                let handle = self::tembra::guest::resources::read(#name);
+                                #slot.with(handle, use_)
+                            }
+                        }
                     }
                 }
             }
         }
     });
-    let native = native::resource_access(resources, modules, facade);
+    let native = native::resource_access(resources, modules, facade, context);
     quote! {
-        // The kernel lists the root's resources when it creates the root, then opens and closes
-        // each of them in its own order through these callbacks.
-        impl exports::tembra::guest::resources_init::Guest for __TembraExports {
-            fn declare() -> __tembra_resource::Vec<exports::tembra::guest::resources_init::Declaration> {
-                ::core::convert::From::from([#(#declarations),*])
-            }
-            fn open(name: __tembra_resource::String) -> u32 {
-                match name.as_str() {
-                    #(#openers)*
-                    _ => ::core::panic!("unknown resource"),
-                }
-            }
-            fn close(name: __tembra_resource::String, _handle: u32) {
-                match name.as_str() {
-                    #(#closers)*
-                    _ => {}
-                }
-            }
-        }
+        #root_code
+        #service_code
         #(#slots)*
         /// A resource's value lives in the component while the resource is open.
         #[doc(hidden)]
         pub mod __tembra_resource {
             extern crate alloc;
-            pub use alloc::{string::String, vec::Vec};
+            pub use alloc::{
+                collections::BTreeMap,
+                string::{String, ToString},
+                vec::Vec,
+            };
 
             /// One resource's value, absent until the kernel opens it and after it closes it.
             pub struct Slot<T>(::core::cell::RefCell<::core::option::Option<T>>);
@@ -6385,6 +6889,50 @@ fn resource_code(
             }
 
             impl<T> ::core::default::Default for Slot<T> {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+
+            /// The values of one resource of a service's objects, each under the handle its open
+            /// answered the kernel: the handles count up from 1, and never come back.
+            pub struct Table<T>(::core::cell::RefCell<(u32, BTreeMap<u32, T>)>);
+
+            // SAFETY: as for `Slot`.
+            unsafe impl<T> ::core::marker::Sync for Table<T> {}
+
+            impl<T> Table<T> {
+                pub const fn new() -> Self {
+                    Self(::core::cell::RefCell::new((0, BTreeMap::new())))
+                }
+
+                /// Keep an object's value and answer its handle. Once every handle has been
+                /// answered, the open fails rather than answer a handle again, which could be
+                /// another object's; the value is dropped without its `#[close]`.
+                pub fn open(&self, value: T) -> ::core::result::Result<u32, String> {
+                    let mut table = self.0.borrow_mut();
+                    let ::core::option::Option::Some(handle) = table.0.checked_add(1) else {
+                        return ::core::result::Result::Err(::core::convert::From::from(
+                            "every handle of the resource was answered once, and none comes back",
+                        ));
+                    };
+                    table.0 = handle;
+                    table.1.insert(handle, value);
+                    ::core::result::Result::Ok(handle)
+                }
+
+                pub fn close(&self, handle: u32) -> ::core::option::Option<T> {
+                    self.0.borrow_mut().1.remove(&handle)
+                }
+
+                pub fn with<R>(&self, handle: u32, use_: impl ::core::ops::FnOnce(&mut T) -> R) -> R {
+                    let mut table = self.0.borrow_mut();
+                    let value = table.1.get_mut(&handle).expect("the resource is not open");
+                    use_(value)
+                }
+            }
+
+            impl<T> ::core::default::Default for Table<T> {
                 fn default() -> Self {
                     Self::new()
                 }

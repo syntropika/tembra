@@ -3,22 +3,26 @@
     wit = "consumed/counters"
 )]
 mod keeping {
-    #[service("example:counters/book@1.0.0")]
-    pub struct Keeper;
+    pub mod keeper {
+        use super::book;
 
-    impl Keeper {
-        pub fn add(entry: book::Entry) -> u32 {
-            entry.label.len() as u32
+        #[service("example:counters/book@1.0.0")]
+        pub struct Keeper;
+
+        impl Keeper {
+            pub fn add(entry: book::Entry) -> u32 {
+                entry.label.len() as u32
+            }
         }
-    }
 
-    #[wit_resource(service = Keeper)]
-    pub struct Cursor;
+        #[wit_resource]
+        pub struct Cursor;
 
-    impl Cursor {
-        #[constructor]
-        pub fn new() -> Self {
-            Cursor
+        impl Cursor {
+            #[constructor]
+            pub fn new() -> Self {
+                Cursor
+            }
         }
     }
 }

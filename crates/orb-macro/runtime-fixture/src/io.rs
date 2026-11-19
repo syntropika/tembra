@@ -24,65 +24,69 @@
     )
 )]
 pub mod io {
-    use alloc::{format, string::String, vec::Vec};
+    pub mod outside {
+        use super::{client, preopens, types, wasi, wit_future};
+        use alloc::{format, string::String, vec::Vec};
 
-    /// Reaches outside the component.
-    #[service]
-    pub struct Outside;
+        /// Reaches outside the component.
+        #[service]
+        pub struct Outside;
 
-    impl Outside {
-        /// The path and the type of each preopened directory, a type of the filesystem's types.
-        pub async fn directories() -> Vec<String> {
-            let mut directories = Vec::new();
-            for (descriptor, path) in preopens::get_directories() {
-                let kind = match descriptor.get_type().await {
-                    Ok(wasi::filesystem::types::DescriptorType::Directory) => "directory",
-                    Ok(_) => "other",
-                    Err(_) => "unknown",
-                };
-                directories.push(format!("{path}: {kind}"));
+        impl Outside {
+            /// The path and the type of each preopened directory, a type of the filesystem's types.
+            pub async fn directories() -> Vec<String> {
+                let mut directories = Vec::new();
+                for (descriptor, path) in preopens::get_directories() {
+                    let kind = match descriptor.get_type().await {
+                        Ok(wasi::filesystem::types::DescriptorType::Directory) => "directory",
+                        Ok(_) => "other",
+                        Err(_) => "unknown",
+                    };
+                    directories.push(format!("{path}: {kind}"));
+                }
+                directories
             }
-            directories
-        }
 
-        /// Connect to `port` of the loopback address over TCP, through a socket of the sockets'
-        /// types.
-        pub async fn connect(port: u16) -> Result<(), String> {
-            let socket = types::TcpSocket::create(types::IpAddressFamily::Ipv4)
-                .map_err(|error| format!("create: {error:?}"))?;
-            let address = types::IpSocketAddress::Ipv4(types::Ipv4SocketAddress {
-                port,
-                address: (127, 0, 0, 1),
-            });
-            socket
-                .connect(address)
-                .await
-                .map_err(|error| format!("connect: {error:?}"))
-        }
+            /// Connect to `port` of the loopback address over TCP, through a socket of the sockets'
+            /// types.
+            pub async fn connect(port: u16) -> Result<(), String> {
+                let socket = types::TcpSocket::create(types::IpAddressFamily::Ipv4)
+                    .map_err(|error| format!("create: {error:?}"))?;
+                let address = types::IpSocketAddress::Ipv4(types::Ipv4SocketAddress {
+                    port,
+                    address: (127, 0, 0, 1),
+                });
+                socket
+                    .connect(address)
+                    .await
+                    .map_err(|error| format!("connect: {error:?}"))
+            }
 
-        /// The status and the body of a GET of `path` from `authority`, over HTTP through the
-        /// host's client.
-        pub async fn fetch(authority: String, path: String) -> Result<String, String> {
-            use wasi::http::types::{ErrorCode, Fields, Request, Response, Scheme, Trailers};
-            let (_, trailers) = wit_future::new::<Result<Option<Trailers>, ErrorCode>>(|| Ok(None));
-            let (request, _sent) = Request::new(Fields::new(), None, trailers, None);
-            request
-                .set_scheme(Some(&Scheme::Http))
-                .map_err(|()| "scheme")?;
-            request
-                .set_authority(Some(&authority))
-                .map_err(|()| "authority")?;
-            request
-                .set_path_with_query(Some(&path))
-                .map_err(|()| "path")?;
-            let response = client::send(request)
-                .await
-                .map_err(|error| format!("send: {error:?}"))?;
-            let status = response.get_status_code();
-            let (_, consumed) = wit_future::new::<Result<(), ErrorCode>>(|| Ok(()));
-            let (body, _trailers) = Response::consume_body(response, consumed);
-            let body: Vec<u8> = body.collect().await;
-            Ok(format!("{status} {}", String::from_utf8_lossy(&body)))
+            /// The status and the body of a GET of `path` from `authority`, over HTTP through the
+            /// host's client.
+            pub async fn fetch(authority: String, path: String) -> Result<String, String> {
+                use wasi::http::types::{ErrorCode, Fields, Request, Response, Scheme, Trailers};
+                let (_, trailers) =
+                    wit_future::new::<Result<Option<Trailers>, ErrorCode>>(|| Ok(None));
+                let (request, _sent) = Request::new(Fields::new(), None, trailers, None);
+                request
+                    .set_scheme(Some(&Scheme::Http))
+                    .map_err(|()| "scheme")?;
+                request
+                    .set_authority(Some(&authority))
+                    .map_err(|()| "authority")?;
+                request
+                    .set_path_with_query(Some(&path))
+                    .map_err(|()| "path")?;
+                let response = client::send(request)
+                    .await
+                    .map_err(|error| format!("send: {error:?}"))?;
+                let status = response.get_status_code();
+                let (_, consumed) = wit_future::new::<Result<(), ErrorCode>>(|| Ok(()));
+                let (body, _trailers) = Response::consume_body(response, consumed);
+                let body: Vec<u8> = body.collect().await;
+                Ok(format!("{status} {}", String::from_utf8_lossy(&body)))
+            }
         }
     }
 }

@@ -19,14 +19,18 @@ installer decides which Orb keeps a book, the contract stays the WIT package.
 ```rust
 #[tembra::orb(package = "example:keeper@1.0.0", wit = "../wit")]
 mod keeper {
-    /// Implements `book` of the shared package: every function of the interface.
-    #[service("example:ledger/book@1.0.0")]
-    pub struct Keeper;
+    pub mod keeper {
+        use super::book;
 
-    impl Keeper {
-        pub fn add(entry: book::Entry) -> u32 { /* ... */ }
-        pub fn total() -> i64 { /* ... */ }
-        pub fn entries() -> Vec<book::Entry> { /* ... */ }
+        /// Implements `book` of the shared package: every function of the interface.
+        #[service("example:ledger/book@1.0.0")]
+        pub struct Keeper;
+
+        impl Keeper {
+            pub fn add(entry: book::Entry) -> u32 { /* ... */ }
+            pub fn total() -> i64 { /* ... */ }
+            pub fn entries() -> Vec<book::Entry> { /* ... */ }
+        }
     }
 }
 ```
@@ -35,7 +39,7 @@ A plain `#[service]` derives a new interface from the `impl` block, with an iden
 own package. `#[service("ns:name/interface@version")]` names an interface that exists already, in
 the directory `wit = "../wit"` points to: the macro exports that interface in the world instead of
 deriving one, re-exports its generated module under the interface's name, so the author writes
-`book::Entry`, and generates the bridge from the WIT functions to the `pub fn` of the same names.
+`book::Entry` (`super::book` from the service's module), and generates the bridge from the WIT functions to the `pub fn` of the same names.
 The `impl` must provide every function of the interface, with its parameter and result types; a
 missing or extra `pub fn` is a compile error, and a wrong type fails to compile at the bridge.
 
@@ -52,7 +56,8 @@ world keeper {
 ```
 
 followed by the shared package, nested, as `cargo tembra build` writes every consumed package. The
-entries are a `#[state]` of the keeper's objects, so a keeper remembers across reloads:
+entries are a `#[state]` of the keeper's objects, in the service's module beside `Keeper`, so a
+keeper remembers across reloads:
 
 ```rust
 #[state]

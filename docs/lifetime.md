@@ -14,7 +14,9 @@ Dependencies open before their consumers and remain available while those consum
 In the SDK, `host.resource(name, options)` declares a host resource.
 `self.resource(name, options)` declares a resource in the current scope.
 `self.resource(name)` reads a named host resource.
-Rust uses `Declaration::resource()` or `resource_async()` for object resources.
+Rust uses `Declaration::resource()` or `resource_async()` for object resources; the opener and the
+closer get a context of the resource's owner, which logs for that orb and, for an object's
+resource, answers the object's address.
 
 An exclusive resource cannot overlap its replacement.
 The engine closes the old value before it opens the new value.

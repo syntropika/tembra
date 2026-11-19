@@ -1,0 +1,5 @@
+error: the #[inputs] `Inputs` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module
+ --> tests/ui/inputs_in_a_service_module.rs:5:20
+  |
+5 |         pub struct Inputs;
+  |                    ^^^^^^

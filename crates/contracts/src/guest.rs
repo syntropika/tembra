@@ -21,23 +21,32 @@ pub const RESOURCE: &str = "tembra:guest/resources@1.0.0";
 /// Exported by an Orb whose root owns resources: declarations, then open and close callbacks.
 pub const RESOURCE_INIT: &str = "tembra:guest/resources-init@1.0.0";
 
+/// Exported by an Orb whose services own resources: the kernel asks for each object's
+/// declarations, then opens and closes them through the object's callbacks.
+pub const SERVICE_RESOURCE_INIT: &str = "tembra:guest/service-resources-init@1.0.0";
+
 /// The call's principal and cancellation, the address of the object running it, and the log.
 pub const CONTEXT: &str = "tembra:guest/context@1.0.0";
 
-/// The declaring callback of [`STATE_INIT`] and [`RESOURCE_INIT`].
+/// The declaring callback of [`STATE_INIT`], [`RESOURCE_INIT`] and [`SERVICE_RESOURCE_INIT`].
 pub const DECLARE: &str = "declare";
 
 /// The validating callback of [`STATE_INIT`], run on reload for a state declared `validated`.
 pub const VALIDATE: &str = "validate";
 
-/// The opening callback of [`RESOURCE_INIT`].
+/// The opening callback of [`RESOURCE_INIT`] and [`SERVICE_RESOURCE_INIT`].
 pub const OPEN: &str = "open";
 
-/// The closing callback of [`RESOURCE_INIT`].
+/// The closing callback of [`RESOURCE_INIT`] and [`SERVICE_RESOURCE_INIT`].
 pub const CLOSE: &str = "close";
 
-/// The interfaces a world imports from the kernel that come with an export answering them.
-pub const PAIRS: [(&str, &str); 2] = [(STATE, STATE_INIT), (RESOURCE, RESOURCE_INIT)];
+/// The interfaces a world imports from the kernel that come with an export answering them; an
+/// import with several exports comes with at least one of them.
+pub const PAIRS: [(&str, &str); 3] = [
+    (STATE, STATE_INIT),
+    (RESOURCE, RESOURCE_INIT),
+    (RESOURCE, SERVICE_RESOURCE_INIT),
+];
 
 /// Every interface the kernel serves to a world that imports it.
 pub const IMPORTS: [&str; 3] = [STATE, RESOURCE, CONTEXT];

@@ -1,14 +1,14 @@
 error[E0603]: module `books` is private
- --> tests/ui/state_in_a_hidden_module.rs:4:13
+ --> tests/ui/state_in_a_hidden_module.rs:5:17
   |
-4 |         mod books {
-  |             ^^^^^ private module
+5 |             mod books {
+  |                 ^^^^^ private module
 ...
-7 |             pub struct Balance {
-  |                        ------- struct `Balance` is not publicly re-exported
+8 |                 pub struct Balance {
+  |                            ------- struct `Balance` is not publicly re-exported
   |
 note: the module `books` is defined here
- --> tests/ui/state_in_a_hidden_module.rs:4:13
+ --> tests/ui/state_in_a_hidden_module.rs:5:17
   |
-4 |         mod books {
-  |             ^^^^^
+5 |             mod books {
+  |                 ^^^^^

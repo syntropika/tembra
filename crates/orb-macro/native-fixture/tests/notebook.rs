@@ -323,7 +323,7 @@ fn a_local_method_takes_native_values_and_refuses_portable_callers() {
                     .await?,
                 42
             );
-            let client = notebook::SessionClient::new(called.clone());
+            let client = notebook::session::SessionClient::new(called.clone());
             assert_eq!(
                 client
                     .apply(&context, 21, Rc::new(|value| value + 1))

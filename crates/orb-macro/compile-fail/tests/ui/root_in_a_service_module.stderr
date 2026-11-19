@@ -1,0 +1,5 @@
+error: the #[root] `start` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module
+ --> tests/ui/root_in_a_service_module.rs:8:12
+  |
+8 |         fn start(
+  |            ^^^^^

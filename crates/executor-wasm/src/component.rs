@@ -265,6 +265,7 @@ fn layout(
         ingress: contract.ingress().map(str::to_owned),
         state_init: guest::exports(contract.model(), guest::STATE_INIT),
         resource_init: guest::exports(contract.model(), guest::RESOURCE_INIT),
+        service_resource_init: guest::exports(contract.model(), guest::SERVICE_RESOURCE_INIT),
         hooks: declared,
         context: guest::imports(contract.model(), guest::CONTEXT),
     })
@@ -405,6 +406,7 @@ mod state_tests {
             export tembra:guest/state-init@1.0.0;
             import tembra:guest/resources@1.0.0;
             export tembra:guest/resources-init@1.0.0;
+            export tembra:guest/service-resources-init@1.0.0;
             export counter;
         }";
 
@@ -483,6 +485,7 @@ mod state_tests {
         let layout = layout(&contract, &services, &bindings, &hooks).unwrap();
         assert!(layout.state_init);
         assert!(layout.resource_init);
+        assert!(layout.service_resource_init);
         assert_eq!(
             layout
                 .exports

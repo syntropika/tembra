@@ -12,32 +12,35 @@
     sdk::orb(package = "example:renamed@1.0.0", crate = "sdk", context)
 )]
 pub mod tally {
-    use alloc::{format, string::String};
+    pub mod counter {
+        use super::context;
+        use alloc::{format, string::String};
 
-    /// The count of one counter object, kept by the kernel.
-    #[state]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Count {
-        pub total: u32,
-    }
-
-    /// Counts for its callers.
-    #[service]
-    pub struct Counter;
-
-    impl Counter {
-        /// Add `by` to the count and say who added it and what the count is.
-        pub fn add(by: u32) -> String {
-            let count = Count::update(|count| count.total += by);
-            format!("{} counts {}", context::principal(), count.total)
+        /// The count of one counter object, kept by the kernel.
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Count {
+            pub total: u32,
         }
 
-        /// Start the count over and return what it was.
-        #[cfg(feature = "archive")]
-        pub fn reset() -> u32 {
-            let total = Count::read().total;
-            Count::update(|count| count.total = 0);
-            total
+        /// Counts for its callers.
+        #[service]
+        pub struct Counter;
+
+        impl Counter {
+            /// Add `by` to the count and say who added it and what the count is.
+            pub fn add(by: u32) -> String {
+                let count = Count::update(|count| count.total += by);
+                format!("{} counts {}", context::principal(), count.total)
+            }
+
+            /// Start the count over and return what it was.
+            #[cfg(feature = "archive")]
+            pub fn reset() -> u32 {
+                let total = Count::read().total;
+                Count::update(|count| count.total = 0);
+                total
+            }
         }
     }
 }

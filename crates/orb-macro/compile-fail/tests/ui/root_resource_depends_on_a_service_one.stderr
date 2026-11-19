@@ -1,0 +1,5 @@
+error: `Harbor` is a resource of the root, and `Mooring` one of each object of the service `Ship`: a root resource opens at activation, before any object, so it depends on root resources alone
+ --> tests/ui/root_resource_depends_on_a_service_one.rs:3:27
+  |
+3 |     #[resource(depends = [Mooring])]
+  |                           ^^^^^^^

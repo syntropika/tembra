@@ -12,24 +12,27 @@ extern crate alloc;
     import = "example:text/texts@1.0.0"
 )]
 mod speller {
-    use alloc::string::String;
+    pub mod spelling {
+        use super::texts;
+        use alloc::string::String;
 
-    /// The service: spells words, one builder of the text Orb per word.
-    #[service]
-    pub struct Spelling;
+        /// The service: spells words, one builder of the text Orb per word.
+        #[service]
+        pub struct Spelling;
 
-    impl Spelling {
-        /// Spell `word` letter by letter, a dash between the letters, through one builder: as many
-        /// `push` calls as letters and dashes, all on the same handle.
-        pub fn spell(word: String) -> String {
-            let builder = texts::start();
-            for (index, letter) in word.chars().enumerate() {
-                if index > 0 {
-                    builder.push('-');
+        impl Spelling {
+            /// Spell `word` letter by letter, a dash between the letters, through one builder: as many
+            /// `push` calls as letters and dashes, all on the same handle.
+            pub fn spell(word: String) -> String {
+                let builder = texts::start();
+                for (index, letter) in word.chars().enumerate() {
+                    if index > 0 {
+                        builder.push('-');
+                    }
+                    builder.push(letter);
                 }
-                builder.push(letter);
+                builder.text()
             }
-            builder.text()
         }
     }
 }

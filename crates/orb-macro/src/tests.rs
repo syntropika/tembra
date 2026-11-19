@@ -193,11 +193,13 @@ const PACKAGE: &str = "example:book@1.0.0";
 fn ledger(attribute: &str) -> String {
     format!(
         "mod book {{
-            {attribute}
-            pub struct Ledger;
-            impl Ledger {{
-                /// How many entries the ledger holds.
-                pub fn count() -> u32 {{ 0 }}
+            pub mod ledger {{
+                {attribute}
+                pub struct Ledger;
+                impl Ledger {{
+                    /// How many entries the ledger holds.
+                    pub fn count() -> u32 {{ 0 }}
+                }}
             }}
         }}"
     )
@@ -330,24 +332,26 @@ fn the_native_side_reaches_the_facade_by_its_name() {
             None,
             false,
             "mod book {
-                #[state]
-                pub struct Count { pub total: i64 }
                 #[resource]
                 pub struct Beads(u32);
                 impl Beads {
                     #[open]
                     fn open() -> Self { Beads(0) }
                 }
-                #[service(key = main)]
-                pub struct Ledger;
-                impl Ledger {
-                    pub fn add(by: i64) -> i64 { by }
-                    pub fn checked(by: i64) -> ::tembra::Result<i64> { Ok(by) }
-                    pub fn lend() -> Pen { Pen { ink: 0 } }
+                pub mod ledger {
+                    #[state]
+                    pub struct Count { pub total: i64 }
+                    #[service(key = main)]
+                    pub struct Ledger;
+                    impl Ledger {
+                        pub fn add(by: i64) -> i64 { by }
+                        pub fn checked(by: i64) -> ::tembra::Result<i64> { Ok(by) }
+                        pub fn lend() -> Pen { Pen { ink: 0 } }
+                    }
+                    #[wit_resource]
+                    pub struct Pen { pub ink: u32 }
+                    impl Pen { pub fn ink(&self) -> u32 { self.ink } }
                 }
-                #[wit_resource(service = Ledger)]
-                pub struct Pen { pub ink: u32 }
-                impl Pen { pub fn ink(&self) -> u32 { self.ink } }
             }",
             ":: sdk :: Code :: Forbidden",
         ),
@@ -373,14 +377,17 @@ fn the_native_side_reaches_the_facade_by_its_name() {
             Some(&pace),
             true,
             "mod book {
-                #[service]
-                pub struct Ledger;
-                impl Ledger {
-                    pub async fn count() -> u64 { clock::wait(1).await }
-                    pub async fn at(key: String) -> u64 {
-                        clock_ref::get(vec![key]).await.unwrap().wait(1).await
+                pub mod ledger {
+                    use super::{clock, clock_ref};
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger {
+                        pub async fn count() -> u64 { clock::wait(1).await }
+                        pub async fn at(key: String) -> u64 {
+                            clock_ref::get(vec![key]).await.unwrap().wait(1).await
+                        }
+                        pub fn latest(tick: clock::Tick) -> clock::Tick { tick }
                     }
-                    pub fn latest(tick: clock::Tick) -> clock::Tick { tick }
                 }
             }",
             ":: sdk :: AcquisitionOptions",
@@ -392,9 +399,11 @@ fn the_native_side_reaches_the_facade_by_its_name() {
                 #[hook(composition = series, input = Admission)]
                 pub struct Guard;
                 pub struct Admission { pub value: i32 }
-                #[service]
-                pub struct Ledger;
-                impl Ledger { pub fn count() -> u32 { 0 } }
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger { pub fn count() -> u32 { 0 } }
+                }
             }",
             ":: sdk :: core :: Code :: Unsupported",
         ),
@@ -446,14 +455,16 @@ fn only_a_component_build_exports() {
     let module = expanded(
         "example:vault@1.0.0",
         "mod safe {
-            #[state]
-            pub struct Sealed { pub count: u32 }
             #[resource]
             pub struct Banner { pub text: String }
             impl Banner { #[open] pub fn open() -> Self { Banner { text: String::new() } } }
-            #[service]
-            pub struct Vault;
-            impl Vault { pub fn get() -> u32 { 0 } }
+            pub mod vault {
+                #[state]
+                pub struct Sealed { pub count: u32 }
+                #[service]
+                pub struct Vault;
+                impl Vault { pub fn get() -> u32 { 0 } }
+            }
         }",
     );
     let exports: Vec<&syn::ItemMacro> = items(&module)
@@ -547,9 +558,11 @@ fn an_interface_named_context_is_refused_beside_the_context_option() {
         expanded_with(importing(identity, false), &ledger("#[service]"));
     }
     let topics = "mod topics {
-        #[service(\"example:notes/context@1.0.0\")]
-        pub struct Topics;
-        impl Topics { pub fn topic() -> String { String::new() } }
+        pub mod topics {
+            #[service(\"example:notes/context@1.0.0\")]
+            pub struct Topics;
+            impl Topics { pub fn topic() -> String { String::new() } }
+        }
     }";
     let implementing = |context| Options {
         context,
@@ -564,18 +577,20 @@ fn an_interface_named_context_is_refused_beside_the_context_option() {
 }
 
 const COUNTER: &str = "mod tally {
-    #[state]
-    pub struct Count { pub total: i64 }
-    impl Count {
-        #[validate]
-        pub fn validate(&self) -> Result<(), String> {
-            if self.total < 0 { Err(String::from(\"negative\")) } else { Ok(()) }
+    pub mod counter {
+        #[state]
+        pub struct Count { pub total: i64 }
+        impl Count {
+            #[validate]
+            pub fn validate(&self) -> Result<(), String> {
+                if self.total < 0 { Err(String::from(\"negative\")) } else { Ok(()) }
+            }
         }
-    }
-    #[service]
-    pub struct Counter;
-    impl Counter {
-        pub fn add(by: i64) -> Result<Count, String> { Count::update(|count| count.total += by) }
+        #[service]
+        pub struct Counter;
+        impl Counter {
+            pub fn add(by: i64) -> Result<Count, String> { Count::update(|count| count.total += by) }
+        }
     }
 }";
 
@@ -621,7 +636,7 @@ fn a_validated_state_declares_so_and_updates_fallibly() {
     assert!(plain.contains("validated : true"), "{plain}");
     assert!(!plain.contains("validated : false"), "{plain}");
     assert!(
-        plain.contains("\"example:counter/counter@1.0.0\" => match :: serde_json :: from_str :: < Count > (& value) { :: core :: result :: Result :: Ok (_) => :: core :: result :: Result :: Ok (()) , :: core :: result :: Result :: Err (error) =>"),
+        plain.contains("\"example:counter/counter@1.0.0\" => match :: serde_json :: from_str :: < counter :: Count > (& value) { :: core :: result :: Result :: Ok (_) => :: core :: result :: Result :: Ok (()) , :: core :: result :: Result :: Err (error) =>"),
         "{plain}"
     );
     assert!(plain.contains("pub fn validate (& self)"), "{plain}");
@@ -641,8 +656,8 @@ fn a_validated_state_declares_so_and_updates_fallibly() {
     let error = refused(
         "example:counter@1.0.0",
         &COUNTER.replace(
-            "#[validate]\n        pub fn validate",
-            "#[validate]\n        pub fn other(&self) -> Result<(), String> { Ok(()) }\n        #[validate]\n        pub fn validate",
+            "#[validate]\n            pub fn validate",
+            "#[validate]\n            pub fn other(&self) -> Result<(), String> { Ok(()) }\n            #[validate]\n            pub fn validate",
         ),
     );
     assert!(
@@ -660,7 +675,7 @@ fn a_state_json_cannot_hold_is_never_stored() {
     let validated = tokens(&expanded("example:counter@1.0.0", COUNTER));
     for expected in [
         "value . validate () ? ; __tembra_state :: update (& value , \"Count\") }",
-        "initial : __tembra_state :: initial (& < Count as :: core :: default :: Default > :: default () , \"Count\") ,",
+        "initial : __tembra_state :: initial (& < counter :: Count as :: core :: default :: Default > :: default () , \"Count\") ,",
         "let json = storable (value , name) ? ; Ok (parse (& super :: tembra :: guest :: state :: update (& json)))",
         "match :: serde_json :: from_str :: < T > (& json) { Ok (_) => Ok (json) , Err (error) => Err (format ! (",
         "Err (refusal) => panic ! (\"{}\" , refusal) ,",
@@ -719,10 +734,13 @@ const FILTER: &str = "mod filter {
         #[close]
         fn close(self) {}
     }
-    #[service]
-    pub struct Report;
-    impl Report {
-        pub fn seen() -> u32 { Counts::with(|counts| counts.seen) }
+    pub mod report {
+        use super::Counts;
+        #[service]
+        pub struct Report;
+        impl Report {
+            pub fn seen() -> u32 { Counts::with(|counts| counts.seen) }
+        }
     }
 }";
 
@@ -796,18 +814,21 @@ fn a_host_lifetime_cannot_linger_and_unknown_options_are_refused() {
     let pinned = |attribute: &str| {
         format!(
             "mod book {{
-                use tembra::Declaration;
                 #[inputs]
                 pub struct Inputs {{ pub n: u32 }}
-                {attribute}
-                pub struct Pinned {{ n: u32 }}
-                impl Pinned {{
-                    #[create]
-                    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {{
-                        Ok(Self {{ n: inputs.n }})
+                pub mod pinned {{
+                    use super::Inputs;
+                    use tembra::Declaration;
+                    {attribute}
+                    pub struct Pinned {{ n: u32 }}
+                    impl Pinned {{
+                        #[create]
+                        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {{
+                            Ok(Self {{ n: inputs.n }})
+                        }}
+                        #[local]
+                        pub fn peek(&self) -> u32 {{ self.n }}
                     }}
-                    #[local]
-                    pub fn peek(&self) -> u32 {{ self.n }}
                 }}
             }}"
         )
@@ -912,11 +933,14 @@ fn an_option_of_an_option_is_refused() {
         format!(
             "mod book {{
                 pub struct Found {{ pub at: {field} }}
-                #[service]
-                pub struct Ledger;
-                impl Ledger {{
-                    pub fn find(key: String) -> {result} {{ todo!() }}
-                    pub fn last() -> Found {{ todo!() }}
+                pub mod ledger {{
+                    use super::Found;
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger {{
+                        pub fn find(key: String) -> {result} {{ todo!() }}
+                        pub fn last() -> Found {{ todo!() }}
+                    }}
                 }}
             }}"
         )
@@ -1018,7 +1042,7 @@ fn the_identities_on_attributes_are_wit_identities() {
     // The bindings escape a namespace that is a Rust keyword, `self_`, but not a package name.
     let module = expanded("self:book@1.0.0", &ledger("#[service]"));
     assert!(
-        tokens(&module).contains("impl exports :: self_ :: book :: ledger :: Guest for"),
+        tokens(&module).contains("impl super :: exports :: self_ :: book :: ledger :: Guest for"),
         "{}",
         tokens(&module)
     );
@@ -1045,8 +1069,8 @@ fn the_identities_on_attributes_are_wit_identities() {
     let error = refused(
         PACKAGE,
         &ledger("#[service]").replace(
-            "pub struct Ledger;",
-            "pub struct Ledger;\n#[hook(\"example:admission/Guard@1.0.0\", priority = 1)]\npub fn block(input: u32) -> u32 { input }",
+            "pub mod ledger {",
+            "#[hook(\"example:admission/Guard@1.0.0\", priority = 1)]\npub fn block(input: u32) -> u32 { input }\npub mod ledger {",
         ),
     );
     assert!(
@@ -1057,8 +1081,8 @@ fn the_identities_on_attributes_are_wit_identities() {
     let error = refused(
         PACKAGE,
         &ledger("#[service]").replace(
-            "pub struct Ledger;",
-            "pub struct Ledger;\n#[hook(\"admission/guard@1.0.0\", composition = series)]\npub struct Guard;",
+            "pub mod ledger {",
+            "#[hook(\"admission/guard@1.0.0\", composition = series)]\npub struct Guard;\npub mod ledger {",
         ),
     );
     assert!(
@@ -1089,11 +1113,14 @@ world keeper { export book; }
 ";
 
 const KEEPER: &str = "mod keeper {
-    #[service(\"example:ledger/book@1.0.0\")]
-    pub struct Keeper;
-    impl Keeper {
-        pub fn add(entry: book::Entry) -> u32 { 0 }
-        pub fn total() -> i64 { 0 }
+    pub mod keeper {
+        use super::book;
+        #[service(\"example:ledger/book@1.0.0\")]
+        pub struct Keeper;
+        impl Keeper {
+            pub fn add(entry: book::Entry) -> u32 { 0 }
+            pub fn total() -> i64 { 0 }
+        }
     }
 }";
 
@@ -1116,11 +1143,11 @@ fn a_service_may_implement_a_consumed_interface() {
     );
     assert!(
         generated
-            .contains("impl exports :: example :: ledger :: book :: Guest for __TembraExports"),
+            .contains("impl super :: exports :: example :: ledger :: book :: Guest for super :: __TembraExports"),
         "{generated}"
     );
     assert!(
-        generated.contains("fn add (entry : exports :: example :: ledger :: book :: Entry) -> u32 { Keeper :: add (entry) }"),
+        generated.contains("fn add (entry : super :: exports :: example :: ledger :: book :: Entry) -> u32 { Keeper :: add (entry) }"),
         "{generated}"
     );
     // A function the service lacks is left out of the `impl`, for rustc to report on the service.
@@ -1157,10 +1184,13 @@ fn a_service_signature_is_the_one_the_kernel_computes() {
         "mod book {
             pub struct Entry { pub label: String, pub amount: i64 }
             pub enum Refusal { Closed, Over(u32) }
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn add(entry: Entry) -> Result<u32, Refusal> { Ok(0) }
+            pub mod ledger {
+                use super::{Entry, Refusal};
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn add(entry: Entry) -> Result<u32, Refusal> { Ok(0) }
+                }
             }
         }",
     );
@@ -1260,37 +1290,39 @@ fn an_implemented_resource_is_bridged_in_its_own_module() {
     let module = orb_with(
         options("example:keeper@1.0.0", Some(&dir)),
         "mod keeper {
-            pub mod model {
-                pub mod entries {
-                    #[wit_resource(service = Keeper)]
-                    pub struct Entry { label: String }
-                    impl Entry {
-                        #[constructor]
-                        fn new(label: String) -> Self { Entry { label } }
-                        pub fn label(&self) -> String { self.label.clone() }
-                        pub fn blank() -> Entry { Entry::new(String::new()) }
+            pub mod keeping {
+                pub mod model {
+                    pub mod entries {
+                        #[wit_resource]
+                        pub struct Entry { label: String }
+                        impl Entry {
+                            #[constructor]
+                            fn new(label: String) -> Self { Entry { label } }
+                            pub fn label(&self) -> String { self.label.clone() }
+                            pub fn blank() -> Entry { Entry::new(String::new()) }
+                        }
                     }
                 }
-            }
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper {
-                pub fn open(label: String) -> model::entries::Entry { todo!() }
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {
+                    pub fn open(label: String) -> model::entries::Entry { todo!() }
+                }
             }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
     let generated = tokens(&module);
     for expected in [
-        "impl exports :: example :: ledger :: book :: Guest for __TembraExports { type Entry = model :: entries :: Entry ;",
+        "impl super :: exports :: example :: ledger :: book :: Guest for super :: __TembraExports { type Entry = super :: keeping :: model :: entries :: Entry ;",
         "pub mod entries { pub struct Entry",
-        "} impl super :: super :: exports :: example :: ledger :: book :: GuestEntry for Entry {",
+        "} impl super :: super :: super :: exports :: example :: ledger :: book :: GuestEntry for Entry {",
         "extern crate alloc as __tembra_alloc ; :: tembra :: __host ! { impl :: tembra :: portable :: Issuable for Entry {",
         "} } # [cfg_attr (not (target_arch = \"wasm32\") , allow (dead_code))] struct __TembraExports ;",
         "model :: entries :: __tembra_resource_entry (:: tembra :: Service :: new (",
         "fn new (label : __tembra_alloc :: string :: String) -> Self { Entry :: new (label) }",
         "fn label (& self ,) -> __tembra_alloc :: string :: String { Entry :: label (self ,) }",
-        "fn blank () -> super :: super :: exports :: example :: ledger :: book :: Entry { super :: super :: exports :: example :: ledger :: book :: Entry :: new (Entry :: blank ()) }",
+        "fn blank () -> super :: super :: super :: exports :: example :: ledger :: book :: Entry { super :: super :: super :: exports :: example :: ledger :: book :: Entry :: new (Entry :: blank ()) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -1319,17 +1351,20 @@ fn an_implemented_resource_reaches_none_of_the_module_types() {
         format!(
             "mod keeper {{
                 {extra}
-                #[service(\"example:ledger/book@1.0.0\")]
-                pub struct Keeper;
-                impl Keeper {{ pub fn open() -> Cursor {{ Cursor::start() }} }}
-                #[wit_resource(service = Keeper)]
-                pub struct Cursor {{ at: u32 }}
-                impl Cursor {{
-                    #[constructor]
-                    pub fn start() -> Self {{ Cursor {{ at: 0 }} }}
-                    pub fn current(&self) -> book::Entry {{ todo!() }}
-                    pub fn all(&self) -> Vec<book::Entry> {{ todo!() }}
-                    pub fn merge(&self, other: book::Cursor) -> u32 {{ self.at }}
+                pub mod keeper {{
+                    use super::book;
+                    #[service(\"example:ledger/book@1.0.0\")]
+                    pub struct Keeper;
+                    impl Keeper {{ pub fn open() -> Cursor {{ Cursor::start() }} }}
+                    #[wit_resource]
+                    pub struct Cursor {{ at: u32 }}
+                    impl Cursor {{
+                        #[constructor]
+                        pub fn start() -> Self {{ Cursor {{ at: 0 }} }}
+                        pub fn current(&self) -> book::Entry {{ todo!() }}
+                        pub fn all(&self) -> Vec<book::Entry> {{ todo!() }}
+                        pub fn merge(&self, other: book::Cursor) -> u32 {{ self.at }}
+                    }}
                 }}
             }}"
         )
@@ -1347,9 +1382,11 @@ fn an_implemented_resource_reaches_none_of_the_module_types() {
         ),
         (
             "pub struct Entry { pub note: String }
-            #[service]
-            pub struct Notes;
-            impl Notes { pub fn count() -> u32 { 0 } }",
+            pub mod notes {
+                #[service]
+                pub struct Notes;
+                impl Notes { pub fn count() -> u32 { 0 } }
+            }",
             "pub struct Entry { pub note : String }",
         ),
     ] {
@@ -1394,19 +1431,22 @@ fn a_name_that_is_a_wit_keyword_is_escaped() {
         "mod list {
             pub struct Record { pub result: u32, pub from: Kind }
             pub enum Kind { Record, Variant }
-            #[wit_resource]
-            pub struct Stream { at: u32 }
-            impl Stream {
-                #[constructor]
-                pub fn new(with: u32) -> Self { Stream { at: with } }
-                pub fn own(&self) -> u32 { self.at }
-                pub fn tuple() -> Stream { Stream { at: 0 } }
-            }
-            #[service]
-            pub struct Interface;
-            impl Interface {
-                pub fn list(from: u32, r#use: String) -> Vec<Record> { todo!() }
-                pub fn future(at: u32) -> Stream { Stream::new(at) }
+            pub mod interface {
+                use super::Record;
+                #[wit_resource]
+                pub struct Stream { at: u32 }
+                impl Stream {
+                    #[constructor]
+                    pub fn new(with: u32) -> Self { Stream { at: with } }
+                    pub fn own(&self) -> u32 { self.at }
+                    pub fn tuple() -> Stream { Stream { at: 0 } }
+                }
+                #[service]
+                pub struct Interface;
+                impl Interface {
+                    pub fn list(from: u32, r#use: String) -> Vec<Record> { todo!() }
+                    pub fn future(at: u32) -> Stream { Stream::new(at) }
+                }
             }
         }",
     );
@@ -1431,20 +1471,23 @@ fn a_name_the_bindings_spell_otherwise_is_bridged() {
         "example:web@1.0.0",
         "mod web {
             pub struct HTTPRequest { pub path: String }
-            #[wit_resource]
-            pub struct HTTPSession { request: HTTPRequest }
-            impl HTTPSession {
-                #[constructor]
-                pub fn open(path: String) -> Self { todo!() }
-                pub fn URL(&self) -> String { todo!() }
-                pub fn r#type(&self) -> u32 { 0 }
-            }
-            #[service]
-            pub struct HTTPServer;
-            impl HTTPServer {
-                pub fn GET(r#type: u32) -> u32 { r#type }
-                pub fn r#move(path: String) -> HTTPRequest { todo!() }
-                pub fn start(request: HTTPRequest) -> Option<HTTPSession> { None }
+            pub mod http_server {
+                use super::HTTPRequest;
+                #[wit_resource]
+                pub struct HTTPSession { request: HTTPRequest }
+                impl HTTPSession {
+                    #[constructor]
+                    pub fn open(path: String) -> Self { todo!() }
+                    pub fn URL(&self) -> String { todo!() }
+                    pub fn r#type(&self) -> u32 { 0 }
+                }
+                #[service]
+                pub struct HTTPServer;
+                impl HTTPServer {
+                    pub fn GET(r#type: u32) -> u32 { r#type }
+                    pub fn r#move(path: String) -> HTTPRequest { todo!() }
+                    pub fn start(request: HTTPRequest) -> Option<HTTPSession> { None }
+                }
             }
         }",
     );
@@ -1459,18 +1502,19 @@ fn a_name_the_bindings_spell_otherwise_is_bridged() {
     }
     let generated = tokens(&module);
     let interface = "exports :: example :: web :: http_server";
+    let bridge = "super :: exports :: example :: web :: http_server";
     for expected in [
         format!("impl :: core :: convert :: From < HTTPRequest > for {interface} :: HttpRequest"),
         format!("impl :: core :: convert :: From < {interface} :: HttpRequest > for HTTPRequest"),
-        "type HttpSession = HTTPSession ;".into(),
+        "type HttpSession = super :: http_server :: HTTPSession ;".into(),
         "fn get (r#type : u32) -> u32 { HTTPServer :: GET (r#type) }".into(),
         format!(
-            "fn move_ (path : String) -> {interface} :: HttpRequest {{ :: core :: convert :: Into :: into (HTTPServer :: r#move (path)) }}"
+            "fn move_ (path : String) -> {bridge} :: HttpRequest {{ :: core :: convert :: Into :: into (HTTPServer :: r#move (path)) }}"
         ),
         format!(
-            "fn start (request : {interface} :: HttpRequest) -> Option < {interface} :: HttpSession > {{ HTTPServer :: start (:: core :: convert :: Into :: into (request)) . map (| item | {interface} :: HttpSession :: new (item)) }}"
+            "fn start (request : {bridge} :: HttpRequest) -> Option < {bridge} :: HttpSession > {{ HTTPServer :: start (:: core :: convert :: Into :: into (request)) . map (| item | {bridge} :: HttpSession :: new (item)) }}"
         ),
-        format!("impl {interface} :: GuestHttpSession for HTTPSession"),
+        format!("impl {bridge} :: GuestHttpSession for HTTPSession"),
         "fn url (& self ,) -> String { HTTPSession :: URL (self ,) }".into(),
         "fn type_ (& self ,) -> u32 { HTTPSession :: r#type (self ,) }".into(),
     ] {
@@ -1489,9 +1533,12 @@ fn a_field_or_a_case_the_bindings_name_otherwise_keeps_its_name() {
         format!(
             "mod web {{
                 {types}
-                #[service]
-                pub struct Server;
-                impl Server {{ pub fn get() -> Request {{ todo!() }} }}
+                pub mod server {{
+                    use super::Request;
+                    #[service]
+                    pub struct Server;
+                    impl Server {{ pub fn get() -> Request {{ todo!() }} }}
+                }}
             }}"
         )
     };
@@ -1531,7 +1578,7 @@ fn a_field_or_a_case_the_bindings_name_otherwise_keeps_its_name() {
             format!(
                 "impl :: core :: convert :: From < {bindings} :: Request > for Request {{ fn from (value : {bindings} :: Request) -> Self {{ {inward} }} }}"
             ),
-            format!("fn get () -> {bindings} :: Request {{ {into} (Server :: get ()) }}"),
+            format!("fn get () -> super :: {bindings} :: Request {{ {into} (Server :: get ()) }}"),
         ] {
             assert!(
                 generated.contains(&expected),
@@ -1566,10 +1613,12 @@ fn two_items_of_one_wit_name_in_one_scope_are_refused() {
     let module = |types: &str, functions: &str| {
         format!(
             "mod office {{
-                {types}
-                #[service]
-                pub struct Desk;
-                impl Desk {{ {functions} }}
+                pub mod desk {{
+                    {types}
+                    #[service]
+                    pub struct Desk;
+                    impl Desk {{ {functions} }}
+                }}
             }}"
         )
     };
@@ -1609,15 +1658,31 @@ fn two_items_of_one_wit_name_in_one_scope_are_refused() {
             "pub fn café() -> u32 { 0 }",
             "`Desk::café` has no WIT name: its kebab-case form `café` holds a character other than ASCII letters, digits and `-`",
         ),
-        (
-            "#[service]\npub struct DESK;\nimpl DESK { pub fn count() -> u32 { 0 } }",
-            "pub fn total() -> u32 { 0 }",
-            "`DESK` and `Desk` are both the interface `desk` in the WIT; rename one of them",
-        ),
     ] {
         let error = refused("example:office@1.0.0", &module(types, functions));
         assert!(error.contains(message), "{types} {functions}: {error}");
     }
+    let error = refused(
+        "example:office@1.0.0",
+        "mod office {
+            pub mod upper {
+                #[service]
+                pub struct DESK;
+                impl DESK { pub fn count() -> u32 { 0 } }
+            }
+            pub mod desk {
+                #[service]
+                pub struct Desk;
+                impl Desk { pub fn total() -> u32 { 0 } }
+            }
+        }",
+    );
+    assert!(
+        error.contains(
+            "`DESK` and `Desk` are both the interface `desk` in the WIT; rename one of them"
+        ),
+        "{error}"
+    );
 }
 
 /// An implemented interface or a consumed hook whose WIT names are Rust keywords is bridged as the
@@ -1645,19 +1710,21 @@ fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
     let module = orb_with(
         options("example:keeper@1.0.0", Some(&dir)),
         "mod keeper {
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper {
-                pub fn r#move(r#type: u32) -> u32 { r#type }
-                pub fn getEntry() -> u32 { 0 }
-            }
-            #[wit_resource(service = Keeper)]
-            pub struct Cursor { at: u32 }
-            impl Cursor {
-                #[constructor]
-                pub fn new(r#type: u32) -> Self { Cursor { at: r#type } }
-                pub fn r#match(&self, r#in: u32) -> bool { self.at == r#in }
-                pub fn static_(r#as: u32) -> Cursor { Cursor { at: r#as } }
+            pub mod keeper {
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {
+                    pub fn r#move(r#type: u32) -> u32 { r#type }
+                    pub fn getEntry() -> u32 { 0 }
+                }
+                #[wit_resource]
+                pub struct Cursor { at: u32 }
+                impl Cursor {
+                    #[constructor]
+                    pub fn new(r#type: u32) -> Self { Cursor { at: r#type } }
+                    pub fn r#match(&self, r#in: u32) -> bool { self.at == r#in }
+                    pub fn static_(r#as: u32) -> Cursor { Cursor { at: r#as } }
+                }
             }
             #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
             pub fn admit(input: guard::Admission) -> guard::Admission { input }
@@ -1670,7 +1737,7 @@ fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
         "fn get_entry () -> u32 { Keeper :: getEntry () }",
         "fn new (type_ : u32) -> Self { Cursor :: new (type_) }",
         "fn match_ (& self , in_ : u32) -> bool { Cursor :: r#match (self , in_) }",
-        "fn static_ (as_ : u32) -> exports :: example :: ledger :: book :: Cursor { exports :: example :: ledger :: book :: Cursor :: new (Cursor :: static_ (as_)) }",
+        "fn static_ (as_ : u32) -> super :: exports :: example :: ledger :: book :: Cursor { super :: exports :: example :: ledger :: book :: Cursor :: new (Cursor :: static_ (as_)) }",
         "fn return_ (input : guard :: Admission) -> guard :: Admission { admit (input) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
@@ -1680,31 +1747,36 @@ fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
         "mod gate {
             #[hook(\"example:ledger/guard@1.0.0\", composition = waterfall)]
             pub struct Guard;
-            #[service]
-            pub struct Admissions;
-            impl Admissions { pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value }).value } }
+            pub mod admissions {
+                use super::{Guard, guard};
+                #[service]
+                pub struct Admissions;
+                impl Admissions { pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value }).value } }
+            }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
     let generated = tokens(&declared);
     for expected in [
         "fn return_ (_input : exports :: example :: ledger :: guard :: Admission)",
-        "self :: example :: ledger :: guard :: return_ (input)",
+        "__tembra_declared :: example :: ledger :: guard :: return_ (input)",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
     let error = refused_with(
         options("example:keeper@1.0.0", Some(&dir)),
         "mod keeper {
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper {
-                pub fn r#move(r#type: u32) -> u32 { r#type }
-                pub fn move_(r#type: u32) -> u32 { r#type }
-                pub fn get_entry() -> u32 { 0 }
+            pub mod keeper {
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {
+                    pub fn r#move(r#type: u32) -> u32 { r#type }
+                    pub fn move_(r#type: u32) -> u32 { r#type }
+                    pub fn get_entry() -> u32 { 0 }
+                }
+                #[wit_resource]
+                pub struct Cursor;
             }
-            #[wit_resource(service = Keeper)]
-            pub struct Cursor;
         }",
     );
     assert!(
@@ -1737,15 +1809,20 @@ fn an_interface_uses_what_its_resources_mention() {
         "example:wa@1.0.0",
         "mod wa {
             pub struct Info { pub n: u32 }
-            #[service]
-            pub struct Main;
-            impl Main { pub fn ping() -> u32 { 1 } }
-            #[wit_resource(service = Sessions)]
-            pub struct Session;
-            impl Session { pub fn info(&self) -> Info { Info { n: 1 } } }
-            #[service]
-            pub struct Sessions;
-            impl Sessions { pub fn open() -> Session { Session } }
+            pub mod main {
+                #[service]
+                pub struct Main;
+                impl Main { pub fn ping() -> u32 { 1 } }
+            }
+            pub mod sessions {
+                use super::Info;
+                #[wit_resource]
+                pub struct Session;
+                impl Session { pub fn info(&self) -> Info { Info { n: 1 } } }
+                #[service]
+                pub struct Sessions;
+                impl Sessions { pub fn open() -> Session { Session } }
+            }
         }",
     ));
     assert!(
@@ -1758,16 +1835,19 @@ fn an_interface_uses_what_its_resources_mention() {
             #[hook(composition = waterfall, input = Admission)]
             pub struct Guard;
             pub struct Admission { pub value: i32, pub blocked: bool }
-            #[wit_resource]
-            pub struct Ticket;
-            impl Ticket {
-                #[constructor]
-                pub fn new(admission: Admission) -> Self { Ticket }
-                pub fn admission(&self) -> Admission { todo!() }
+            pub mod admissions {
+                use super::Admission;
+                #[wit_resource]
+                pub struct Ticket;
+                impl Ticket {
+                    #[constructor]
+                    pub fn new(admission: Admission) -> Self { Ticket }
+                    pub fn admission(&self) -> Admission { todo!() }
+                }
+                #[service]
+                pub struct Admissions;
+                impl Admissions { pub fn issue() -> Ticket { Ticket } }
             }
-            #[service]
-            pub struct Admissions;
-            impl Admissions { pub fn issue() -> Ticket { Ticket } }
         }",
     ));
     assert!(
@@ -1779,15 +1859,22 @@ fn an_interface_uses_what_its_resources_mention() {
 const FRONT: &str = "mod wb {
     /// Counts over the texts.
     pub struct Stats { pub words: u32 }
-    #[service]
-    pub struct Front;
-    impl Front { pub fn start() -> Builder { Builder } }
-    #[wit_resource(service = Texts)]
-    pub struct Builder;
-    impl Builder { pub fn text(&self) -> u32 { 0 } }
-    #[service]
-    pub struct Texts;
-    impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }
+    pub mod front {
+        use super::Stats;
+        use super::texts::Builder;
+        #[service]
+        pub struct Front;
+        impl Front { pub fn start() -> Builder { Builder } }
+    }
+    pub mod texts {
+        use super::Stats;
+        #[wit_resource]
+        pub struct Builder;
+        impl Builder { pub fn text(&self) -> u32 { 0 } }
+        #[service]
+        pub struct Texts;
+        impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }
+    }
 }";
 
 /// A type is defined in the interface of the earliest service that mentions it, through its
@@ -1819,15 +1906,20 @@ fn a_type_is_defined_by_the_earliest_service_that_mentions_it() {
         "mod wa {
             pub struct Info { pub n: u32, pub detail: Detail }
             pub struct Detail { pub text: String }
-            #[service]
-            pub struct Main;
-            impl Main { pub fn ping() -> u32 { 1 } }
-            #[wit_resource(service = Sessions)]
-            pub struct Session;
-            impl Session { pub fn info(&self) -> Info { todo!() } }
-            #[service]
-            pub struct Sessions;
-            impl Sessions { pub fn open() -> Session { Session } }
+            pub mod main {
+                #[service]
+                pub struct Main;
+                impl Main { pub fn ping() -> u32 { 1 } }
+            }
+            pub mod sessions {
+                use super::Info;
+                #[wit_resource]
+                pub struct Session;
+                impl Session { pub fn info(&self) -> Info { todo!() } }
+                #[service]
+                pub struct Sessions;
+                impl Sessions { pub fn open() -> Session { Session } }
+            }
         }",
     ));
     assert!(
@@ -1868,7 +1960,7 @@ fn a_resource_is_returned_only_from_its_own_interface() {
         ),
         (
             "impl Front { pub fn ping() -> u32 { 0 } }
-            #[wit_resource(service = Front)]
+            #[wit_resource]
             pub struct Draft;
             impl Draft {
                 pub fn text(&self) -> u32 { 0 }
@@ -1889,18 +1981,23 @@ fn a_resource_is_returned_only_from_its_own_interface() {
     let error = refused(
         "example:wa@1.0.0",
         "mod wa {
-            #[wit_resource(service = Main)]
-            pub struct Token;
-            impl Token { pub fn id(&self) -> u32 { 7 } }
-            #[service]
-            pub struct Main;
-            impl Main { pub fn issue() -> Token { Token } }
-            #[wit_resource(service = Sessions)]
-            pub struct Session;
-            impl Session { pub fn grant(&self) -> Token { Token } }
-            #[service]
-            pub struct Sessions;
-            impl Sessions { pub fn open() -> Session { Session } }
+            pub mod main {
+                #[wit_resource]
+                pub struct Token;
+                impl Token { pub fn id(&self) -> u32 { 7 } }
+                #[service]
+                pub struct Main;
+                impl Main { pub fn issue() -> Token { Token } }
+            }
+            pub mod sessions {
+                use super::main::Token;
+                #[wit_resource]
+                pub struct Session;
+                impl Session { pub fn grant(&self) -> Token { Token } }
+                #[service]
+                pub struct Sessions;
+                impl Sessions { pub fn open() -> Session { Session } }
+            }
         }",
     );
     assert!(
@@ -1911,21 +2008,27 @@ fn a_resource_is_returned_only_from_its_own_interface() {
     let error = refused_with(
         options("example:keeper@1.0.0", Some(&dir)),
         "mod keeper {
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper { pub fn open() -> Cursor { Cursor::start() } }
-            #[wit_resource(service = Keeper)]
-            pub struct Cursor { at: u32 }
-            impl Cursor {
-                #[constructor]
-                pub fn start() -> Self { Cursor { at: 0 } }
-                pub fn current(&self) -> book::Entry { todo!() }
-                pub fn all(&self) -> Vec<book::Entry> { todo!() }
-                pub fn merge(&self, other: book::Cursor) -> u32 { self.at }
+            pub mod keeper {
+                use super::book;
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper { pub fn open() -> Cursor { Cursor::start() } }
+                #[wit_resource]
+                pub struct Cursor { at: u32 }
+                impl Cursor {
+                    #[constructor]
+                    pub fn start() -> Self { Cursor { at: 0 } }
+                    pub fn current(&self) -> book::Entry { todo!() }
+                    pub fn all(&self) -> Vec<book::Entry> { todo!() }
+                    pub fn merge(&self, other: book::Cursor) -> u32 { self.at }
+                }
             }
-            #[service]
-            pub struct Tools;
-            impl Tools { pub fn fresh() -> Option<Cursor> { None } }
+            pub mod tools {
+                use super::keeper::Cursor;
+                #[service]
+                pub struct Tools;
+                impl Tools { pub fn fresh() -> Option<Cursor> { None } }
+            }
         }",
     );
     assert!(
@@ -1938,12 +2041,15 @@ fn a_resource_is_returned_only_from_its_own_interface() {
             #[hook(composition = series, input = Admission)]
             pub struct Guard;
             pub struct Admission { pub ticket: Ticket }
-            #[wit_resource]
-            pub struct Ticket;
-            impl Ticket { pub fn id(&self) -> u32 { 0 } }
-            #[service]
-            pub struct Admissions;
-            impl Admissions { pub fn issue() -> Ticket { Ticket } }
+            use self::admissions::Ticket;
+            pub mod admissions {
+                #[wit_resource]
+                pub struct Ticket;
+                impl Ticket { pub fn id(&self) -> u32 { 0 } }
+                #[service]
+                pub struct Admissions;
+                impl Admissions { pub fn issue() -> Ticket { Ticket } }
+            }
         }",
     );
     assert!(
@@ -1970,21 +2076,23 @@ fn a_resource_is_returned_only_from_its_own_interface() {
 }
 
 const DESK: &str = "mod desk {
-    /// One session.
-    #[wit_resource]
-    pub struct Session { n: u32 }
-    impl Session {
-        #[constructor]
-        pub fn new(n: u32) -> Session { Session { n } }
-        /// The number.
-        pub fn get(&self) -> u32 { self.n }
-        pub fn twin(&self) -> Session { Session { n: self.n } }
-        pub fn make() -> Session { Session { n: 0 } }
-    }
-    #[service]
-    pub struct Sessions;
-    impl Sessions {
-        pub fn open(n: u32) -> Session { Session::new(n) }
+    pub mod sessions {
+        /// One session.
+        #[wit_resource]
+        pub struct Session { n: u32 }
+        impl Session {
+            #[constructor]
+            pub fn new(n: u32) -> Session { Session { n } }
+            /// The number.
+            pub fn get(&self) -> u32 { self.n }
+            pub fn twin(&self) -> Session { Session { n: self.n } }
+            pub fn make() -> Session { Session { n: 0 } }
+        }
+        #[service]
+        pub struct Sessions;
+        impl Sessions {
+            pub fn open(n: u32) -> Session { Session::new(n) }
+        }
     }
 }";
 
@@ -1999,16 +2107,17 @@ fn a_wit_resource_is_derived_from_the_struct_and_its_methods() {
     );
     let generated = tokens(&module);
     assert!(
-        generated.contains("type Session = Session ;"),
+        generated.contains("type Session = super :: sessions :: Session ;"),
         "{generated}"
     );
     assert!(
-        generated
-            .contains("impl exports :: example :: desk :: sessions :: GuestSession for Session"),
+        generated.contains(
+            "impl super :: exports :: example :: desk :: sessions :: GuestSession for Session"
+        ),
         "{generated}"
     );
     assert!(
-        generated.contains("fn open (n : u32) -> exports :: example :: desk :: sessions :: Session { exports :: example :: desk :: sessions :: Session :: new (Sessions :: open (n)) }"),
+        generated.contains("fn open (n : u32) -> super :: exports :: example :: desk :: sessions :: Session { super :: exports :: example :: desk :: sessions :: Session :: new (Sessions :: open (n)) }"),
         "{generated}"
     );
     assert!(
@@ -2044,7 +2153,7 @@ fn a_nested_resource_is_wrapped_where_it_is() {
             pub fn plain(n: u32) -> Option<u32> { None }",
         ),
     );
-    let module_path = "exports :: example :: desk :: sessions";
+    let module_path = "super :: exports :: example :: desk :: sessions";
     let generated = tokens(&module);
     for expected in [
         format!(
@@ -2119,7 +2228,7 @@ fn a_derived_function_takes_a_resource_of_its_interface() {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    let handle = "exports :: example :: desk :: sessions :: Session";
+    let handle = "super :: exports :: example :: desk :: sessions :: Session";
     let generated = tokens(&module);
     for expected in [
         format!(
@@ -2175,7 +2284,7 @@ fn a_resource_named_through_a_use_or_an_alias_crosses_as_its_handle() {
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
-    let handle = "exports :: example :: desk :: sessions :: Session";
+    let handle = "super :: exports :: example :: desk :: sessions :: Session";
     let generated = tokens(&module);
     for expected in [
         format!(
@@ -2210,9 +2319,9 @@ fn a_resource_the_runtime_cannot_carry_into_a_function_is_refused() {
     let error = refused(
         "example:wb@1.0.0",
         &FRONT.replace(
-            "impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }",
-            "impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }
-            #[wit_resource(service = Front)]
+            "impl Front { pub fn start() -> Builder { Builder } }",
+            "impl Front { pub fn start() -> Builder { Builder } }
+            #[wit_resource]
             pub struct Draft;
             impl Draft { pub fn keep(&self, builder: Builder) {} }",
         ),
@@ -2236,21 +2345,27 @@ fn a_resource_the_runtime_cannot_carry_into_a_function_is_refused() {
     let error = refused_with(
         options("example:keeper@1.0.0", Some(&dir)),
         "mod keeper {
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper { pub fn open() -> Cursor { Cursor::start() } }
-            #[wit_resource(service = Keeper)]
-            pub struct Cursor { at: u32 }
-            impl Cursor {
-                #[constructor]
-                pub fn start() -> Self { Cursor { at: 0 } }
-                pub fn current(&self) -> book::Entry { todo!() }
-                pub fn all(&self) -> Vec<book::Entry> { todo!() }
-                pub fn merge(&self, other: book::Cursor) -> u32 { self.at }
+            pub mod keeper {
+                use super::book;
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper { pub fn open() -> Cursor { Cursor::start() } }
+                #[wit_resource]
+                pub struct Cursor { at: u32 }
+                impl Cursor {
+                    #[constructor]
+                    pub fn start() -> Self { Cursor { at: 0 } }
+                    pub fn current(&self) -> book::Entry { todo!() }
+                    pub fn all(&self) -> Vec<book::Entry> { todo!() }
+                    pub fn merge(&self, other: book::Cursor) -> u32 { self.at }
+                }
             }
-            #[service]
-            pub struct Tools;
-            impl Tools { pub fn measure(cursor: Cursor) -> u32 { 0 } }
+            pub mod tools {
+                use super::keeper::Cursor;
+                #[service]
+                pub struct Tools;
+                impl Tools { pub fn measure(cursor: Cursor) -> u32 { 0 } }
+            }
         }",
     );
     assert!(
@@ -2262,12 +2377,15 @@ fn a_resource_the_runtime_cannot_carry_into_a_function_is_refused() {
         "mod wahook {
             #[hook(composition = series, input = Ticket)]
             pub struct Guard;
-            #[wit_resource]
-            pub struct Ticket;
-            impl Ticket { pub fn id(&self) -> u32 { 0 } }
-            #[service]
-            pub struct Admissions;
-            impl Admissions { pub fn issue() -> Ticket { Ticket } }
+            use self::admissions::Ticket;
+            pub mod admissions {
+                #[wit_resource]
+                pub struct Ticket;
+                impl Ticket { pub fn id(&self) -> u32 { 0 } }
+                #[service]
+                pub struct Admissions;
+                impl Admissions { pub fn issue() -> Ticket { Ticket } }
+            }
         }",
     );
     assert!(
@@ -2280,9 +2398,12 @@ fn a_resource_the_runtime_cannot_carry_into_a_function_is_refused() {
             ..options("example:files@1.0.0", None)
         },
         "mod storage {
-            #[service]
-            pub struct Files;
-            impl Files { pub fn size(file: types::Descriptor) -> u64 { 0 } }
+            pub mod files {
+                use super::types;
+                #[service]
+                pub struct Files;
+                impl Files { pub fn size(file: types::Descriptor) -> u64 { 0 } }
+            }
         }",
     );
     assert!(
@@ -2316,19 +2437,22 @@ fn a_derived_function_takes_an_imported_handle() {
     let module = orb_with(
         importing(),
         "mod speller {
-            #[wit_resource]
-            pub struct Note { text: String }
-            impl Note {
-                #[constructor]
-                pub fn new(builder: texts::Builder) -> Self { Note { text: builder.text() } }
-                pub fn append(&self, more: Option<texts::Builder>) -> u32 { 0 }
-            }
-            #[service]
-            pub struct Spelling;
-            impl Spelling {
-                pub fn finish(builder: texts::Builder) -> String { builder.text() }
-                pub fn count(builders: Vec<texts::Builder>, odd: texts::AB) -> u32 { 0 }
-                pub fn jot(builder: texts::Builder) -> Note { Note::new(builder) }
+            pub mod spelling {
+                use super::texts;
+                #[wit_resource]
+                pub struct Note { text: String }
+                impl Note {
+                    #[constructor]
+                    pub fn new(builder: texts::Builder) -> Self { Note { text: builder.text() } }
+                    pub fn append(&self, more: Option<texts::Builder>) -> u32 { 0 }
+                }
+                #[service]
+                pub struct Spelling;
+                impl Spelling {
+                    pub fn finish(builder: texts::Builder) -> String { builder.text() }
+                    pub fn count(builders: Vec<texts::Builder>, odd: texts::AB) -> u32 { 0 }
+                    pub fn jot(builder: texts::Builder) -> Note { Note::new(builder) }
+                }
             }
         }",
     )
@@ -2361,9 +2485,12 @@ fn a_derived_function_takes_an_imported_handle() {
     let refused = |module: &str| refused_with(importing(), module);
     let error = refused(
         "mod speller {
-            #[service]
-            pub struct Spelling;
-            impl Spelling { pub fn begin() -> Option<texts::Builder> { None } }
+            pub mod spelling {
+                use super::texts;
+                #[service]
+                pub struct Spelling;
+                impl Spelling { pub fn begin() -> Option<texts::Builder> { None } }
+            }
         }",
     );
     assert!(
@@ -2372,9 +2499,12 @@ fn a_derived_function_takes_an_imported_handle() {
     );
     let error = refused(
         "mod speller {
-            #[service]
-            pub struct Spelling;
-            impl Spelling { pub fn finish(builder: texts::Bulder) -> u32 { 0 } }
+            pub mod spelling {
+                use super::texts;
+                #[service]
+                pub struct Spelling;
+                impl Spelling { pub fn finish(builder: texts::Bulder) -> u32 { 0 } }
+            }
         }",
     );
     assert!(
@@ -2386,16 +2516,22 @@ fn a_derived_function_takes_an_imported_handle() {
     let named_like = |draft: &str| {
         format!(
             "mod speller {{
-                #[wit_resource(service = Drafts)]
-                pub struct Builder {{ pub text: String }}
-                #[service]
-                pub struct Spelling;
-                impl Spelling {{
-                    pub fn finish(builder: texts::Builder) -> u32 {{ 0 }}
+                pub mod spelling {{
+                    use super::texts;
+                    #[service]
+                    pub struct Spelling;
+                    impl Spelling {{
+                        pub fn finish(builder: texts::Builder) -> u32 {{ 0 }}
+                    }}
                 }}
-                #[service]
-                pub struct Drafts;
-                impl Drafts {{ {draft} }}
+                pub mod drafts {{
+                    use super::texts;
+                    #[wit_resource]
+                    pub struct Builder {{ pub text: String }}
+                    #[service]
+                    pub struct Drafts;
+                    impl Drafts {{ {draft} }}
+                }}
             }}"
         )
     };
@@ -2414,7 +2550,7 @@ fn a_derived_function_takes_an_imported_handle() {
     let generated = tokens(&module);
     for expected in [
         "fn finish (builder : texts :: Builder) -> u32 { Spelling :: finish (builder) }",
-        "fn draft () -> exports :: example :: speller :: drafts :: Builder { exports :: example :: speller :: drafts :: Builder :: new (Drafts :: draft ()) }",
+        "fn draft () -> super :: exports :: example :: speller :: drafts :: Builder { super :: exports :: example :: speller :: drafts :: Builder :: new (Drafts :: draft ()) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -2425,11 +2561,14 @@ const PERMITS: &str = "mod office {
     #[derive(Default, PartialEq)]
     pub struct Access { pub read: bool, pub write: bool, pub share: bool }
     pub struct Grant { pub who: String, pub access: Access }
-    #[service]
-    pub struct Permits;
-    impl Permits {
-        pub fn invert(access: Access) -> Access { todo!() }
-        pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Grant { todo!() }
+    pub mod permits {
+        use super::{Access, Grant};
+        #[service]
+        pub struct Permits;
+        impl Permits {
+            pub fn invert(access: Access) -> Access { todo!() }
+            pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Grant { todo!() }
+        }
     }
 }";
 
@@ -2464,38 +2603,69 @@ fn a_struct_of_bool_fields_is_a_record() {
 
 /// What else the Orb module names in a sub-module, a state, a root resource and its marked
 /// functions, and a WIT resource of a service of the Orb module, expands when it is visible to the
-/// Orb module through every module between them. One the Orb module cannot see is left to rustc,
-/// whose error falls on the author's item (the compile-fail cases).
+/// Orb module through every module between them: `pub`, `pub(crate)`, or a restricted visibility
+/// that reaches the Orb module, `pub(super)` one level below it and `pub(in super::super)` two.
+/// One the Orb module cannot see is left to rustc, whose error falls on the author's item (the
+/// compile-fail cases).
 #[test]
 fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
-    let module = |inner: &str, item: &str| {
+    // A state and a WIT resource sit below their service, in its module; a root resource outside
+    // every service's module.
+    let module = |owned: bool, inner: &str, item: &str| {
+        let below = format!(
+            "pub mod a {{
+                {inner} mod b {{
+                    {item}
+                }}
+            }}"
+        );
+        let (inside, outside) = if owned {
+            (below.as_str(), "")
+        } else {
+            ("", below.as_str())
+        };
         format!(
             "mod ledger {{
-                pub mod a {{
-                    {inner} mod b {{
-                        {item}
-                    }}
+                {outside}
+                pub mod passing {{
+                    {inside}
+                    #[service]
+                    pub struct Passing;
+                    impl Passing {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
                 }}
-                #[service]
-                pub struct Passing;
-                impl Passing {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
             }}"
         )
     };
-    for item in [
-        "#[state] VIS struct Balance { VIS total: i64 }",
-        "#[resource] VIS struct Counts { pub seen: u32 }
+    for (owned, item) in [
+        (true, "#[state] VIS struct Balance { VIS total: i64 }"),
+        (
+            false,
+            "#[resource] VIS struct Counts { pub seen: u32 }
             impl Counts { #[open] pub fn open() -> Self { Counts { seen: 0 } } }",
-        "#[resource] pub struct Counts { pub seen: u32 }
+        ),
+        (
+            false,
+            "#[resource] pub struct Counts { pub seen: u32 }
             impl Counts { #[open] VIS fn open() -> Self { Counts { seen: 0 } } }",
-        "#[wit_resource] VIS struct Pen { pub ink: u32 }
+        ),
+        (
+            true,
+            "#[wit_resource] VIS struct Pen { pub ink: u32 }
             impl Pen { pub fn ink(&self) -> u32 { self.ink } }",
+        ),
     ] {
         let item = |vis: &str| item.replace("VIS", vis);
-        expanded("example:ledger@1.0.0", &module("pub", &item("pub")));
+        expanded("example:ledger@1.0.0", &module(owned, "pub", &item("pub")));
+        // `b` sits in `passing::a` when the service owns the item, in `a` otherwise: the
+        // visibility that reaches the Orb module from there.
+        let reaching = if owned {
+            "pub(in super::super)"
+        } else {
+            "pub(super)"
+        };
         expanded(
             "example:ledger@1.0.0",
-            &module("pub(super)", &item("pub(crate)")),
+            &module(owned, reaching, &item("pub(crate)")),
         );
     }
 }
@@ -2505,7 +2675,7 @@ fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
 /// the service's module cannot see is left to rustc, whose error falls on the module.
 #[test]
 fn a_wit_resource_is_named_from_its_service_module() {
-    const PEN: &str = "#[wit_resource(service = Walker)]
+    const PEN: &str = "#[wit_resource]
         pub struct Pen { pub ink: u32 }
         impl Pen { pub fn ink(&self) -> u32 { self.ink } }";
     let beside = expanded(
@@ -2573,128 +2743,41 @@ fn a_wit_resource_is_named_from_its_service_module() {
     );
 }
 
-/// A WIT resource beside its service, in a module that cannot name the service's client: without
-/// a constructor or a static function, the native side writes nothing of the client there, and the
-/// Orb expands; with one, which the native side writes on the client there, the Orb expands too,
-/// for a component, and natively writes no client there: its `orb()` answers the error naming the
-/// module and the service to make visible. Once they are `pub(crate)`, the native side writes it.
+/// A WIT resource sits in its service's module or below it, so its module always sees the service's
+/// client: natively, the constructor and the static functions go on the client from there, also
+/// when the service and its module are private.
 #[test]
-fn a_resource_whose_module_cannot_see_the_client_has_no_constructor() {
-    let module = |nest: &str, service: &str, functions: &str| {
+fn a_resource_below_its_service_sees_the_client() {
+    let module = |vis: &str| {
         format!(
             "mod burrow {{
                 pub mod den {{
-                    {nest} mod nest {{
-                        use super::super::tags::Token;
+                    {vis} mod tokens {{
                         #[service]
-                        {service} struct Tokens;
-                        impl Tokens {{ pub fn open(n: u32) -> Token {{ Token {{ n }} }} }}
-                    }}
-                }}
-                pub mod tags {{
-                    #[wit_resource(service = Tokens)]
-                    pub struct Token {{ pub(crate) n: u32 }}
-                    impl Token {{
-                        {functions}
-                        pub fn number(&self) -> u32 {{ self.n }}
+                        {vis} struct Tokens;
+                        impl Tokens {{ pub fn open(n: u32) -> tags::Token {{ tags::Token::new(n) }} }}
+                        pub mod tags {{
+                            #[wit_resource]
+                            pub struct Token {{ pub(crate) n: u32 }}
+                            impl Token {{
+                                #[constructor] pub fn new(n: u32) -> Token {{ Token {{ n }} }}
+                                pub fn made(n: u32) -> Token {{ Token {{ n }} }}
+                                pub fn number(&self) -> u32 {{ self.n }}
+                            }}
+                        }}
                     }}
                 }}
             }}"
         )
     };
-    let package = "example:burrow@1.0.0";
-    let constructor = "#[constructor] pub fn new(n: u32) -> Token { Token { n } }";
-    let made = "pub fn made(n: u32) -> Token { Token { n } }";
-    let plain = expanded(package, &module("", "pub", ""));
-    let tags = native(&plain, &["tags"]);
-    assert!(!tags.contains("TokensClient"), "{tags}");
-    for (nest, service, hidden) in [
-        ("", "pub", "the module `nest`"),
-        ("pub(crate)", "", "the service `Tokens`"),
-        ("", "", "the module `nest` and the service `Tokens`"),
-    ] {
-        for functions in [constructor, made] {
-            // The module expands, for a component as it is; natively, `orb()` answers why.
-            let refused = expanded(package, &module(nest, service, functions));
-            let message = format!(
-                "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `tags`, which cannot see it: make {hidden} visible to the module `tags`, at least `pub(crate)`"
-            );
-            assert_eq!(native(&refused, &[]), unsupported(&message));
-            assert!(native(&refused, &["tags"]).is_empty());
-        }
+    for vis in ["pub", ""] {
+        let expanded = expanded("example:burrow@1.0.0", &module(vis));
+        let tags = native(&expanded, &["den", "tokens", "tags"]);
+        assert!(
+            tags.contains("impl super :: super :: super :: den :: tokens :: TokensClient {"),
+            "{tags}"
+        );
     }
-    let visible = expanded(package, &module("pub(crate)", "pub(crate)", constructor));
-    let tags = native(&visible, &["tags"]);
-    assert!(
-        tags.contains("impl super :: den :: nest :: TokensClient {"),
-        "{tags}"
-    );
-}
-
-/// Where 1.2's rule stops: a `pub(super)` service seen from a sibling under the same parent, and a
-/// resource in the parent of the service's private module, see the client and expand; for a private
-/// service seen from that parent, natively, `orb()` answers the error naming the service.
-#[test]
-fn a_resource_sees_the_client_of_a_service_its_parent_holds() {
-    let constructor = "#[constructor] pub fn new(n: u32) -> Token { Token { n } }";
-    let resource = format!(
-        "#[wit_resource(service = Tokens)]
-        pub struct Token {{ pub(crate) n: u32 }}
-        impl Token {{
-            {constructor}
-            pub fn number(&self) -> u32 {{ self.n }}
-        }}"
-    );
-    let nest = |service: &str, use_token: &str| {
-        format!(
-            "mod nest {{
-                use {use_token};
-                #[service]
-                {service} struct Tokens;
-                impl Tokens {{ pub fn open(n: u32) -> Token {{ Token::new(n) }} }}
-            }}"
-        )
-    };
-    let package = "example:burrow@1.0.0";
-    let sibling = expanded(
-        package,
-        &format!(
-            "mod burrow {{
-                pub mod den {{
-                    {}
-                    pub mod tags {{ {resource} }}
-                }}
-            }}",
-            nest("pub(super)", "super::tags::Token")
-        ),
-    );
-    let tags = native(&sibling, &["den", "tags"]);
-    assert!(
-        tags.contains("impl super :: super :: den :: nest :: TokensClient {"),
-        "{tags}"
-    );
-    let parent = |service: &str| {
-        format!(
-            "mod burrow {{
-                pub mod den {{
-                    {}
-                    {resource}
-                }}
-            }}",
-            nest(service, "super::Token")
-        )
-    };
-    let den = native(&expanded(package, &parent("pub")), &["den"]);
-    assert!(
-        den.contains("impl super :: den :: nest :: TokensClient {"),
-        "{den}"
-    );
-    assert_eq!(
-        native(&expanded(package, &parent("")), &[]),
-        unsupported(
-            "`Token` has a constructor or a static function, which a native build writes on the client of its service `Tokens` in the module `den`, which cannot see it: make the service `Tokens` visible to the module `den`, at least `pub(crate)`"
-        )
-    );
 }
 
 /// An impl names the type as a contract type's name resolves, through the glob imports from the
@@ -2756,9 +2839,6 @@ fn an_impl_names_the_type_through_a_glob_or_an_alias() {
     expanded(
         "example:walk@1.0.0",
         "mod walk {
-            #[wit_resource]
-            pub struct Pen { pub ink: u32 }
-            impl Pen { pub fn ink(&self) -> u32 { self.ink } }
             pub struct Lease { pub pen: Pen }
             #[derive(Clone)]
             pub struct Desk { pub lease: Lease }
@@ -2766,9 +2846,16 @@ fn an_impl_names_the_type_through_a_glob_or_an_alias() {
                 use super::Lease;
                 impl Clone for Lease { fn clone(&self) -> Self { todo!() } }
             }
-            #[service]
-            pub struct Walker;
-            impl Walker { pub fn lend() -> Desk { todo!() } }
+            use self::walker::Pen;
+            pub mod walker {
+                use super::Desk;
+                #[wit_resource]
+                pub struct Pen { pub ink: u32 }
+                impl Pen { pub fn ink(&self) -> u32 { self.ink } }
+                #[service]
+                pub struct Walker;
+                impl Walker { pub fn lend() -> Desk { todo!() } }
+            }
         }",
     );
 }
@@ -2838,10 +2925,12 @@ fn what_the_macro_cannot_evaluate_is_refused() {
     let module = |types: &str, returned: &str| {
         format!(
             "mod office {{
-                {types}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+                pub mod permits {{
+                    {types}
+                    #[service]
+                    pub struct Permits;
+                    impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+                }}
             }}"
         )
     };
@@ -2918,9 +3007,12 @@ fn a_cfg_attr_wrapping_only_what_the_generated_type_never_takes_expands() {
             #[cfg_attr(test, deprecated, cfg_attr(docsrs, doc(hidden)))]
             pub struct Grant { #[cfg_attr(test, allow(dead_code))] pub who: String }
             pub enum Level { #[cfg_attr(test, allow(unused))] Read, Write }
-            #[service]
-            pub struct Permits;
-            impl Permits { pub fn issue(level: Level) -> Grant { todo!() } }
+            pub mod permits {
+                use super::{Grant, Level};
+                #[service]
+                pub struct Permits;
+                impl Permits { pub fn issue(level: Level) -> Grant { todo!() } }
+            }
         }",
     );
     let text = resolved(&module);
@@ -2942,10 +3034,12 @@ fn a_type_entering_the_wit_under_cfg_is_refused() {
     let module = |types: &str, returned: &str| {
         format!(
             "mod office {{
-                {types}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+                pub mod permits {{
+                    {types}
+                    #[service]
+                    pub struct Permits;
+                    impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+                }}
             }}"
         )
     };
@@ -3026,19 +3120,25 @@ fn instead(evaluated: bool) -> &'static str {
 /// refused there, pointing to the plain form.
 #[test]
 fn a_marked_struct_under_cfg_is_refused() {
-    let module = |items: &str| {
+    // A state and a WIT resource are the service's, in its module; the rest are the Orb's.
+    let module = |items: &str, owned: bool| {
+        let (root, owned) = if owned { ("", items) } else { (items, "") };
         format!(
             "mod office {{
-                {items}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+                {root}
+                pub mod permits {{
+                    {owned}
+                    #[service]
+                    pub struct Permits;
+                    impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+                }}
             }}"
         )
     };
-    for (items, what, name, does, evaluated) in [
+    for (items, owned, what, name, does, evaluated) in [
         (
             "{cfg} #[state] pub struct Tally { pub count: u32 }",
+            true,
             "state",
             "Tally",
             "builds and reads it",
@@ -3047,6 +3147,7 @@ fn a_marked_struct_under_cfg_is_refused() {
         (
             "{cfg} #[resource] pub struct Pool { pub size: u32 }
             impl Pool { #[open] pub fn open() -> Self { Pool { size: 0 } } }",
+            false,
             "resource",
             "Pool",
             "opens and closes it",
@@ -3059,14 +3160,18 @@ fn a_marked_struct_under_cfg_is_refused() {
                 pub fn new(holder: String) -> Self { Badge { holder } }
                 pub fn holder(&self) -> String { self.holder.clone() }
             }",
+            true,
             "resource",
             "Badge",
             "calls its functions",
             false,
         ),
         (
-            "#[service] {cfg} pub struct Ledger;
-            impl Ledger { pub fn count() -> u32 { 0 } }",
+            "pub mod ledger {
+                #[service] {cfg} pub struct Ledger;
+                impl Ledger { pub fn count() -> u32 { 0 } }
+            }",
+            false,
             "service",
             "Ledger",
             "calls its functions",
@@ -3075,6 +3180,7 @@ fn a_marked_struct_under_cfg_is_refused() {
         (
             "{cfg} #[hook(composition = series, input = Grant)] pub struct Granted;
             pub struct Grant { pub who: String }",
+            false,
             "hook",
             "Granted",
             "runs it",
@@ -3082,7 +3188,7 @@ fn a_marked_struct_under_cfg_is_refused() {
         ),
     ] {
         for (condition, written) in refused_conditions(evaluated) {
-            let conditional = module(&items.replace("{cfg}", condition));
+            let conditional = module(&items.replace("{cfg}", condition), owned);
             let error = refused("example:office@1.0.0", &conditional);
             let message = format!(
                 "{written} on the {what} `{name}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; {}",
@@ -3090,7 +3196,10 @@ fn a_marked_struct_under_cfg_is_refused() {
             );
             assert!(error.contains(&message), "{condition} {items}: {error}");
         }
-        expanded("example:office@1.0.0", &module(&items.replace("{cfg}", "")));
+        expanded(
+            "example:office@1.0.0",
+            &module(&items.replace("{cfg}", ""), owned),
+        );
     }
 }
 
@@ -3107,16 +3216,22 @@ fn a_marked_struct_under_cfg_is_refused() {
 /// read keeps its `#[cfg(..)]`.
 #[test]
 fn a_function_under_cfg_is_refused() {
-    let office = |items: &str| {
+    // The items of the service, in its module, and those of the Orb, beside it.
+    let module = |owned: &str, root: &str| {
         format!(
             "mod office {{
-                {items}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+                {root}
+                pub mod permits {{
+                    {owned}
+                    #[service]
+                    pub struct Permits;
+                    impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+                }}
             }}"
         )
     };
+    let office = |items: &str| module(items, "");
+    let beside = |items: &str| module("", items);
     let keeper = consumed("cfg-keeper", LEDGER_WIT);
     let blocker = consumed("cfg-blocker", ADMISSION_WIT);
     for (package, dir, module, what, name, evaluated) in [
@@ -3202,7 +3317,7 @@ fn a_function_under_cfg_is_refused() {
         (
             "example:office@1.0.0",
             None,
-            office(
+            beside(
                 "#[resource] pub struct Pool { pub size: u32 }
                 impl Pool { {cfg} #[open] pub fn open() -> Self { Pool { size: 0 } } }",
             ),
@@ -3213,7 +3328,7 @@ fn a_function_under_cfg_is_refused() {
         (
             "example:office@1.0.0",
             None,
-            office(
+            beside(
                 "#[resource] pub struct Pool { pub size: u32 }
                 {cfg} impl Pool {
                     #[open] pub fn open() -> Self { Pool { size: 0 } }
@@ -3276,16 +3391,22 @@ fn a_function_under_cfg_is_refused() {
 /// the plain form. A sub-module holding nothing the macro marks keeps its `#[cfg(..)]`.
 #[test]
 fn a_sub_module_under_cfg_holding_a_marked_item_is_refused() {
-    let office = |items: &str| {
+    // The items of the service, in its module, and those of the Orb, beside it.
+    let module = |owned: &str, root: &str| {
         format!(
             "mod office {{
-                #[service]
-                pub struct Desk;
-                impl Desk {{ pub fn open() -> u32 {{ 1 }} }}
-                {items}
+                pub mod desk {{
+                    #[service]
+                    pub struct Desk;
+                    impl Desk {{ pub fn open() -> u32 {{ 1 }} }}
+                    {owned}
+                }}
+                {root}
             }}"
         )
     };
+    let office = |items: &str| module("", items);
+    let desk = |items: &str| module(items, "");
     let blocker = consumed("cfg-module-blocker", ADMISSION_WIT);
     for (package, dir, module, what, name, does, evaluated) in [
         (
@@ -3323,7 +3444,7 @@ fn a_sub_module_under_cfg_holding_a_marked_item_is_refused() {
         (
             "example:office@1.0.0",
             None,
-            office("{cfg} pub mod kept { #[state] pub struct Tally { pub count: u32 } }"),
+            desk("{cfg} pub mod kept { #[state] pub struct Tally { pub count: u32 } }"),
             "module `kept` holding the state",
             "Tally",
             "builds and reads it",
@@ -3346,9 +3467,9 @@ fn a_sub_module_under_cfg_holding_a_marked_item_is_refused() {
         (
             "example:office@1.0.0",
             None,
-            office(
+            desk(
                 "{cfg} pub mod badges {
-                    #[wit_resource(service = Desk)] pub struct Badge { holder: String }
+                    #[wit_resource] pub struct Badge { holder: String }
                     impl Badge {
                         #[constructor]
                         pub fn new(holder: String) -> Self { Badge { holder } }
@@ -3404,9 +3525,11 @@ fn a_sub_module_under_cfg_holding_a_marked_item_is_refused() {
     let inner = office(
         "pub mod audit {
             #![cfg_attr(test, cfg(feature = \"audit\"))]
-            #[service]
-            pub struct Permits;
-            impl Permits { pub fn check() -> u32 { 0 } }
+            pub mod permits {
+                #[service]
+                pub struct Permits;
+                impl Permits { pub fn check() -> u32 { 0 } }
+            }
         }",
     );
     let error = refused("example:office@1.0.0", &inner);
@@ -3442,16 +3565,22 @@ fn a_sub_module_under_cfg_holding_a_marked_item_is_refused() {
 /// `#[cfg(test)] mod tests` holding only tests and impls.
 #[test]
 fn a_parameter_under_cfg_is_refused() {
-    let office = |items: &str| {
+    // The items of the service, in its module, and those of the Orb, beside it.
+    let module = |owned: &str, root: &str| {
         format!(
             "mod office {{
-                {items}
-                #[service]
-                pub struct Permits;
-                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+                {root}
+                pub mod permits {{
+                    {owned}
+                    #[service]
+                    pub struct Permits;
+                    impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+                }}
             }}"
         )
     };
+    let office = |items: &str| module(items, "");
+    let beside = |items: &str| module("", items);
     let badge = |functions: &str| {
         office(&format!(
             "#[wit_resource] pub struct Badge {{ holder: String }}
@@ -3523,7 +3652,7 @@ fn a_parameter_under_cfg_is_refused() {
         (
             "example:office@1.0.0",
             None,
-            office(
+            beside(
                 "#[resource] pub struct Pool { pub size: u32 }
                 impl Pool {
                     #[open] pub fn open() -> Self { Pool { size: 0 } }
@@ -3601,25 +3730,27 @@ fn an_implemented_interface_wraps_its_nested_resources() {
     let module = orb_with(
         options("example:keeper@1.0.0", Some(&dir)),
         "mod keeper {
-            #[wit_resource(service = Keeper)]
-            pub struct Entry { label: String }
-            impl Entry {
-                #[constructor]
-                pub fn new(label: String) -> Self { Entry { label } }
-                pub fn next(&self) -> Option<Entry> { None }
-                pub fn split() -> (Entry, Entry) { todo!() }
-            }
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper {
-                pub fn find(label: String) -> Option<Entry> { None }
-                pub fn aliased(label: String) -> Option<Entry> { None }
-                pub fn many() -> Vec<Result<Entry, String>> { Vec::new() }
+            pub mod keeper {
+                #[wit_resource]
+                pub struct Entry { label: String }
+                impl Entry {
+                    #[constructor]
+                    pub fn new(label: String) -> Self { Entry { label } }
+                    pub fn next(&self) -> Option<Entry> { None }
+                    pub fn split() -> (Entry, Entry) { todo!() }
+                }
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {
+                    pub fn find(label: String) -> Option<Entry> { None }
+                    pub fn aliased(label: String) -> Option<Entry> { None }
+                    pub fn many() -> Vec<Result<Entry, String>> { Vec::new() }
+                }
             }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
-    let book = "exports :: example :: ledger :: book";
+    let book = "super :: exports :: example :: ledger :: book";
     let generated = tokens(&module);
     for expected in [
         format!(
@@ -3692,11 +3823,13 @@ fn a_state_enters_the_wit_only_when_a_method_mentions_it() {
     let module = expanded(
         "example:ledger@1.0.0",
         "mod ledger {
-            #[state]
-            pub struct Balance { pub total: i64 }
-            #[service]
-            pub struct Pinned;
-            impl Pinned { pub fn add(amount: i64) -> i64 { Balance::update(|b| b.total += amount).total } }
+            pub mod pinned {
+                #[state]
+                pub struct Balance { pub total: i64 }
+                #[service]
+                pub struct Pinned;
+                impl Pinned { pub fn add(amount: i64) -> i64 { Balance::update(|b| b.total += amount).total } }
+            }
         }",
     );
     assert!(!wit(&module).contains("record"), "{}", wit(&module));
@@ -3717,20 +3850,23 @@ fn the_types_a_state_out_of_the_wit_reaches_stay_as_written() {
     let module = expanded(
         "example:ledger@1.0.0",
         "mod ledger {
-            #[state]
-            #[derive(Default, serde::Serialize, serde::Deserialize)]
-            pub struct Balance { pub total: i64, pub phase: Phase, pub notes: Vec<Note>, pub shown: Shown }
             #[derive(Default, serde::Serialize, serde::Deserialize)]
             pub enum Phase { #[default] Open, Closed }
             #[derive(serde::Serialize, serde::Deserialize)]
             pub struct Note { pub text: String }
             #[derive(Default, serde::Serialize, serde::Deserialize)]
             pub struct Shown { pub at: u64 }
-            #[service]
-            pub struct Pinned;
-            impl Pinned {
-                pub fn add(amount: i64) -> i64 { amount }
-                pub fn last_shown() -> Shown { todo!() }
+            pub mod pinned {
+                use super::{Note, Phase, Shown};
+                #[state]
+                #[derive(Default, serde::Serialize, serde::Deserialize)]
+                pub struct Balance { pub total: i64, pub phase: Phase, pub notes: Vec<Note>, pub shown: Shown }
+                #[service]
+                pub struct Pinned;
+                impl Pinned {
+                    pub fn add(amount: i64) -> i64 { amount }
+                    pub fn last_shown() -> Shown { todo!() }
+                }
             }
         }",
     );
@@ -3757,14 +3893,17 @@ fn only_a_type_that_enters_the_wit_needs_a_wit_spelling() {
             "mod safe {{
                 pub struct Digest {{ pub bytes: [u8; 32] }}
                 pub enum Shape {{ Circle {{ radius: u32 }}, Rectangle(u32, u32) }}
-                #[state]
-                pub struct Sealed {{ pub digest: [u8; 4], pub shape: Shape }}
                 #[resource]
                 pub struct Banner {{ pub text: &'static str }}
                 impl Banner {{ #[open] pub fn open() -> Self {{ Banner {{ text: \"safe\" }} }} }}
-                #[service]
-                pub struct Vault;
-                impl Vault {{ pub fn get() -> {returned} {{ todo!() }} }}
+                pub mod vault {{
+                    use super::{{Banner, Digest, Shape}};
+                    #[state]
+                    pub struct Sealed {{ pub digest: [u8; 4], pub shape: Shape }}
+                    #[service]
+                    pub struct Vault;
+                    impl Vault {{ pub fn get() -> {returned} {{ todo!() }} }}
+                }}
             }}"
         )
     };
@@ -3803,10 +3942,12 @@ fn what_a_generated_type_would_drop_stays_the_authors() {
     let module = |types: &str, returned: &str| {
         format!(
             "mod ledger {{
-                {types}
-                #[service]
-                pub struct Desk;
-                impl Desk {{ pub fn get() -> {returned} {{ todo!() }} }}
+                pub mod desk {{
+                    {types}
+                    #[service]
+                    pub struct Desk;
+                    impl Desk {{ pub fn get() -> {returned} {{ todo!() }} }}
+                }}
             }}"
         )
     };
@@ -3814,7 +3955,7 @@ fn what_a_generated_type_would_drop_stays_the_authors() {
         (
             "pub enum Priority { Low = 10, High = 90 }",
             "Priority",
-            "pub enum Priority { Low = 10 , High = 90 } impl :: core :: convert :: From < Priority > for exports :: example :: ledger :: desk :: Priority { fn from (value : Priority) -> Self { match value { Priority :: Low => Self :: Low , Priority :: High => Self :: High , } } }",
+            "pub enum Priority { Low = 10 , High = 90 } impl :: core :: convert :: From < Priority > for super :: exports :: example :: ledger :: desk :: Priority { fn from (value : Priority) -> Self { match value { Priority :: Low => Self :: Low , Priority :: High => Self :: High , } } }",
         ),
         (
             "#[serde(rename_all = \"camelCase\")] pub struct Entry { pub total_amount: i64 }",
@@ -3859,12 +4000,15 @@ const REVIEW: &str = "mod review {
     /// How a reviewer voted.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub enum Vote { Yes, No }
-    #[service]
-    pub struct Reviews;
-    impl Reviews {
-        pub fn decide(reviewer: String, vote: Vote) -> Decision { todo!() }
-        pub fn outcomes(decisions: Vec<Decision>) -> Vec<Outcome> { todo!() }
-        pub fn worst(outcomes: Vec<Outcome>, fallback: Option<Outcome>) -> Result<Outcome, String> { todo!() }
+    pub mod reviews {
+        use super::{Decision, Outcome, Vote};
+        #[service]
+        pub struct Reviews;
+        impl Reviews {
+            pub fn decide(reviewer: String, vote: Vote) -> Decision { todo!() }
+            pub fn outcomes(decisions: Vec<Decision>) -> Vec<Outcome> { todo!() }
+            pub fn worst(outcomes: Vec<Outcome>, fallback: Option<Outcome>) -> Result<Outcome, String> { todo!() }
+        }
     }
 }";
 
@@ -3915,6 +4059,7 @@ world review {
     );
     let generated = tokens(&module);
     let bindings = "exports :: example :: review :: reviews";
+    let bridge = "super :: exports :: example :: review :: reviews";
     let into = ":: core :: convert :: Into :: into";
     for expected in [
         // The author's types stay, as written.
@@ -3942,12 +4087,12 @@ world review {
             "impl :: core :: convert :: From < {bindings} :: Decision > for Decision {{ fn from (value : {bindings} :: Decision) -> Self {{ Self {{ reviewer : {into} (value . reviewer) , outcome : {into} (value . outcome) }} }} }}"
         ),
         // The bridges spell the bindings' types and convert where the author's types are.
-        format!("fn decide (reviewer : String , vote : {bindings} :: Vote) -> {bindings} :: Decision {{ {into} (Reviews :: decide (reviewer , {into} (vote))) }}"),
+        format!("fn decide (reviewer : String , vote : {bridge} :: Vote) -> {bridge} :: Decision {{ {into} (Reviews :: decide (reviewer , {into} (vote))) }}"),
         format!(
-            "fn outcomes (decisions : Vec < {bindings} :: Decision >) -> Vec < {bindings} :: Outcome > {{ Reviews :: outcomes (decisions . into_iter () . map (| item | {into} (item)) . collect ()) . into_iter () . map (| item | {into} (item)) . collect () }}"
+            "fn outcomes (decisions : Vec < {bridge} :: Decision >) -> Vec < {bridge} :: Outcome > {{ Reviews :: outcomes (decisions . into_iter () . map (| item | {into} (item)) . collect ()) . into_iter () . map (| item | {into} (item)) . collect () }}"
         ),
         format!(
-            "fn worst (outcomes : Vec < {bindings} :: Outcome > , fallback : Option < {bindings} :: Outcome >) -> Result < {bindings} :: Outcome , String > {{ match Reviews :: worst (outcomes . into_iter () . map (| item | {into} (item)) . collect () , fallback . map (| item | {into} (item))) {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok ({into} (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err ({into} (item)) , }} }}"
+            "fn worst (outcomes : Vec < {bridge} :: Outcome > , fallback : Option < {bridge} :: Outcome >) -> Result < {bridge} :: Outcome , String > {{ match Reviews :: worst (outcomes . into_iter () . map (| item | {into} (item)) . collect () , fallback . map (| item | {into} (item))) {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok ({into} (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err ({into} (item)) , }} }}"
         ),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
@@ -3978,16 +4123,19 @@ fn a_converted_type_is_converted_in_its_own_module() {
                 #[derive(Debug, Clone, PartialEq)]
                 pub enum Mood { Calm, Upset { since: u64, HTTPCode: u16 } }
             }
-            /// The last decision, kept by the kernel.
-            #[state(service = Reviews)]
-            pub struct Last { pub outcome: Option<verdicts::Outcome>, pub count: u32 }
             pub struct Report { pub mood: verdicts::Mood }
-            #[service]
-            pub struct Reviews;
-            impl Reviews {
-                pub fn decide(reason: Option<String>) -> verdicts::Outcome { todo!() }
-                pub fn latest() -> Last { todo!() }
-                pub fn moods() -> Report { todo!() }
+            pub mod reviews {
+                use super::{Report, verdicts};
+                /// The last decision, kept by the kernel.
+                #[state]
+                pub struct Last { pub outcome: Option<verdicts::Outcome>, pub count: u32 }
+                #[service]
+                pub struct Reviews;
+                impl Reviews {
+                    pub fn decide(reason: Option<String>) -> verdicts::Outcome { todo!() }
+                    pub fn latest() -> Last { todo!() }
+                    pub fn moods() -> Report { todo!() }
+                }
             }
         }",
     );
@@ -4012,11 +4160,11 @@ fn a_converted_type_is_converted_in_its_own_module() {
         format!("impl :: core :: convert :: From < Outcome > for {bindings} :: Outcome {{ fn from (value : Outcome) -> Self {{ match value {{ Outcome :: Accepted => Self :: Accepted , Outcome :: Refused {{ reason }} => Self :: Refused ({bindings} :: OutcomeRefused {{ reason : {into} (reason) }}) , }} }} }}"),
         format!("Mood :: Upset {{ since , HTTPCode }} => Self :: Upset ({bindings} :: MoodUpset {{ since : {into} (since) , http_code : {into} (HTTPCode) }})"),
         format!("{bindings} :: Mood :: Upset (item) => Self :: Upset {{ since : {into} (item . since) , HTTPCode : {into} (item . http_code) }}"),
-        format!("impl :: core :: convert :: From < Last > for exports :: example :: review :: reviews :: Last {{ fn from (value : Last) -> Self {{ Self {{ outcome : value . outcome . map (| item | {into} (item)) , count : {into} (value . count) }} }} }}"),
+        format!("impl :: core :: convert :: From < Last > for super :: exports :: example :: review :: reviews :: Last {{ fn from (value : Last) -> Self {{ Self {{ outcome : value . outcome . map (| item | {into} (item)) , count : {into} (value . count) }} }} }}"),
         // The bridges name the sub-module's types as the bindings do.
-        format!("fn decide (reason : Option < String >) -> exports :: example :: review :: reviews :: Outcome {{ {into} (Reviews :: decide (reason)) }}"),
-        format!("fn latest () -> exports :: example :: review :: reviews :: Last {{ {into} (Reviews :: latest ()) }}"),
-        format!("fn moods () -> exports :: example :: review :: reviews :: Report {{ {into} (Reviews :: moods ()) }}"),
+        format!("fn decide (reason : Option < String >) -> super :: exports :: example :: review :: reviews :: Outcome {{ {into} (Reviews :: decide (reason)) }}"),
+        format!("fn latest () -> super :: exports :: example :: review :: reviews :: Last {{ {into} (Reviews :: latest ()) }}"),
+        format!("fn moods () -> super :: exports :: example :: review :: reviews :: Report {{ {into} (Reviews :: moods ()) }}"),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
@@ -4036,10 +4184,12 @@ fn what_a_converted_type_cannot_be_is_refused() {
     let module = |types: &str, methods: &str| {
         format!(
             "mod review {{
-                {types}
-                #[service]
-                pub struct Reviews;
-                impl Reviews {{ {methods} }}
+                pub mod reviews {{
+                    {types}
+                    #[service]
+                    pub struct Reviews;
+                    impl Reviews {{ {methods} }}
+                }}
             }}"
         )
     };
@@ -4087,13 +4237,17 @@ fn a_converted_type_carries_its_resources_and_reaches_a_derived_hook() {
                 pub enum Outcome {{ Accepted, Opened {{ draft: Draft }} }}
                 pub enum Verdict {{ Accepted, Refused {{ reason: String }} }}
                 pub struct Decision {{ pub verdict: Verdict }}
-                {draft}
-                #[service]
-                pub struct Reviews;
-                impl Reviews {{
-                    pub fn open() -> Outcome {{ todo!() }}
-                    pub fn reopen(outcome: Outcome) -> Result<Draft, Verdict> {{ todo!() }}
-                    pub fn pair(draft: (Draft, Decision)) -> u32 {{ 0 }}
+                use self::reviews::Draft;
+                pub mod reviews {{
+                    use super::{{Decision, Outcome, Verdict}};
+                    {draft}
+                    #[service]
+                    pub struct Reviews;
+                    impl Reviews {{
+                        pub fn open() -> Outcome {{ todo!() }}
+                        pub fn reopen(outcome: Outcome) -> Result<Draft, Verdict> {{ todo!() }}
+                        pub fn pair(draft: (Draft, Decision)) -> u32 {{ 0 }}
+                    }}
                 }}
                 #[hook(composition = waterfall, input = Decision)]
                 pub struct Vetting;
@@ -4102,6 +4256,7 @@ fn a_converted_type_carries_its_resources_and_reaches_a_derived_hook() {
     );
     let generated = tokens(&module);
     let reviews = "exports :: example :: review :: reviews";
+    let bridge = "super :: exports :: example :: review :: reviews";
     let export = "exports :: example :: review :: vetting";
     let import = "self :: example :: review :: vetting";
     let into = ":: core :: convert :: Into :: into";
@@ -4112,12 +4267,12 @@ fn a_converted_type_carries_its_resources_and_reaches_a_derived_hook() {
         format!(
             "{reviews} :: Outcome :: Opened (item) => Self :: Opened {{ draft : item . draft . into_inner () }}"
         ),
-        format!("fn open () -> {reviews} :: Outcome {{ {into} (Reviews :: open ()) }}"),
+        format!("fn open () -> {bridge} :: Outcome {{ {into} (Reviews :: open ()) }}"),
         format!(
-            "fn reopen (outcome : {reviews} :: Outcome) -> Result < {reviews} :: Draft , {reviews} :: Verdict > {{ match Reviews :: reopen ({into} (outcome)) {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok ({reviews} :: Draft :: new (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err ({into} (item)) , }} }}"
+            "fn reopen (outcome : {bridge} :: Outcome) -> Result < {bridge} :: Draft , {bridge} :: Verdict > {{ match Reviews :: reopen ({into} (outcome)) {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok ({bridge} :: Draft :: new (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err ({into} (item)) , }} }}"
         ),
         format!(
-            "fn pair (draft : ({reviews} :: Draft , {reviews} :: Decision ,)) -> u32 {{ Reviews :: pair ({{ let (item0 , item1 ,) = draft ; (item0 . into_inner () , {into} (item1) ,) }}) }}"
+            "fn pair (draft : ({bridge} :: Draft , {bridge} :: Decision ,)) -> u32 {{ Reviews :: pair ({{ let (item0 , item1 ,) = draft ; (item0 . into_inner () , {into} (item1) ,) }}) }}"
         ),
         // Both copies of the hook's types convert to and from the author's.
         format!("impl :: core :: convert :: From < Verdict > for {export} :: Verdict {{"),
@@ -4145,10 +4300,14 @@ fn a_converted_type_carries_its_resources_and_reaches_a_derived_hook() {
         &format!(
             "mod review {{
                 pub enum Outcome {{ Accepted, Opened {{ draft: Draft }} }}
-                {draft}
-                #[service]
-                pub struct Reviews;
-                impl Reviews {{ pub fn open() -> Outcome {{ todo!() }} }}
+                use self::reviews::Draft;
+                pub mod reviews {{
+                    use super::Outcome;
+                    {draft}
+                    #[service]
+                    pub struct Reviews;
+                    impl Reviews {{ pub fn open() -> Outcome {{ todo!() }} }}
+                }}
             }}"
         ),
     );
@@ -4174,11 +4333,14 @@ const WALK: &str = "mod walk {
     pub enum Move { Step(Heading), Jump(Point), Rest }
     /// The notes of a walk; it derives nothing.
     pub struct Trace { pub notes: Vec<Note> }
-    #[service]
-    pub struct Walker;
-    impl Walker {
-        pub fn walk(moves: Vec<Move>) -> Point { todo!() }
-        pub fn last_trace() -> Trace { todo!() }
+    pub mod walker {
+        use super::{Move, Point, Trace};
+        #[service]
+        pub struct Walker;
+        impl Walker {
+            pub fn walk(moves: Vec<Move>) -> Point { todo!() }
+            pub fn last_trace() -> Trace { todo!() }
+        }
     }
 }";
 
@@ -4226,10 +4388,13 @@ fn a_type_that_enters_the_wit_keeps_its_attributes() {
             #[derive(Clone, Copy)]
             #[repr(u8)]
             pub enum Heading { North = 1, East = 2 }
-            #[service]
-            pub struct Walker;
-            impl Walker {
-                pub fn walk(step: Step, heading: Heading) -> Step { todo!() }
+            pub mod walker {
+                use super::{Heading, Step};
+                #[service]
+                pub struct Walker;
+                impl Walker {
+                    pub fn walk(step: Step, heading: Heading) -> Step { todo!() }
+                }
             }
         }",
     );
@@ -4279,24 +4444,29 @@ fn a_derived_hook_input_keeps_its_derives() {
 /// nothing implements twice: the error of a function's result may implement `Display` by hand.
 #[test]
 fn a_hand_impl_for_a_type_of_the_module_is_the_authors() {
-    let module = |items: &str| {
+    let module = |items: &str, owned: &str| {
         format!(
             "mod walk {{
                 use std::fmt;
-                #[wit_resource]
-                pub struct Pen {{ pub ink: u32 }}
-                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
                 pub struct Point {{ pub x: i32 }}
                 pub struct Lease {{ pub pen: Pen }}
                 pub enum Fault {{ Lost, Stuck }}
                 pub enum Heading {{ North, East }}
                 pub struct Access {{ pub read: bool }}
                 {items}
-                #[service]
-                pub struct Walker;
-                impl Walker {{
-                    pub fn walk(access: Access, heading: Heading) -> Result<Point, Fault> {{ todo!() }}
-                    pub fn lend() -> Lease {{ todo!() }}
+                use self::walker::Pen;
+                pub mod walker {{
+                    use super::{{Access, Fault, Heading, Lease, Point}};
+                    {owned}
+                    #[wit_resource]
+                    pub struct Pen {{ pub ink: u32 }}
+                    impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                    #[service]
+                    pub struct Walker;
+                    impl Walker {{
+                        pub fn walk(access: Access, heading: Heading) -> Result<Point, Fault> {{ todo!() }}
+                        pub fn lend() -> Lease {{ todo!() }}
+                    }}
                 }}
             }}"
         )
@@ -4305,8 +4475,8 @@ fn a_hand_impl_for_a_type_of_the_module_is_the_authors() {
     let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
     let state = "#[state] pub struct Count { pub steps: u32 }";
     let display = format!("impl fmt::Display for Fault {{ {fmt} }}");
-    let generated = tokens(&expanded("example:walk@1.0.0", &module(&display)));
-    let bindings = "exports :: example :: walk :: walker";
+    let generated = tokens(&expanded("example:walk@1.0.0", &module(&display, "")));
+    let bindings = "super :: exports :: example :: walk :: walker";
     for expected in [
         "impl fmt :: Display for Fault { fn fmt (& self , f : & mut fmt :: Formatter < '_ >) -> fmt :: Result { todo ! () } }".to_owned(),
         format!("fn walk (access : {bindings} :: Access , heading : {bindings} :: Heading) -> Result < {bindings} :: Point , {bindings} :: Fault >"),
@@ -4328,7 +4498,6 @@ fn a_hand_impl_for_a_type_of_the_module_is_the_authors() {
         }".to_owned(),
         "impl PartialEq<Self> for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
         "impl<T> PartialEq<T> for Heading { fn eq(&self, other: &T) -> bool { todo!() } }".to_owned(),
-        format!("{state} impl serde::Serialize for Point {{ {serialize} }}"),
         format!("impl fmt::Display for Point {{ {fmt} }}"),
         "impl PartialEq for Point { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
         "impl core::cmp::PartialEq<u8> for Heading { fn eq(&self, other: &u8) -> bool { todo!() } }".to_owned(),
@@ -4338,18 +4507,23 @@ fn a_hand_impl_for_a_type_of_the_module_is_the_authors() {
         format!("impl serde::Serialize for Point {{ {serialize} }}"),
         "impl crate::walk::Display for Fault {} pub trait Display {}".to_owned(),
         format!("use pretty::*; impl Display for Fault {{ {fmt} }}"),
-        format!("{state} impl rkyv::Serialize<u32> for Point {{}}"),
         "pub trait Clone { fn dup(&self) -> u32; } impl Clone for Point { fn dup(&self) -> u32 { 0 } }".to_owned(),
         "pub trait Ord { fn rank(&self) -> u32; } impl Ord for Heading { fn rank(&self) -> u32 { 0 } }".to_owned(),
         "pub mod traits { pub trait PartialEq { fn same(&self) -> bool; } }
         use traits::*;
         impl PartialEq for Heading { fn same(&self) -> bool { true } }".to_owned(),
-        format!("{state} pub trait Serialize {{ fn bytes(&self) -> u32; }} impl Serialize for Point {{ fn bytes(&self) -> u32 {{ 0 }} }}"),
         "pub mod ops { use crate::geometry::*; impl core::fmt::Debug for Point { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } } }".to_owned(),
         "pub mod legacy { pub struct Heading(pub u8); }
         impl PartialEq<legacy::Heading> for Heading { fn eq(&self, other: &legacy::Heading) -> bool { todo!() } }".to_owned(),
     ] {
-        expanded("example:walk@1.0.0", &module(&items));
+        expanded("example:walk@1.0.0", &module(&items, ""));
+    }
+    for items in [
+        format!("impl serde::Serialize for Point {{ {serialize} }}"),
+        "impl rkyv::Serialize<u32> for Point {}".to_owned(),
+        "pub trait Serialize { fn bytes(&self) -> u32; } impl Serialize for Point { fn bytes(&self) -> u32 { 0 } }".to_owned(),
+    ] {
+        expanded("example:walk@1.0.0", &module(&items, state));
     }
 }
 
@@ -4362,12 +4536,14 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
     let ledger = |items: &str| {
         format!(
             "mod ledger {{
-                #[state]
-                pub struct Balance {{ pub total: i64 }}
                 {items}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+                pub mod pinned {{
+                    #[state]
+                    pub struct Balance {{ pub total: i64 }}
+                    #[service]
+                    pub struct Pinned;
+                    impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+                }}
             }}"
         )
     };
@@ -4376,9 +4552,12 @@ fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
             "mod office {{
                 pub struct Access {{ pub read: bool }}
                 {items}
-                #[service]
-                pub struct Guard;
-                impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                pub mod guard {{
+                    use super::Access;
+                    #[service]
+                    pub struct Guard;
+                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
             }}"
         )
     };
@@ -4407,13 +4586,15 @@ fn a_states_default_and_serde_derives_are_the_authors() {
     let state = |attributes: &str, extra: &str, returned: &str| {
         format!(
             "mod ledger {{
-                {attributes}
-                #[state]
-                pub struct Balance {{ pub total: i64 }}
-                {extra}
-                #[service]
-                pub struct Pinned;
-                impl Pinned {{ pub fn add(amount: i64) -> {returned} {{ todo!() }} }}
+                pub mod pinned {{
+                    {attributes}
+                    {extra}
+                    #[state]
+                    pub struct Balance {{ pub total: i64 }}
+                    #[service]
+                    pub struct Pinned;
+                    impl Pinned {{ pub fn add(amount: i64) -> {returned} {{ todo!() }} }}
+                }}
             }}"
         )
     };
@@ -4432,7 +4613,10 @@ fn a_states_default_and_serde_derives_are_the_authors() {
                 "example:ledger@1.0.0",
                 &state(attributes, "", returned),
             ));
-            assert!(generated.contains(&asserted("Balance")), "{generated}");
+            assert!(
+                generated.contains(&asserted("pinned :: Balance")),
+                "{generated}"
+            );
             assert!(!generated.contains(written), "{generated}");
             assert!(!generated.contains("# [derive (:: serde"), "{generated}");
         }
@@ -4481,7 +4665,10 @@ fn a_states_default_and_serde_derives_are_the_authors() {
             )),
             "{entered}"
         );
-        assert!(entered.contains(&asserted("Balance")), "{entered}");
+        assert!(
+            entered.contains(&asserted("pinned :: Balance")),
+            "{entered}"
+        );
         for unexpected in [written, "additional_type_attributes", "pub use exports"] {
             assert!(!entered.contains(unexpected), "{unexpected}\n{entered}");
         }
@@ -4500,10 +4687,13 @@ const GATE: &str = "mod gate {
     pub struct Guard;
     /// One admission.
     pub struct Admission { pub value: i32, pub blocked: bool }
-    #[service]
-    pub struct Admissions;
-    impl Admissions {
-        pub fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }) }
+    pub mod admissions {
+        use super::{Admission, Guard};
+        #[service]
+        pub struct Admissions;
+        impl Admissions {
+            pub fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }) }
+        }
     }
 }";
 
@@ -4536,7 +4726,7 @@ fn a_declared_hook_is_derived_from_its_input() {
         "impl :: core :: convert :: From < self :: example :: gate :: guard :: Admission > for Admission",
         "Self { value : :: core :: convert :: Into :: into (value . value) , blocked : :: core :: convert :: Into :: into (value . blocked) }",
         "fn apply (_input : exports :: example :: gate :: guard :: Admission) -> exports :: example :: gate :: guard :: Admission",
-        "fn admit (value : i32) -> exports :: example :: gate :: admissions :: Admission { :: core :: convert :: Into :: into (Admissions :: admit (value)) }",
+        "fn admit (value : i32) -> super :: exports :: example :: gate :: admissions :: Admission { :: core :: convert :: Into :: into (Admissions :: admit (value)) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -4567,9 +4757,11 @@ fn a_derived_hooks_input_resolves_as_a_signatures_name() {
                         {uses}
                         #[hook(composition = waterfall, input = {input})]
                         pub struct Guard;
-                        #[service]
-                        pub struct Admissions;
-                        impl Admissions {{ pub fn count() -> u32 {{ 0 }} }}
+                        pub mod admissions {{
+                            #[service]
+                            pub struct Admissions;
+                            impl Admissions {{ pub fn count() -> u32 {{ 0 }} }}
+                        }}
                     }}
                 }}"
             ),
@@ -4720,9 +4912,11 @@ fn a_derived_hook_converts_what_its_input_reaches() {
             pub enum Tag { Hot, Cold }
             pub enum Kind { Plain, Weighted(u32) }
             pub struct Note { pub text: String }
-            #[service]
-            pub struct Admissions;
-            impl Admissions { pub fn count() -> u32 { 0 } }
+            pub mod admissions {
+                #[service]
+                pub struct Admissions;
+                impl Admissions { pub fn count() -> u32 { 0 } }
+            }
         }",
     );
     let text = wit(&nested);
@@ -4820,16 +5014,20 @@ interface guard {
 const SHARED_GATE: &str = "mod gate {
     #[hook(\"example:admission/guard@1.0.0\", composition = waterfall)]
     pub struct Guard;
-    #[service]
-    pub struct Admissions;
-    impl Admissions {
-        pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value, blocked: false }).value }
+    pub mod admissions {
+        use super::{Guard, guard};
+        #[service]
+        pub struct Admissions;
+        impl Admissions {
+            pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value, blocked: false }).value }
+        }
     }
 }";
 
 /// A hook declared from a consumed package keeps that package's types: the world imports and
-/// exports the identity, the import module is re-exported under the interface's name and `run`
-/// takes its types; the composition must fit the callback.
+/// exports the identity, the export module is re-exported under the interface's name and `run`
+/// takes its types, which the bindings of the hook's import, generated apart, name too; the
+/// composition must fit the callback.
 #[test]
 fn a_declared_hook_may_name_a_consumed_interface() {
     let dir = consumed("admission", ADMISSION_WIT);
@@ -4844,13 +5042,21 @@ fn a_declared_hook_may_name_a_consumed_interface() {
     );
     let generated = tokens(&module);
     assert!(
-        generated.contains("pub use self :: example :: admission :: guard ;"),
+        generated.contains("pub use exports :: example :: admission :: guard ;"),
         "{generated}"
     );
     assert!(
-        generated.contains("pub fn run (input : self :: example :: admission :: guard :: Admission) -> self :: example :: admission :: guard :: Admission"),
+        generated.contains("pub fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Admission"),
         "{generated}"
     );
+    for expected in [
+        "with : { \"example:admission/guard@1.0.0\" : self :: exports :: example :: admission :: guard } ,",
+        "mod __tembra_declared {",
+        "world tembra-declared-hooks {\\n  import example:admission/guard@1.0.0;\\n}",
+        "with : { \"example:admission/guard@1.0.0/admission\" : super :: super :: super :: super :: exports :: example :: admission :: guard :: Admission } ,",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
     let error = refused_with(
         options("example:gate@1.0.0", Some(&dir)),
         &SHARED_GATE.replace("composition = waterfall", "composition = series"),
@@ -4861,6 +5067,33 @@ fn a_declared_hook_may_name_a_consumed_interface() {
     );
     let error = refused("example:gate@1.0.0", SHARED_GATE);
     assert!(error.contains("hooks need wit ="), "{error}");
+}
+
+/// The world of the hooks' imports takes a name that no interface or world of the Orb's package
+/// holds: an Orb module `tembra_declared_hooks`, whose world has the name, and a service whose
+/// interface has the next one lengthen it twice.
+#[test]
+fn the_world_of_a_declared_hooks_import_takes_a_free_name() {
+    let dir = consumed("admission-names", ADMISSION_WIT);
+    let source = SHARED_GATE
+        .replace("mod gate {", "mod tembra_declared_hooks {")
+        .replace("Admissions", "TembraDeclaredHooksX");
+    let module = orb_with(options("example:gate@1.0.0", Some(&dir)), &source)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let text = wit(&module);
+    for taken in [
+        "world tembra-declared-hooks {",
+        "interface tembra-declared-hooks-x {",
+    ] {
+        assert!(text.contains(taken), "{taken}\n{text}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "world tembra-declared-hooks-x-x {\\n  import example:admission/guard@1.0.0;\\n}",
+        "world : \"tembra-declared-hooks-x-x\"",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
 }
 
 /// `run` hands the hook's import its input the way the bindings take it: by reference for a
@@ -4915,7 +5148,7 @@ fn run_borrows_an_input_that_holds_a_string_or_a_list() {
     };
     let plain = consumed_run("plain", "record admission { value: s32, blocked: bool }");
     assert!(
-        plain.contains("{ self :: example :: admission :: guard :: apply (input) }"),
+        plain.contains("{ __tembra_declared :: example :: admission :: guard :: apply (input) }"),
         "{plain}"
     );
     let noted = consumed_run(
@@ -4923,7 +5156,7 @@ fn run_borrows_an_input_that_holds_a_string_or_a_list() {
         "record admission { value: s32, blocked: bool, notes: list<string> }",
     );
     assert!(
-        noted.contains("{ self :: example :: admission :: guard :: apply (& input) }"),
+        noted.contains("{ __tembra_declared :: example :: admission :: guard :: apply (& input) }"),
         "{noted}"
     );
 }
@@ -4949,14 +5182,16 @@ fn run_lends_the_parts_of_an_option_a_result_or_a_tuple() {
             "mod gate {
                 #[hook(\"example:admission/guard@1.0.0\", composition = waterfall)]
                 pub struct Guard;
-                #[service]
-                pub struct Admissions;
-                impl Admissions { pub fn count() -> u32 { 0 } }
+                pub mod admissions {
+                    #[service]
+                    pub struct Admissions;
+                    impl Admissions { pub fn count() -> u32 { 0 } }
+                }
             }",
         )
         .unwrap_or_else(|error| panic!("{input}: {error}"));
         let generated = tokens(&module);
-        let call = "self :: example :: admission :: guard :: apply (";
+        let call = "__tembra_declared :: example :: admission :: guard :: apply (";
         let start = generated.find(call).expect("the call") + call.len();
         generated[start..].to_owned()
     };
@@ -5012,7 +5247,7 @@ fn a_waterfall_result_is_its_input_type_through_aliases() {
     )
     .unwrap_or_else(|error| panic!("{error}"));
     assert!(
-        tokens(&module).contains("pub fn run (input : self :: example :: admission :: guard :: Admission) -> self :: example :: admission :: guard :: Out"),
+        tokens(&module).contains("pub fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Out"),
         "{}",
         tokens(&module)
     );
@@ -5083,13 +5318,15 @@ fn a_cfg_attr_derive_on_a_state_outside_the_wit_expands() {
     let module = expanded(
         "example:tally@1.0.0",
         "mod tally {
-            #[state]
-            #[cfg_attr(test, derive(Default, serde::Serialize, serde::Deserialize))]
-            pub struct Count { pub total: u32 }
-            #[service]
-            pub struct Counter;
-            impl Counter {
-                pub fn add(by: u32) -> u32 { Count::update(|count| count.total += by).total }
+            pub mod counter {
+                #[state]
+                #[cfg_attr(test, derive(Default, serde::Serialize, serde::Deserialize))]
+                pub struct Count { pub total: u32 }
+                #[service]
+                pub struct Counter;
+                impl Counter {
+                    pub fn add(by: u32) -> u32 { Count::update(|count| count.total += by).total }
+                }
             }
         }",
     );
@@ -5126,8 +5363,8 @@ const LEDGER: &str = "mod ledger {
     }
 }";
 
-/// A sub-module groups a service with its state: the state needs no `service = Name`, two states
-/// of two modules may share a name when they stay out of the WIT, a type's conversions are
+/// A sub-module groups a service with its state: the state belongs to its module's service, two
+/// states of two modules may share a name when they stay out of the WIT, a type's conversions are
 /// generated where the author declared it, and the bridges in the service's module, naming the Orb
 /// module through `super::`.
 #[test]
@@ -5160,9 +5397,8 @@ fn sub_modules_group_a_service_with_its_state() {
     }
 }
 
-/// The owner of a state is the one service of its module, else the one service of the Orb; a file
-/// module cannot be read; an item the Orb module uses must be visible to it; a name that enters the
-/// WIT is one across the modules.
+/// A service's module holds one service; a file module cannot be read; a name that enters the WIT
+/// is one across the modules.
 #[test]
 fn sub_modules_are_refused_when_ill_formed() {
     let error = refused(
@@ -5173,7 +5409,9 @@ fn sub_modules_are_refused_when_ill_formed() {
         ),
     );
     assert!(
-        error.contains("put the state in the service's sub-module"),
+        error.contains(
+            "`Other` shares the module `passing` with the service `Passing`: put each service in a module of its own"
+        ),
         "{error}"
     );
     let error = refused(
@@ -5195,6 +5433,201 @@ fn sub_modules_are_refused_when_ill_formed() {
         error.contains("`Balance` is declared in `pinned` and in `passing`"),
         "{error}"
     );
+}
+
+/// The owner of a state or a WIT resource is the service of the nearest service's module at or
+/// above it: a state and a resource in the service's module, or in a module below it, belong to
+/// that service, whichever other services the Orb holds.
+#[test]
+fn the_owner_is_the_service_of_the_nearest_services_module() {
+    let module = expanded(
+        "example:ledger@1.0.0",
+        "mod ledger {
+            pub mod passing {
+                pub mod books {
+                    pub mod kept {
+                        #[state]
+                        #[derive(Default, serde::Serialize, serde::Deserialize)]
+                        pub struct Balance { pub total: i64 }
+                    }
+                    #[wit_resource]
+                    pub struct Receipt { pub total: i64 }
+                    impl Receipt { pub fn total(&self) -> i64 { self.total } }
+                }
+                #[service]
+                pub struct Passing;
+                impl Passing {
+                    pub fn add(amount: i64) -> books::Receipt {
+                        let total = books::kept::Balance::update(|balance| balance.total += amount).total;
+                        books::Receipt { total }
+                    }
+                }
+            }
+            pub mod pinned {
+                #[service]
+                pub struct Pinned;
+                impl Pinned { pub fn count() -> u32 { 0 } }
+            }
+        }",
+    );
+    let text = wit(&module);
+    for expected in [
+        "interface passing {\n  resource receipt {\n    total: func() -> s64;\n  }\n  add: func(amount: s64) -> receipt;\n}\n",
+        "interface pinned {\n  count: func() -> u32;\n}\n",
+        "  import tembra:guest/state@1.0.0;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let generated = tokens(&module);
+    assert!(
+        generated
+            .contains("\"example:ledger/passing@1.0.0\" => :: core :: option :: Option :: Some ("),
+        "{generated}"
+    );
+    assert!(
+        !generated
+            .contains("\"example:ledger/pinned@1.0.0\" => :: core :: option :: Option :: Some ("),
+        "{generated}"
+    );
+}
+
+/// The macro refuses an item outside its owner's module, on the item, with the fix: a service in
+/// the Orb module, two services in one module, a service's module inside another's, a state or a
+/// WIT resource outside every service's module, `service = Name` on either, and the Orb's items,
+/// the root, the inputs and a hook, inside a service's module.
+#[test]
+fn an_item_outside_its_owners_module_is_refused() {
+    let service = |name: &str| {
+        format!(
+            "#[service]
+            pub struct {name};
+            impl {name} {{ pub fn count() -> u32 {{ 0 }} }}"
+        )
+    };
+    let package = "example:desk@1.0.0";
+    let cases = [
+        (
+            format!("mod desk {{ {} }}", service("Tickets")),
+            "`Tickets` is a #[service] of the Orb module: put each service in a module of its own, with its impl, its state and its WIT resources, `pub mod tickets { #[service] pub struct Tickets; .. }`",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{ {} {} }} }}",
+                service("Tickets"),
+                service("Other")
+            ),
+            "`Other` shares the module `tickets` with the service `Tickets`: put each service in a module of its own",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{ {} pub mod other {{ {} }} }} }}",
+                service("Tickets"),
+                service("Other")
+            ),
+            "the module of `Other` is inside `tickets`, the module of the service `Tickets`: put each service's module outside every other service's module",
+        ),
+        (
+            format!(
+                "mod desk {{
+                    #[state]
+                    pub struct Count {{ pub total: u32 }}
+                    pub mod tickets {{ {} }}
+                }}",
+                service("Tickets")
+            ),
+            "the #[state] `Count` is outside every service's module: put it in the module of the service whose objects own it",
+        ),
+        (
+            format!(
+                "mod desk {{
+                    pub mod tokens {{
+                        #[wit_resource]
+                        pub struct Token;
+                        impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    }}
+                    pub mod tickets {{ {} }}
+                }}",
+                service("Tickets")
+            ),
+            "the #[wit_resource] `Token` is outside every service's module: put it in the module of the service whose interface defines it",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{
+                    #[state(service = Tickets)]
+                    pub struct Count {{ pub total: u32 }}
+                    {}
+                }} }}",
+                service("Tickets")
+            ),
+            "#[state] takes no `service`: the state belongs to the service whose module holds it, so put it in that module",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{
+                    #[wit_resource(service = Tickets)]
+                    pub struct Token;
+                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    {}
+                }} }}",
+                service("Tickets")
+            ),
+            "#[wit_resource] takes no `service`: the resource belongs to the service whose module holds it, so put it in that module",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{
+                    pub mod gate {{
+                        #[hook(composition = series, input = u32)]
+                        pub struct Guard;
+                    }}
+                    {}
+                }} }}",
+                service("Tickets")
+            ),
+            "the #[hook] `Guard` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{
+                    #[hook(\"example:admission/guard@1.0.0\")]
+                    pub fn raise(input: guard::Admission) -> guard::Admission {{ input }}
+                    {}
+                }} }}",
+                service("Tickets")
+            ),
+            "the #[hook] `raise` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{
+                    #[root]
+                    fn start(inputs: &super::Inputs, declaration: &Declaration) -> tembra::Result<()> {{ Ok(()) }}
+                    {}
+                }}
+                #[inputs]
+                pub struct Inputs;
+                }}",
+                service("Tickets")
+            ),
+            "the #[root] `start` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module",
+        ),
+        (
+            format!(
+                "mod desk {{ pub mod tickets {{
+                    #[inputs]
+                    pub struct Inputs;
+                    {}
+                }} }}",
+                service("Tickets")
+            ),
+            "the #[inputs] `Inputs` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module",
+        ),
+    ];
+    for (module, expected) in cases {
+        let error = refused(package, &module);
+        assert_eq!(error, expected, "{module}");
+    }
 }
 
 /// A name resolves in the module that writes it first: a record named like a resource of another
@@ -5225,9 +5658,6 @@ fn a_name_resolves_in_the_module_that_writes_it_first() {
     for tickets in [
         "impl Tickets { pub fn check(token: Token) -> u32 { token.id } }",
         "impl Tickets { pub fn issue() -> Token { Token { id: 1 } } }",
-        "#[hook(composition = series, input = Token)]
-        pub struct Guard;
-        impl Tickets { pub fn count() -> u32 { 0 } }",
     ] {
         let error = refused("example:desk@1.0.0", &desk("Token", tickets));
         assert!(
@@ -5239,6 +5669,25 @@ fn a_name_resolves_in_the_module_that_writes_it_first() {
             &desk("Stamp", &tickets.replace("Token", "Stamp")),
         );
     }
+    let gate = |record: &str| {
+        desk(
+            "Pass",
+            &format!(
+                "impl Tickets {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
+                pub mod gate {{
+                    pub struct {record} {{ pub id: u32 }}
+                    #[hook(composition = series, input = {record})]
+                    pub struct Guard;"
+            ),
+        )
+    };
+    let error = refused("example:desk@1.0.0", &gate("Token"));
+    assert!(
+        error.contains("`Token` is declared in `gate` and in `sessions`; a name that enters the WIT is one across the Orb module"),
+        "{error}"
+    );
+    expanded("example:desk@1.0.0", &gate("Stamp"));
 }
 
 /// A type of any shape takes its name in the module declaring it before a resource of another
@@ -5250,18 +5699,24 @@ fn a_name_resolves_in_the_module_that_writes_it_first() {
 #[test]
 fn a_type_the_module_declares_takes_its_name_before_a_resource() {
     let desk = |declared: &str, owner: &str| {
+        let resource = "#[wit_resource]
+            pub struct Token;
+            impl Token { pub fn id(&self) -> u32 { 0 } }";
+        let (issued, sessions) = match owner {
+            "Tickets" => (resource, ""),
+            _ => ("", resource),
+        };
         format!(
             "mod desk {{
                 pub mod tickets {{
                     {declared}
+                    pub mod issued {{ {issued} }}
                     #[service]
                     pub struct Tickets;
                     impl Tickets {{ pub fn check(token: Token) -> u32 {{ 0 }} }}
                 }}
                 pub mod sessions {{
-                    #[wit_resource(service = {owner})]
-                    pub struct Token;
-                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    {sessions}
                     #[service]
                     pub struct Sessions;
                     impl Sessions {{ pub fn count() -> u32 {{ 0 }} }}
@@ -5292,18 +5747,23 @@ fn a_type_the_module_declares_takes_its_name_before_a_resource() {
             );
         }
     }
-    let alias = "pub type Token = super::sessions::Token;";
-    let error = refused("example:desk@1.0.0", &desk(alias, "Sessions"));
+    let error = refused(
+        "example:desk@1.0.0",
+        &desk("pub type Token = super::sessions::Token;", "Sessions"),
+    );
     assert!(
         error.contains("`Tickets::check` takes `Token`, a resource of the interface `sessions`"),
         "{error}"
     );
-    expanded("example:desk@1.0.0", &desk(alias, "Tickets"));
+    expanded(
+        "example:desk@1.0.0",
+        &desk("pub type Token = issued::Token;", "Tickets"),
+    );
 }
 
-/// A path into another module of the Orb names its type there, as in Rust: `super::sessions::Token`
-/// or `super::model::Entry`, or `sessions::Token` after `use super::sessions;` or
-/// `use super::sessions as s;`, written in a module declaring a `Token` or an `Entry` of its own,
+/// A path into another module of the Orb names its type there, as in Rust: `passes::Token`,
+/// `self::passes::Token` or `super::model::Entry`, or `p::Token` after `use self::passes as p;`,
+/// written in a module declaring a `Token` or an `Entry` of its own,
 /// in a signature or in a record's field, is the other module's resource or record, which the bare
 /// name would not be, so the function takes the resource or returns the record as it would after a
 /// `use` of the type.
@@ -5315,25 +5775,22 @@ fn a_path_into_another_module_names_its_type_there() {
                 pub mod tickets {{
                     {uses}
                     pub struct Token(pub u32);
+                    pub mod passes {{
+                        #[wit_resource]
+                        pub struct Token;
+                        impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    }}
                     #[service]
                     pub struct Tickets;
                     impl Tickets {{ pub fn check(token: {token}) -> u32 {{ 0 }} }}
-                }}
-                pub mod sessions {{
-                    #[wit_resource(service = Tickets)]
-                    pub struct Token;
-                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
-                    #[service]
-                    pub struct Sessions;
-                    impl Sessions {{ pub fn count() -> u32 {{ 0 }} }}
                 }}
             }}"
         )
     };
     for (uses, token) in [
-        ("", "super::sessions::Token"),
-        ("use super::sessions;", "sessions::Token"),
-        ("use super::sessions as s;", "s::Token"),
+        ("", "passes::Token"),
+        ("", "self::passes::Token"),
+        ("use self::passes as p;", "p::Token"),
     ] {
         let text = resolved(&expanded("example:desk@1.0.0", &desk(uses, token)));
         assert!(
@@ -5386,11 +5843,12 @@ fn a_path_into_another_module_names_its_type_there() {
 /// importing it, still takes the other module's type.
 #[test]
 fn a_type_the_module_declares_takes_its_name_before_another_modules_record() {
-    let desk = |tickets: &str, shelves: &str| {
+    let desk = |tickets: &str, shelves: &str, stock: &str| {
         format!(
             "mod desk {{
                 pub mod tickets {{
                     {tickets}
+                    pub mod stock {{ {stock} }}
                     #[service]
                     pub struct Tickets;
                 }}
@@ -5404,20 +5862,29 @@ fn a_type_the_module_declares_takes_its_name_before_another_modules_record() {
         )
     };
     let record = "pub struct Token { pub id: u32 }";
-    let resource = "#[wit_resource(service = Tickets)]
+    let resource = "#[wit_resource]
         pub struct Token { id: u32 }
         impl Token { pub fn id(&self) -> u32 { self.id } }";
     let parameter = "impl Tickets { pub fn check(token: Token) -> u32 { 0 } }";
     let field = "pub struct Pass { pub token: Token }
         impl Tickets { pub fn check(pass: Pass) -> bool { true } }";
-    for (uses, shelves) in [(parameter, record), (field, record), (field, resource)] {
+    // The other module's type: a record of `shelves`, or a resource of `Tickets` in `stock`.
+    for (uses, shelves, stock, path) in [
+        (parameter, record, "", "super::shelves::Token"),
+        (field, record, "", "super::shelves::Token"),
+        (field, "", resource, "self::stock::Token"),
+    ] {
         let error = refused(
             "example:desk@1.0.0",
-            &desk(&format!("pub struct Token;\n{uses}"), shelves),
+            &desk(&format!("pub struct Token;\n{uses}"), shelves, stock),
         );
         let text = resolved(&expanded(
             "example:desk@1.0.0",
-            &desk(&format!("pub struct Token(pub u64);\n{uses}"), shelves),
+            &desk(
+                &format!("pub struct Token(pub u64);\n{uses}"),
+                shelves,
+                stock,
+            ),
         ));
         assert!(text.contains("u64"), "{uses}\n{shelves}\n{text}");
         assert!(!text.contains("record token"), "{uses}\n{shelves}\n{text}");
@@ -5427,12 +5894,16 @@ fn a_type_the_module_declares_takes_its_name_before_another_modules_record() {
         );
         expanded(
             "example:desk@1.0.0",
-            &desk(&format!("use super::shelves::Token;\n{uses}"), shelves),
+            &desk(&format!("use {path};\n{uses}"), shelves, stock),
         );
     }
     let text = wit(&expanded(
         "example:desk@1.0.0",
-        &desk(&format!("use super::shelves::Token;\n{parameter}"), record),
+        &desk(
+            &format!("use super::shelves::Token;\n{parameter}"),
+            record,
+            "",
+        ),
     ));
     for expected in [
         "  record token {\n    id: u32,\n  }\n",
@@ -5451,16 +5922,16 @@ fn a_use_names_one_of_two_types_of_one_name() {
     let desk = |second: &str| {
         format!(
             "mod desk {{
-                pub mod a {{
-                    #[wit_resource(service = Tickets)]
-                    pub struct Token;
-                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
-                }}
-                pub mod b {{
-                    {second}
-                }}
                 pub mod c {{
-                    use super::a::Token;
+                    pub mod a {{
+                        #[wit_resource]
+                        pub struct Token;
+                        impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    }}
+                    pub mod b {{
+                        {second}
+                    }}
+                    use self::a::Token;
                     #[service]
                     pub struct Tickets;
                     impl Tickets {{ pub fn check(token: Token) -> u32 {{ token.id() }} }}
@@ -5482,13 +5953,13 @@ fn a_use_names_one_of_two_types_of_one_name() {
     let error = refused(
         "example:desk@1.0.0",
         &desk(
-            "#[wit_resource(service = Tickets)]
+            "#[wit_resource]
             pub struct Token;
             impl Token { pub fn id(&self) -> u32 { 1 } }",
         ),
     );
     assert!(
-        error.contains("`Token` is declared in `a` and in `b`; a name that enters the WIT is one across the Orb module"),
+        error.contains("`Token` is declared in `c`::`a` and in `c`::`b`; a name that enters the WIT is one across the Orb module"),
         "{error}"
     );
 }
@@ -5516,22 +5987,24 @@ fn books(uses: &str, signature: &str) -> String {
 }
 
 /// A type from outside the Orb named like a resource of the module is not the resource: beside the
-/// module's own `Tally` in a signature, `Option<other::Tally>` and a `Tally` a sub-module's
-/// `use other::Tally;` brings are refused as types declared outside the Orb module, never wrapped
-/// as the resource's handle, and the signature without them expands, the resource wrapped.
+/// service's own `kept::Tally` in a signature, `Option<other::Tally>` and a `Tally` the service's
+/// module's `use other::Tally;` brings are refused as types declared outside the Orb module, never
+/// wrapped as the resource's handle, and the signature without them expands, the resource wrapped.
 #[test]
 fn a_type_from_outside_named_like_a_resource_is_not_its_handle() {
     let counter = |uses: &str, outside: &str| {
         format!(
             "mod counter {{
-                #[wit_resource]
-                pub struct Tally {{ count: u32 }}
-                impl Tally {{ pub fn count(&self) -> u32 {{ self.count }} }}
                 pub mod api {{
+                    pub mod kept {{
+                        #[wit_resource]
+                        pub struct Tally {{ count: u32 }}
+                        impl Tally {{ pub fn count(&self) -> u32 {{ self.count }} }}
+                    }}
                     {uses}
                     #[service]
                     pub struct Counting;
-                    impl Counting {{ pub fn pair() -> (super::Tally, {outside}) {{ todo!() }} }}
+                    impl Counting {{ pub fn pair() -> (kept::Tally, {outside}) {{ todo!() }} }}
                 }}
             }}"
         )
@@ -5565,10 +6038,13 @@ fn a_newtype_holds_a_same_named_newtype_of_another_module() {
         "mod desk {
             pub mod a { pub struct Id(pub super::c::Id); }
             pub mod c { pub struct Id(pub u64); }
-            #[service]
-            pub struct Tickets;
-            impl Tickets {
-                pub fn check(id: a::Id) -> bool { true }
+            pub mod tickets {
+                use super::a;
+                #[service]
+                pub struct Tickets;
+                impl Tickets {
+                    pub fn check(id: a::Id) -> bool { true }
+                }
             }
         }",
     ));
@@ -5802,6 +6278,7 @@ fn documentation_over_several_lines_stays_comment_text() {
     let module = expanded(
         PACKAGE,
         "mod book {
+        pub mod ledger {
         /** The ledger.
         interface injected { surprise: func() -> u32; } */
         #[service]
@@ -5809,6 +6286,7 @@ fn documentation_over_several_lines_stays_comment_text() {
         impl Ledger {
             #[doc = \"How many entries.\\n  type extra = u64;\\r\\nThe end.\"]
             pub fn count() -> u32 { 0 }
+        }
         }
     }",
     );
@@ -5866,9 +6344,11 @@ fn inner_attributes_stay_inside_their_module() {
                 #![allow(unused_imports)]
                 pub fn helper() {}
             }
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn count() -> u32 { 0 } }
+            pub mod ledger {
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn count() -> u32 { 0 } }
+            }
         }",
     );
     let styles = |module: &ItemMod| -> Vec<(String, bool)> {
@@ -5960,11 +6440,13 @@ fn a_state_holding_no_consumed_type_asks_the_bindings_for_no_derive() {
     let module = orb_with(
         imports,
         "mod vault {
-            #[state]
-            pub struct Count { pub total: u32 }
-            #[service]
-            pub struct Keeper;
-            impl Keeper { pub fn total() -> u32 { Count::read().total } }
+            pub mod keeper {
+                #[state]
+                pub struct Count { pub total: u32 }
+                #[service]
+                pub struct Keeper;
+                impl Keeper { pub fn total() -> u32 { Count::read().total } }
+            }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
@@ -6058,11 +6540,14 @@ world first {
 fn a_consumed_contract_may_bring_the_kernel_package() {
     const GUEST: &str = tembra_contracts::guest::SOURCE;
     let fourth = "mod fourth {
-        #[state]
-        pub struct Seen { pub calls: u32 }
-        #[service]
-        pub struct Relay;
-        impl Relay { pub fn add(by: u32) -> u32 { counter::add(by) } }
+        pub mod relay {
+            use super::counter;
+            #[state]
+            pub struct Seen { pub calls: u32 }
+            #[service]
+            pub struct Relay;
+            impl Relay { pub fn add(by: u32) -> u32 { counter::add(by) } }
+        }
     }";
     let with_deps = |name: &str, guest: &str| {
         let dir = consumed(name, FIRST_WIT);
@@ -6168,14 +6653,6 @@ fn generated_code_names_prelude_items_by_their_paths() {
     let module = orb_with(
         options("example:keeper@1.0.0", Some(&dir)),
         "mod keeper {
-            #[state]
-            pub struct Count { pub total: i64 }
-            impl Count {
-                #[validate]
-                fn check(&self) -> core::result::Result<(), alloc::string::String> {
-                    core::result::Result::Ok(())
-                }
-            }
             #[resource]
             pub struct Counts { pub seen: u32 }
             impl Counts {
@@ -6187,14 +6664,24 @@ fn generated_code_names_prelude_items_by_their_paths() {
             #[hook(composition = bail, input = Admission)]
             pub struct Guard;
             pub struct Admission { pub value: core::result::Result<u32, alloc::string::String> }
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper {
-                pub fn find(label: alloc::string::String) -> core::option::Option<i64> {
-                    core::option::Option::None
+            pub mod keeper {
+                #[state]
+                pub struct Count { pub total: i64 }
+                impl Count {
+                    #[validate]
+                    fn check(&self) -> core::result::Result<(), alloc::string::String> {
+                        core::result::Result::Ok(())
+                    }
                 }
-                pub fn check(amount: i64) -> core::result::Result<i64, alloc::string::String> {
-                    core::result::Result::Ok(amount)
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {
+                    pub fn find(label: alloc::string::String) -> core::option::Option<i64> {
+                        core::option::Option::None
+                    }
+                    pub fn check(amount: i64) -> core::result::Result<i64, alloc::string::String> {
+                        core::result::Result::Ok(amount)
+                    }
                 }
             }
         }",
@@ -6239,22 +6726,28 @@ fn the_native_side_generates_orb_from_the_manifest_and_the_services() {
         &ledger("#[service]"),
     )
     .unwrap_or_else(|error| panic!("{error}"));
-    let native = native(&module, &[]);
+    let root = native(&module, &[]);
+    let ledger = native(&module, &["ledger"]);
     for expected in [
         "const _ : & [u8] = :: core :: include_bytes ! (:: core :: concat ! (:: core :: env ! (\"CARGO_MANIFEST_DIR\") , \"/Cargo.toml\")) ;",
         "pub fn orb () -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"ledgers\" , 3u32) }",
-        "pub fn orb_named (name : & str , api_version : u32) -> :: tembra :: Result < :: tembra :: Orb > { :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . service (self :: __TembraRegistry :: < 0 > :: __tembra_service_ledger (name))) }",
-        "impl __TembraRegistry < 0 > { # [doc = \" The service `Ledger` of the native Orb named `orb`, as `orb()` registers it.\"] pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < () > { const __TEMBRA_CODEC_COUNT : :: tembra :: Codec < () , u32 > = :: tembra :: Codec { decode : | value | {",
+        "pub fn orb_named (name : & str , api_version : u32) -> :: tembra :: Result < :: tembra :: Orb > { :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . service (self :: __TembraRegistry :: < 1 > :: __tembra_service_ledger (name))) }",
         "struct __TembraRegistry < const SCOPE : usize > ;",
-        "} ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) }) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (__TEMBRA_SIGNATURE_LEDGER))) . method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) } , __TEMBRA_CODEC_COUNT ,) }",
     ] {
-        assert!(native.contains(expected), "{expected}\n{native}");
+        assert!(root.contains(expected), "{expected}\n{root}");
     }
-    assert!(!native.contains(". lifetime ("), "{native}");
+    for expected in [
+        "impl super :: __TembraRegistry < 1 > { # [doc = \" The service `Ledger` of the native Orb named `orb`, as `orb()` registers it.\"] pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < () > { const __TEMBRA_CODEC_COUNT : :: tembra :: Codec < () , u32 > = :: tembra :: Codec { decode : | value | {",
+        "} ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) }) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_LEDGER))) . method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) } , __TEMBRA_CODEC_COUNT ,) }",
+    ] {
+        assert!(ledger.contains(expected), "{expected}\n{ledger}");
+    }
+    assert!(!ledger.contains(". lifetime ("), "{ledger}");
     // No type of the module enters the WIT, so there is no JSON of one to write.
-    assert!(!native.contains("__TembraBoundary"), "{native}");
-    // One wrapper, in the Orb module: the services are its.
-    assert_eq!(tokens(&module).matches(":: tembra :: __host !").count(), 1);
+    assert!(!root.contains("__TembraBoundary"), "{root}");
+    assert!(!ledger.contains("__TembraBoundary"), "{ledger}");
+    // One wrapper in the Orb module and one in the service's.
+    assert_eq!(tokens(&module).matches(":: tembra :: __host !").count(), 2);
 }
 
 /// The ownership policy of `#[service(lifetime = host)]` and `#[service(linger_ms = n)]` goes on
@@ -6263,7 +6756,7 @@ fn the_native_side_generates_orb_from_the_manifest_and_the_services() {
 fn a_native_service_takes_the_lifetime_of_its_attribute() {
     let host = native(
         &expanded(PACKAGE, &ledger("#[service(lifetime = host)]")),
-        &[],
+        &["ledger"],
     );
     assert!(
         host.contains(". lifetime (:: tembra :: core :: Lifetime :: Host , 0u32)"),
@@ -6271,7 +6764,7 @@ fn a_native_service_takes_the_lifetime_of_its_attribute() {
     );
     let lingering = native(
         &expanded(PACKAGE, &ledger("#[service(linger_ms = 2500)]")),
-        &[],
+        &["ledger"],
     );
     assert!(
         lingering.contains(". lifetime (:: tembra :: core :: Lifetime :: Referenced , 2500u32)"),
@@ -6290,19 +6783,21 @@ fn a_native_method_takes_a_tuple_of_arguments_and_gets_a_codec() {
     let module = expanded(
         PACKAGE,
         "mod book {
-            #[service]
-            pub struct Math;
-            impl Math {
-                pub fn add(a: u32, b: u32) -> u32 { a + b }
-                pub async fn total(values: Vec<u32>) -> u64 { 0 }
-                pub fn count_words(text: String) -> Option<u32> { None }
-                pub fn initial(text: Option<String>) -> Option<char> { None }
-                pub fn swap(pair: (String, u32)) -> (u32, String) { (pair.1, pair.0) }
-                pub fn ping() {}
+            pub mod math {
+                #[service]
+                pub struct Math;
+                impl Math {
+                    pub fn add(a: u32, b: u32) -> u32 { a + b }
+                    pub async fn total(values: Vec<u32>) -> u64 { 0 }
+                    pub fn count_words(text: String) -> Option<u32> { None }
+                    pub fn initial(text: Option<String>) -> Option<char> { None }
+                    pub fn swap(pair: (String, u32)) -> (u32, String) { (pair.1, pair.0) }
+                    pub fn ping() {}
+                }
             }
         }",
     );
-    let native = native(&module, &[]);
+    let native = native(&module, &["math"]);
     for expected in [
         ". method_with (\"add\" , | _ , __tembra_context : :: tembra :: Context , (a , b ,) : (u32 , u32 ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Math :: add (a , b)) } , __TEMBRA_CODEC_ADD ,)",
         ". method_with (\"total\" , | _ , __tembra_context : :: tembra :: Context , (values ,) : (Vec < u32 > ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Math :: total (values) . await) } , __TEMBRA_CODEC_TOTAL ,)",
@@ -6384,15 +6879,17 @@ fn a_native_service_gets_a_typed_client() {
     let module = expanded(
         PACKAGE,
         "mod book {
-            #[service]
-            pub struct Math;
-            impl Math {
-                /// The sum of two numbers.
-                pub fn add(a: u32, b: u32) -> u32 { a + b }
-                pub async fn total(values: Vec<u32>) -> u64 { 0 }
-                pub fn count_words(text: String) -> Option<u32> { None }
-                pub fn ping() {}
-                pub fn new() -> u32 { 0 }
+            pub mod math {
+                #[service]
+                pub struct Math;
+                impl Math {
+                    /// The sum of two numbers.
+                    pub fn add(a: u32, b: u32) -> u32 { a + b }
+                    pub async fn total(values: Vec<u32>) -> u64 { 0 }
+                    pub fn count_words(text: String) -> Option<u32> { None }
+                    pub fn ping() {}
+                    pub fn new() -> u32 { 0 }
+                }
             }
             pub mod memo {
                 #[service]
@@ -6401,7 +6898,7 @@ fn a_native_service_gets_a_typed_client() {
             }
         }",
     );
-    let root = native(&module, &[]);
+    let math = native(&module, &["math"]);
     for expected in [
         "pub struct MathClient { pub (crate) reference : :: std :: rc :: Rc < :: tembra :: Reference > , }",
         "impl MathClient {",
@@ -6413,10 +6910,10 @@ fn a_native_service_gets_a_typed_client() {
         "pub async fn new_ (& self , context : & :: tembra :: Context) -> :: tembra :: Result < u32 > { self . reference . call :: < () , u32 > (context , \"new\" , ()) . await }",
         ". method_with (\"new\" ,",
     ] {
-        assert!(root.contains(expected), "{expected}\n{root}");
+        assert!(math.contains(expected), "{expected}\n{math}");
     }
-    assert!(!root.contains("pub async fn new ("), "{root}");
-    assert!(!root.contains("MemoClient"), "{root}");
+    assert!(!math.contains("pub async fn new ("), "{math}");
+    assert!(!math.contains("MemoClient"), "{math}");
     let memo = native(&module, &["memo"]);
     for expected in [
         "pub (crate) struct MemoClient {",
@@ -6441,16 +6938,18 @@ fn a_native_service_implementing_an_interface_is_named_by_its_identity() {
     let module = orb_with(
         options("example:tally@1.0.0", Some(&dir)),
         "mod tally {
-            #[service(\"example:counters/counter@1.0.0\")]
-            pub struct Counter;
-            impl Counter { pub fn add(amount: u32) -> u32 { amount } }
+            pub mod counter {
+                #[service(\"example:counters/counter@1.0.0\")]
+                pub struct Counter;
+                impl Counter { pub fn add(amount: u32) -> u32 { amount } }
+            }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
-    let native = native(&module, &[]);
+    let native = native(&module, &["counter"]);
     for expected in [
         ":: std :: format ! (\"{}::{}\" , orb , \"example:counters/counter@1.0.0\")",
-        ":: std :: string :: String :: from (__TEMBRA_SIGNATURE_COUNTER)",
+        ":: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_COUNTER)",
         ". method_with (\"add\" ,",
     ] {
         assert!(native.contains(expected), "{expected}\n{native}");
@@ -6467,12 +6966,14 @@ fn a_native_method_takes_the_calls_context_outside_the_wit() {
     let module = expanded(
         PACKAGE,
         "mod book {
-            use tembra::Context;
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn owner(context: &Context) -> String { String::new() }
-                pub async fn add(amount: u32, context: &::tembra::Context, label: String) -> u32 { amount }
+            pub mod ledger {
+                use tembra::Context;
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn owner(context: &Context) -> String { String::new() }
+                    pub async fn add(amount: u32, context: &::tembra::Context, label: String) -> u32 { amount }
+                }
             }
         }",
     );
@@ -6484,7 +6985,7 @@ fn a_native_method_takes_the_calls_context_outside_the_wit() {
         assert!(wit.contains(expected), "{expected}\n{wit}");
     }
     assert!(!wit.contains("context"), "{wit}");
-    let handles = native(&module, &[]);
+    let handles = native(&module, &["ledger"]);
     for expected in [
         ". method_with (\"owner\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: owner (& __tembra_context)) } , __TEMBRA_CODEC_OWNER ,)",
         ". method_with (\"add\" , | _ , __tembra_context : :: tembra :: Context , (amount , label ,) : (u32 , String ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: add (amount , & __tembra_context , label) . await) } , __TEMBRA_CODEC_ADD ,)",
@@ -6504,13 +7005,15 @@ fn a_native_method_takes_the_calls_context_outside_the_wit() {
     let module = orb_with(
         options("example:tally@1.0.0", Some(&dir)),
         "mod tally {
-            #[service(\"example:counters/counter@1.0.0\")]
-            pub struct Counter;
-            impl Counter { pub fn add(context: &tembra::Context, amount: u32) -> u32 { amount } }
+            pub mod counter {
+                #[service(\"example:counters/counter@1.0.0\")]
+                pub struct Counter;
+                impl Counter { pub fn add(context: &tembra::Context, amount: u32) -> u32 { amount } }
+            }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
-    let implemented = native(&module, &[]);
+    let implemented = native(&module, &["counter"]);
     assert!(
         implemented.contains(
             "(amount ,) : (u32 ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Counter :: add (& __tembra_context , amount)) }"
@@ -6528,9 +7031,11 @@ fn a_native_method_takes_the_calls_context_outside_the_wit() {
         refused(
             PACKAGE,
             "mod book {
-                #[service]
-                pub struct Ledger;
-                impl Ledger { pub fn twice(first: &Context, second: &Context) {} }
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger { pub fn twice(first: &Context, second: &Context) {} }
+                }
             }"
         ),
         "a method takes the call's `&Context` once"
@@ -6545,10 +7050,12 @@ fn a_native_method_takes_the_calls_context_outside_the_wit() {
                 PACKAGE,
                 &format!(
                     "mod book {{
-                        {declared}
-                        #[service]
-                        pub struct Ledger;
-                        impl Ledger {{ pub fn greet(c: &Context) -> String {{ String::new() }} }}
+                        pub mod ledger {{
+                            {declared}
+                            #[service]
+                            pub struct Ledger;
+                            impl Ledger {{ pub fn greet(c: &Context) -> String {{ String::new() }} }}
+                        }}
                     }}"
                 )
             ),
@@ -6570,15 +7077,18 @@ fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
         PACKAGE,
         "mod book {
             pub struct Tape { pub entries: Vec<u32> }
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn count() -> u32 { 0 }
-                /// Run a callback over a tape.
-                #[local]
-                pub fn apply_each(tape: Tape, operation: Rc<dyn Fn(u32) -> u32>) -> Tape { tape }
-                #[local]
-                pub async fn rewind(context: &Context, label: &'static str) {}
+            pub mod ledger {
+                use super::Tape;
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn count() -> u32 { 0 }
+                    /// Run a callback over a tape.
+                    #[local]
+                    pub fn apply_each(tape: Tape, operation: Rc<dyn Fn(u32) -> u32>) -> Tape { tape }
+                    #[local]
+                    pub async fn rewind(context: &Context, label: &'static str) {}
+                }
             }
         }",
     );
@@ -6587,7 +7097,7 @@ fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
     for absent in ["apply", "callback", "rewind", "tape"] {
         assert!(!wit.contains(absent), "{absent}\n{wit}");
     }
-    let handles = native(&module, &[]);
+    let handles = native(&module, &["ledger"]);
     for expected in [
         ". method_with (\"count\" ,",
         ". local_method (\"apply-each\" , | _ , __tembra_context : :: tembra :: Context , (tape , operation ,) : (Tape , Rc < dyn Fn (u32) -> u32 > ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: apply_each (tape , operation)) } ,)",
@@ -6609,19 +7119,21 @@ fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
     let generated = tokens(&module);
     for expected in [
         "pub struct Tape { pub entries : Vec < u32 > }",
-        "Guest for __TembraExports { fn count () -> u32 { Ledger :: count () } }",
+        "Guest for super :: __TembraExports { fn count () -> u32 { Ledger :: count () } }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
     for (module, message) in [
         (
             "mod book {
-                #[service]
-                pub struct Ledger;
-                impl Ledger {
-                    pub fn count() -> u32 { 0 }
-                    #[local]
-                    fn hidden() {}
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger {
+                        pub fn count() -> u32 { 0 }
+                        #[local]
+                        fn hidden() {}
+                    }
                 }
             }",
             "#[local] marks a `pub fn` of a #[service] struct",
@@ -6630,9 +7142,11 @@ fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
             "mod book {
                 pub struct Tape;
                 impl Tape { #[local] pub fn rewind() {} }
-                #[service]
-                pub struct Ledger;
-                impl Ledger { pub fn count() -> u32 { 0 } }
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger { pub fn count() -> u32 { 0 } }
+                }
             }",
             "#[local] marks a function of a #[service] struct; `Tape` is not one",
         ),
@@ -6640,35 +7154,41 @@ fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
             "mod book {
                 #[local]
                 pub fn rewind() {}
-                #[service]
-                pub struct Ledger;
-                impl Ledger { pub fn count() -> u32 { 0 } }
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger { pub fn count() -> u32 { 0 } }
+                }
             }",
             "#[local] goes on a function in the impl block of a #[service] struct, not on a free function",
         ),
         // A local method's name is taken among the portable methods' and the other local ones'.
         (
             "mod book {
-                #[service]
-                pub struct Ledger;
-                impl Ledger {
-                    pub fn get_entry(id: u32) -> String { String::new() }
-                    #[local]
-                    pub fn getEntry(id: u32, cache: Rc<Cache>) -> String { String::new() }
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger {
+                        pub fn get_entry(id: u32) -> String { String::new() }
+                        #[local]
+                        pub fn getEntry(id: u32, cache: Rc<Cache>) -> String { String::new() }
+                    }
                 }
             }",
             "`Ledger::get_entry` and `Ledger::getEntry` are both `get-entry` in the methods of `Ledger`, where local and portable methods share one namespace; rename one of them",
         ),
         (
             "mod book {
-                #[service]
-                pub struct Ledger;
-                impl Ledger {
-                    pub fn count() -> u32 { 0 }
-                    #[local]
-                    pub fn rewind_tape() {}
-                    #[local]
-                    pub fn rewindTape() {}
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger {
+                        pub fn count() -> u32 { 0 }
+                        #[local]
+                        pub fn rewind_tape() {}
+                        #[local]
+                        pub fn rewindTape() {}
+                    }
                 }
             }",
             "`Ledger::rewind_tape` and `Ledger::rewindTape` are both `rewind-tape` in the methods of `Ledger`, where local and portable methods share one namespace; rename one of them",
@@ -6676,21 +7196,25 @@ fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
         // Its interface is made of the portable ones.
         (
             "mod book {
-                #[service]
-                pub struct Ledger;
-                impl Ledger { #[local] pub fn rewind() {} }
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger { #[local] pub fn rewind() {} }
+                }
             }",
             "a service needs at least one portable method, a pub fn without #[local], or a function marked #[create] that declares what its objects run",
         ),
         // It borrows `&self` only where a create builds the object, as a portable one does.
         (
             "mod book {
-                #[service]
-                pub struct Ledger;
-                impl Ledger {
-                    pub fn count() -> u32 { 0 }
-                    #[local]
-                    pub fn rewind(&self) {}
+                pub mod ledger {
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger {
+                        pub fn count() -> u32 { 0 }
+                        #[local]
+                        pub fn rewind(&self) {}
+                    }
                 }
             }",
             "`Ledger::rewind` borrows `&self`, which a #[create] builds: give `Ledger` a function marked #[create], or remove self",
@@ -6713,12 +7237,14 @@ fn the_native_context_reads_the_call_each_method_runs_for() {
             ..options(PACKAGE, None)
         },
         "mod book {
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn count() -> u32 { 0 }
-                #[local]
-                pub fn rewind() {}
+            pub mod ledger {
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn count() -> u32 { 0 }
+                    #[local]
+                    pub fn rewind() {}
+                }
             }
             pub mod shelf {
                 #[service]
@@ -6738,10 +7264,15 @@ fn the_native_context_reads_the_call_each_method_runs_for() {
         "pub fn cancelled () -> bool { current () . context . signal () . is_cancelled () }",
         "pub fn cancel () {",
         "pub fn log (level : Level , message : & str) {",
-        ". method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | self :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }) , __TEMBRA_CODEC_COUNT ,)",
-        ". local_method (\"rewind\" , | _ , __tembra_context : :: tembra :: Context , () : () | self :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ; Ledger :: rewind () ; :: core :: result :: Result :: Ok (()) }) ,)",
     ] {
         assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let ledger = native(&module, &["ledger"]);
+    for expected in [
+        ". method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | self :: super :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }) , __TEMBRA_CODEC_COUNT ,)",
+        ". local_method (\"rewind\" , | _ , __tembra_context : :: tembra :: Context , () : () | self :: super :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ; Ledger :: rewind () ; :: core :: result :: Result :: Ok (()) }) ,)",
+    ] {
+        assert!(ledger.contains(expected), "{expected}\n{ledger}");
     }
     let shelf = native(&module, &["shelf"]);
     assert!(
@@ -6756,9 +7287,11 @@ fn the_native_context_reads_the_call_each_method_runs_for() {
             ..options(PACKAGE, None)
         },
         "mod book {
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn count() -> u32 { 0 } }
+            pub mod ledger {
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn count() -> u32 { 0 } }
+            }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
@@ -6789,7 +7322,7 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
             pub fn count() -> u32 { 0 }",
         ),
     );
-    let native = native(&module, &[]);
+    let native = native(&module, &["sessions"]);
     let issued = "< u32 as :: core :: convert :: From < :: tembra :: portable :: Slot >> :: from (__tembra_result . issue";
     let written = "-> :: core :: result :: Result < :: tembra :: serde_json :: Value , :: std :: string :: String >";
     let issuing = format!("__tembra_result : & mut :: tembra :: portable :: Payload | {written}");
@@ -6840,8 +7373,8 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
         DESK,
     )
     .unwrap_or_else(|error| panic!("{error}"));
-    let in_context = self::native(&module, &[]);
-    let scoped = "| self :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ;";
+    let in_context = self::native(&module, &["sessions"]);
+    let scoped = "| self :: super :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ;";
     for function in ["open", "[constructor]session", "[method]session.get"] {
         let receiver = if function.starts_with("[method]") {
             "mut __tembra_payload"
@@ -6872,15 +7405,15 @@ fn a_wit_resource_gets_a_typed_handle_and_client_calls() {
             pub fn many(n: u32) -> (Vec<Session>, u32) { (Vec::new(), n) }",
         ),
     );
-    let native = native(&module, &[]);
+    let native = native(&module, &["sessions"]);
     let arguments = "let __tembra_arguments = __tembra_encode () . map_err (| message | { :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }) ? ;";
-    let wrapped = "< SessionHandle as :: core :: convert :: TryFrom < :: tembra :: portable :: Owned >> :: try_from";
+    let wrapped = "< super :: sessions :: SessionHandle as :: core :: convert :: TryFrom < :: tembra :: portable :: Owned >> :: try_from";
     for expected in [
         "pub struct SessionHandle { owned : :: tembra :: portable :: Owned , }",
         "# [doc = \" The number.\"] pub async fn get (& self , context : & :: tembra :: Context) -> :: tembra :: Result < u32 > {",
         arguments,
         "let __tembra_value = self . owned . call_portable :: < _ , :: tembra :: serde_json :: Value > (context , \"[method]session.get\" , __tembra_arguments) . await ? ;",
-        "pub async fn twin (& self , context : & :: tembra :: Context) -> :: tembra :: Result < SessionHandle > {",
+        "pub async fn twin (& self , context : & :: tembra :: Context) -> :: tembra :: Result < super :: sessions :: SessionHandle > {",
         &format!(
             "{wrapped} (self . owned . call_portable :: < _ , :: tembra :: portable :: Owned > (context , \"[method]session.twin\" , __tembra_arguments) . await ?)"
         ),
@@ -6888,14 +7421,14 @@ fn a_wit_resource_gets_a_typed_handle_and_client_calls() {
         "impl :: core :: convert :: TryFrom < :: tembra :: portable :: Owned > for SessionHandle { type Error = :: tembra :: portable :: Owned ;",
         "if * owned . nominal () != < Session as :: tembra :: portable :: Issuable > :: nominal () { return :: core :: result :: Result :: Err (owned) ; }",
         "impl :: core :: convert :: From < SessionHandle > for :: tembra :: portable :: Owned {",
-        "impl SessionsClient { # [doc = \" A new `Session`, from its constructor, as its handle.\"] pub async fn new_session (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < SessionHandle > {",
+        "impl super :: sessions :: SessionsClient { # [doc = \" A new `Session`, from its constructor, as its handle.\"] pub async fn new_session (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < super :: sessions :: SessionHandle > {",
         ":: tembra :: serde_json :: Value :: Array (:: std :: vec ! [:: tembra :: serde_json :: to_value (n) . map_err (| error | error . to_string ()) ?] ,)",
         &format!(
             "{wrapped} (self . reference . call_portable :: < _ , :: tembra :: portable :: Owned > (context , \"[constructor]session\" , __tembra_arguments) . await ?)"
         ),
-        "pub async fn session_make (& self , context : & :: tembra :: Context) -> :: tembra :: Result < SessionHandle > {",
-        "pub async fn open (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < SessionHandle > {",
-        "pub async fn many (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < (:: std :: vec :: Vec < SessionHandle > , u32 ,) > {",
+        "pub async fn session_make (& self , context : & :: tembra :: Context) -> :: tembra :: Result < super :: sessions :: SessionHandle > {",
+        "pub async fn open (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < super :: sessions :: SessionHandle > {",
+        "pub async fn many (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < (:: std :: vec :: Vec < super :: sessions :: SessionHandle > , u32 ,) > {",
         "let __tembra_delivered = self . reference . call_portable :: < _ , :: tembra :: portable :: Delivered > (context , \"many\" , __tembra_arguments) . await ? ;",
         ". and_then (| index : usize | __tembra_owned . get_mut (index)) . and_then (:: core :: option :: Option :: take)",
         ". collect :: < :: core :: result :: Result < :: std :: vec :: Vec < _ > , :: std :: string :: String >> ()",
@@ -6908,31 +7441,33 @@ fn a_wit_resource_gets_a_typed_handle_and_client_calls() {
     let module = expanded(
         "example:desk@1.0.0",
         "mod desk {
-            #[service]
-            pub struct Sessions;
-            impl Sessions {
-                pub fn open(n: u32) -> kinds::Session { kinds::Session::new(n) }
-            }
-            pub mod kinds {
-                #[wit_resource(service = Sessions)]
-                pub struct Session { n: u32 }
-                impl Session {
-                    #[constructor]
-                    pub fn new(n: u32) -> Session { Session { n } }
-                    pub fn get(&self) -> u32 { self.n }
+            pub mod sessions {
+                #[service]
+                pub struct Sessions;
+                impl Sessions {
+                    pub fn open(n: u32) -> kinds::Session { kinds::Session::new(n) }
+                }
+                pub mod kinds {
+                    #[wit_resource]
+                    pub struct Session { n: u32 }
+                    impl Session {
+                        #[constructor]
+                        pub fn new(n: u32) -> Session { Session { n } }
+                        pub fn get(&self) -> u32 { self.n }
+                    }
                 }
             }
         }",
     );
-    let root = self::native(&module, &[]);
+    let sessions = self::native(&module, &["sessions"]);
     assert!(
-        root.contains("pub async fn open (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < kinds :: SessionHandle > {"),
-        "{root}"
+        sessions.contains("pub async fn open (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < super :: sessions :: kinds :: SessionHandle > {"),
+        "{sessions}"
     );
-    let kinds = self::native(&module, &["kinds"]);
+    let kinds = self::native(&module, &["sessions", "kinds"]);
     for expected in [
         "pub struct SessionHandle {",
-        "impl super :: SessionsClient { # [doc = \" A new `Session`, from its constructor, as its handle.\"] pub async fn new_session (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < super :: kinds :: SessionHandle > {",
+        "impl super :: super :: sessions :: SessionsClient { # [doc = \" A new `Session`, from its constructor, as its handle.\"] pub async fn new_session (& self , context : & :: tembra :: Context , n : u32) -> :: tembra :: Result < super :: super :: sessions :: kinds :: SessionHandle > {",
     ] {
         assert!(kinds.contains(expected), "{expected}\n{kinds}");
     }
@@ -6947,23 +7482,25 @@ fn a_wit_resource_gets_a_typed_handle_and_client_calls() {
 fn the_native_client_refuses_two_methods_of_one_name() {
     // The constructor of `Kind` and the static function `kind` of `New`.
     let two = "mod desk {
-        #[wit_resource]
-        pub struct Kind { n: u32 }
-        impl Kind {
-            #[constructor]
-            pub fn new(n: u32) -> Kind { Kind { n } }
-            pub fn get(&self) -> u32 { self.n }
-        }
-        #[wit_resource]
-        pub struct New { n: u32 }
-        impl New {
-            pub fn kind() -> u32 { 0 }
-            pub fn get(&self) -> u32 { self.n }
-        }
-        #[service]
-        pub struct Sessions;
-        impl Sessions {
-            pub fn open(n: u32) -> New { New { n } }
+        pub mod sessions {
+            #[wit_resource]
+            pub struct Kind { n: u32 }
+            impl Kind {
+                #[constructor]
+                pub fn new(n: u32) -> Kind { Kind { n } }
+                pub fn get(&self) -> u32 { self.n }
+            }
+            #[wit_resource]
+            pub struct New { n: u32 }
+            impl New {
+                pub fn kind() -> u32 { 0 }
+                pub fn get(&self) -> u32 { self.n }
+            }
+            #[service]
+            pub struct Sessions;
+            impl Sessions {
+                pub fn open(n: u32) -> New { New { n } }
+            }
         }
     }";
     for (module, message) in [
@@ -7003,22 +7540,25 @@ fn a_service_with_only_a_resource_has_a_signature() {
     let module = orb_with(
         options("example:desk@1.0.0", None),
         "mod desk {
-            use tembra::Declaration;
             #[inputs]
             pub struct Inputs { pub n: u32 }
-            #[wit_resource(service = Sessions)]
-            pub struct Session { n: u32 }
-            impl Session {
-                #[constructor]
-                pub fn new(n: u32) -> Session { Session { n } }
-                pub fn get(&self) -> u32 { self.n }
-            }
-            #[service]
-            pub struct Sessions { n: u32 }
-            impl Sessions {
-                #[create]
-                fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-                    Ok(Self { n: inputs.n })
+            pub mod sessions {
+                use super::Inputs;
+                use tembra::Declaration;
+                #[wit_resource]
+                pub struct Session { n: u32 }
+                impl Session {
+                    #[constructor]
+                    pub fn new(n: u32) -> Session { Session { n } }
+                    pub fn get(&self) -> u32 { self.n }
+                }
+                #[service]
+                pub struct Sessions { n: u32 }
+                impl Sessions {
+                    #[create]
+                    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                        Ok(Self { n: inputs.n })
+                    }
                 }
             }
         }",
@@ -7029,9 +7569,9 @@ fn a_service_with_only_a_resource_has_a_signature() {
         generated.contains("pub const __TEMBRA_SIGNATURE_SESSIONS : & str ="),
         "{generated}"
     );
-    let native = native(&module, &[]);
+    let native = native(&module, &["sessions"]);
     assert!(
-        native.contains("__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\") , move | declaration | Sessions :: create (& inputs , & declaration)) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (__TEMBRA_SIGNATURE_SESSIONS))))"),
+        native.contains("__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\") , move | declaration | Sessions :: create (& inputs , & declaration)) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_SESSIONS))))"),
         "{native}"
     );
 }
@@ -7103,7 +7643,7 @@ fn an_async_method_of_a_wit_resource_holds_its_self_natively() {
         "{}",
         wit(&module)
     );
-    let native = native(&module, &[]);
+    let native = native(&module, &["sessions"]);
     for expected in [
         ". payload_method (\"[method]session.later\" , | _ , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | async move { __tembra_context . check () ? ; let __tembra_receiver = __tembra_payload . receiver :: < Session > () ? ;",
         "let value = { let __tembra_self = __tembra_receiver . guard () ? ; Session :: later (& * __tembra_self , by) . await } ;",
@@ -7116,8 +7656,9 @@ fn an_async_method_of_a_wit_resource_holds_its_self_natively() {
 
 /// A state natively: the factory of the service that owns it declares it, with the version and the
 /// rule of the state, before the create runs, and keeps it beside the object's environment, a unit
-/// or what the create builds; each method's future, local ones too, runs in the scope of its
-/// object, where the state's `read` and `update` reach it, in a sub-module through `super::`, and
+/// or what the create builds; the state sits in its service's module or, as `Kept`, in a module
+/// below it. Each method's future, local ones too, runs in the scope of its object, where the
+/// state's `read` and `update` reach it, from a service's module through `super::`, and
 /// so do the futures of a function issuing a WIT resource of the service and of that resource's
 /// functions, which the service's registration hands the way to the object's state. The
 /// component's `read` and `update`, over the bindings' import, are a component build's only, and a
@@ -7130,31 +7671,37 @@ fn the_factory_of_its_service_declares_a_state_natively() {
         "mod book {
             #[inputs]
             pub struct Inputs { pub title: String }
-            #[state(service = Notes, version = 2)]
-            pub struct Kept { pub count: u32 }
-            impl Kept {
-                #[validate]
-                fn bounded(&self) -> Result<(), String> { Ok(()) }
+            pub mod ledger {
+                #[state]
+                pub struct Total { pub sum: u32 }
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn count() -> u32 { Total::read().sum }
+                    pub fn issue() -> Ticket { Ticket }
+                }
+                #[wit_resource]
+                pub struct Ticket;
+                impl Ticket {
+                    #[constructor]
+                    pub fn new() -> Self { Ticket }
+                    pub fn sum(&self) -> u32 { Total::read().sum }
+                }
             }
-            #[state(service = Ledger)]
-            pub struct Total { pub sum: u32 }
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn count() -> u32 { Total::read().sum }
-                pub fn issue() -> Ticket { Ticket }
+            pub mod shelf {
+                #[service]
+                pub struct Shelf;
+                impl Shelf { pub fn size() -> u32 { 0 } }
             }
-            #[wit_resource(service = Ledger)]
-            pub struct Ticket;
-            impl Ticket {
-                #[constructor]
-                pub fn new() -> Self { Ticket }
-                pub fn sum(&self) -> u32 { Total::read().sum }
-            }
-            #[service]
-            pub struct Shelf;
-            impl Shelf { pub fn size() -> u32 { 0 } }
             pub mod notes {
+                pub mod kept {
+                    #[state(version = 2)]
+                    pub struct Kept { pub count: u32 }
+                    impl Kept {
+                        #[validate]
+                        fn bounded(&self) -> Result<(), String> { Ok(()) }
+                    }
+                }
                 #[service]
                 pub struct Notes { title: String }
                 impl Notes {
@@ -7164,31 +7711,36 @@ fn the_factory_of_its_service_declares_a_state_natively() {
                     }
                     pub fn title(&self) -> String { self.title.clone() }
                     #[local]
-                    pub fn kept() -> u32 { super::Kept::read().count }
+                    pub fn kept() -> u32 { kept::Kept::read().count }
                 }
             }
         }",
     );
     let stated = ":: tembra :: State < :: tembra :: serde_json :: Value >";
-    let root = native(&module, &[]);
+    let ledger = native(&module, &["ledger"]);
     for expected in [
         format!("pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < (() , {stated}) >"),
-        "| declaration | { let state = self :: __tembra_state :: declare :: < Total > (& declaration , 1u32 , \"Total\" , | _ : & Total | :: core :: result :: Result :: Ok (()) ,) ? ; :: core :: result :: Result :: Ok ((() , state)) }".to_owned(),
-        format!(". method_with (\"count\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }}) , __TEMBRA_CODEC_COUNT ,)"),
-        format!(". payload_method (\"issue\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{"),
+        "| declaration | { let state = self :: super :: __tembra_state :: declare :: < super :: ledger :: Total > (& declaration , 1u32 , \"Total\" , | _ : & super :: ledger :: Total | :: core :: result :: Result :: Ok (()) ,) ? ; :: core :: result :: Result :: Ok ((() , state)) }".to_owned(),
+        format!(". method_with (\"count\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }}) , __TEMBRA_CODEC_COUNT ,)"),
+        format!(". payload_method (\"issue\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{"),
         format!(", | object : & (() , {stated}) | object . 1 . clone ())"),
         format!("pub (crate) fn __tembra_resource_ticket < E : 'static > (service : :: tembra :: Service < E > , __tembra_state_of : fn (& E) -> {stated}) -> :: tembra :: Service < E >"),
-        ". payload_method (\"[constructor]ticket\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
-        ". payload_method (\"[method]ticket.sum\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
-        "pub (crate) fn __tembra_service_shelf (orb : & str) -> :: tembra :: Service < () >".to_owned(),
-        ". method_with (\"size\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Shelf :: size ()) } , __TEMBRA_CODEC_SIZE ,)".to_owned(),
+        ". payload_method (\"[constructor]ticket\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
+        ". payload_method (\"[method]ticket.sum\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
     ] {
-        assert!(root.contains(&expected), "{expected}\n{root}");
+        assert!(ledger.contains(&expected), "{expected}\n{ledger}");
+    }
+    let shelf = native(&module, &["shelf"]);
+    for expected in [
+        "pub (crate) fn __tembra_service_shelf (orb : & str) -> :: tembra :: Service < () >",
+        ". method_with (\"size\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Shelf :: size ()) } , __TEMBRA_CODEC_SIZE ,)",
+    ] {
+        assert!(shelf.contains(expected), "{expected}\n{shelf}");
     }
     let notes = native(&module, &["notes"]);
     for expected in [
         format!("-> :: tembra :: Service < (Notes , {stated}) >"),
-        "move | declaration | { let state = self :: super :: __tembra_state :: declare :: < super :: Kept > (& declaration , 2u32 , \"Kept\" , | state : & super :: Kept | state . bounded () ,) ? ; :: core :: result :: Result :: Ok ((Notes :: create (& inputs , & declaration) ? , state)) }".to_owned(),
+        "move | declaration | { let state = self :: super :: __tembra_state :: declare :: < super :: notes :: kept :: Kept > (& declaration , 2u32 , \"Kept\" , | state : & super :: notes :: kept :: Kept | state . bounded () ,) ? ; :: core :: result :: Result :: Ok ((Notes :: create (& inputs , & declaration) ? , state)) }".to_owned(),
         format!(". method_with (\"title\" , move | __tembra_object : :: std :: rc :: Rc < (Notes , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Notes :: title (& __tembra_object . 0)) }}) , __TEMBRA_CODEC_TITLE ,)"),
         format!(". local_method (\"kept\" , move | __tembra_object : :: std :: rc :: Rc < (Notes , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Notes :: kept ()) }}) ,)"),
     ] {
@@ -7213,8 +7765,9 @@ fn the_factory_of_its_service_declares_a_state_natively() {
 }
 
 /// The resources of the Orb's root natively: `orb_named` builds a table of them for the Orb, which
-/// the Orb's create fills, declaring each with its version, `#[open]` and `#[close]` before the
-/// `#[root]` runs, and which every service takes, and hands the functions of its WIT resources;
+/// the Orb's create fills, declaring each with its version, its dependencies, none here, `#[open]`,
+/// whose scope reaches the table, and `#[close]` before the `#[root]` runs, and which every service
+/// takes, and hands the functions of its WIT resources;
 /// each method's future, local ones too, and each of those functions', runs in the scope of its
 /// Orb, where the resources' `with` reaches the table, in a sub-module through `super::`, once the
 /// scope has found no resource the host keeps as a value of another Rust type, which the runtime
@@ -7238,19 +7791,22 @@ fn the_orbs_create_declares_its_root_resources_natively() {
                 #[close]
                 fn close(self) {}
             }
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn count() -> u32 { Counts::with(|counts| counts.seen) }
-                #[local]
-                pub fn rewind() {}
-            }
-            #[wit_resource(service = Ledger)]
-            pub struct Ticket;
-            impl Ticket {
-                #[constructor]
-                pub fn new() -> Self { Ticket }
-                pub fn seen(&self) -> u32 { Counts::with(|counts| counts.seen) }
+            pub mod ledger {
+                use super::Counts;
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn count() -> u32 { Counts::with(|counts| counts.seen) }
+                    #[local]
+                    pub fn rewind() {}
+                }
+                #[wit_resource]
+                pub struct Ticket;
+                impl Ticket {
+                    #[constructor]
+                    pub fn new() -> Self { Ticket }
+                    pub fn seen(&self) -> u32 { Counts::with(|counts| counts.seen) }
+                }
             }
             pub mod banner {
                 #[resource(version = 2)]
@@ -7259,6 +7815,8 @@ fn the_orbs_create_declares_its_root_resources_natively() {
                     #[open]
                     pub fn open() -> Self { Banner { text: String::new() } }
                 }
+            }
+            pub mod shelf {
                 #[service]
                 pub struct Shelf;
                 impl Shelf { pub fn size() -> u32 { 0 } }
@@ -7269,22 +7827,27 @@ fn the_orbs_create_declares_its_root_resources_natively() {
     for expected in [
         "let resources = :: std :: rc :: Rc :: new (< self :: __tembra_resource :: Resources as :: core :: default :: Default > :: default () ,) ;",
         ". create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; let resources = :: std :: rc :: Rc :: clone (& resources) ; move | declaration | { resources . declare (& declaration) ? ; self :: __TembraRegistry :: < 0 > :: __tembra_root (& inputs , & declaration) } })",
-        ". service (self :: __TembraRegistry :: < 0 > :: __tembra_service_ledger (name , & resources)) . service (self :: __TembraRegistry :: < 1 > :: __tembra_service_shelf (name , & resources))",
-        "pub (crate) fn __tembra_service_ledger (orb : & str , resources : & :: std :: rc :: Rc < self :: __tembra_resource :: Resources >) -> :: tembra :: Service < () >",
-        ". method_with (\"count\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , () : () | self :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }) } , __TEMBRA_CODEC_COUNT ,)",
-        ". local_method (\"rewind\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , () : () | self :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ; Ledger :: rewind () ; :: core :: result :: Result :: Ok (()) }) } ,)",
-        ", resources)",
-        "pub (crate) fn __tembra_resource_ticket < E : 'static > (service : :: tembra :: Service < E > , resources : & :: std :: rc :: Rc < self :: __tembra_resource :: Resources >) -> :: tembra :: Service < E >",
-        ". payload_method (\"[method]ticket.seen\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move {",
+        ". service (self :: __TembraRegistry :: < 1 > :: __tembra_service_ledger (name , & resources)) . service (self :: __TembraRegistry :: < 3 > :: __tembra_service_shelf (name , & resources))",
     ] {
         assert!(root.contains(expected), "{expected}\n{root}");
     }
-    let banner = native(&module, &["banner"]);
+    let ledger = native(&module, &["ledger"]);
+    for expected in [
+        "pub (crate) fn __tembra_service_ledger (orb : & str , resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >) -> :: tembra :: Service < () >",
+        ". method_with (\"count\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }) } , __TEMBRA_CODEC_COUNT ,)",
+        ". local_method (\"rewind\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ; Ledger :: rewind () ; :: core :: result :: Result :: Ok (()) }) } ,)",
+        ", resources)",
+        "pub (crate) fn __tembra_resource_ticket < E : 'static > (service : :: tembra :: Service < E > , resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >) -> :: tembra :: Service < E >",
+        ". payload_method (\"[method]ticket.seen\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move {",
+    ] {
+        assert!(ledger.contains(expected), "{expected}\n{ledger}");
+    }
+    let shelf = native(&module, &["shelf"]);
     for expected in [
         "resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >",
         "| self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) ,",
     ] {
-        assert!(banner.contains(expected), "{expected}\n{banner}");
+        assert!(shelf.contains(expected), "{expected}\n{shelf}");
     }
     let generated = tokens(&module);
     assert!(
@@ -7294,8 +7857,8 @@ fn the_orbs_create_declares_its_root_resources_natively() {
     let resources = native(&module, &["__tembra_resource"]);
     for expected in [
         "pub struct Resources { counts : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: Counts >> > , banner : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: banner :: Banner >> > , }",
-        "let resource = declaration . resource (\"counts\" , 1u32 , || { let slot = Slot :: new () ; slot . open (super :: Counts :: open ()) ; :: core :: result :: Result :: Ok (slot) } , | slot , _ | { if let :: core :: option :: Option :: Some (value) = slot . close () { value . close () ; } :: std :: boxed :: Box :: pin (async { :: core :: result :: Result :: Ok (()) }) } ,) ? ; let _ = self . counts . set (resource) ;",
-        "let resource = declaration . resource (\"banner\" , 2u32 , || { let slot = Slot :: new () ; slot . open (super :: banner :: Banner :: open ()) ; :: core :: result :: Result :: Ok (slot) } , | slot , _ | { slot . close () ; :: std :: boxed :: Box :: pin (async { :: core :: result :: Result :: Ok (()) }) } ,) ? ; let _ = self . banner . set (resource) ;",
+        "let dependencies = [] ; let table = :: std :: rc :: Rc :: downgrade (self) ; let closing = :: std :: rc :: Weak :: clone (& table) ; let resource = declaration . resource_async (\"counts\" , 1u32 , & dependencies , move | __tembra_context | { :: std :: boxed :: Box :: pin (in_context (__tembra_context , async move { let _entered = table . upgrade () . map (Entered :: enter) ; let slot = Slot :: new () ; slot . open (super :: Counts :: open ()) ; :: core :: result :: Result :: Ok (slot) })) } , move | slot , __tembra_context | { :: std :: boxed :: Box :: pin (in_context (__tembra_context , async move { let _entered = closing . upgrade () . map (Entered :: enter) ; if let :: core :: option :: Option :: Some (value) = slot . close () { value . close () ; } :: core :: result :: Result :: Ok (()) })) } ,) ? ; let _ = self . counts . set (resource) ;",
+        "let dependencies = [] ; let table = :: std :: rc :: Rc :: downgrade (self) ; let closing = :: std :: rc :: Weak :: clone (& table) ; let resource = declaration . resource_async (\"counts\" , 1u32 , & dependencies , move | __tembra_context | { :: std :: boxed :: Box :: pin (in_context (__tembra_context , async move { let _entered = table . upgrade () . map (Entered :: enter) ; let slot = Slot :: new () ; slot . open (super :: Counts :: open ()) ; :: core :: result :: Result :: Ok (slot) })) } , move | slot , __tembra_context | { :: std :: boxed :: Box :: pin (in_context (__tembra_context , async move { let _entered = closing . upgrade () . map (Entered :: enter) ; if let :: core :: option :: Option :: Some (value) = slot . close () { value . close () ; } :: core :: result :: Result :: Ok (()) })) } ,) ? ; let _ = self . counts . set (resource) ; let dependencies = [] ; let table = :: std :: rc :: Rc :: downgrade (self) ; let closing = :: std :: rc :: Weak :: clone (& table) ; let resource = declaration . resource_async (\"banner\" , 2u32 , & dependencies , move | __tembra_context | { :: std :: boxed :: Box :: pin (in_context (__tembra_context , async move { let _entered = table . upgrade () . map (Entered :: enter) ; let slot = Slot :: new () ; slot . open (super :: banner :: Banner :: open ()) ; :: core :: result :: Result :: Ok (slot) })) } , move | slot , __tembra_context | { :: std :: boxed :: Box :: pin (in_context (__tembra_context , async move { let _entered = closing . upgrade () . map (Entered :: enter) ; slot . close () ; :: core :: result :: Result :: Ok (()) })) } ,) ? ; let _ = self . banner . set (resource) ;",
         "fn typed (& self) -> :: tembra :: Result < () > { if let :: core :: option :: Option :: Some (error) = self . counts . get () . and_then (| resource | resource . value () . err ()) . filter (| error | error . reason == :: tembra :: core :: Reason :: RustType . as_str ()) { return :: core :: result :: Result :: Err (error) ; } if let :: core :: option :: Option :: Some (error) = self . banner . get () . and_then (| resource | resource . value () . err ()) . filter (| error | error . reason == :: tembra :: core :: Reason :: RustType . as_str ()) { return :: core :: result :: Result :: Err (error) ; } :: core :: result :: Result :: Ok (()) }",
         "pub (crate) fn scoped < T , F : :: core :: future :: Future < Output = :: tembra :: Result < T >> > (resources : :: std :: rc :: Rc < Resources > , future : F ,) -> impl :: core :: future :: Future < Output = :: tembra :: Result < T >> { let mut future = :: std :: boxed :: Box :: pin (future) ; async move { resources . typed () ? ; :: core :: future :: poll_fn (| cx | {",
         "impl super :: Counts {",
@@ -7305,13 +7868,239 @@ fn the_orbs_create_declares_its_root_resources_natively() {
     }
 }
 
+/// An `#[open]` returning `Result<Self, E>`, or an alias of `Result` with one type argument: a
+/// component's `open` answers the error's `Display` text, which the worker words as "the resource
+/// `name` did not open: ..", and the native opener fails with the same words and
+/// `unavailable/resource`; an `#[open]` returning `Self`, or a path to its struct, opens as before.
+#[test]
+fn an_open_returning_a_result_fails_with_its_error_both_ways() {
+    let module = expanded(
+        PACKAGE,
+        "mod kiln {
+            #[resource]
+            pub struct Fire { pub heat: u32 }
+            impl Fire {
+                #[open]
+                pub fn open() -> Result<Self, String> { Err(String::new()) }
+            }
+            #[resource]
+            pub struct Wood { pub logs: u32 }
+            impl Wood {
+                #[open]
+                pub fn open() -> super::kiln::Wood { Wood { logs: 0 } }
+            }
+            #[resource]
+            pub struct Ash { pub grams: u32 }
+            impl Ash {
+                #[open]
+                pub fn open() -> std::io::Result<self::Ash> { Ok(Ash { grams: 0 }) }
+            }
+            pub mod hearth {
+                #[service]
+                pub struct Hearth;
+                impl Hearth { pub fn heat() -> u32 { 0 } }
+            }
+        }",
+    );
+    let generated = tokens(&module);
+    for expected in [
+        "\"fire\" => match Fire :: open () { :: core :: result :: Result :: Ok (value) => { __TEMBRA_RESOURCE_FIRE . open (value) ; :: core :: result :: Result :: Ok (1) } :: core :: result :: Result :: Err (error) => :: core :: result :: Result :: Err (__tembra_resource :: ToString :: to_string (& error)) , }",
+        "\"wood\" => { __TEMBRA_RESOURCE_WOOD . open (Wood :: open ()) ; :: core :: result :: Result :: Ok (1) }",
+        "\"ash\" => match Ash :: open () {",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let resources = native(&module, &["__tembra_resource"]);
+    for expected in [
+        "slot . open (match super :: Fire :: open () { :: core :: result :: Result :: Ok (value) => value , :: core :: result :: Result :: Err (error) => { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: core :: Code :: Unavailable , :: tembra :: core :: Reason :: Resource , :: std :: format ! (\"the resource `fire` did not open: {}\" , :: std :: string :: ToString :: to_string (& error)) ,)) ; } }) ;",
+        "slot . open (super :: Wood :: open ()) ;",
+        "slot . open (match super :: Ash :: open () {",
+    ] {
+        assert!(resources.contains(expected), "{expected}\n{resources}");
+    }
+}
+
+/// A `#[resource]` in a service's module is a resource of each object of the service: the world
+/// exports `service-resources-init`, whose `declare` lists the service's resources, after the root's
+/// ones they depend on, by the service's interface, and whose `open` keeps the object's value in a
+/// table under the handle it answers, which `with` reads back through the kernel; a root resource
+/// keeps its slot. Natively, the service's factory declares the object's resources on its
+/// declaration, after the root's and the object's earlier ones they depend on, and keeps their
+/// table beside the environment, which each method's scope sets for `with`. A root resource
+/// depending on a service's, a service's depending on another service's, and two resources of one
+/// name are errors on the name.
+#[test]
+fn a_resource_in_a_service_module_belongs_to_each_object_of_the_service() {
+    let dock = |mooring: &str, berth: &str| {
+        format!(
+            "mod dock {{
+                #[resource]
+                pub struct Harbor {{ pub berths: u32 }}
+                impl Harbor {{
+                    #[open]
+                    pub fn open() -> Harbor {{ Harbor {{ berths: 0 }} }}
+                }}
+                pub mod ship {{
+                    use super::Harbor;
+                    #[service]
+                    pub struct Ship;
+                    impl Ship {{ pub fn berth() -> u32 {{ Mooring::with(|mooring| mooring.berth) }} }}
+                    {mooring}
+                    pub struct Mooring {{ pub berth: u32 }}
+                    impl Mooring {{
+                        #[open]
+                        pub fn open() -> Result<Mooring, String> {{ Ok(Mooring {{ berth: Harbor::with(|harbor| harbor.berths) }}) }}
+                        #[close]
+                        pub fn close(self) {{}}
+                    }}
+                    #[resource(depends = [Mooring])]
+                    pub struct Line;
+                    impl Line {{
+                        #[open]
+                        pub fn open() -> Line {{ Line }}
+                    }}
+                }}
+                pub mod tug {{
+                    #[service]
+                    pub struct Tug;
+                    impl Tug {{ pub fn pull() -> u32 {{ 0 }} }}
+                    {berth}
+                    pub struct Berth;
+                    impl Berth {{
+                        #[open]
+                        pub fn open() -> Berth {{ Berth }}
+                    }}
+                }}
+            }}"
+        )
+    };
+    let module = expanded(
+        PACKAGE,
+        &dock("#[resource(depends = [Harbor])]", "#[resource]"),
+    );
+    assert!(
+        wit(&module).contains(
+            "world dock {\n  import tembra:guest/resources@1.0.0;\n  export tembra:guest/resources-init@1.0.0;\n  export tembra:guest/service-resources-init@1.0.0;\n  export ship;\n  export tug;\n}"
+        ),
+        "{}",
+        wit(&module)
+    );
+    let generated = tokens(&module);
+    for expected in [
+        // The root's declaration lists the harbor alone.
+        "fn declare () -> __tembra_resource :: Vec < exports :: tembra :: guest :: resources_init :: Declaration > { :: core :: convert :: From :: from ([exports :: tembra :: guest :: resources_init :: Declaration { name : :: core :: convert :: From :: from (\"harbor\") , version : 1u32 , dependencies : :: core :: convert :: From :: from ([]) , }]) }",
+        "\"harbor\" => { __TEMBRA_RESOURCE_HARBOR . open (Harbor :: open ()) ; :: core :: result :: Result :: Ok (1) }",
+        // Each service's declaration lists its own, in dependency order.
+        "fn declare (service : __tembra_resource :: String ,) -> __tembra_resource :: Vec < exports :: tembra :: guest :: service_resources_init :: Declaration > { match service . as_str () { \"example:book/ship@1.0.0\" => :: core :: convert :: From :: from ([exports :: tembra :: guest :: service_resources_init :: Declaration { name : :: core :: convert :: From :: from (\"mooring\") , version : 1u32 , dependencies : :: core :: convert :: From :: from ([:: core :: convert :: From :: from (\"harbor\")]) , } , exports :: tembra :: guest :: service_resources_init :: Declaration { name : :: core :: convert :: From :: from (\"line\") , version : 1u32 , dependencies : :: core :: convert :: From :: from ([:: core :: convert :: From :: from (\"mooring\")]) , }]) , \"example:book/tug@1.0.0\" => :: core :: convert :: From :: from ([exports :: tembra :: guest :: service_resources_init :: Declaration { name : :: core :: convert :: From :: from (\"berth\") , version : 1u32 , dependencies : :: core :: convert :: From :: from ([]) , }]) , _ => __tembra_resource :: Vec :: new () , } }",
+        // An open keeps the object's value in the table and answers its handle; a fallible one
+        // answers its error's text.
+        "(\"example:book/ship@1.0.0\" , \"mooring\") => match ship :: Mooring :: open () { :: core :: result :: Result :: Ok (value) => __TEMBRA_RESOURCE_MOORING . open (value) , :: core :: result :: Result :: Err (error) => :: core :: result :: Result :: Err (__tembra_resource :: ToString :: to_string (& error)) , }",
+        "(\"example:book/tug@1.0.0\" , \"berth\") => __TEMBRA_RESOURCE_BERTH . open (tug :: Berth :: open ()) ,",
+        // A close takes the object's value out of the table by its handle.
+        "(\"example:book/ship@1.0.0\" , \"mooring\") => { if let :: core :: option :: Option :: Some (value) = __TEMBRA_RESOURCE_MOORING . close (handle) { value . close () ; } }",
+        "(\"example:book/ship@1.0.0\" , \"line\") => { __TEMBRA_RESOURCE_LINE . close (handle) ; }",
+        "static __TEMBRA_RESOURCE_MOORING : __tembra_resource :: Table < ship :: Mooring > = __tembra_resource :: Table :: new () ;",
+        // The objects' values are kept by handle, and a handle never comes back: the open fails
+        // once every one was answered, rather than wrap into another object's.
+        "pub struct Table < T > (:: core :: cell :: RefCell < (u32 , BTreeMap < u32 , T >) >) ;",
+        "let :: core :: option :: Option :: Some (handle) = table . 0 . checked_add (1) else { return :: core :: result :: Result :: Err (",
+        "static __TEMBRA_RESOURCE_HARBOR : __tembra_resource :: Slot < Harbor > = __tembra_resource :: Slot :: new () ;",
+        // `with` reads the handle of the running object's value from the kernel.
+        "impl ship :: Mooring { # [doc = \" Use the resource `mooring` of the `Ship` object running the current call, opened by the kernel when it created the object; the kernel names the object's value by its handle, the value lives in this component.\"] pub fn with < R > (use_ : impl :: core :: ops :: FnOnce (& mut Self) -> R) -> R { let handle = self :: tembra :: guest :: resources :: read (\"mooring\") ; __TEMBRA_RESOURCE_MOORING . with (handle , use_) } }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    // Natively, the factory of the service declares the object's resources on its declaration,
+    // after the root's and the object's earlier ones they depend on, and keeps their table beside
+    // the environment, which the scope of each method sets for `with`.
+    let ship = native(&module, &["ship"]);
+    for expected in [
+        ") -> :: tembra :: Service < (() , :: std :: rc :: Rc < self :: super :: __tembra_resource :: ShipResources >) >",
+        "let __tembra_root_resources = :: std :: rc :: Rc :: clone (resources) ; move | declaration | { let __tembra_object_resources = :: std :: rc :: Rc :: new (< self :: super :: __tembra_resource :: ShipResources as :: core :: default :: Default > :: default () ,) ; __tembra_object_resources . declare (& __tembra_root_resources , & declaration) ? ; :: core :: result :: Result :: Ok ((() , __tembra_object_resources)) }",
+        "| __tembra_object : :: std :: rc :: Rc < (() , :: std :: rc :: Rc < self :: super :: __tembra_resource :: ShipResources >) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , self :: super :: __tembra_resource :: ShipResources :: scoped (:: std :: rc :: Rc :: clone (& __tembra_object . 1) , async move {",
+    ] {
+        assert!(ship.contains(expected), "{expected}\n{ship}");
+    }
+    let resources = native(&module, &["__tembra_resource"]);
+    for expected in [
+        "pub struct Resources { harbor : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: Harbor >> > , }",
+        "pub struct ShipResources { mooring : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: ship :: Mooring >> > , line : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: ship :: Line >> > , }",
+        "pub struct TugResources { berth : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: tug :: Berth >> > , }",
+        // The mooring depends on the root's harbor, the line on the object's mooring.
+        "let dependencies = [root . harbor . get () . expect (\"a resource's dependencies are declared before it\") . key ()] ; let table = :: std :: rc :: Rc :: downgrade (root) ; let object = :: std :: rc :: Rc :: downgrade (self) ;",
+        "let resource = declaration . resource_async (\"mooring\" , 1u32 , & dependencies , move | __tembra_context | { :: std :: boxed :: Box :: pin (in_context (__tembra_context , async move { let _entered = table . upgrade () . map (Entered :: enter) ; let _object = object . upgrade () . map (ShipEntered :: enter) ; let slot = Slot :: new () ; slot . open (match super :: ship :: Mooring :: open () { :: core :: result :: Result :: Ok (value) => value , :: core :: result :: Result :: Err (error) => { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: core :: Code :: Unavailable , :: tembra :: core :: Reason :: Resource , :: std :: format ! (\"the resource `mooring` did not open: {}\" , :: std :: string :: ToString :: to_string (& error)) ,)) ; } }) ; :: core :: result :: Result :: Ok (slot) })) } , move | slot , __tembra_context | { :: std :: boxed :: Box :: pin (in_context (__tembra_context , async move { let _entered = closing . upgrade () . map (Entered :: enter) ; let _object = closing_object . upgrade () . map (ShipEntered :: enter) ; if let :: core :: option :: Option :: Some (value) = slot . close () { value . close () ; } :: core :: result :: Result :: Ok (()) })) } ,) ? ; let _ = self . mooring . set (resource) ;",
+        "let dependencies = [self . mooring . get () . expect (\"a resource's dependencies are declared before it\") . key ()] ;",
+        "impl super :: ship :: Mooring { # [doc = \" Use the resource `mooring` of the `Ship` object running the current call, which the host opened when it created the object: the closure gets the open value, which lives in the host.\"] pub fn with < R > (use_ : impl :: core :: ops :: FnOnce (& mut Self) -> R) -> R { let slot = CURRENT_SHIP . with (| current | current . borrow () . clone ()) . expect (\"a resource of a service's objects is used inside a method of the service\") . mooring . get () . and_then (| resource | resource . value () . ok ()) . expect (\"the resource `mooring` of the `Ship` object running the call is open\") ; slot . with (use_) } }",
+    ] {
+        assert!(resources.contains(expected), "{expected}\n{resources}");
+    }
+    // Without a root resource, the world exports `service-resources-init` alone.
+    let alone = expanded(
+        PACKAGE,
+        &dock("#[resource]", "#[resource]")
+            .replace(
+                "#[resource]\n                pub struct Harbor",
+                "pub struct Harbor",
+            )
+            .replace(
+                "#[open]\n                    pub fn open() -> Harbor",
+                "pub fn open() -> Harbor",
+            ),
+    );
+    assert!(
+        wit(&alone).contains(
+            "world dock {\n  import tembra:guest/resources@1.0.0;\n  export tembra:guest/service-resources-init@1.0.0;\n  export ship;\n  export tug;\n}"
+        ),
+        "{}",
+        wit(&alone)
+    );
+    assert!(
+        !tokens(&alone).contains("exports :: tembra :: guest :: resources_init :: Guest"),
+        "{}",
+        tokens(&alone)
+    );
+    let error = refused(
+        PACKAGE,
+        &dock("#[resource]", "#[resource(depends = [Mooring])]"),
+    );
+    assert_eq!(
+        error,
+        "`Berth` is a resource of each object of the service `Tug`, and `Mooring` one of the service `Ship`: a service resource depends on root resources and on resources of its own service, whose objects open and close together"
+    );
+    let error = refused(
+        PACKAGE,
+        &dock("#[resource]", "#[resource]").replace(
+            "#[resource]\n                pub struct Harbor",
+            "#[resource(depends = [Berth])]\n                pub struct Harbor",
+        ),
+    );
+    assert_eq!(
+        error,
+        "`Harbor` is a resource of the root, and `Berth` one of each object of the service `Tug`: a root resource opens at activation, before any object, so it depends on root resources alone"
+    );
+    let error = refused(
+        PACKAGE,
+        &dock("#[resource]", "#[resource]")
+            .replace("pub struct Berth", "pub struct Mooring")
+            .replace("impl Berth", "impl Mooring")
+            .replace(
+                "pub fn open() -> Berth { Berth }",
+                "pub fn open() -> Mooring { Mooring }",
+            ),
+    );
+    assert_eq!(
+        error,
+        "`Mooring` names two resources, one of the service `Ship` and one of the service `Tug`: the kernel and `depends` name a resource by its struct's name, in kebab-case, so give each resource of the Orb a name of its own"
+    );
+}
+
 /// What the native side does not cover yet leaves the module compiling inside the facade's wrapper,
 /// with an `orb()` that answers an error naming it, and a component build of the module unaffected:
 /// a WASI import, an import, plain or by key, of an interface with a synchronous function, and a
 /// hook declaration, whose `run` is synchronous, both of which work in a component build only.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
-    let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    let service = "pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }";
     let pace = consumed("native-pace", PACE_WIT);
     let synchronous = "works in a component build only: its function `now` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`";
     for (options, module, message) in [
@@ -7440,11 +8229,14 @@ fn an_import_of_async_functions_is_served_natively() {
             ..options(PACKAGE, Some(&dir))
         },
         "mod book {
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub async fn count() -> u64 { clock::wait(1).await }
-                pub fn latest(tick: clock::Tick) -> clock::Tick { tick }
+            pub mod ledger {
+                use super::clock;
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub async fn count() -> u64 { clock::wait(1).await }
+                    pub fn latest(tick: clock::Tick) -> clock::Tick { tick }
+                }
             }
         }",
     )
@@ -7456,9 +8248,7 @@ fn an_import_of_async_functions_is_served_natively() {
         "let imports = :: std :: rc :: Rc :: new (self :: __tembra_import :: Imports :: new (& providers)) ;",
         "for requirement in self :: __tembra_providers :: requirements (& providers) ? { orb = orb . requires (requirement) ; }",
         "move | declaration | { imports . declare (& declaration) ? ; :: core :: result :: Result :: Ok (()) }",
-        ". service (self :: __TembraRegistry :: < 0 > :: __tembra_service_ledger (name , & imports))",
-        "pub (crate) fn __tembra_service_ledger (orb : & str , imports : & :: std :: rc :: Rc < self :: __tembra_import :: Imports >) -> :: tembra :: Service < () >",
-        "self :: __tembra_import :: scoped (__tembra_context . clone () , :: std :: rc :: Rc :: clone (& __tembra_imports) , async move {",
+        ". service (self :: __TembraRegistry :: < 1 > :: __tembra_service_ledger (name , & imports))",
         "pub struct Providers { # [doc = \" The Orb answering the import of `example:pace/clock@1.0.0`, at its `main` object.\"] pub clock : :: tembra :: Provider , }",
         "let requirement = entry (& mut requirements , & providers . clock) ? ; let service = :: std :: format ! (\"{}::{}\" , providers . clock . name , \"example:pace/clock@1.0.0\") ;",
         "pub mod clock { # [allow (unused_imports)] pub use super :: example :: pace :: clock :: * ;",
@@ -7466,9 +8256,16 @@ fn an_import_of_async_functions_is_served_natively() {
         "pub async fn last (labels : :: std :: vec :: Vec < :: std :: string :: String >) -> :: core :: option :: Option < super :: example :: pace :: clock :: Tick > {",
         ". call (& __tembra_call . imports . clock . reference () , \"last\" , __tembra_arguments , | value |",
         "impl __TembraBoundary for self :: example :: pace :: clock :: Tick {",
-        ". method_with (\"latest\" ,",
     ] {
         assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let ledger = native(&module, &["ledger"]);
+    for expected in [
+        "pub (crate) fn __tembra_service_ledger (orb : & str , imports : & :: std :: rc :: Rc < self :: super :: __tembra_import :: Imports >) -> :: tembra :: Service < () >",
+        "self :: super :: __tembra_import :: scoped (__tembra_context . clone () , :: std :: rc :: Rc :: clone (& __tembra_imports) , async move {",
+        ". method_with (\"latest\" ,",
+    ] {
+        assert!(ledger.contains(expected), "{expected}\n{ledger}");
     }
     assert!(
         tokens(&module)
@@ -7489,12 +8286,14 @@ fn a_tembra_result_is_the_error_channel_of_a_native_method() {
     let module = expanded(
         PACKAGE,
         "mod book {
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn divide(a: u32, b: u32) -> tembra::Result<u32> { todo!() }
-                pub async fn settle() -> ::tembra::Result<()> { todo!() }
-                pub fn quotient(a: u32, b: u32) -> Result<u32, String> { todo!() }
+            pub mod ledger {
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn divide(a: u32, b: u32) -> tembra::Result<u32> { todo!() }
+                    pub async fn settle() -> ::tembra::Result<()> { todo!() }
+                    pub fn quotient(a: u32, b: u32) -> Result<u32, String> { todo!() }
+                }
             }
         }",
     );
@@ -7506,7 +8305,7 @@ fn a_tembra_result_is_the_error_channel_of_a_native_method() {
     ] {
         assert!(wit.contains(expected), "{expected}\n{wit}");
     }
-    let native = native(&module, &[]);
+    let native = native(&module, &["ledger"]);
     for expected in [
         "const __TEMBRA_CODEC_DIVIDE : :: tembra :: Codec < (u32 , u32 ,) , u32 >",
         "const __TEMBRA_CODEC_SETTLE : :: tembra :: Codec < () , () >",
@@ -7527,13 +8326,15 @@ fn a_tembra_result_is_the_error_channel_of_a_native_method() {
     let module = orb_with(
         options("example:tally@1.0.0", Some(&dir)),
         "mod tally {
-            #[service(\"example:counters/counter@1.0.0\")]
-            pub struct Counter;
-            impl Counter { pub fn add(amount: u32) -> tembra::Result<u32> { todo!() } }
+            pub mod counter {
+                #[service(\"example:counters/counter@1.0.0\")]
+                pub struct Counter;
+                impl Counter { pub fn add(amount: u32) -> tembra::Result<u32> { todo!() } }
+            }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
-    let implemented = self::native(&module, &[]);
+    let implemented = self::native(&module, &["counter"]);
     assert!(
         implemented.contains(
             "async move { __tembra_context . check () ? ; Counter :: add (amount) } , __TEMBRA_CODEC_ADD ,"
@@ -7550,10 +8351,12 @@ fn a_tembra_result_is_the_error_channel_of_a_native_method() {
     let refused = refused(
         PACKAGE,
         "mod book {
-            use tembra::Result;
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn divide(a: u32) -> Result<u32> { todo!() } }
+            pub mod ledger {
+                use tembra::Result;
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn divide(a: u32) -> Result<u32> { todo!() } }
+            }
         }",
     );
     assert!(
@@ -7604,9 +8407,12 @@ fn a_type_of_an_implemented_interface_gets_its_codec_from_the_wit() {
                 }
             }
             pub struct Order { pub entry: book::Entry, pub count: u32 }
-            #[service]
-            pub struct Orders;
-            impl Orders { pub fn place(order: Order) -> u32 { 0 } }
+            pub mod orders {
+                use super::Order;
+                #[service]
+                pub struct Orders;
+                impl Orders { pub fn place(order: Order) -> u32 { 0 } }
+            }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
@@ -7659,9 +8465,12 @@ fn a_type_of_an_implemented_interface_gets_its_codec_from_the_wit() {
     let module = orb_with(
         options("example:keeper@1.0.0", Some(&dir)),
         "mod keeper {
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
+            pub mod keeper {
+                use super::book;
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
+            }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
@@ -7709,7 +8518,7 @@ fn a_nested_option_is_refused_wherever_a_method_reaches_it() {
         let error = refused(
             PACKAGE,
             &format!(
-                "mod book {{ {items} #[service] pub struct Ledger; impl Ledger {{ {function} }} }}"
+                "mod book {{ pub mod ledger {{ {items} #[service] pub struct Ledger; impl Ledger {{ {function} }} }} }}"
             ),
         );
         assert!(
@@ -7732,9 +8541,12 @@ fn a_nested_option_in_a_derived_hooks_input_is_refused() {
                 #[hook(composition = series, input = Order)]
                 pub struct Ordered;
                 pub struct Order {{ pub at: {at} }}
-                #[service]
-                pub struct Ledger;
-                impl Ledger {{ pub fn order() {{ Ordered::run(Order {{ at: None }}) }} }}
+                pub mod ledger {{
+                    use super::{{Order, Ordered}};
+                    #[service]
+                    pub struct Ledger;
+                    impl Ledger {{ pub fn order() {{ Ordered::run(Order {{ at: None }}) }} }}
+                }}
             }}"
         )
     };
@@ -7760,11 +8572,14 @@ fn free_json_is_a_string_that_holds_its_text() {
         PACKAGE,
         "mod book {
             pub struct Note { pub title: String, pub body: serde_json::Value }
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn annotated(document: serde_json::Value, notes: Vec<Option<::serde_json::Value>>) -> serde_json::Value { todo!() }
-                pub fn noted(note: Note) -> (Note, serde_json::Value) { todo!() }
+            pub mod ledger {
+                use super::Note;
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn annotated(document: serde_json::Value, notes: Vec<Option<::serde_json::Value>>) -> serde_json::Value { todo!() }
+                    pub fn noted(note: Note) -> (Note, serde_json::Value) { todo!() }
+                }
             }
         }",
     );
@@ -7784,13 +8599,13 @@ fn free_json_is_a_string_that_holds_its_text() {
         "notes . into_iter () . map (| item | item . map (| item | match :: serde_json :: from_str :: < :: serde_json :: Value > (& item) {",
         "match serde_json :: to_string (& Ledger :: annotated (",
         "{ :: core :: result :: Result :: Ok (text) => text , :: core :: result :: Result :: Err (error) => :: core :: panic ! (\"{}\" , error) , }",
-        "fn noted (note : exports :: example :: book :: ledger :: Note) -> (exports :: example :: book :: ledger :: Note , __tembra_alloc :: string :: String ,) {",
+        "fn noted (note : super :: exports :: example :: book :: ledger :: Note) -> (super :: exports :: example :: book :: ledger :: Note , __tembra_alloc :: string :: String ,) {",
         "body : match serde_json :: to_string (& value . body) {",
         "body : match serde_json :: from_str :: < serde_json :: Value > (& value . body) {",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
-    let native = native(&module, &[]);
+    let native = [native(&module, &[]), native(&module, &["ledger"])].join(" ");
     for expected in [
         ":: tembra :: serde_json :: Value :: String (text) => { :: tembra :: serde_json :: from_str :: < serde_json :: Value > (& text) . map_err (| error | :: std :: format ! (\"expected JSON text: {}\" , error)) }",
         "\"expected JSON text as a string\"",
@@ -7803,10 +8618,12 @@ fn free_json_is_a_string_that_holds_its_text() {
     let error = refused(
         PACKAGE,
         "mod book {
-            use serde_json::Value;
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn read(document: Value) {} }
+            pub mod ledger {
+                use serde_json::Value;
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn read(document: Value) {} }
+            }
         }",
     );
     let message = "`Value` is declared outside the Orb module, or in a module the macro does not read: a contract type is declared inside the Orb module, or is a consumed interface's type, named through its module, `greeting::Entry`, or a `use` of it; for free JSON, write it by its path, `serde_json::Value`";
@@ -7846,12 +8663,15 @@ fn a_newtype_is_spelled_as_its_field() {
                     fn from(value: serde_json::Value) -> Self { Self(value) }
                 }
             }
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn add(entry: Entry, codes: Vec<ids::Code>) -> Option<Amount> { todo!() }
-                pub fn tagged(tag: Tagged) -> (ids::Code, u32) { todo!() }
-                pub fn total(document: documents::Document) -> Total { todo!() }
+            pub mod ledger {
+                use super::{Amount, documents, Entry, ids, Tagged, Total};
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn add(entry: Entry, codes: Vec<ids::Code>) -> Option<Amount> { todo!() }
+                    pub fn tagged(tag: Tagged) -> (ids::Code, u32) { todo!() }
+                    pub fn total(document: documents::Document) -> Total { todo!() }
+                }
             }
         }",
     );
@@ -7882,9 +8702,9 @@ fn a_newtype_is_spelled_as_its_field() {
         "impl __TembraNewtype for Total { type Bindings = < Amount as __TembraNewtype > :: Bindings ; fn __tembra_from_bindings (value : Self :: Bindings) -> Self { # [cfg (target_arch = \"wasm32\")] { < Self as __TembraFromField < Amount > > :: __tembra_from_field (< Amount as __TembraNewtype > :: __tembra_from_bindings (value)) }",
         "impl super :: __TembraNewtype for Document { type Bindings = __tembra_alloc :: string :: String ;",
         // The bridges spell a newtype as the bindings' type of its field and convert it.
-        "fn add (entry : exports :: example :: book :: ledger :: Entry , codes : Vec < < ids :: Code as __TembraNewtype > :: Bindings >) -> Option < < Amount as __TembraNewtype > :: Bindings > {",
-        "codes . into_iter () . map (| item | < ids :: Code as __TembraNewtype > :: __tembra_from_bindings (item)) . collect ()",
-        "fn tagged (tag : < Tagged as __TembraNewtype > :: Bindings) -> (< ids :: Code as __TembraNewtype > :: Bindings , u32 ,) {",
+        "fn add (entry : super :: exports :: example :: book :: ledger :: Entry , codes : Vec < < ids :: Code as super :: __TembraNewtype > :: Bindings >) -> Option < < Amount as super :: __TembraNewtype > :: Bindings > {",
+        "codes . into_iter () . map (| item | < ids :: Code as super :: __TembraNewtype > :: __tembra_from_bindings (item)) . collect ()",
+        "fn tagged (tag : < Tagged as super :: __TembraNewtype > :: Bindings) -> (< ids :: Code as super :: __TembraNewtype > :: Bindings , u32 ,) {",
         // A record holding a newtype stays the author's, converted field by field.
         "code : < ids :: Code as __TembraNewtype > :: __tembra_into_bindings (value . code)",
         "code : < ids :: Code as __TembraNewtype > :: __tembra_from_bindings (value . code)",
@@ -7925,9 +8745,11 @@ fn a_newtype_is_spelled_as_its_field() {
         PACKAGE,
         "mod book {
             struct Dropped(core::cell::Cell<u32>);
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn count() -> u32 { 0 } }
+            pub mod ledger {
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn count() -> u32 { 0 } }
+            }
         }",
     );
     assert!(!tokens(&module).contains("__TembraNewtype"));
@@ -7937,9 +8759,12 @@ fn a_newtype_is_spelled_as_its_field() {
             pub mod a { pub struct Code(pub String); }
             pub mod b { pub struct Code { pub text: String } }
             pub use b::Code;
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn add(code: Code) {} }
+            pub mod ledger {
+                use super::Code;
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn add(code: Code) {} }
+            }
         }",
     );
     let wit = self::wit(&module);
@@ -7972,7 +8797,7 @@ fn what_a_newtype_cannot_be_is_refused() {
         let error = refused(
             PACKAGE,
             &format!(
-                "mod book {{ {resource} {items} #[service] pub struct Ledger; impl Ledger {{ {function} }} }}"
+                "mod book {{ pub mod ledger {{ {resource} {items} #[service] pub struct Ledger; impl Ledger {{ {function} }} }} }}"
             ),
         );
         assert!(error.contains(message), "{message}\n{error}");
@@ -7990,20 +8815,23 @@ fn free_json_and_a_newtype_cross_beside_a_resource_and_into_a_derived_hook() {
     let module = expanded(
         PACKAGE,
         "mod book {
-            #[wit_resource]
-            pub struct Ticket;
-            impl Ticket { #[constructor] pub fn new() -> Self { Ticket } }
             pub struct Code(String);
             pub struct Event { pub data: serde_json::Value, pub code: Code }
             #[hook(composition = bail, input = Event)]
             pub struct Audit;
             #[hook(composition = waterfall, input = Code)]
             pub struct Coded;
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn issue() -> (Ticket, Code) { todo!() }
-                pub fn noted() -> (Ticket, serde_json::Value) { todo!() }
+            pub mod ledger {
+                use super::Code;
+                #[wit_resource]
+                pub struct Ticket;
+                impl Ticket { #[constructor] pub fn new() -> Self { Ticket } }
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn issue() -> (Ticket, Code) { todo!() }
+                    pub fn noted() -> (Ticket, serde_json::Value) { todo!() }
+                }
             }
         }",
     );
@@ -8016,11 +8844,11 @@ fn free_json_and_a_newtype_cross_beside_a_resource_and_into_a_derived_hook() {
         assert!(wit.contains(expected), "{expected}\n{wit}");
     }
     let generated = tokens(&module);
-    let ledger = "exports :: example :: book :: ledger";
+    let ledger = "super :: exports :: example :: book :: ledger";
     let import = "self :: example :: book :: audit";
     let into = ":: core :: convert :: Into :: into";
     for expected in [
-        format!("fn issue () -> ({ledger} :: Ticket , < Code as __TembraNewtype > :: Bindings ,) {{ {{ let (item0 , item1 ,) = Ledger :: issue () ; ({ledger} :: Ticket :: new (item0) , < Code as __TembraNewtype > :: __tembra_into_bindings (item1) ,) }} }}"),
+        format!("fn issue () -> ({ledger} :: Ticket , < Code as super :: __TembraNewtype > :: Bindings ,) {{ {{ let (item0 , item1 ,) = Ledger :: issue () ; ({ledger} :: Ticket :: new (item0) , < Code as super :: __TembraNewtype > :: __tembra_into_bindings (item1) ,) }} }}"),
         format!("fn noted () -> ({ledger} :: Ticket , __tembra_alloc :: string :: String ,) {{ {{ let (item0 , item1 ,) = Ledger :: noted () ; ({ledger} :: Ticket :: new (item0) , match serde_json :: to_string (& item1) {{"),
         format!("impl :: core :: convert :: From < Event > for {import} :: Event {{ fn from (value : Event) -> Self {{ Self {{ data : match serde_json :: to_string (& value . data) {{"),
         "code : < Code as __TembraNewtype > :: __tembra_into_bindings (value . code) } } }".to_owned(),
@@ -8045,15 +8873,24 @@ fn a_codec_is_declared_inside_the_registration_of_its_service() {
     let module = expanded(
         PACKAGE,
         "mod book {
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn count_words(text: String) -> u32 { 0 } }
-            #[service]
-            pub struct LedgerCount;
-            impl LedgerCount { pub fn words(text: String) -> u64 { 0 } }
+            pub mod ledger {
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn count_words(text: String) -> u32 { 0 } }
+            }
+            pub mod ledger_count {
+                #[service]
+                pub struct LedgerCount;
+                impl LedgerCount { pub fn words(text: String) -> u64 { 0 } }
+            }
         }",
     );
-    let native = native(&module, &[]);
+    let native = [
+        native(&module, &[]),
+        native(&module, &["ledger"]),
+        native(&module, &["ledger_count"]),
+    ]
+    .join(" ");
     let items = syn::parse_str::<syn::File>(&native).unwrap().items;
     let names: Vec<String> = items
         .iter()
@@ -8061,8 +8898,9 @@ fn a_codec_is_declared_inside_the_registration_of_its_service() {
             Item::Fn(function) => vec![function.sig.ident.to_string()],
             Item::Const(constant) => vec![constant.ident.to_string()],
             Item::Impl(implementation)
-                if quote::ToTokens::to_token_stream(&implementation.self_ty).to_string()
-                    == "__TembraRegistry < 0 >" =>
+                if quote::ToTokens::to_token_stream(&implementation.self_ty)
+                    .to_string()
+                    .starts_with("super :: __TembraRegistry <") =>
             {
                 implementation
                     .items
@@ -8112,11 +8950,14 @@ fn each_type_of_the_module_gets_its_json() {
             pub enum Mark { Dot, Cross(shapes::Point), Label { text: String, at: shapes::Point } }
             pub struct Pen { pub filled: bool, pub dashed_line: bool }
             pub enum Glyph { Blank, Stroke(Pen) }
-            #[service]
-            pub struct Ledger;
-            impl Ledger {
-                pub fn place(mark: Mark, heading: shapes::Heading) -> Result<shapes::Point, String> { todo!() }
-                pub fn draw(glyph: Glyph) -> Result<(), ()> { todo!() }
+            pub mod ledger {
+                use super::{Glyph, Mark, shapes};
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn place(mark: Mark, heading: shapes::Heading) -> Result<shapes::Point, String> { todo!() }
+                    pub fn draw(glyph: Glyph) -> Result<(), ()> { todo!() }
+                }
             }
         }",
     );
@@ -8137,13 +8978,19 @@ fn each_type_of_the_module_gets_its_json() {
         "impl __TembraBoundary for Glyph {",
         "Self :: Stroke (item) =>",
         "< Pen as __TembraBoundary > :: encode (item) ?",
-        // The methods' codecs, through the trait, as the method names the types.
-        "< Mark as __TembraBoundary > :: decode (__tembra_0) ?",
-        "< shapes :: Heading as __TembraBoundary > :: decode (__tembra_1) ?",
-        ":: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: < :: tembra :: serde_json :: Value , :: std :: string :: String > :: Ok (:: tembra :: serde_json :: Value :: Object (:: core :: iter :: FromIterator :: from_iter ([(:: std :: string :: String :: from (\"tag\") , :: tembra :: serde_json :: Value :: String (:: std :: string :: String :: from (\"ok\")) ,) , (:: std :: string :: String :: from (\"val\") , < shapes :: Point as __TembraBoundary > :: encode (item) ?) ,])))",
-        ":: core :: result :: Result :: Err (()) => :: core :: result :: Result :: < :: tembra :: serde_json :: Value , :: std :: string :: String > :: Ok (:: tembra :: serde_json :: Value :: Object (:: core :: iter :: FromIterator :: from_iter ([(:: std :: string :: String :: from (\"tag\") , :: tembra :: serde_json :: Value :: String (:: std :: string :: String :: from (\"err\")) ,) ,])))",
     ] {
         assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let ledger = native(&module, &["ledger"]);
+    for expected in [
+        // The methods' codecs, in the service's module, through the trait, as the method names
+        // the types.
+        "< Mark as super :: __TembraBoundary > :: decode (__tembra_0) ?",
+        "< shapes :: Heading as super :: __TembraBoundary > :: decode (__tembra_1) ?",
+        ":: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: < :: tembra :: serde_json :: Value , :: std :: string :: String > :: Ok (:: tembra :: serde_json :: Value :: Object (:: core :: iter :: FromIterator :: from_iter ([(:: std :: string :: String :: from (\"tag\") , :: tembra :: serde_json :: Value :: String (:: std :: string :: String :: from (\"ok\")) ,) , (:: std :: string :: String :: from (\"val\") , < shapes :: Point as super :: __TembraBoundary > :: encode (item) ?) ,])))",
+        ":: core :: result :: Result :: Err (()) => :: core :: result :: Result :: < :: tembra :: serde_json :: Value , :: std :: string :: String > :: Ok (:: tembra :: serde_json :: Value :: Object (:: core :: iter :: FromIterator :: from_iter ([(:: std :: string :: String :: from (\"tag\") , :: tembra :: serde_json :: Value :: String (:: std :: string :: String :: from (\"err\")) ,) ,])))",
+    ] {
+        assert!(ledger.contains(expected), "{expected}\n{ledger}");
     }
     for expected in [
         // The bindings' record, by the bindings' fields and lowerCamelCase keys.
@@ -8169,12 +9016,14 @@ fn a_float_crosses_only_when_finite_and_no_negative_zero() {
     let module = expanded(
         PACKAGE,
         "mod book {
-            #[service]
-            pub struct Ledger;
-            impl Ledger { pub fn ratio(a: f32, b: f64) -> f32 { 0.0 } }
+            pub mod ledger {
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn ratio(a: f32, b: f64) -> f32 { 0.0 } }
+            }
         }",
     );
-    let native = native(&module, &[]);
+    let native = native(&module, &["ledger"]);
     for expected in [
         "match __tembra_0 { :: tembra :: serde_json :: Value :: Number (number) => match number . as_f64 () { :: core :: option :: Option :: Some (wide) if (wide . is_finite () && ! (wide == 0.0 && wide . is_sign_negative ())) => { let narrow = wide as f32 ; if (narrow . is_finite () && ! (narrow == 0.0 && narrow . is_sign_negative ())) { :: core :: result :: Result :: Ok (narrow) } else { :: core :: result :: Result :: Err (:: std :: format ! (\"expected a finite f32 other than -0, got {}\" , number)) } }",
         "item => :: tembra :: serde_json :: from_value :: < f32 > (item) . map_err (| error | error . to_string ()) ,",
@@ -8191,7 +9040,7 @@ fn a_float_crosses_only_when_finite_and_no_negative_zero() {
 /// hold, and no type of the WIT. In a sub-module, the Orb module names it by its path.
 #[test]
 fn the_inputs_are_the_argument_of_orb() {
-    let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    let service = "pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }";
     let module = expanded(
         PACKAGE,
         &format!(
@@ -8236,7 +9085,7 @@ fn the_inputs_are_the_argument_of_orb() {
 /// module can name.
 #[test]
 fn inputs_are_refused_when_ill_formed() {
-    let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    let service = "pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }";
     for (items, message) in [
         (
             "#[inputs] pub struct Lent { pub a: u32 } #[inputs] pub struct Borrowed { pub b: u32 }",
@@ -8270,35 +9119,50 @@ fn a_service_with_a_create_is_built_by_it() {
         "mod book {
             #[inputs]
             pub struct Inputs { pub base: u32 }
-            #[service]
-            pub struct Ledger { base: u32 }
-            impl Ledger {
-                #[create]
-                fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-                    Ok(Self { base: inputs.base })
+            pub mod ledger {
+                use super::Inputs;
+                #[service]
+                pub struct Ledger { base: u32 }
+                impl Ledger {
+                    #[create]
+                    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                        Ok(Self { base: inputs.base })
+                    }
+                    pub fn count(&self) -> u32 { self.base }
+                    pub async fn total(&self, extra: u32) -> u32 { self.base + extra }
+                    pub fn zero() -> u32 { 0 }
                 }
-                pub fn count(&self) -> u32 { self.base }
-                pub async fn total(&self, extra: u32) -> u32 { self.base + extra }
-                pub fn zero() -> u32 { 0 }
             }
-            #[service]
-            pub struct Plain;
-            impl Plain { pub fn one() -> u32 { 1 } }
+            pub mod plain {
+                #[service]
+                pub struct Plain;
+                impl Plain { pub fn one() -> u32 { 1 } }
+            }
         }",
     );
     let root = native(&module, &[]);
     for expected in [
         "pub fn orb (inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"book\" , 1u32 , inputs) }",
-        "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . service (self :: __TembraRegistry :: < 0 > :: __tembra_service_ledger (name , & inputs)) . service (self :: __TembraRegistry :: < 0 > :: __tembra_service_plain (name))) }",
-        "pub (crate) fn __tembra_service_ledger (orb : & str , inputs : & :: std :: rc :: Rc < Inputs >) -> :: tembra :: Service < Ledger > { const __TEMBRA_CODEC_COUNT :",
+        "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . service (self :: __TembraRegistry :: < 1 > :: __tembra_service_ledger (name , & inputs)) . service (self :: __TembraRegistry :: < 2 > :: __tembra_service_plain (name))) }",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let ledger = native(&module, &["ledger"]);
+    for expected in [
+        "pub (crate) fn __tembra_service_ledger (orb : & str , inputs : & :: std :: rc :: Rc < super :: Inputs >) -> :: tembra :: Service < Ledger > { const __TEMBRA_CODEC_COUNT :",
         "} ; let inputs = :: std :: rc :: Rc :: clone (inputs) ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , move | declaration | Ledger :: create (& inputs , & declaration))",
         ". method_with (\"count\" , | __tembra_self : :: std :: rc :: Rc < Ledger > , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count (& * __tembra_self)) } , __TEMBRA_CODEC_COUNT ,)",
         ":: core :: result :: Result :: Ok (Ledger :: total (& * __tembra_self , extra) . await)",
         ". method_with (\"zero\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: zero ()) } , __TEMBRA_CODEC_ZERO ,)",
+    ] {
+        assert!(ledger.contains(expected), "{expected}\n{ledger}");
+    }
+    let plain = native(&module, &["plain"]);
+    for expected in [
         "pub (crate) fn __tembra_service_plain (orb : & str) -> :: tembra :: Service < () > { const __TEMBRA_CODEC_ONE :",
         "} ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/plain@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) })",
     ] {
-        assert!(root.contains(expected), "{expected}\n{root}");
+        assert!(plain.contains(expected), "{expected}\n{plain}");
     }
     let derived = wit(&module);
     assert!(
@@ -8307,7 +9171,7 @@ fn a_service_with_a_create_is_built_by_it() {
     );
     let tokens = tokens(&module);
     assert!(
-        tokens.contains("impl exports :: example :: book :: plain :: Guest for __TembraExports"),
+        tokens.contains("impl super :: exports :: example :: book :: plain :: Guest for super :: __TembraExports"),
         "{tokens}"
     );
     assert!(!tokens.contains(":: ledger :: Guest for"), "{tokens}");
@@ -8363,56 +9227,56 @@ fn a_create_is_refused_when_ill_formed() {
     for (items, message) in [
         (
             format!(
-                "#[service] pub struct Ledger; impl Ledger {{ {create} pub fn count() -> u32 {{ 0 }} }}"
+                "pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ {create} pub fn count() -> u32 {{ 0 }} }} }}"
             ),
             "`Ledger::create` is marked #[create], which takes the Orb's inputs: mark the struct `orb(..)` takes #[inputs]",
         ),
         (
             format!(
-                "{inputs} #[service] pub struct Ledger; impl Ledger {{ #[create] async fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }}"
+                "{inputs} pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ #[create] async fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }} }}"
             ),
             "#[create] marks `fn(&Inputs, &Declaration) -> tembra::Result<Self>` of a #[service] struct",
         ),
         (
             format!(
-                "{inputs} #[service] pub struct Ledger; impl Ledger {{ #[create] fn create(inputs: Inputs, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }}"
+                "{inputs} pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ #[create] fn create(inputs: Inputs, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }} }}"
             ),
             "#[create] marks `fn(&Inputs, &Declaration) -> tembra::Result<Self>` of a #[service] struct",
         ),
         (
             format!(
-                "{inputs} #[service] pub struct Ledger; impl Ledger {{ #[create] fn create(&self, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }}"
+                "{inputs} pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ #[create] fn create(&self, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }} }}"
             ),
             "#[create] marks `fn(&Inputs, &Declaration) -> tembra::Result<Self>` of a #[service] struct",
         ),
         (
             format!(
-                "{inputs} #[service] pub struct Ledger; impl Ledger {{ {create} {} pub fn count() -> u32 {{ 0 }} }}",
+                "{inputs} pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ {create} {} pub fn count() -> u32 {{ 0 }} }} }}",
                 create.replace("fn create", "fn build")
             ),
             "`Ledger` has two functions marked #[create]",
         ),
         (
             format!(
-                "{inputs} pub struct Other; impl Other {{ {create} }} #[service] pub struct Ledger; impl Ledger {{ pub fn count() -> u32 {{ 0 }} }}"
+                "{inputs} pub struct Other; impl Other {{ {create} }} pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ pub fn count() -> u32 {{ 0 }} }} }}"
             ),
             "#[create] marks a function of a #[service] struct; `Other` is not one",
         ),
         (
             format!(
-                "{inputs} #[service] pub struct Ledger {{ base: u32 }} impl Ledger {{ pub fn count() -> u32 {{ 0 }} }}"
+                "{inputs} pub mod ledger {{ #[service] pub struct Ledger {{ base: u32 }} impl Ledger {{ pub fn count() -> u32 {{ 0 }} }} }}"
             ),
             "`Ledger` has fields, which a #[create] builds: give it a function marked #[create], `fn(&Inputs, &Declaration) -> tembra::Result<Self>`, or make it a unit struct",
         ),
         (
             format!(
-                "{inputs} #[service] pub struct Ledger; impl Ledger {{ pub fn count(&self) -> u32 {{ 0 }} }}"
+                "{inputs} pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ pub fn count(&self) -> u32 {{ 0 }} }} }}"
             ),
             "`Ledger::count` borrows `&self`, which a #[create] builds: give `Ledger` a function marked #[create], or remove self",
         ),
         (
             format!(
-                "{inputs} #[service] pub struct Ledger; impl Ledger {{ {create} pub fn count(&mut self) -> u32 {{ 0 }} }}"
+                "{inputs} pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ {create} pub fn count(&mut self) -> u32 {{ 0 }} }} }}"
             ),
             "a method borrows `&self`; change the service through Cell or RefCell",
         ),
@@ -8431,7 +9295,7 @@ fn an_address_guard_refuses_another_key_or_principal() {
     let key = "if address . key != [\"main\"] { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: Code :: Forbidden , \"key\" , \"the objects of example:book/ledger@1.0.0 use the key main\")) ; }";
     let principal = "if address . principal != \"host\" { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: Code :: Forbidden , \"principal\" , \"the objects of example:book/ledger@1.0.0 belong to the principal host\")) ; }";
     let module = expanded(PACKAGE, &ledger("#[service(key = main)]"));
-    let generated = native(&module, &[]);
+    let generated = native(&module, &["ledger"]);
     assert!(
         generated.contains(&format!(
             ":: tembra :: Service :: new (:: std :: format ! (\"{{}}::{{}}\" , orb , \"example:book/ledger@1.0.0\") , | declaration | {{ let address = declaration . address () ? ; {key} :: core :: result :: Result :: Ok (()) }})"
@@ -8442,7 +9306,7 @@ fn an_address_guard_refuses_another_key_or_principal() {
     assert_eq!(wit(&module), wit(&expanded(PACKAGE, &ledger("#[service]"))));
     assert_eq!(manifest(&module), None);
     let module = expanded(PACKAGE, &ledger("#[service(principal = \"host\")]"));
-    let generated = native(&module, &[]);
+    let generated = native(&module, &["ledger"]);
     assert!(
         generated.contains(&format!(
             "| declaration | {{ let address = declaration . address () ? ; {principal} :: core :: result :: Result :: Ok (()) }}"
@@ -8456,18 +9320,21 @@ fn an_address_guard_refuses_another_key_or_principal() {
         "mod book {
             #[inputs]
             pub struct Inputs { pub base: u32 }
-            #[service(key = main, principal = \"host\", lifetime = host)]
-            pub struct Ledger { base: u32 }
-            impl Ledger {
-                #[create]
-                fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-                    Ok(Self { base: inputs.base })
+            pub mod ledger {
+                use super::Inputs;
+                #[service(key = main, principal = \"host\", lifetime = host)]
+                pub struct Ledger { base: u32 }
+                impl Ledger {
+                    #[create]
+                    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                        Ok(Self { base: inputs.base })
+                    }
+                    pub fn count(&self) -> u32 { self.base }
                 }
-                pub fn count(&self) -> u32 { self.base }
             }
         }",
     );
-    let generated = native(&module, &[]);
+    let generated = native(&module, &["ledger"]);
     for expected in [
         format!(
             "move | declaration | {{ let address = declaration . address () ? ; {key} {principal} Ledger :: create (& inputs , & declaration) }}"
@@ -8499,7 +9366,7 @@ fn a_host_lifetime_guards_no_other_principal() {
         PACKAGE,
         &ledger("#[service(lifetime = host, principal = \"host\")]"),
     );
-    let generated = native(&module, &[]);
+    let generated = native(&module, &["ledger"]);
     assert!(
         generated.contains("if address . principal != \"host\""),
         "{generated}"
@@ -8514,7 +9381,7 @@ fn a_host_lifetime_guards_no_other_principal() {
 /// sub-module the Orb module cannot see runs all the same.
 #[test]
 fn the_root_is_the_create_of_the_orb() {
-    let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    let service = "pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }";
     let module = expanded(
         PACKAGE,
         &format!(
@@ -8533,7 +9400,7 @@ fn the_root_is_the_create_of_the_orb() {
     let root = native(&module, &[]);
     assert!(
         root.contains(
-            "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: __TembraRegistry :: < 0 > :: __tembra_root (& inputs , & declaration) }) . service (self :: __TembraRegistry :: < 0 > :: __tembra_service_ledger (name))) }"
+            "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: __TembraRegistry :: < 0 > :: __tembra_root (& inputs , & declaration) }) . service (self :: __TembraRegistry :: < 1 > :: __tembra_service_ledger (name))) }"
         ),
         "{root}"
     );
@@ -8636,7 +9503,7 @@ fn a_root_is_refused_when_ill_formed() {
         let error = refused(
             PACKAGE,
             &format!(
-                "mod book {{ {items} #[service] pub struct Ledger; impl Ledger {{ pub fn count() -> u32 {{ 0 }} }} }}"
+                "mod book {{ {items} pub mod ledger {{ #[service] pub struct Ledger; impl Ledger {{ pub fn count() -> u32 {{ 0 }} }} }} }}"
             ),
         );
         assert_eq!(error, message, "{items}");
@@ -8649,18 +9516,21 @@ const NATIVE_ONLY: &str = "mod book {
     pub struct Inputs { pub base: u32 }
     #[root]
     fn shared(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<u32> { Ok(0) }
-    #[service(key = main, principal = \"host\")]
-    pub struct Ledger { base: u32 }
-    impl Ledger {
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-            Ok(Self { base: inputs.base })
+    pub mod ledger {
+        use super::Inputs;
+        #[service(key = main, principal = \"host\")]
+        pub struct Ledger { base: u32 }
+        impl Ledger {
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                Ok(Self { base: inputs.base })
+            }
+            pub fn count(&self) -> u32 { self.base }
+            pub fn owner(context: &Context) -> String { String::new() }
+            pub fn divide(a: u32, b: u32) -> tembra::Result<u32> { Ok(a / b) }
+            #[local]
+            pub fn rewind(&self) {}
         }
-        pub fn count(&self) -> u32 { self.base }
-        pub fn owner(context: &Context) -> String { String::new() }
-        pub fn divide(a: u32, b: u32) -> tembra::Result<u32> { Ok(a / b) }
-        #[local]
-        pub fn rewind(&self) {}
     }
 }";
 
@@ -8707,13 +9577,17 @@ fn a_component_build_refuses_each_marker_of_a_native_only_module() {
         quote::quote!(#[cfg(target_arch = "wasm32")] ::core::compile_error!(#message);).to_string()
     };
     let inputs = "#[inputs] pub struct Inputs { pub base: u32 }";
-    let count = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
-    let create = "#[service] pub struct Ledger { base: u32 } impl Ledger {
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-            Ok(Self { base: inputs.base })
+    let count = "pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }";
+    let create = "pub mod ledger {
+        use super::Inputs;
+        #[service] pub struct Ledger { base: u32 }
+        impl Ledger {
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                Ok(Self { base: inputs.base })
+            }
+            pub fn count(&self) -> u32 { self.base }
         }
-        pub fn count(&self) -> u32 { self.base }
     }";
     let root = "#[root] fn shared(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<u32> { Ok(0) }";
     let method = |method: &str| count.replace("pub fn count() -> u32 { 0 }", method);
@@ -8843,9 +9717,13 @@ fn a_native_only_module_may_only_run_its_root() {
 /// without a create, still has a method.
 #[test]
 fn a_native_only_service_may_have_no_method() {
-    let porter = "#[service] pub struct Porter; impl Porter {
-        #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> { Ok(Self) }
+    let porter = "pub mod porter {
+        use super::Inputs;
+        #[service] pub struct Porter;
+        impl Porter {
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> { Ok(Self) }
+        }
     }";
     let module = expanded(
         PACKAGE,
@@ -8854,14 +9732,14 @@ fn a_native_only_service_may_have_no_method() {
     let derived = wit(&module);
     assert!(derived.contains("interface porter {\n}"), "{derived}");
     assert!(derived.contains("  export porter;\n"), "{derived}");
-    let root = native(&module, &[]);
+    let porter = native(&module, &["porter"]);
     assert!(
-        root.contains(
+        porter.contains(
             ":: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/porter@1.0.0\") , move | declaration | Porter :: create (& inputs , & declaration)) }"
         ),
-        "{root}"
+        "{porter}"
     );
-    assert!(!root.contains("method_with"), "{root}");
+    assert!(!porter.contains("method_with"), "{porter}");
     assert!(
         !tokens(&module).contains("SIGNATURE"),
         "{}",
@@ -8870,7 +9748,7 @@ fn a_native_only_service_may_have_no_method() {
     assert_eq!(
         refused(
             PACKAGE,
-            "mod book { #[service] pub struct Ledger; impl Ledger {} }"
+            "mod book { pub mod ledger { #[service] pub struct Ledger; impl Ledger {} } }"
         ),
         "a service needs at least one pub fn in an impl block"
     );
@@ -8878,7 +9756,7 @@ fn a_native_only_service_may_have_no_method() {
     assert_eq!(
         refused(
             PACKAGE,
-            "mod book { #[inputs] pub struct Inputs { pub base: u32 } #[service] pub struct Ledger; impl Ledger {} }"
+            "mod book { #[inputs] pub struct Inputs { pub base: u32 } pub mod ledger { #[service] pub struct Ledger; impl Ledger {} } }"
         ),
         "a service needs at least one pub fn in an impl block, or a function marked #[create] that declares what its objects run"
     );
@@ -9043,21 +9921,27 @@ interface counter {
     let module = expanded_with(
         options,
         "mod keeper {
-            #[state(service = Keeper)]
-            pub struct Kept { pub total: i64, pub last: Option<reports::Report> }
-            #[service(\"example:ledger/book@1.0.0\")]
-            pub struct Keeper;
-            impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
+            pub mod keeper {
+                use super::{book, reports};
+                #[state]
+                pub struct Kept { pub total: i64, pub last: Option<reports::Report> }
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
+            }
             #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
             pub fn admit(input: guard::Admission) -> guard::Admission { input }
-            #[service]
-            pub struct Report;
-            impl Report {
-                pub fn latest() -> reports::Report { reports::latest() }
-                pub async fn bump(key: String) -> Result<u32, String> {
-                    Ok(counter_ref::get(vec![key]).await?.add(1))
+            pub mod report {
+                use super::{counter_ref, random, reports};
+                #[service]
+                pub struct Report;
+                impl Report {
+                    pub fn latest() -> reports::Report { reports::latest() }
+                    pub async fn bump(key: String) -> Result<u32, String> {
+                        Ok(counter_ref::get(vec![key]).await?.add(1))
+                    }
+                    pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
                 }
-                pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
             }
         }",
     );
@@ -9121,9 +10005,11 @@ interface counter {
         "mod keeper {
             #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
             pub fn admit(input: guard::Admission) -> guard::Admission { input }
-            #[service]
-            pub struct Report;
-            impl Report { pub fn count() -> u32 { 0 } }
+            pub mod report {
+                #[service]
+                pub struct Report;
+                impl Report { pub fn count() -> u32 { 0 } }
+            }
         }",
     );
     assert_eq!(
@@ -9156,12 +10042,15 @@ fn every_reader_of_the_bundled_packages_takes_them_parsed_once() {
     let module = expanded_with(
         options,
         "mod watch {
-            #[state(service = Clock)]
-            pub struct Seen { pub last: Option<system_clock::Instant> }
-            #[service]
-            pub struct Clock;
-            impl Clock {
-                pub fn seconds() -> i64 { system_clock::now().seconds }
+            pub mod clock {
+                use super::system_clock;
+                #[state]
+                pub struct Seen { pub last: Option<system_clock::Instant> }
+                #[service]
+                pub struct Clock;
+                impl Clock {
+                    pub fn seconds() -> i64 { system_clock::now().seconds }
+                }
             }
         }",
     );

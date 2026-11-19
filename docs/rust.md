@@ -27,16 +27,22 @@ tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
 ```rust,ignore
 #[tembra::orb(package = "example:greeting@1.0.0")]
 mod greeting {
-    #[service]
-    pub struct Api;
+    pub mod api {
+        #[service]
+        pub struct Api;
 
-    impl Api {
-        pub fn hello(name: String) -> String {
-            format!("Hello, {name}!")
+        impl Api {
+            pub fn hello(name: String) -> String {
+                format!("Hello, {name}!")
+            }
         }
     }
 }
 ```
+
+Each service lives in a module of its own, with its `#[state]` and its `#[wit_resource]` structs;
+the Orb's own items, such as a root `#[resource]` or a `#[hook]`, stay outside every service's
+module.
 
 The macro uses `std` by default. A freestanding guest uses `#![no_std]`, the `no_std` macro
 option and `dlmalloc`; see the [macro guide](../crates/orb-macro/README.md). The `macros`
@@ -155,7 +161,9 @@ for other orbs to contribute to; see
 can read the call's principal, the object's address and write to the host's log through the
 kernel's context interface, see [the Rust context example](../examples/rust-orb-context/README.md),
 and each service can choose the lifetime of its objects, see
-[the Rust service lifetime example](../examples/rust-orb-service-lifetime/README.md). A service
+[the Rust service lifetime example](../examples/rust-orb-service-lifetime/README.md), and give each
+of them resources of their own, opened and closed with the object, see
+[the Rust service resource example](../examples/rust-orb-service-resource/README.md). A service
 can implement an interface of a shared WIT package instead of deriving one, see
 [the Rust shared interface example](../examples/rust-orb-shared-interface/README.md), import
 another orb's interface and call it, see

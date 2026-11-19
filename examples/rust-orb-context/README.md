@@ -19,12 +19,16 @@ different principals with different keys.
 ```rust
 #[tembra::orb(package = "example:audit@1.0.0", context)]
 mod audit {
-    impl Auditor {
-        /// The call's principal and the address of the object running it; a log record too.
-        pub fn whoami() -> Caller {
-            let object = context::object();
-            context::log(context::Level::Info, "whoami was asked");
-            Caller { principal: context::principal(), key: object.key, owner: object.principal }
+    pub mod auditor {
+        use super::{Caller, context};
+
+        impl Auditor {
+            /// The call's principal and the address of the object running it; a log record too.
+            pub fn whoami() -> Caller {
+                let object = context::object();
+                context::log(context::Level::Info, "whoami was asked");
+                Caller { principal: context::principal(), key: object.key, owner: object.principal }
+            }
         }
     }
 }

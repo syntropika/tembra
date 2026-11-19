@@ -3,7 +3,7 @@ mod walk {
     pub mod a {
         pub mod b {
             mod c {
-                #[wit_resource(service = Walker)]
+                #[wit_resource]
                 pub struct Pen {
                     pub ink: u32,
                 }
