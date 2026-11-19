@@ -23,6 +23,7 @@ import { encode, Encoded } from "../src/interpreter/codec.ts";
 import { ComponentPort } from "../src/interpreter/component/port.ts";
 import type { Session } from "../src/runtime/session.ts";
 import type { ReferenceRecord } from "../src/runtime/records.ts";
+import { contract, host, type Compiled } from "./compiled-components.ts";
 
 const binding = "test:resources/sessions@1.0.0";
 const nominal = { interface: binding, name: "session" };
@@ -400,6 +401,82 @@ describe("nested capability result admission", () => {
       expect(second.destroyed()).toBe(1);
       expect(importedResources.size).toBe(0);
       if (variant === "mistyped") Object.assign(second.owner.nominal, nominal);
+    }
+  });
+});
+
+const CHAIN = `package test:chain@1.0.0;
+interface probe {
+  ping: func() -> u32;
+}
+world chain {
+  import tembra:guest/resources@1.0.0;
+  export tembra:guest/resources-init@1.0.0;
+  export probe;
+}`;
+
+/** A compiled Orb whose root lists `declarations` and records each open and close in `events`. */
+const chain = async (
+  declarations: readonly { name: string; dependencies: string[] }[],
+  events: string[],
+): Promise<Compiled> => ({
+  name: "chain",
+  contract: await contract(CHAIN, "chain"),
+  component: () => ({
+    "tembra:guest/resources-init@1.0.0": {
+      declare: () => declarations.map((declaration) => ({ ...declaration, version: 1 })),
+      open: (name: string) => {
+        events.push(`open ${name}`);
+        return 0;
+      },
+      close: (name: string) => void events.push(`close ${name}`),
+    },
+    "test:chain/probe@1.0.0": { ping: () => 0 },
+  }),
+});
+
+describe("dependencies of a compiled Orb's root resources", () => {
+  test("`c` depends on `b`, `b` on `a`: they open `a`, `b`, `c` and close `c`, `b`, `a`", async () => {
+    const events: string[] = [];
+    const owner = host([
+      await chain(
+        [
+          { name: "a", dependencies: [] },
+          { name: "b", dependencies: ["a"] },
+          { name: "c", dependencies: ["b"] },
+        ],
+        events,
+      ),
+    ]);
+    await owner.install({ artifact: Uint8Array.of(0) });
+    const probe = await owner.get("chain::test:chain/probe@1.0.0", "main");
+    expect(await probe.ping()).toBe(0);
+    probe.release();
+    await owner.close();
+    expect(events).toEqual(["open a", "open b", "open c", "close c", "close b", "close a"]);
+    expect(owner.errors()).toEqual([]);
+  });
+
+  test("a dependency not declared before its resource refuses the Orb, naming both", async () => {
+    const events: string[] = [];
+    const owner = host([
+      await chain(
+        [
+          { name: "a", dependencies: [] },
+          { name: "b", dependencies: ["c"] },
+          { name: "c", dependencies: [] },
+        ],
+        events,
+      ),
+    ]);
+    try {
+      const installed = owner
+        .install({ artifact: Uint8Array.of(0) })
+        .then(() => owner.get("chain::test:chain/probe@1.0.0", "main"));
+      await expect(installed).rejects.toThrow("the resource `b` depends on `c`");
+      expect(events).toEqual([]);
+    } finally {
+      await owner.close();
     }
   });
 });

@@ -223,17 +223,32 @@ export class ComponentKernel {
         if (!list) return;
         const declared = await this.#call(environment, callback, list, []);
         if (!Array.isArray(declared)) throw new Error("The resource declarations are not a list");
-        for (const resource of declared as { name?: unknown; version?: unknown }[]) {
-          const { name, version } = resource;
+        // Each resource follows the resources it depends on, so each dependency's name maps to
+        // the id the kernel already gave it.
+        type Listed = { name?: unknown; version?: unknown; dependencies?: unknown };
+        for (const resource of declared as Listed[]) {
+          const { name, version, dependencies: names } = resource;
           if (typeof name !== "string") throw new Error("A resource declaration carries no name");
           if (!isU32(version)) throw new Error("A resource declaration carries no version");
+          if (!Array.isArray(names))
+            throw new Error("A resource declaration carries no dependencies");
+          const dependencies = names.map((dependency: unknown) => {
+            if (typeof dependency !== "string")
+              throw new Error("A resource dependency is not a name");
+            const id = table.resources.get(dependency);
+            if (id === undefined)
+              throw new Error(
+                `the resource \`${name}\` depends on \`${dependency}\`, which the Orb does not declare before it`,
+              );
+            return { id };
+          });
           const id = execution.sync({
             operation: "resource.declare",
             name,
             version,
             open: this.#number({ kind: "open", environment: environment.id, name }),
             close: this.#number({ kind: "close", environment: environment.id, name }),
-            dependencies: [],
+            dependencies,
           });
           table.resources.set(name, id as number);
         }
