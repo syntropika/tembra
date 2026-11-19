@@ -46,6 +46,14 @@ Method receivers borrow the resource. The host processes release in frame order,
 pending callbacks fill its admission budget. Releasing a resource prevents later frames from
 reserving it while the admitted physical callback keeps its existing pin until it settles.
 
+The SDK reserves a separate release budget of `maxPending` requests alongside the same-sized
+ordinary request budget. Ordinary saturation does not prevent explicit release, failed-move
+cleanup or disposal of late replies. Release responses free only release slots. Cleanup retains
+no unbounded queue: if release responses themselves stall and exhaust that separate budget,
+the SDK closes the connection with the exhaustion error, letting the host drain its claims.
+A failed release write also closes with its original transport error because delivery is
+uncertain. Calls are not replayed.
+
 An `own<T>` argument consumes its wrapper. Validate and cancel a call before starting it when
 ownership must remain with the caller. Once the SDK submits the move, failure, cancellation,
 refused admission or an uncertain response never restores ownership. The host validates the full
@@ -69,6 +77,10 @@ reconnecting. Acquire new clients and resources on the new connection.
 Resource calls reuse the original reference's permissions and principal checks. A descriptor is
 connection-local authority, checked before provider entry; it never bypasses kernel admission.
 Unsupported capability delivery is refused before invoking a WIT function or constructor.
+Generated local clients apply the same check, including ordinary data functions on a
+resource-bearing interface. A missing or mismatched captured handler cannot execute an
+ordinary provider callback. Plain data imports that explicitly accept a checked data result
+retain that existing path; receivers and owned arguments always require resource delivery.
 
 ## Protocol
 
@@ -114,7 +126,8 @@ Ordinary serde methods use data calls.
 both native code and a component, and the existing resource-container component. The same generated
 SDK clients run over actual bytes for both executor types. Tests cover constructors, statics,
 synchronous and asynchronous methods, moves, aliases, containers, cancellation, delayed replies,
-release while running, host closure, disconnect, reload, forged and cross-session handles,
+ordinary saturation, bounded release cleanup, release while running, host closure, disconnect,
+reload, forged and cross-session handles,
 acquisition limits and oversized results. Rejected delivery is checked against provider counters.
 Each host exits with no calls, roots or references remaining.
 

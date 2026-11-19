@@ -20,6 +20,7 @@ export class RemoteHost {
   #pending = new Map<
     number,
     {
+      readonly control: boolean;
       /** Deliver the response to its pending caller. */
       resolve(value: any): void;
       /** Reject the caller when its request or connection fails. */
@@ -65,13 +66,18 @@ export class RemoteHost {
     received?: (value: any) => void,
   ): Promise<any> {
     if (signal) checkSignal(signal);
-    if (this.#pending.size >= this.channel.maxPending)
+    // Releases use a separate, equally bounded window so ordinary work cannot block cleanup.
+    const control = op === RpcOp.Release;
+    let pendingCount = 0;
+    for (const pending of this.#pending.values()) if (pending.control === control) pendingCount++;
+    if (pendingCount >= this.channel.maxPending)
       throw new TembraError(Errors.Exhausted.PendingRequests);
     const id = ++this.#next;
     if (!Number.isSafeInteger(id)) throw new TembraError(Errors.Exhausted.RequestIds);
     let abort: (() => void) | undefined;
     const result = new Promise((resolve, reject) => {
       const pending = {
+        control,
         resolve: (value: any) => {
           try {
             received?.(value);
@@ -105,6 +111,7 @@ export class RemoteHost {
             "capabilities" in payload)
         ) {
           this.#pending.set(id, {
+            control,
             resolve: (value) => {
               if (op === RpcOp.Get) this.#release(value?.reference);
               else this.#releaseResult(value);
@@ -140,15 +147,11 @@ export class RemoteHost {
     }
   }
 
-  /** Release a late or unusable acquisition within the normal pending-request budget. */
+  /** Release a late or unusable acquisition within the reserved control budget. */
   #release(reference: unknown): void {
     if (!Number.isSafeInteger(reference) || (reference as number) <= 0 || this.channel.closed)
       return;
-    void this.request(RpcOp.Release, { reference }).catch((error) => {
-      try {
-        this.channel.options.onError?.(error);
-      } catch {}
-    });
+    void this.request(RpcOp.Release, { reference }).catch((error) => this.channel.close(error));
   }
 
   /** Close a late resource result that its cancelled caller can no longer accept. */
@@ -230,9 +233,7 @@ export class RemoteHost {
         if (released) return;
         released = true;
         this.#states.delete(id);
-        void this.request(RpcOp.Release, { reference: id }).catch((error) =>
-          this.channel.options.onError?.(error),
-        );
+        this.#release(id);
       },
       /** Reject opaque resources that cannot cross the transport. */
       opaque() {

@@ -265,16 +265,14 @@ test("aborted acquisitions and their cleanup retain a bounded pending budget", a
   expect(connection.sent.filter((message) => message.op === "get")).toHaveLength(2);
 
   connection.receive({ id: 1, ok: { reference: 1, methods: [], state: { value: 0 } } });
-  await expect(remote.get("counter", "still-blocked")).rejects.toMatchObject({
-    code: "exhausted",
-  });
+  const recovered = remote.get("counter", "recovered");
+  await expect(remote.get("counter", "still-blocked")).rejects.toMatchObject({ code: "exhausted" });
   connection.receive({
     id: 2,
     error: { code: "cancelled", reason: "request", message: "Cancelled" },
   });
-  const acquiring = remote.get("counter", "recovered");
   connection.receive({ id: 4, ok: { reference: 4, methods: [], state: { value: 4 } } });
-  expect((await acquiring).state.value).toEqual({ value: 4 });
+  expect((await recovered).state.value).toEqual({ value: 4 });
   connection.receive({ id: 3, ok: null });
   expect(connection.sent.filter((message) => message.op === "release")).toEqual([
     { id: 3, op: "release", payload: { reference: 1 } },
@@ -313,4 +311,60 @@ test("an unusable acquisition releases only its valid server claim", async () =>
   connection.receive({ id: 3, ok: { reference: 8, methods: [] } });
   expect(connection.sent.filter((message) => message.op === "release")).toHaveLength(1);
   remote.close();
+});
+
+test("release has a bounded control budget independent of ordinary requests", async () => {
+  const connection = transport();
+  const remote = new RemoteHost(connection.endpoint, { maxPending: 2 });
+  const ordinary = [remote.installedOrbs(), remote.installedOrbs()];
+  const releases = [
+    remote.request("release", { reference: 1 }),
+    remote.request("release", { reference: 2 }),
+  ];
+  await expect(remote.request("release", { reference: 3 })).rejects.toMatchObject({
+    code: "exhausted",
+    reason: "pending_requests",
+  });
+  await expect(remote.installedOrbs()).rejects.toMatchObject({ code: "exhausted" });
+  expect(connection.sent).toHaveLength(4);
+  connection.receive({ id: 3, ok: null });
+  connection.receive({ id: 4, ok: null });
+  expect(await Promise.all(releases)).toEqual([null, null]);
+  expect(remote.channel.closed).toBe(false);
+  connection.receive({ id: 1, ok: ["first"] });
+  connection.receive({ id: 2, ok: ["second"] });
+  expect(await Promise.all(ordinary)).toEqual([["first"], ["second"]]);
+  remote.close();
+});
+
+test("automatic cleanup fails closed when the bounded control budget is exhausted", async () => {
+  const connection = transport();
+  const remote = new RemoteHost(connection.endpoint, { maxPending: 1 });
+  const first = remote.get("counter", "first");
+  connection.receive({ id: 1, ok: { reference: 1, methods: [] } });
+  const second = remote.get("counter", "second");
+  connection.receive({ id: 2, ok: { reference: 2, methods: [] } });
+  (await first).release();
+  (await second).release();
+  await Promise.resolve();
+  expect(remote.channel.closed).toBe(true);
+  expect(connection.causes).toEqual([
+    expect.objectContaining({ code: "exhausted", reason: "pending_requests" }),
+  ]);
+  expect(connection.sent.filter((frame) => frame.op === "release")).toHaveLength(1);
+});
+
+test("release transport failures reject unrelated work with the original cause", async () => {
+  const connection = transport();
+  const cause = new Error("release write failed after possible delivery");
+  const remote = new RemoteHost(connection.endpoint, { maxPending: 1 });
+  const acquiring = remote.get("counter", "main");
+  connection.receive({ id: 1, ok: { reference: 1, methods: [] } });
+  const reference = await acquiring;
+  const ordinary = remote.installedOrbs();
+  connection.endpoint.send = () => Promise.reject(cause);
+  reference.release();
+  await expect(ordinary).rejects.toBe(cause);
+  expect(connection.causes).toEqual([cause]);
+  expect(remote.channel.closed).toBe(true);
 });

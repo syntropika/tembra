@@ -26,7 +26,7 @@ interface Codec {
   consumeMany(
     value: [(Decoder | null)[], { tag: "ok"; val: Decoder } | { tag: "err"; val: string }],
   ): Promise<bigint>;
-  pair(seed: bigint): Promise<[Decoder, (Decoder | null)[]]>;
+  pair(seed: bigint, ctx?: Context): Promise<[Decoder, (Decoder | null)[]]>;
   stats(): Promise<[number, number]>;
   float(value: number): Promise<number>;
 }
@@ -679,6 +679,166 @@ for (const mode of ["native", "wasm"]) {
         } finally {
           await source.close();
         }
+      }
+    },
+    30_000,
+  );
+}
+
+for (const mode of ["native", "wasm"]) {
+  test.skipIf(
+    !process.env.TEMBRA_RPC_HOST || (mode === "wasm" && !process.env.TEMBRA_RPC_COMPONENT),
+  )(
+    `${mode} RPC resources: release and failed owned submissions survive ordinary request saturation`,
+    async () => {
+      const source = await generated();
+      const connection = connect(mode, { maxPending: 2 });
+      try {
+        const codec = await source.get(connection.remote, { orb: "codec", key: "main" });
+        const control = (await connection.remote.get("control", "main")) as unknown as Control;
+        const borrowed = await codec.open(1n);
+        const released = await codec.open(2n);
+        const failed = await codec.open(3n);
+        const before = await codec.stats();
+        let settled = false;
+        const pending = borrowed.wait().then((value) => {
+          settled = true;
+          return value;
+        });
+        await until(async () => (await control.stats()).started === 1);
+        connection.hold(
+          (frame) => typeof frame.ok === "object" && frame.ok !== null && "started" in frame.ok,
+        );
+        const other = control.stats();
+        const responses = connection.received.length;
+        await until(async () =>
+          connection.received
+            .slice(responses)
+            .some(
+              (frame) => typeof frame.ok === "object" && frame.ok !== null && "started" in frame.ok,
+            ),
+        );
+        released.release();
+        await expect(codec.consume(failed)).rejects.toMatchObject({
+          code: "exhausted",
+          reason: "pending_requests",
+        });
+        await until(
+          async () => connection.received.filter((frame) => frame.ok === null).length >= 2,
+        );
+        expect(connection.remote.channel.closed).toBe(false);
+        expect(settled).toBe(false);
+        connection.flush();
+        expect((await other).started).toBe(1);
+        await control.open();
+        expect(await pending).toBe(1n);
+        expect(await codec.stats()).toEqual([before[0] + 2, before[1] + 1]);
+        await expect(failed.total()).rejects.toThrow();
+        borrowed.release();
+        await connection.remote.installedOrbs();
+        codec.reference.release();
+        control.release();
+      } finally {
+        await connection.close();
+        await source.close();
+      }
+    },
+    30_000,
+  );
+}
+
+for (const mode of ["native", "wasm"]) {
+  test.skipIf(
+    !process.env.TEMBRA_RPC_HOST || (mode === "wasm" && !process.env.TEMBRA_RPC_COMPONENT),
+  )(
+    `${mode} RPC resources: cancelled late container replies release without consuming ordinary slots`,
+    async () => {
+      const source = await generated();
+      const connection = connect(mode, { maxPending: 2 });
+      const application = createHost();
+      try {
+        const codec = await source.get(connection.remote, { orb: "codec", key: "main" });
+        const control = (await connection.remote.get("control", "main")) as unknown as Control;
+        const borrowed = await codec.open(1n);
+        const before = await codec.stats();
+        connection.hold((frame) =>
+          Boolean((frame.ok as { owned?: unknown[] } | undefined)?.owned?.length),
+        );
+        let context: Context | undefined;
+        const factory = application.root((ctx) => {
+          context = ctx;
+          return codec.pair(7n, ctx);
+        });
+        const outcome = factory.catch((error: unknown) => error);
+        const received = connection.received.length;
+        await until(async () =>
+          connection.received
+            .slice(received)
+            .some((frame) =>
+              Boolean((frame.ok as { owned?: unknown[] } | undefined)?.owned?.length),
+            ),
+        );
+        context!.cancel();
+        expect(await outcome).toBeDefined();
+        let settled = false;
+        const pending = borrowed.wait().then((value) => {
+          settled = true;
+          return value;
+        });
+        connection.flush();
+        await until(async () => (await control.stats()).started === 1);
+        expect(connection.remote.channel.closed).toBe(false);
+        expect(settled).toBe(false);
+        await control.open();
+        expect(await pending).toBe(1n);
+        expect((await codec.stats())[0]).toBe(before[0] + 2);
+        expect(
+          connection.sent.filter((frame) => frame.op === "release" && frame.payload?.resource),
+        ).toHaveLength(2);
+        borrowed.release();
+        await connection.remote.installedOrbs();
+        codec.reference.release();
+        control.release();
+      } finally {
+        connection.flush();
+        await connection.close();
+        await application.close();
+        await source.close();
+      }
+    },
+    30_000,
+  );
+}
+
+for (const mode of ["native", "wasm"]) {
+  test.skipIf(
+    !process.env.TEMBRA_RPC_HOST || (mode === "wasm" && !process.env.TEMBRA_RPC_COMPONENT),
+  )(
+    `${mode} RPC resources: a stalled control budget closes with bounded cleanup`,
+    async () => {
+      const source = await generated();
+      const connection = connect(mode, { maxPending: 1 });
+      try {
+        const codec = await source.get(connection.remote, { orb: "codec", key: "main" });
+        const first = await codec.open(1n);
+        const second = await codec.open(2n);
+        const retained = await codec.open(3n);
+        connection.hold((frame) => frame.ok === null);
+        first.release();
+        await until(async () => connection.received.some((frame) => frame.ok === null));
+        second.release();
+        await until(async () => connection.remote.channel.closed);
+        await expect(retained.total()).rejects.toMatchObject({
+          code: "gone",
+          reason: "connection",
+        });
+        expect(connection.sent.filter((frame) => frame.op === "release")).toHaveLength(1);
+        retained.release();
+        codec.reference.release();
+      } finally {
+        connection.flush();
+        await connection.close();
+        await source.close();
       }
     },
     30_000,

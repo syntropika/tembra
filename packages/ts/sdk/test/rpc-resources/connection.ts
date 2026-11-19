@@ -12,7 +12,10 @@ export interface Frame {
 }
 
 /** Connect a generated SDK client to one actual native Rust host process. */
-export function connect(mode: string, limits: { maxReferences?: number; maxFrame?: number } = {}) {
+export function connect(
+  mode: string,
+  limits: { maxReferences?: number; maxFrame?: number; maxPending?: number } = {},
+) {
   const child = Bun.spawn([process.env.TEMBRA_RPC_HOST!, mode], {
     stdin: "pipe",
     stdout: "pipe",
@@ -87,7 +90,10 @@ export function connect(mode: string, limits: { maxReferences?: number; maxFrame
       reader.releaseLock();
     }
   })();
-  const remote = new RemoteHost(transport);
+  const remote = new RemoteHost(
+    transport,
+    limits.maxPending === undefined ? {} : { maxPending: limits.maxPending },
+  );
   return {
     remote,
     child,

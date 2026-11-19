@@ -156,12 +156,13 @@ test("an unaccepted private argument batch closes on refusal before admission an
           context,
           {
             signature: "moves",
+            dataResult: true,
             input: encode([0]),
             arguments: transfer([moved]),
           },
         ),
       ),
-    ).rejects.toThrow("data-only");
+    ).rejects.toThrow("matching WIT capability signature");
     expect(entered).toBe(0);
     expect(destroyed).toBe(1);
     const next = new ResourceOwner(nominal, {}, 1, {}, () => {

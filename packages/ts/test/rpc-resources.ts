@@ -20,16 +20,25 @@ async function verify(mode) {
   const socket = new WebSocket(location.origin.replace('http', 'ws') + '/rpc?mode=' + mode);
   socket.binaryType = 'arraybuffer';
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
+  let holdStats = false;
+  const heldFrames = [];
+  let deliver;
   const connection = new RemoteHost({
     send(frame) { socket.send(frame); },
     listen(receive, closed) {
-      const message = event => receive(new Uint8Array(event.data));
+      deliver = receive;
+      const message = event => {
+        const bytes = new Uint8Array(event.data);
+        const frame = JSON.parse(new TextDecoder().decode(bytes));
+        if (holdStats && frame.ok && typeof frame.ok.started === 'number') heldFrames.push(bytes);
+        else receive(bytes);
+      };
       const ended = () => closed();
       socket.addEventListener('message', message); socket.addEventListener('close', ended);
       return () => { socket.removeEventListener('message', message); socket.removeEventListener('close', ended); };
     },
     close() { socket.close(); }
-  });
+  }, {maxPending: 2});
   try {
     const codec = await getCodec(connection, {orb: 'codec', key: 'main'});
     const control = await connection.get('control', 'main');
@@ -38,14 +47,34 @@ async function verify(mode) {
     assert(await codec.consume(await codec.open(7n)) === 7n, mode + ' ownership transfer');
     const [first, list] = await codec.pair(3n);
     assert(await codec.consumeMany([[first, null], {tag:'ok', val:list[1]}]) === 7n, mode + ' resource containers');
-    const pending = decoder.next();
+    const released = await codec.open(8n);
+    const failed = await codec.open(9n);
+    let finished = false;
+    const pending = decoder.next().then(value => { finished = true; return value; });
     for (let tries=0;;tries++) {
       if ((await control.stats()).started === 1) break;
       if (tries > 1000) throw new Error('provider never suspended');
       await new Promise(resolve => setTimeout(resolve, 2));
     }
-    codec.reference.release();
+    holdStats = true;
+    const ordinary = control.stats();
+    for (let tries=0; heldFrames.length === 0; tries++) {
+      if (tries > 1000) throw new Error('stats response never arrived');
+      await new Promise(resolve => setTimeout(resolve, 2));
+    }
+    released.release();
+    let exhausted = false;
+    try { await codec.consume(failed); } catch(error) { exhausted = error.code === 'exhausted'; }
+    assert(exhausted, mode + ' failed owned submission');
+    assert(!connection.channel.closed && !finished, mode + ' release preserves unrelated saturated work');
+    holdStats = false;
+    for (const frame of heldFrames.splice(0)) deliver(frame);
+    await ordinary;
+    // A response proves that both earlier release frames reached the host before another release.
+    await control.stats();
     decoder.release();
+    await control.stats();
+    codec.reference.release();
     await control.open();
     assert(await pending === 9007199254740996n, mode + ' release during physical method');
     const current = await getCodec(connection, {orb:'codec',key:'other'});

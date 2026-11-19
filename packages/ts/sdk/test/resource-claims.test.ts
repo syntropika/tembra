@@ -135,11 +135,12 @@ test("reload never forwards an old implicit resource receiver to an ordinary han
       host.root((context) =>
         host.session.calls.invokePhysical(resource.reference, "read", [], context, {
           signature: "resource-one",
+          dataResult: true,
           input: encode([]),
           receiver: resource,
         }),
       ),
-    ).rejects.toThrow("data-only");
+    ).rejects.toThrow("matching WIT capability signature");
     expect(dataCalls).toBe(0);
     expect(host.session.kernel.command(KernelOp.Diagnostics).calls).toBe(0);
   } finally {
