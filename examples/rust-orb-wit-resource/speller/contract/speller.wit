@@ -4,7 +4,7 @@ package example:speller@1.0.0;
 interface spelling {
   /// Spell `word` letter by letter, a dash between the letters, through one builder: as many
   /// `push` calls as letters and dashes, all on the same handle.
-  spell: func(word: string) -> string;
+  spell: async func(word: string) -> string;
 }
 
 world speller {

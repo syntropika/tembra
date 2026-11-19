@@ -15,10 +15,9 @@
 //! methods call that object, and whose claim the call that drops it releases as it settles, as a
 //! component's view's is.
 //!
-//! A native method has no fiber of its own, which a component's call suspends while the kernel
-//! completes an import: the functions of an imported interface are `async` natively, so an
-//! interface whose functions are all `async func`, whose bindings are `async` in a component too,
-//! is imported natively, and one with a synchronous function stays component-only.
+//! Native imported calls are always awaitable, including synchronous WIT functions. Providers
+//! retain their original calling convention. Owned WIT resources use the existing portable
+//! delivery, nominal identity and deferred callback drops; keyed views remain service claims.
 //!
 //! `Providers` also names the Orb that declares each hook the module contributes to: the Orb
 //! requires the hook of it, with the signature of the hook's callback, and adds the contribution
@@ -28,7 +27,7 @@
 //! feature instead.
 use super::{
     Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode, kind, refused,
-    spelled, wit_kind,
+    spelled,
 };
 use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident};
 use heck::ToSnakeCase;
@@ -38,6 +37,9 @@ use std::collections::BTreeSet;
 use syn::Ident;
 use tembra_contracts::Contract;
 use wit_parser::FunctionKind;
+
+mod functions;
+mod values;
 
 /// An interface the module imports from another Orb, which the native side serves.
 pub(super) struct Import<'a> {
@@ -66,9 +68,8 @@ impl Import<'_> {
 
 /// The interfaces the module imports from other Orbs, which the native side serves, each with what
 /// its provider must offer, leaving out an interface of types only, which needs none; or the
-/// refusal of the first import it does not cover: a WASI import, an interface with a synchronous
-/// function, which works in a component build only, or with a resource, or a function taking or
-/// returning what the codec does not cover.
+/// refusal of the first import outside the native portable profile, including WASI, explicit
+/// borrows, streams and futures.
 pub(super) fn imports<'a>(
     analysis: &'a Analysis,
     contract: Result<&Contract, &syn::Error>,
@@ -103,6 +104,11 @@ pub(super) fn imports<'a>(
     imports
         .into_iter()
         .map(|(field, interface, view)| {
+            if view.is_none() {
+                contract
+                    .check_import_resource_profile(interface)
+                    .map_err(unresolved)?;
+            }
             let mut import = Import {
                 field,
                 interface,
@@ -350,9 +356,7 @@ pub(super) fn contribution(
     }
 }
 
-/// Whether the native side serves the import of `identity`, by key or not: every function of the
-/// interface is an `async func` taking and returning what the codec covers, and the interface has
-/// no resource.
+/// Check the imported function data; the contract separately checks nominal resource roles.
 fn served(analysis: &Analysis, identity: &str, by_key: bool) -> Result<(), Refused> {
     let interface = analysis
         .consumed_types
@@ -363,37 +367,25 @@ fn served(analysis: &Analysis, identity: &str, by_key: bool) -> Result<(), Refus
     } else {
         format!("the import of {identity}")
     };
-    if let Some(name) = interface
-        .types
-        .iter()
-        .find(|(_, id)| {
-            matches!(
-                analysis
-                    .consumed_types
-                    .definition(wit_parser::Type::Id(**id)),
-                Ok((_, wit_parser::TypeDefKind::Resource))
-            )
-        })
-        .map(|(name, _)| name)
-    {
-        return Err(refused(&format!(
-            "{import}, an interface with the resource `{name}`, is not supported natively yet"
-        )));
-    }
     for function in interface.functions.values() {
         let name = &function.name;
-        if matches!(function.kind, FunctionKind::Freestanding) {
-            return Err(refused(&format!(
-                "{import} works in a component build only: its function `{name}` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`"
-            )));
-        }
+        let receiver = matches!(
+            function.kind,
+            FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
+        );
         let types = function
             .params
             .iter()
+            .skip(usize::from(receiver))
             .map(|param| param.ty)
             .chain(function.result);
         for ty in types {
-            if let Err(what) = wit_kind(ty, &analysis.consumed_types, 1) {
+            if let Err(what) = (values::Values {
+                types: &analysis.consumed_types,
+                facade: &analysis.options.facade(),
+            })
+            .check(ty)
+            {
                 return Err(refused(&format!(
                     "{import} is not supported natively yet: its function `{name}` takes or returns {what}"
                 )));
@@ -687,7 +679,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                         if let ::core::option::Option::Some(call) = call {
                             call.dropped
                                 .borrow_mut()
-                                .push(::std::rc::Rc::clone(&self.reference));
+                                .push(Dropped::Reference(::std::rc::Rc::clone(&self.reference)));
                             return;
                         }
                     }
@@ -696,6 +688,16 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                     let _ = self.reference.release();
                 }
             }
+        }
+    });
+    let reference_drop = (!keyed.is_empty()).then(|| {
+        quote! {
+            Reference(::std::rc::Rc<::#facade::Reference>),
+        }
+    });
+    let reference_release = (!keyed.is_empty()).then(|| {
+        quote! {
+            Dropped::Reference(reference) => { let _ = reference.release(); }
         }
     });
     quote! {
@@ -744,7 +746,21 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                 pub(crate) imports: ::std::rc::Rc<Imports>,
                 failed: ::core::cell::RefCell<::core::option::Option<::#facade::Error>>,
                 abandoned: ::core::cell::RefCell<::std::vec::Vec<::#facade::IssuedCall>>,
-                dropped: ::core::cell::RefCell<::std::vec::Vec<::std::rc::Rc<::#facade::Reference>>>,
+                dropped: ::core::cell::RefCell<::std::vec::Vec<Dropped>>,
+            }
+
+            /// Ownership released at the existing importing callback's settlement checkpoint.
+            enum Dropped {
+                #reference_drop
+                Resource(::#facade::portable::Owned),
+            }
+
+            /// Defer an imported WIT drop just as a compiled callback defers its resource drops.
+            pub(crate) fn drop_resource(owned: ::#facade::portable::Owned) {
+                let call = CALL.with(|current| current.borrow().clone());
+                if let Some(call) = call {
+                    call.dropped.borrow_mut().push(Dropped::Resource(owned));
+                }
             }
 
             /// Run a method's future for its call: while it is polled, the import modules call
@@ -789,9 +805,11 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                         ::core::mem::drop(future);
                     }
                     call.join().await;
-                    for reference in call.dropped.take() {
-                        // As for a component's view, a release that fails goes unreported.
-                        let _ = reference.release();
+                    for dropped in call.dropped.take() {
+                        match dropped {
+                            #reference_release
+                            Dropped::Resource(owned) => ::core::mem::drop(owned),
+                        }
                     }
                     result
                 }
@@ -821,41 +839,8 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
             }
 
             impl Call {
-                /// Call `method` of the object `reference` holds with `arguments`, the boundary's
-                /// JSON, and read its result with `read`; a failure ends the method making the
-                /// call.
-                pub(crate) async fn call<R>(
-                    &self,
-                    reference: &::#facade::Reference,
-                    method: &str,
-                    arguments: ::core::result::Result<
-                        ::#facade::serde_json::Value,
-                        ::std::string::String,
-                    >,
-                    read: impl ::core::ops::FnOnce(
-                        ::#facade::serde_json::Value,
-                    ) -> ::core::result::Result<R, ::std::string::String>,
-                ) -> R {
-                    let answered = match arguments {
-                        ::core::result::Result::Ok(arguments) => {
-                            match self.issue(reference, method, arguments).await {
-                                ::core::result::Result::Ok(value) => {
-                                    read(value).map_err(|message| {
-                                        ::#facade::Error::invalid(
-                                            ::#facade::core::Reason::Result,
-                                            message,
-                                        )
-                                    })
-                                }
-                                ::core::result::Result::Err(error) => {
-                                    ::core::result::Result::Err(error)
-                                }
-                            }
-                        }
-                        ::core::result::Result::Err(message) => ::core::result::Result::Err(
-                            ::#facade::Error::invalid(::#facade::core::Reason::Arguments, message),
-                        ),
-                    };
+                /// Return an import result, or end the importing callback with its failure.
+                pub(crate) async fn answer<R>(&self, answered: ::#facade::Result<R>) -> R {
                     match answered {
                         ::core::result::Result::Ok(value) => value,
                         ::core::result::Result::Err(error) => {
@@ -865,23 +850,18 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                     }
                 }
 
-                /// Issue the call of `method` with `arguments` to the object `reference` holds,
-                /// and wait for its result. Dropped first, it cancels the call, as a component's
+                /// Await portable admission on a service reference or owned resource, then its
+                /// result. Dropped first, it cancels the call, as a component's
                 /// executor cancels an import its callback abandons, and leaves it for the method
                 /// to join.
-                async fn issue(
+                pub(crate) async fn issue(
                     &self,
-                    reference: &::#facade::Reference,
-                    method: &str,
-                    arguments: ::#facade::serde_json::Value,
-                ) -> ::#facade::Result<::#facade::serde_json::Value> {
-                    let (issued, result) = reference
-                        .issue_portable::<::#facade::serde_json::Value, ::#facade::serde_json::Value>(
-                            &self.context,
-                            method,
-                            arguments,
-                        )
-                        .await?;
+                    admission: impl ::core::future::Future<Output = ::#facade::Result<(
+                        ::#facade::IssuedCall,
+                        ::std::pin::Pin<::std::boxed::Box<dyn ::core::future::Future<Output = ::#facade::Result<::#facade::portable::Delivered>>>>,
+                    )>>,
+                ) -> ::#facade::Result<::#facade::portable::Delivered> {
+                    let (issued, result) = admission.await?;
                     let mut awaited = Awaited {
                         call: self,
                         issued: ::core::option::Option::Some(issued),
@@ -941,66 +921,21 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
 /// The module of each import, in the Orb module, in place of the bindings' import module, whose
 /// types it re-exports: a function of a plain import calls the provider's `main` object, and the
 /// view of an import by key has `get`, which acquires the object of a key, and the value it
-/// returns, whose methods call that object. Each function is `async`, as the bindings of an
-/// `async func` are, and takes its parameters owned.
+/// returns, whose methods call that object. Each native function is awaitable and takes owned
+/// parameters, independently of the provider's WIT calling convention.
 pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStream {
     let facade = &analysis.options.facade();
     let types = &analysis.consumed_types;
-    let boundary = super::boundary_at(1);
     let modules = imports.iter().map(|import| {
         let field = &import.field;
         let interface = types
             .interface(import.interface)
             .expect("an imported interface is read");
         let bindings = import_module(1, &hook_path(&import.binding(&analysis.package)));
-        let functions = interface.functions.values().map(|function| {
-            let wit_name = &function.name;
-            let name = rust_ident(wit_name);
-            let docs = docs(function.docs.contents.as_deref());
-            let params: Vec<Ident> = function
-                .params
-                .iter()
-                .map(|param| rust_ident(&param.name))
-                .collect();
-            let spelled = function.params.iter().map(|param| types.owned(param.ty, 1));
-            let encoded = function.params.iter().zip(&params).map(|(param, name)| {
-                let kind = wit_kind(param.ty, types, 1).expect("a served import's types are covered");
-                encode(&kind, quote! { #name }, &boundary, facade)
-            });
-            let (result, read) = match function.result {
-                Some(ty) => {
-                    let kind: Kind<'static> =
-                        wit_kind(ty, types, 1).expect("a served import's types are covered");
-                    (types.owned(ty, 1), decode(&kind, quote! { value }, &boundary, facade))
-                }
-                None => (quote! { () }, quote! { ::core::result::Result::Ok(()) }),
-            };
-            let (receiver, reference) = match import.view {
-                Some(_) => (quote! { &self, }, quote! { self.claim.reference() }),
-                None => (
-                    quote! {},
-                    quote! { &__tembra_call.imports.#field.reference() },
-                ),
-            };
-            quote! {
-                #(#[doc = #docs])*
-                pub async fn #name(#receiver #(#params: #spelled),*) -> #result {
-                    let __tembra_call = super::__tembra_import::current();
-                    let __tembra_arguments = (|| -> ::core::result::Result<
-                        ::#facade::serde_json::Value,
-                        ::std::string::String,
-                    > {
-                        ::core::result::Result::Ok(::#facade::serde_json::Value::Array(
-                            ::std::vec![#(#encoded?),*],
-                        ))
-                    })();
-                    __tembra_call
-                        .call(#reference, #wit_name, __tembra_arguments, |value| #read)
-                        .await
-                }
-            }
-        });
-        let functions: Vec<TokenStream> = functions.collect();
+        let functions = functions::functions(import, analysis);
+        let values = values::Values { types, facade };
+        let declarations = interface.types.iter().filter_map(|(name, ty)| values.declaration(name, wit_parser::Type::Id(*ty)));
+        let resources = functions::resources(import, analysis);
         let module_doc = match import.view {
             Some(_) => format!(
                 " The objects of `{}`, each selected by its key, natively: `get` acquires the object of a key under the principal of the call, and the methods of the value it returns call that object.",
@@ -1047,7 +982,7 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
                     }
                 }
             }
-            None => quote! { #(#functions)* },
+            None => quote! { #(#functions)* #resources #(#declarations)* },
         };
         quote! {
             #[doc = #module_doc]

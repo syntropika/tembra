@@ -80,16 +80,30 @@ mod speller {
         use super::texts;
 
         impl Spelling {
-            pub fn spell(word: String) -> String {
+            /// Spell `word` letter by letter, a dash between the letters, through one builder: as many
+            /// `push` calls as letters and dashes, all on the same handle.
+            pub async fn spell(word: String) -> String {
+                #[cfg(target_arch = "wasm32")]
                 let builder = texts::start();
+                #[cfg(not(target_arch = "wasm32"))]
+                let builder = texts::start().await;
                 for (index, letter) in word.chars().enumerate() {
                     if index > 0 {
+                        #[cfg(target_arch = "wasm32")]
                         builder.push('-');
+                        #[cfg(not(target_arch = "wasm32"))]
+                        builder.push('-').await;
                     }
+                    #[cfg(target_arch = "wasm32")]
                     builder.push(letter);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    builder.push(letter).await;
                 }
-                builder.text()
-                // the handle is dropped here
+                #[cfg(target_arch = "wasm32")]
+                let text = builder.text();
+                #[cfg(not(target_arch = "wasm32"))]
+                let text = builder.text().await;
+                text
             }
         }
     }
@@ -152,3 +166,8 @@ parameter is not expressed by the macro. Methods borrow `self`; a `&mut self` me
 error. A resource belongs to one service's interface, the one of the service whose module holds
 it, and only that interface returns it: the runtime returns a resource only from the interface that
 defines it, so another service returning it is a compile error.
+
+The consumer method is asynchronous so the same source can await its native imports. The provider
+WIT functions remain synchronous. Component builds use their synchronous bindings; native builds
+await the generated imported functions and resource methods with owned arguments. The source
+shows the platform branches, as described in [native WIT composition](../../docs/native-imports.md).

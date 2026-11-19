@@ -19,6 +19,7 @@ import { NodeContract } from "@syntropika/tembra-engine-node";
 import type { ReferenceBase } from "../authoring/types.ts";
 import { HTTP_HANDLER } from "../interpreter/http-ingress.ts";
 import { query } from "../interpreter/types.ts";
+import { resourceNames as resourceNaming } from "./client-resources.ts";
 
 export interface ClientOptions {
   /** The contract's entry `.wit` file; its directory and `deps/` resolve as for `build()`. */
@@ -40,15 +41,18 @@ interface WitKind {
   enum?: { cases: { name: string }[] };
   flags?: { flags: { name: string }[] };
   result?: { ok?: WitType; err?: WitType };
+  handle?: { own?: number; borrow?: number };
   [other: string]: unknown;
 }
 interface DescribedFunction {
   readonly name: string;
+  readonly kind?: string | Readonly<Record<string, number>>;
   readonly params: readonly { readonly name: string; readonly type: WitType }[];
   readonly result?: WitType;
 }
 /** The parts of the contract's `describe` answer this module reads. */
 interface Described {
+  readonly imports?: readonly { readonly binding: string; readonly contract?: string | null }[];
   readonly exports: readonly {
     readonly contract?: string | null;
     readonly type_only?: boolean;
@@ -57,7 +61,11 @@ interface Described {
   }[];
   readonly types: readonly {
     readonly id: number;
-    readonly definition: { readonly kind: WitKind | string };
+    readonly definition: {
+      readonly kind: WitKind | string;
+      readonly owner?: string;
+      readonly name?: string;
+    };
   }[];
   readonly javascriptNames: Readonly<Record<string, string>>;
 }
@@ -165,6 +173,8 @@ const OWN = new Set([
   "DynamicReference",
   "Promise",
   "ReferenceBase",
+  "WitResource",
+  "WitClientSchema",
 ]);
 
 /** The default JavaScript spelling of a WIT name, as the contract derives it for members. */
@@ -183,6 +193,10 @@ export async function client(options: ClientOptions): Promise<readonly string[]>
   const contract = new NodeContract(path.dirname(wit), options.world);
   const graph = query<Described>(contract, { kind: "describe" });
   const names = query<TypeNames>(contract, { kind: "type-names" });
+  const hasResources = graph.exports.some((entry) => Object.keys(entry.resources ?? {}).length);
+  const signatures = hasResources
+    ? query<Readonly<Record<string, string>>>(contract, { kind: "client-signatures" })
+    : {};
   const source = `${path.basename(wit)}${options.world ? `, world ${options.world}` : ""}`;
   const out = path.resolve(options.out);
   const modules = new Map<string, string>();
@@ -192,7 +206,7 @@ export async function client(options: ClientOptions): Promise<readonly string[]>
     const file = path.join(out, `${identity.replace(/@[^@]*$/, "").replace(/[:/]/g, "-")}.ts`);
     if (modules.has(file))
       throw new Error(`${identity} and another exported interface share the module ${file}`);
-    modules.set(file, clientModule(graph, names, identity, entry, source));
+    modules.set(file, clientModule(graph, names, identity, entry, source, signatures[identity]));
   }
   if (modules.size === 0) throw new Error(`${source} exports no interface a host can call`);
   await mkdir(out, { recursive: true });
@@ -216,33 +230,65 @@ function clientModule(
   identity: string,
   entry: Described["exports"][number],
   source: string,
+  signature?: string,
 ): string {
-  if (entry.resources && Object.keys(entry.resources).length)
-    throw new Error(`${identity} declares WIT resources, which a host cannot call by name`);
   const interfaceName = /\/([^@/]+)(?:@[^@]*)?$/.exec(identity)?.[1];
   if (!interfaceName) throw new Error(`${identity} is not a versioned interface identity`);
   const spelled = graph.javascriptNames[interfaceName] ?? camel(interfaceName);
   const pascal = spelled.charAt(0).toUpperCase() + spelled.slice(1);
   const service = OWN.has(pascal) ? `${pascal}_` : pascal;
   const functions = Object.values(entry.functions ?? {});
+  const occupied = new Set([...OWN, service]);
+  const resourceTypes = resourceNaming(graph, entry.resources ?? {}, identity, occupied);
+  const resourceNames = resourceTypes.names;
+  const resources = resourceNames.size > 0;
   const { render, declarations } = renderer(
     graph,
     names,
     identity,
-    new Set([...OWN, service]),
-    functions.flatMap((fn) => [...fn.params.map((parameter) => parameter.type), fn.result]),
+    occupied,
+    functions.flatMap((fn) => [
+      ...fn.params.filter((p) => p.name !== "self").map((p) => p.type),
+      fn.result,
+    ]),
+    resourceNames,
   );
   const signatures: string[] = [];
   const members: string[] = [];
+  const resourceSignatures = new Map([...resourceNames].map(([id]) => [id, [] as string[]]));
+  const used = new Map<string, Set<string>>();
   for (const fn of functions.sort((a, b) => a.name.localeCompare(b.name))) {
-    const method = graph.javascriptNames[fn.name] ?? camel(fn.name);
-    if (Object.hasOwn(MEMBERS, fn.name) || Object.hasOwn(MEMBERS, method))
+    const kind = typeof fn.kind === "object" ? Object.entries(fn.kind)[0] : undefined;
+    const receiver = kind?.[0] === "method" || kind?.[0] === "async-method";
+    const resource = kind ? resourceNames.get(resourceTypes.canonical(kind[1])) : undefined;
+    const member = fn.name.split(".").at(-1)!;
+    const method =
+      kind?.[0] === "constructor"
+        ? `new${resource}`
+        : kind
+          ? receiver
+            ? camel(member)
+            : `${resource!.charAt(0).toLowerCase()}${resource!.slice(1)}${camel(member).charAt(0).toUpperCase()}${camel(member).slice(1)}`
+          : (graph.javascriptNames[fn.name] ?? camel(fn.name));
+    if (kind && !resource)
+      throw new Error(`${identity}: resource function has no defining resource`);
+    if (
+      Object.hasOwn(MEMBERS, fn.name) ||
+      Object.hasOwn(MEMBERS, method) ||
+      method === "resourceType"
+    )
       throw new Error(
-        `${identity}: ${fn.name} collides with a member every client has ` +
-          `(${Object.keys(MEMBERS).join(", ")})`,
+        `${identity}: ${fn.name} collides with a member every client has (${Object.keys(MEMBERS).join(", ")})`,
       );
+    const scope = receiver ? resource! : service;
+    const methodNames = used.get(scope) ?? new Set<string>();
+    if (methodNames.has(method))
+      throw new Error(`${identity}: generated method collision: ${scope}.${method}`);
+    methodNames.add(method);
+    used.set(scope, methodNames);
     const taken = new Set<string>();
-    const parameters = fn.params.map((parameter) => {
+    const params = receiver ? fn.params.slice(1) : fn.params;
+    const parameters = params.map((parameter) => {
       let name = camel(parameter.name);
       while (RESERVED.has(name) || taken.has(name)) name += "_";
       taken.add(name);
@@ -250,27 +296,53 @@ function clientModule(
     });
     parameters.push("context?: Context");
     const result = fn.result === undefined || fn.result === null ? "void" : render(fn.result);
-    // In an interface, `new(..)` declares a construct signature; the quoted name is a method.
     const key = method === "new" ? JSON.stringify(method) : method;
-    signatures.push(`  ${key}(${parameters.join(", ")}): Promise<${result}>;`);
-    members.push(
-      `    ${method}: (...args) => reference[${JSON.stringify(fn.name)}](...sent(args, ${fn.params.length})),`,
-    );
+    const declaration = `  ${key}(${parameters.join(", ")}): Promise<${result}>;`;
+    if (receiver) resourceSignatures.get(resourceTypes.canonical(kind![1]))!.push(declaration);
+    else {
+      signatures.push(declaration);
+      members.push(
+        resources
+          ? `    ${method}: (...args) => calls.call<${result}>(${JSON.stringify(fn.name)}, sent(args, ${params.length})),`
+          : `    ${method}: (...args) => reference[${JSON.stringify(fn.name)}](...sent(args, ${params.length})),`,
+      );
+    }
   }
+  const wrappers = [...resourceNames].flatMap(([id, name]) => {
+    return [
+      `/** An owned WIT resource. Release it when its work ends. */`,
+      `export interface ${name} extends WitResource {`,
+      `  readonly resourceType: ${JSON.stringify(resourceTypes.nominals.get(id))};`,
+      ...resourceSignatures.get(id)!,
+      `}`,
+      ``,
+    ];
+  });
+  const schema = resources
+    ? [
+        `const schema = ${JSON.stringify({ identity, signature, functions: entry.functions, types: graph.types, javascriptNames: graph.javascriptNames, imports: (graph.imports ?? []).map(({ binding, contract }) => ({ binding, ...(contract ? { contract } : {}) })) })} satisfies WitClientSchema;`,
+        ``,
+      ]
+    : [];
   return [
     `// Generated by \`client\` from @syntropika/tembra-sdk/tooling: the typed client of`,
     `// ${identity} (${source}). Regenerate it instead of editing it.`,
+    ...(resources ? [`import { witClient } from "@syntropika/tembra-sdk";`] : []),
     `import type {`,
     `  AcquisitionOptions,`,
     `  Context,`,
     `  DynamicReference,`,
     `  ReferenceBase,`,
+    ...(resources ? [`  WitResource,`, `  WitClientSchema,`] : []),
     `} from "@syntropika/tembra-sdk";`,
     ``,
     `/** The interface identity; an Orb's service is named \`<orb>::<identity>\`. */`,
     `export const IDENTITY = ${JSON.stringify(identity)};`,
     ``,
     ...declarations(),
+    ...wrappers,
+    ...resourceTypes.aliases,
+    ...schema,
     `/** One object's \`${identity}\`, with the values a host sends and receives. */`,
     `export interface ${service} {`,
     `  /** The acquired reference: its readiness, status, state and \`release()\`. */`,
@@ -291,6 +363,7 @@ function clientModule(
     `  options?: AcquisitionOptions,`,
     `): Promise<${service}> {`,
     `  const reference = await scope.get(\`\${address.orb}::\${IDENTITY}\`, address.key, options);`,
+    ...(resources ? [`  const calls = witClient(reference, schema);`] : []),
     // Typed by its declaration, not by the async return, which also admits a `PromiseLike`: its
     // `Object` members would leave the arguments of `toString` or `valueOf` untyped.
     `  const client: ${service} = {`,
@@ -323,6 +396,7 @@ function renderer(
   identity: string,
   taken: ReadonlySet<string>,
   roots: readonly WitType[],
+  resources: ReadonlyMap<number, string> = new Map(),
 ): { render: (type: WitType) => string; declarations: () => string[] } {
   const kinds = new Map(graph.types.map(({ id, definition }) => [id, definition.kind]));
   const wit = new Map(names.map((entry) => [entry.id, entry]));
@@ -407,6 +481,9 @@ function renderer(
   const kind = (definition: WitKind | string): string => {
     if (typeof definition === "string") return refuse(definition);
     if (definition.type !== undefined) return render(definition.type);
+    if (definition.handle?.own !== undefined)
+      return resources.get(target(definition.handle.own)) ?? refuse("a foreign owned resource");
+    if (definition.handle?.borrow !== undefined) return refuse("an explicit resource borrow");
     if (definition.list !== undefined) {
       const item = render(definition.list);
       return union(definition.list) ? `(${item})[]` : `${item}[]`;
@@ -432,6 +509,8 @@ function renderer(
   const render = (type: WitType): string => {
     if (type === null || type === undefined) throw new Error(`${identity}: a type is missing`);
     if (typeof type === "string") return PRIMITIVES[type] ?? refuse(type);
+    const resource = resources.get(target(type));
+    if (resource !== undefined) return resource;
     const known = rendered.get(type);
     if (known !== undefined) return known;
     const definition = kinds.get(type);

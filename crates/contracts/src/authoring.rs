@@ -182,9 +182,18 @@ impl Contract {
         #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
         enum Own {
             TypeNames {},
+            ClientSignatures {},
         }
         match serde_json::from_str::<Own>(packet) {
             Ok(Own::TypeNames {}) => crate::port::envelope(Ok(self.type_names())),
+            Ok(Own::ClientSignatures {}) => crate::port::envelope(
+                self.prepared
+                    .check_resource_profile()
+                    .and_then(|()| self.prepared.service_signatures())
+                    .map_err(|error| {
+                        tembra_core::Error::invalid("wit_contract", error.to_string())
+                    }),
+            ),
             Err(_) => self.prepared.request(packet),
         }
     }

@@ -14,8 +14,8 @@
 //! also writes by hand against the runtime's API. `abacus` and `restrung` are one Orb before and
 //! after a reload that gives its root's resource a new version, and `reframed` that Orb after a
 //! reload that gives only its package a new version. `cistern` and `refilled` are one Orb before
-//! and after a reload that gives a resource's dependency a new version. `dice`, `turnstile`, `checkpoint` and `desk`
-//! hold what the native side does not cover yet, a WASI import, a synchronous import, a hook
+//! and after a reload that gives a resource's dependency a new version. `dice`, `checkpoint` and `desk`
+//! hold what the native side does not cover yet, a WASI import, a hook
 //! declaration and a record holding a resource: they compile here all the same, and their `orb()`
 //! answers an error naming it. `trail` holds its root two private modules down, with a service in a
 //! module below it, and a service whose method is named `clone`, as a method of `Rc`. `hollow`
@@ -1938,9 +1938,8 @@ pub mod dice {
     }
 }
 
-/// Passes values through the gate of the package in `wit/deps/`, whose `admit` is synchronous: a
-/// native method could not wait for it, so the import works in a component build only, and the
-/// module's `orb()` answers an error naming it.
+/// Pass values through a synchronous WIT gate. The native imported call is awaitable; the
+/// compiled call retains the synchronous bindings of the unchanged provider contract.
 #[tembra::orb(
     package = "example:turnstile@1.0.0",
     wit = "wit",
@@ -1956,8 +1955,12 @@ pub mod turnstile {
 
         impl Entrance {
             /// Whether the gate lets the value through.
-            pub fn pass(value: i32) -> bool {
-                !admissions::admit(value).blocked
+            pub async fn pass(value: i32) -> bool {
+                #[cfg(target_arch = "wasm32")]
+                let admitted = admissions::admit(value);
+                #[cfg(not(target_arch = "wasm32"))]
+                let admitted = admissions::admit(value).await;
+                !admitted.blocked
             }
         }
     }
@@ -2310,3 +2313,5 @@ pub mod pier {
         }
     }
 }
+
+pub mod codec;

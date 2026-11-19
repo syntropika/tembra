@@ -22,8 +22,15 @@ mod welcomer {
 
         impl Welcoming {
             /// Greet each name through the imported interface and return the greetings.
-            pub fn welcome(names: Vec<String>) -> Vec<String> {
-                names.iter().map(|name| greeting::hello(name)).collect()
+            pub async fn welcome(names: Vec<String>) -> Vec<String> {
+                let mut greetings = Vec::new();
+                for name in names {
+                    #[cfg(target_arch = "wasm32")]
+                    greetings.push(greeting::hello(&name));
+                    #[cfg(not(target_arch = "wasm32"))]
+                    greetings.push(greeting::hello(name).await);
+                }
+                greetings
             }
         }
     }

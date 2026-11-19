@@ -386,9 +386,21 @@ name), so a call site can name the values it builds. A type the interface takes 
 its name there (`Spot` for `use b.{point as spot}`). Two different types of one name in one module
 are named after the interface that declares each (`APoint` and `BPoint`), and refused only when
 those names clash too. Every method takes an optional `Context` last, leaves it out
-when it is `undefined`, and returns a promise. The wrapper adds no other behaviour: the contract
-still checks every value, and an interface that declares WIT resources is refused, since a host
-cannot call it by name.
+when it is `undefined`, and returns a promise. The contract still checks every value.
+
+Interfaces declaring resources also get typed ownership wrappers. A resource constructor becomes
+`client.newDecoder(seed)`, a static `decoder.zero` becomes `client.decoderZero()`, and instance
+methods are called on the returned `Decoder`, such as `await decoder.next()`. Both synchronous and
+asynchronous WIT methods return promises. `decoder.release()` closes its existing SDK owner;
+`client.reference.release()` releases the service reference separately. Owned arguments move the
+resource, and stale aliases cannot call it again. All supported containers keep their resource
+wrappers, bigint positions, tagged results and nullable options.
+
+Resource clients require the SDK's matched prepared capability delivery, currently provided by
+prepared browser components. Data-only Node/mobile transports, RPC and ordinary application
+handlers cannot carry WIT owners and are explicitly refused. This generator does not add a
+cross-process handle protocol. Explicit borrows, streams and futures remain unsupported. See
+[native WIT composition](native-imports.md) for the Rust interface and verification fixtures.
 
 ## Install an artifact
 

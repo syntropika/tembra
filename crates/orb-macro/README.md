@@ -1544,8 +1544,8 @@ it closes it, `with` panics, as it traps a component. A root that fails fails th
 resource opens.
 
 An import of another Orb's interface, [plain](#importing-another-orbs-interface) or
-[by key](#importing-another-orbs-interface-by-key), serves a native host when every function of the
-interface is an `async func`. The struct `Providers`, generated beside `orb(..)`, names the Orb that
+[by key](#importing-another-orbs-interface-by-key), serves a native host through awaitable calls,
+including functions whose WIT calling convention is synchronous. The struct `Providers`, generated beside `orb(..)`, names the Orb that
 answers each import, a `tembra::Provider` of its name and API version, under the name of the
 import's module, `gauge` or `gauge_ref`. `orb(..)` takes it last, `orb(providers)` or
 `orb(inputs, providers)`, and so does `orb_named(..)`, so a host that leaves an import without a
@@ -1562,7 +1562,7 @@ The Orb requires each provider, with the signature of the interface, as the plan
 requires the provider an installation selects, so the host refuses the Orb without it. An import of
 an interface of types only needs no provider, as `cargo tembra build` binds a component's to
 nothing: `Providers` leaves it out. In place of the bindings' import module, the Orb module names a
-module of the same name, with the interface's types and functions, `async` as in a component and
+module of the same name, with the interface's types and functions, all `async` natively and
 taking their parameters owned: each writes its arguments as the boundary's JSON, calls the provider
 through the kernel, under the context of the method running, and reads the result back. A call the
 method stops awaiting, a future it drops before the answer, is cancelled, and the method ends once
@@ -1574,11 +1574,23 @@ holds the claim: a view dropped releases it when the call settles, and a `get` t
 it at once, as in a component. A call that fails, or whose arguments or result the codec refuses,
 ends the method that made it with that error, where it traps a component. As the `context`
 functions, the imported functions serve the methods and the contributions of the Orb and the
-futures they await, and panic elsewhere. A native method has no fiber of its own to suspend while
-the kernel completes a call, as a component's call has, so a synchronous imported function cannot
-wait for its answer: an import of an interface with a synchronous function, plain or by key, makes
-the module's `orb()` answer an error naming it where the runtime is linked, and works in a
-component build of the same module.
+futures they await, and panic elsewhere. Synchronous WIT providers keep their synchronous
+signatures and implementations. The generated native import is awaitable because reference
+admission and delivery can suspend. Shared source uses a platform branch at synchronous import
+calls: the component calls its synchronous binding, while native code awaits its owned arguments.
+The importing method must itself be able to await; the provider contract does not change.
+
+Imported resources are non-cloneable native wrappers backed by `portable::Owned`. Constructors
+are awaitable `iface::Resource::new(..)` calls, static functions are awaitable associated functions,
+and methods, synchronous or asynchronous in WIT, are awaitable `&self` methods. Results preserve
+nominal identity through lists, options, tuples, results, records and variants. Records and variants
+holding resources have native handle-bearing types in the import module. An explicit owned
+argument moves its existing owner through the portable payload. A dropped imported handle follows
+the same callback settlement checkpoint as a compiled import; physical receiver loans remain
+owned by their admitted calls. Reload retires the issuing revision, and closure uses the existing
+reference errors. Keyed service views retain their separate reference claims.
+
+See [native WIT composition](../../docs/native-imports.md) for shared-source examples and limits.
 
 The resources of a service's objects serve a native host too: the factory of the service declares
 each on the object's declaration, in the order the component lists them, after the root's resources
@@ -1620,11 +1632,11 @@ facade there: such a module names the facade `::tembra`, as in `::tembra::Result
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, newtypes, `Result`s, and `Vec`, `Option` and
 tuples of them, the types of an implemented or imported interface or of a hook among them, WIT
-resources as above, states, the resources of the Orb's root and of a service's objects, the
-imports of interfaces of `async func`s and contributions to hooks. What it does not cover yet, such
-as a type of a consumed interface that holds a resource, an import of an interface with a resource,
-a WASI import or an `Option` of an `Option`, which the boundary's JSON cannot tell from `None`, and
-the other cases
+resources as above, states, the resources of the Orb's root and of a service's objects, imports of synchronous and
+asynchronous interfaces and their owned resources, and contributions to hooks. Native exporter
+records holding resources remain outside this slice. Other unsupported cases, such as a WASI
+import, an explicit `borrow<T>` parameter, a stream, a future or an
+`Option` of an `Option`, which the boundary's JSON cannot tell from `None`, and the other cases
 above, leaves the module compiling where the runtime is linked: its `orb()` and `orb_named(..)`,
 which take the inputs if the module has an `#[inputs]` struct and no providers, answer an error
 with the code `unsupported` and the reason `native`, naming the item, so only a host that installs

@@ -17,6 +17,7 @@ import type { Described } from "./revision.ts";
 import type { ReferenceBinding } from "../types.ts";
 import type { ReferenceClaim } from "./scope.ts";
 import type { FunctionValues, GraphFunction } from "./values.ts";
+import { bindingName } from "./names.ts";
 import type { Nominal } from "./resources.ts";
 
 interface ImportedResource {
@@ -74,20 +75,6 @@ export function dependencyImport(
 export function viewMethod<F extends { readonly params: readonly unknown[] }>(fn: F): F {
   if (!fn.params.length) throw new Error("A reference view method has no receiver");
   return { ...fn, params: fn.params.slice(1) };
-}
-
-/**
- * The generated bindings' spelling of one WIT identifier: kebab-case words, each entirely lower
- * or upper case, joined in lower (functions, methods) or upper (resource classes) camel case.
- */
-export function bindingName(name: string, upper: boolean): string {
-  return name
-    .split("-")
-    .map((word, index) => {
-      const lower = word.toLowerCase();
-      return index === 0 && !upper ? lower : lower.charAt(0).toUpperCase() + lower.slice(1);
-    })
-    .join("");
 }
 
 /** The checked shape of one reference-view import, with its generated JavaScript spellings. */

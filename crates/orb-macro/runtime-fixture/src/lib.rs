@@ -9,6 +9,12 @@ extern crate alloc;
 mod authored;
 #[cfg(feature = "cellar")]
 mod cellar;
+#[cfg(feature = "codec-consumer")]
+#[path = "../../native-fixture/src/codec/consumer.rs"]
+mod codec_consumer;
+#[cfg(feature = "codec-provider")]
+#[path = "../../native-fixture/src/codec/provider.rs"]
+mod codec_provider;
 #[cfg(feature = "configured")]
 mod configured;
 #[cfg(feature = "contributor")]
@@ -424,7 +430,10 @@ mod guest {
                     let shelf = shelf_ref::get(vec![key]).await?;
                     let mut held = 0;
                     for book in books {
-                        held = shelf.shelve(&lent(book));
+                        #[cfg(target_arch = "wasm32")]
+                        { held = shelf.shelve(&lent(book)); }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        { held = shelf.shelve(lent(book)).await; }
                     }
                     Ok(held)
                 }

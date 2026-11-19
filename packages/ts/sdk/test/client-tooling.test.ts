@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile, symlink, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -245,7 +245,7 @@ test("a generated client acquires the kebab-case service and forwards each call 
   }
 });
 
-test("client generation refuses resources, a world without callable exports and a non-WIT entry", async () => {
+test("client generation supports resources and refuses a silent world and a non-WIT entry", async () => {
   const root = await mkdtemp(
     path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-client-"),
   );
@@ -254,9 +254,12 @@ test("client generation refuses resources, a world without callable exports and 
       path.join(root, "contract.wit"),
       "package example:refused; interface sessions { resource session { add: func(value: u32) -> u32; } open: func() -> session; } interface types-only { record value { count: u32 } } world handles { export sessions; } world silent { export types-only; }",
     );
-    await expect(
-      client({ wit: path.join(root, "contract.wit"), world: "handles", out: root }),
-    ).rejects.toThrow("example:refused/sessions declares WIT resources");
+    const files = await client({
+      wit: path.join(root, "contract.wit"),
+      world: "handles",
+      out: root,
+    });
+    for (const file of files) expect(diagnostics(files).get(file)).toEqual([]);
     await expect(
       client({ wit: path.join(root, "contract.wit"), world: "silent", out: root }),
     ).rejects.toThrow("exports no interface a host can call");
@@ -539,4 +542,267 @@ test.skipIf(!fixtures)(
     }
     expect(host.diagnostics().references).toBe(0);
   },
+);
+
+const RESOURCES = `package example:decoders@1.0.0;
+interface codec {
+  resource decoder {
+    constructor(seed: u64);
+    zero: static func() -> decoder;
+    total: func() -> u64;
+    next: async func() -> option<u64>;
+  }
+  record bundle { decoder: decoder, wide: u64 }
+  variant selection { missing, found(bundle) }
+  type decoder-alias = decoder;
+  open: func(seed: u64) -> decoder-alias;
+  containers: func() -> tuple<list<option<decoder>>, result<selection, string>>;
+  consume: func(value: decoder) -> u64;
+}
+interface sink {
+  use codec.{decoder as imported-decoder};
+  accept: func(value: imported-decoder) -> u64;
+}
+world provider { import codec; export codec; export sink; }
+`;
+
+test(
+  "generated resource clients type-check and deliver actual SDK owners",
+  async () => {
+    const { NodeContract } = await import("@syntropika/tembra-engine-node");
+    const { query } = await import("../src/interpreter/types.ts");
+    const { ResourceOwner } = await import("../src/interpreter/component/resources.ts");
+    const { bindCaptured } = await import("../src/runtime/adapters.ts");
+    const { encode } = await import("../src/interpreter/codec.ts");
+    const root = await mkdtemp(
+      path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-resource-client-"),
+    );
+    const host = createHost();
+    let closed = 0;
+    const issuer = {};
+    const identity = "example:decoders/codec@1.0.0";
+    const nominal = { interface: identity, name: "decoder" };
+    try {
+      const wit = path.join(root, "contract.wit");
+      await writeFile(wit, RESOURCES);
+      const files = await client({ wit, out: root });
+      const [file, sinkFile] = files;
+      const site = path.join(root, "site.ts");
+      await writeFile(
+        site,
+        `import { get, type Decoder, type DecoderAlias } from "./example-decoders-codec.ts";
+import { get as getSink, type ImportedDecoder } from "./example-decoders-sink.ts";
+export async function check(scope: Parameters<typeof get>[0]) {
+  const codec = await get(scope, { orb: "codec", key: "main" });
+  const decoder: Decoder = await codec.newDecoder(1n);
+  const total: bigint = await decoder.total();
+  const next: bigint | null = await decoder.next();
+  const other: Decoder = await codec.decoderZero();
+  const alias: DecoderAlias = await codec.open(3n);
+  const imported: ImportedDecoder = alias;
+  const sink = await getSink(scope, { orb: "codec", key: "main" });
+  const transferred: bigint = await sink.accept(imported);
+  const [items, selected] = await codec.containers();
+  const maybe: Decoder | null = items[0]!;
+  if (selected.tag === "ok" && selected.val.tag === "found") {
+    const wide: bigint = selected.val.val.wide;
+    selected.val.val.decoder.release();
+  }
+  // @ts-expect-error u64 inputs require bigint.
+  codec.newDecoder(1);
+  // @ts-expect-error Handles retain their resource type.
+  const wrong: Decoder = { release() {} };
+  decoder.release(); other.release(); maybe?.release();
+  return { total, next, wrong, transferred };
+}
+`,
+      );
+      for (const errors of diagnostics([...files, site]).values()) expect(errors).toEqual([]);
+      const contract = new NodeContract(root, "provider");
+      const signatures = query<Record<string, string>>(contract, { kind: "client-signatures" });
+      const signature = signatures[identity]!;
+      const graph = query<{ exports: { functions: Record<string, unknown> }[] }>(contract, {
+        kind: "describe",
+      });
+      const owned = (total: bigint) =>
+        new ResourceOwner(nominal, issuer, 1, { total }, () => {
+          closed++;
+        });
+      const methods = Object.fromEntries(
+        Object.keys(graph.exports[0]!.functions).map((name) => [
+          name,
+          bindCaptured(
+            () => {
+              throw new Error("data-only entry");
+            },
+            signature,
+            async (_environment, _context, input, receiver, _retain, arguments_) => {
+              const args = JSON.parse(input.text) as unknown[];
+              if (
+                name === "[constructor]decoder" ||
+                name === "open" ||
+                name === "[static]decoder.zero"
+              ) {
+                return {
+                  value: encode(0),
+                  capabilities: [
+                    owned(name === "[static]decoder.zero" ? 0n : BigInt(args[0] as string)),
+                  ],
+                };
+              }
+              if (name === "containers")
+                return {
+                  value: encode(
+                    [
+                      [null, 0],
+                      {
+                        tag: "ok",
+                        val: { tag: "found", val: { decoder: 1, wide: 9007199254740993n } },
+                      },
+                    ],
+                    undefined,
+                    {
+                      items: [
+                        undefined,
+                        {
+                          cases: new Map([
+                            [
+                              "ok",
+                              {
+                                cases: new Map([
+                                  [
+                                    "found",
+                                    {
+                                      fields: new Map([
+                                        ["decoder", undefined],
+                                        ["wide", "u64"],
+                                      ]),
+                                    },
+                                  ],
+                                ]),
+                              },
+                            ],
+                          ]),
+                        },
+                      ],
+                    },
+                  ),
+                  capabilities: [owned(4n), owned(5n)],
+                };
+              if (name === "consume") {
+                const owner = arguments_!.owners[0]!;
+                arguments_!.accept();
+                const raw = owner.take(issuer, nominal) as { total: bigint };
+                closed++;
+                return encode(raw.total, undefined, "u64");
+              }
+              const raw = receiver!.redeem(issuer, 1, nominal) as { total: bigint };
+              if (name === "[method]decoder.next") {
+                await Promise.resolve();
+                raw.total++;
+              }
+              return encode(raw.total, undefined, "u64");
+            },
+          ),
+        ]),
+      );
+      await host.install({
+        name: "codec",
+        apiVersion: 1,
+        services: {
+          [`codec::${identity}`]: { methods },
+          "codec::example:decoders/sink@1.0.0": {
+            methods: {
+              accept: bindCaptured(
+                () => {
+                  throw new Error("data-only entry");
+                },
+                signatures["example:decoders/sink@1.0.0"]!,
+                async (_environment, _context, _input, _receiver, _retain, arguments_) => {
+                  const owner = arguments_!.owners[0]!;
+                  arguments_!.accept();
+                  const raw = owner.take(issuer, nominal) as { total: bigint };
+                  closed++;
+                  return encode(raw.total, undefined, "u64");
+                },
+              ),
+            },
+          },
+        },
+      });
+      interface Decoder {
+        total(context?: import("../src/runtime/context.ts").Context): Promise<bigint>;
+        next(): Promise<bigint | null>;
+        release(): void;
+      }
+      interface Codec {
+        reference: { release(): void };
+        newDecoder(seed: bigint): Promise<Decoder>;
+        decoderZero(): Promise<Decoder>;
+        open(seed: bigint): Promise<Decoder>;
+        containers(): Promise<
+          [
+            (Decoder | null)[],
+            (
+              | {
+                  tag: "ok";
+                  val:
+                    | { tag: "missing" }
+                    | { tag: "found"; val: { decoder: Decoder; wide: bigint } };
+                }
+              | { tag: "err"; val: string }
+            ),
+          ]
+        >;
+        consume(value: Decoder): Promise<bigint>;
+      }
+      await mkdir(path.join(root, "node_modules/@syntropika"), { recursive: true });
+      await symlink(sdk, path.join(root, "node_modules/@syntropika/tembra-sdk"), "dir");
+      const { get } = (await import(file!)) as {
+        get(scope: typeof host, address: { orb: string; key: string }): Promise<Codec>;
+      };
+      const codec = await get(host, { orb: "codec", key: "main" });
+      const decoder = await codec.newDecoder(9007199254740993n);
+      expect(await decoder.total()).toBe(9007199254740993n);
+      expect(await decoder.next()).toBe(9007199254740994n);
+      const zero = await codec.decoderZero();
+      expect(await zero.total(undefined)).toBe(0n);
+      zero.release();
+      const [items, selected] = await codec.containers();
+      expect(items[0]).toBeNull();
+      expect(await items[1]!.total()).toBe(4n);
+      items[1]!.release();
+      expect(selected.tag).toBe("ok");
+      if (selected.tag === "ok" && selected.val.tag === "found") {
+        expect(selected.val.val.wide).toBe(9007199254740993n);
+        expect(await selected.val.val.decoder.total()).toBe(5n);
+        selected.val.val.decoder.release();
+      }
+      expect(await codec.consume(decoder)).toBe(9007199254740994n);
+      await expect(decoder.total()).rejects.toThrow("not live");
+      decoder.release();
+      const { get: getSink } = (await import(sinkFile!)) as {
+        get(
+          scope: typeof host,
+          address: { orb: string; key: string },
+        ): Promise<{
+          reference: { release(): void };
+          accept(value: Decoder): Promise<bigint>;
+        }>;
+      };
+      const sink = await getSink(host, { orb: "codec", key: "main" });
+      const transferred = await codec.open(6n);
+      expect(await sink.accept(transferred)).toBe(6n);
+      await expect(transferred.total()).rejects.toThrow("not live");
+      transferred.release();
+      expect(closed).toBe(5);
+      sink.reference.release();
+      codec.reference.release();
+    } finally {
+      await host.close();
+      await rm(root, { recursive: true, force: true });
+    }
+    expect(host.diagnostics().references).toBe(0);
+  },
+  CHECKER,
 );

@@ -209,6 +209,7 @@ for (const suite of selected) {
   if (suite === "native") {
     const macro = path.resolve(root, process.env.CARGO_TARGET_DIR ?? "target", "orb-macro");
     run("just", ["build-orb-macro", macro]);
+    run("just", ["build-import-resources", macro]);
     const parity = path.resolve(root, process.env.CARGO_TARGET_DIR ?? "target", "orb-parity");
     run("just", ["build-orb-parity", parity]);
     // Acceptance runs both self-contained components and tests requiring these real artifacts.
@@ -217,6 +218,8 @@ for (const suite of selected) {
       ["test", "--locked", "-p", "tembra-executor-wasm", "--tests", "--", "--include-ignored"],
       {
         ...environment,
+        TEMBRA_WASM_CODEC_PROVIDER: path.join(macro, "codec-provider.wasm"),
+        TEMBRA_WASM_CODEC_CONSUMER: path.join(macro, "codec-consumer.wasm"),
         TEMBRA_WASM_ORB_MACRO_ASYNC: path.join(
           macro,
           "wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm",

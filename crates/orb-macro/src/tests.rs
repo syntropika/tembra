@@ -8096,13 +8096,10 @@ fn a_resource_in_a_service_module_belongs_to_each_object_of_the_service() {
 
 /// What the native side does not cover yet leaves the module compiling inside the facade's wrapper,
 /// with an `orb()` that answers an error naming it, and a component build of the module unaffected:
-/// a WASI import, an import, plain or by key, of an interface with a synchronous function, and a
-/// hook declaration, whose `run` is synchronous, both of which work in a component build only.
+/// a WASI import and a native hook declaration, whose `run` needs the component's suspension.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
     let service = "pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }";
-    let pace = consumed("native-pace", PACE_WIT);
-    let synchronous = "works in a component build only: its function `now` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`";
     for (options, module, message) in [
         (
             Options {
@@ -8111,22 +8108,6 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
             },
             ledger("#[service]"),
             "the import of wasi:random/random@0.3.0 is not supported natively yet".to_owned(),
-        ),
-        (
-            Options {
-                imports: vec![literal("example:pace/beat@1.0.0")],
-                ..options(PACKAGE, Some(&pace))
-            },
-            ledger("#[service]"),
-            format!("the import of example:pace/beat@1.0.0 {synchronous}"),
-        ),
-        (
-            Options {
-                keyed: vec![literal("example:pace/beat@1.0.0")],
-                ..options(PACKAGE, Some(&pace))
-            },
-            ledger("#[service]"),
-            format!("the import of example:pace/beat@1.0.0 by key {synchronous}"),
         ),
         (
             options(PACKAGE, None),
@@ -8140,6 +8121,40 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
             orb_with(options, &module).unwrap_or_else(|error| panic!("{message}: {error}"));
         assert_eq!(native(&module, &[]), unsupported(&message), "{message}");
         assert!(wit(&module).starts_with("package "), "{message}");
+    }
+}
+
+/// A synchronous WIT function keeps its calling convention, with an awaitable native import.
+#[test]
+fn synchronous_functions_are_awaitable_imports_plainly_and_by_key() {
+    let dir = consumed("native-sync-import", PACE_WIT);
+    for keyed in [false, true] {
+        let mut configured = options(PACKAGE, Some(&dir));
+        if keyed {
+            configured.keyed.push(literal("example:pace/beat@1.0.0"));
+        } else {
+            configured.imports.push(literal("example:pace/beat@1.0.0"));
+        }
+        let module = orb_with(configured, &ledger("#[service]")).unwrap();
+        let root = native(&module, &[]);
+        assert!(root.contains("pub struct Providers"), "{root}");
+        assert!(
+            root.contains(if keyed {
+                "pub async fn now (& self ,) -> u64"
+            } else {
+                "pub async fn now () -> u64"
+            }),
+            "{root}"
+        );
+        assert!(
+            wit(&module).contains(if keyed {
+                "now: func() -> u64;"
+            } else {
+                "import example:pace/beat@1.0.0;"
+            }),
+            "{}",
+            wit(&module)
+        );
     }
 }
 
@@ -8254,7 +8269,7 @@ fn an_import_of_async_functions_is_served_natively() {
         "pub mod clock { # [allow (unused_imports)] pub use super :: example :: pace :: clock :: * ;",
         "# [doc = \" Wait until `value` and return it.\"] pub async fn wait (value : u64) -> u64 { let __tembra_call = super :: __tembra_import :: current () ;",
         "pub async fn last (labels : :: std :: vec :: Vec < :: std :: string :: String >) -> :: core :: option :: Option < super :: example :: pace :: clock :: Tick > {",
-        ". call (& __tembra_call . imports . clock . reference () , \"last\" , __tembra_arguments , | value |",
+        ". issue (__tembra_call . imports . clock . reference () . issue_portable :: < _ , :: tembra :: portable :: Delivered > (& __tembra_call . context , \"last\" , __tembra_input))",
         "impl __TembraBoundary for self :: example :: pace :: clock :: Tick {",
     ] {
         assert!(root.contains(expected), "{expected}\n{root}");

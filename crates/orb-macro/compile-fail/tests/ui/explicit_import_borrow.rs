@@ -1,0 +1,17 @@
+#[tembra::orb(
+    package = "example:reader@1.0.0",
+    wit = "consumed/protocol",
+    import = "example:protocol/borrowed@1.0.0"
+)]
+mod reader {
+    #[service]
+    pub struct Probe;
+
+    impl Probe {
+        pub fn value() -> u64 {
+            0
+        }
+    }
+}
+
+fn main() {}

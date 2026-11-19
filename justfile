@@ -174,17 +174,27 @@ build-orb-macro target-dir:
     cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --target-dir "$fixture_target" --features no-std -- -Clinker=wasm-component-ld
     cp "$fixture_target/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$fixture_target/no-std.wasm"
 
+# Compile the same fixed-WIT codec provider and importing consumer used by the native tests.
+build-import-resources target-dir:
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features codec-provider --target-dir "$1" -- -Clinker=wasm-component-ld
+    cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/codec-provider.wasm"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features codec-consumer --target-dir "$1" -- -Clinker=wasm-component-ld
+    cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/codec-consumer.wasm"
+
 # Execute real macro component boundaries; acceptance uses the same fixture builder.
 test-orb-macro:
     #!/usr/bin/env bash
     set -euo pipefail
     fixture_target="${CARGO_TARGET_DIR:-target}/orb-macro"
     just build-orb-macro "$fixture_target"
+    just build-import-resources "$fixture_target"
     fixture_target="$(cd "$fixture_target" && pwd)"
+    TEMBRA_WASM_CODEC_PROVIDER="$fixture_target/codec-provider.wasm" \
+    TEMBRA_WASM_CODEC_CONSUMER="$fixture_target/codec-consumer.wasm" \
     TEMBRA_WASM_ORB_MACRO_ASYNC="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm" \
     TEMBRA_WASM_ORB_MACRO_STD="$fixture_target/std.wasm" \
     TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \
-        cargo test --locked -p tembra-executor-wasm --test orb_macro_async --test orb_macro_runtime -- --ignored
+        cargo test --locked -p tembra-executor-wasm --test orb_macro_async --test orb_macro_runtime --test orb_macro_imports -- --ignored
 
 # Build the parity fixture's Orb as a component into one reusable target directory, with the overflow checks of its native tests.
 build-orb-parity target-dir:
