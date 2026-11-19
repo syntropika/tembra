@@ -1,0 +1,47 @@
+package spike:state;
+
+/// The state of the benchmark: a ledger with 64-bit fields past 2^53 and a list of entries.
+interface types {
+    record entry {
+        id: u64,
+        owner: string,
+        amount: u64,
+        tags: list<string>,
+    }
+    record ledger {
+        user-id: u64,
+        name: string,
+        balance: s64,
+        entries: list<entry>,
+    }
+}
+
+/// The state as `tembra:guest/state` carries it today: JSON text.
+interface json-state {
+    read: func() -> string;
+    update: func(value: string) -> string;
+}
+
+/// The state as a per-Orb interface would carry it: a WIT record.
+interface typed-state {
+    use types.{ledger};
+    read: func() -> ledger;
+    update: func(value: ledger) -> ledger;
+}
+
+/// Each function reads the state, adds 1 to the balance and updates it, `iterations` times, and
+/// returns the sum of the retained balances.
+interface bench {
+    /// JSON as today: Rust field names, 64-bit integers as JSON numbers.
+    run-json: func(iterations: u32) -> s64;
+    /// JSON fixed in place: camelCase names, 64-bit integers as decimal strings.
+    run-json-exact: func(iterations: u32) -> s64;
+    /// The WIT record.
+    run-typed: func(iterations: u32) -> s64;
+}
+
+world orb {
+    import json-state;
+    import typed-state;
+    export bench;
+}

@@ -1,0 +1,8 @@
+{
+  "name": "spike-typed-state-host-js",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bytecodealliance/jco-transpile": "0.23.0"
+  }
+}
