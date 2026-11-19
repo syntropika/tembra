@@ -9,6 +9,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createHost, directoryFilesystem } from "../dist/node.js";
+import { signature } from "../dist/runtime/adapters.js";
+import { dependencies } from "./component-dependencies.mjs";
 
 // The no-std probe component imports WASI 0.3 through its generated WIT bindings.
 const probe = process.env.TEMBRA_WASM_PROBE;
@@ -192,6 +194,40 @@ async function refused(call) {
   assert.fail("the call succeeded");
 }
 
+/**
+ * Run `script` on the JS component adapter with `bytes` prepared for it, and read the JSON line
+ * it prints per call. The prepared glue needs JSPI: a child Node enables it, and resolves the
+ * adapter's SDK import to this package.
+ */
+async function inAdapter(directory, bytes, script, ...args) {
+  const { prepareBrowserComponent } = await import("../dist/tooling/index.js");
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const adapter = await prepareBrowserComponent(bytes, digest, path.join(directory, "adapter"));
+  await mkdir(path.join(directory, "node_modules/@syntropika"), { recursive: true });
+  await symlink(
+    path.resolve(import.meta.dirname, ".."),
+    path.join(directory, "node_modules/@syntropika/tembra-sdk"),
+  );
+  const artifactFile = path.join(directory, "artifact.wasm");
+  await writeFile(artifactFile, bytes);
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--experimental-wasm-jspi",
+      path.join(import.meta.dirname, script),
+      adapter.module,
+      artifactFile,
+      ...args,
+    ],
+    { encoding: "utf8", timeout: 60000 },
+  );
+  assert.equal(child.status, 0, child.stderr);
+  return child.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+}
+
 test(
   "a trap answers the same reasons in the native worker and in the JS component adapter",
   { skip: missing("TEMBRA_WASM_PROBE"), timeout: 120000 },
@@ -212,33 +248,7 @@ test(
       } finally {
         await host.close();
       }
-      // The JS adapter runs the same artifact's prepared glue, which needs JSPI: a child Node
-      // enables it, and resolves the adapter's SDK import to this package.
-      const { prepareBrowserComponent } = await import("../dist/tooling/index.js");
-      const digest = createHash("sha256").update(bytes).digest("hex");
-      const adapter = await prepareBrowserComponent(bytes, digest, path.join(directory, "adapter"));
-      await mkdir(path.join(directory, "node_modules/@syntropika"), { recursive: true });
-      await symlink(
-        path.resolve(import.meta.dirname, ".."),
-        path.join(directory, "node_modules/@syntropika/tembra-sdk"),
-      );
-      const artifactFile = path.join(directory, "probe.wasm");
-      await writeFile(artifactFile, bytes);
-      const child = spawnSync(
-        process.execPath,
-        [
-          "--experimental-wasm-jspi",
-          path.join(import.meta.dirname, "component-trap-adapter.mjs"),
-          adapter.module,
-          artifactFile,
-        ],
-        { encoding: "utf8", timeout: 60000 },
-      );
-      assert.equal(child.status, 0, child.stderr);
-      const adapted = child.stdout
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
+      const adapted = await inAdapter(directory, bytes, "component-trap-adapter.mjs");
       for (const [trap, quarantined] of [native, adapted]) {
         const answer = (reason) => ({ code: "unavailable", reason, message: trap.message });
         assert.deepEqual(trap, answer("wasm_executor"));
@@ -288,4 +298,58 @@ test(
       await host.close();
     }
   },
+);
+
+test(
+  "a TypeScript dependency's refusal traps its compiled caller alike in both hosts",
+  { skip: missing("TEMBRA_WASM_CONSUMER"), timeout: 120000 },
+  () =>
+    scratch(async (directory) => {
+      const bytes = await artifact("pipeline", "consumer", "pipeline", { component: consumer });
+      // The WIT digest the pipeline requires of each dependency.
+      const plan = JSON.parse(
+        new binding.NodeArtifact(bytes).request(
+          JSON.stringify({
+            kind: "install",
+            name: "pipeline",
+            apiVersion: 1,
+            requires,
+            grants: {},
+            filesystem: [],
+            network: [],
+          }),
+        ),
+      ).ok.plan;
+      const signatures = Object.fromEntries(
+        plan.orb.requires.map(({ orb, signatures }) => [orb, Object.values(signatures)[0]]),
+      );
+      const host = createHost();
+      let native;
+      try {
+        await host.install([...dependencies(signatures, signature), { artifact: bytes, requires }]);
+        const reference = await host.get(`pipeline::${pipeline}`, "main");
+        native = [
+          await refused(() => reference.quadruple(1)),
+          await refused(() => reference.quadruple(1)),
+        ];
+        reference.release();
+      } finally {
+        await host.close();
+      }
+      const adapted = await inAdapter(
+        directory,
+        bytes,
+        "component-dependency-adapter.mjs",
+        JSON.stringify(signatures),
+      );
+      // The native worker's trap text names the Wasm frame first; both end with the refusal.
+      const refusal = "dependency call failed: released/reference: The reference has been released";
+      for (const [trap, quarantined] of [native, adapted]) {
+        assert.equal(trap.reason, "wasm_executor", trap.message);
+        assert.match(trap.message, /^component trap: /);
+        assert.ok(trap.message.endsWith(refusal), trap.message);
+        assert.deepEqual(quarantined, { ...trap, reason: "wasm_executor_quarantined" });
+      }
+      assert.equal(adapted[0].message, `component trap: ${refusal}`);
+    }),
 );

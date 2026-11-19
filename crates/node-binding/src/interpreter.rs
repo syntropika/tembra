@@ -432,22 +432,51 @@ struct ReplyError {
     message: String,
 }
 
+/// The platform's refusal of a host request: its structured error, whose code and reason the
+/// request answers, or a bare text, which answers `invalid/platform_reply`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Refusal {
+    Structured {
+        code: String,
+        reason: String,
+        message: String,
+    },
+    Text(String),
+}
+
+impl From<Refusal> for tembra::Error {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Structured {
+                code,
+                reason,
+                message,
+            } => match tembra::core::Code::parse(&code) {
+                Some(code) => tembra::Error::new(code, reason, message),
+                None => tembra::Error::invalid("platform_reply", message),
+            },
+            Refusal::Text(message) => tembra::Error::invalid("platform_reply", message),
+        }
+    }
+}
+
 /// Decode one response supplied by the trusted platform scope adapter.
 fn decode(packet: &str) -> tembra::Result<Value> {
-    let value: Reply<Value, String> = serde_json::from_str(packet)
+    let value: Reply<Value, Refusal> = serde_json::from_str(packet)
         .map_err(|error| tembra::Error::invalid("platform_reply", error.to_string()))?;
     match value {
         Reply::Ok(value) => Ok(value),
-        Reply::Error(message) => Err(tembra::Error::invalid("platform_reply", message)),
+        Reply::Error(refusal) => Err(refusal.into()),
     }
 }
 /// Retain the checked payload verbatim; parsing through Value would rewrite its numbers.
 fn decode_raw(packet: &str) -> tembra::Result<String> {
-    let value: Reply<Box<serde_json::value::RawValue>, String> = serde_json::from_str(packet)
+    let value: Reply<Box<serde_json::value::RawValue>, Refusal> = serde_json::from_str(packet)
         .map_err(|error| tembra::Error::invalid("platform_reply", error.to_string()))?;
     match value {
         Reply::Ok(value) => Ok(value.get().to_owned()),
-        Reply::Error(message) => Err(tembra::Error::invalid("platform_reply", message)),
+        Reply::Error(refusal) => Err(refusal.into()),
     }
 }
 
@@ -467,6 +496,34 @@ mod tests {
         );
         assert!(super::decode_raw(r#"{"ok": invalid}"#).is_err());
         assert!(super::decode_raw(r#"{"error":"refused"}"#).is_err());
+    }
+
+    /// A structured refusal keeps its code and reason; a bare text or an unknown code answers
+    /// `invalid/platform_reply`.
+    #[test]
+    fn a_platform_refusal_keeps_its_code_and_reason() {
+        let refused = |packet: &str| {
+            let error = super::decode_raw(packet).unwrap_err();
+            (error.code.as_str(), error.reason, error.message)
+        };
+        let released = r#"{"error":{"code":"released","reason":"reference","message":"gone"}}"#;
+        assert_eq!(
+            refused(released),
+            ("released", "reference".into(), "gone".into())
+        );
+        let error = super::decode(released).unwrap_err();
+        assert_eq!(
+            (error.code.as_str(), error.reason.as_str()),
+            ("released", "reference")
+        );
+        assert_eq!(
+            refused(r#"{"error":"refused"}"#),
+            ("invalid", "platform_reply".into(), "refused".into())
+        );
+        assert_eq!(
+            refused(r#"{"error":{"code":"other","reason":"x","message":"m"}}"#),
+            ("invalid", "platform_reply".into(), "m".into())
+        );
     }
 
     /// A refused entry completes an ordinary or an incoming HTTP exchange with its code and reason,

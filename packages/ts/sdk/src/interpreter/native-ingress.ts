@@ -30,7 +30,7 @@
  * call completes without a terminal frame (cancellation, trap, timeout): the latter is a failure,
  * never a truncated end.
  */
-import { reply } from "./codec.ts";
+import { refusal, reply } from "./codec.ts";
 import { failure as fault } from "../error.ts";
 import { decodeAsyncHostRequest, decodeHostRequest } from "./host-protocol.ts";
 import { decode, type HandleCodec, Reader } from "./standard-codec.ts";
@@ -96,7 +96,7 @@ export function respond(operation: () => unknown): string {
   try {
     return `{"ok":${reply(operation())}}`;
   } catch (error) {
-    return JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+    return refusal(error);
   }
 }
 

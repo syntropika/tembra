@@ -122,9 +122,26 @@ fn portable_compiled_imports_use_scoped_host_events() {
     assert_eq!(backend.instances(), 0);
 }
 
-/// A refused dependency call traps the synchronous import and quarantines only this Store.
+/// A refused dependency call traps the synchronous import and quarantines only this Store. The
+/// trap names the platform's structured refusal by its code and reason, and a bare text as
+/// `invalid/platform_reply`.
 #[test]
 fn portable_compiled_import_refusal_quarantines_the_importer() {
+    for (refusal, named) in [
+        (
+            json!({"error": {"code": "released", "reason": "reference", "message": "provider refused"}}),
+            "dependency call failed: released/reference: provider refused",
+        ),
+        (
+            json!({"error": "provider refused"}),
+            "dependency call failed: invalid/platform_reply: provider refused",
+        ),
+    ] {
+        refused_import_quarantines_the_importer(refusal, named);
+    }
+}
+
+fn refused_import_quarantines_the_importer(refusal: Value, named: &str) {
     let backend = NativeInterpreter::new("{}".into(), vec![]).unwrap();
     let port = consumer(&backend);
     exchange(
@@ -144,11 +161,11 @@ fn portable_compiled_import_refusal_quarantines_the_importer() {
         &port,
         json!({"kind":"invoke","environment":2,"function":quadruple(),"args":[5]}),
         false,
-        &mut |_, _| json!({"error":"provider refused"}).to_string(),
+        &mut |_, _| refusal.to_string(),
     );
     let message = result["error"]["message"].as_str().unwrap();
-    assert!(message.contains("component trap"), "{message}");
-    assert!(message.contains("provider refused"), "{message}");
+    assert!(message.starts_with("component trap"), "{message}");
+    assert!(message.ends_with(named), "{message}");
     assert_eq!(backend.instances(), 0);
     // The quarantined revision refuses the next entry with its code and reason.
     let refused = exchange(

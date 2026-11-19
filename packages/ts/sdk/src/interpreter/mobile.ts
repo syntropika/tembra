@@ -3,7 +3,7 @@ import { Host } from "../host.ts";
 import { isolate, type AdaptedHostOptions } from "#tembra-adapters";
 import { Revision } from "./revision.ts";
 import { decodeAsyncHostRequest, decodeHostRequest } from "./host-protocol.ts";
-import { reply } from "./codec.ts";
+import { refusal, reply } from "./codec.ts";
 import { cliPacket } from "./cli.ts";
 import type { IngressExchange } from "./http-ingress.ts";
 import type { HttpField } from "./http-provider.ts";
@@ -249,9 +249,7 @@ export class MobileDriver implements InterpreterPort {
           try {
             response = `{"ok":${reply(operation())}}`;
           } catch (error) {
-            response = JSON.stringify({
-              error: error instanceof Error ? error.message : String(error),
-            });
+            response = refusal(error);
           }
           return this.port.reply(event.id, response);
         };

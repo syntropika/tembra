@@ -456,11 +456,31 @@ impl NativePort {
             #[serde(rename_all = "lowercase")]
             enum Answer {
                 Ok(Box<serde_json::value::RawValue>),
-                Error(String),
+                Error(Refusal),
+            }
+            // The platform's refusal: its structured error keeps its code and reason; a bare
+            // text answers `invalid/platform_reply`.
+            #[derive(serde::Deserialize)]
+            #[serde(untagged)]
+            enum Refusal {
+                Structured {
+                    code: String,
+                    reason: String,
+                    message: String,
+                },
+                Text(String),
             }
             let result = match serde_json::from_str::<Answer>(&packet) {
                 Ok(Answer::Ok(value)) => Ok(value.get().to_owned()),
-                Ok(Answer::Error(message)) => {
+                Ok(Answer::Error(Refusal::Structured {
+                    code,
+                    reason,
+                    message,
+                })) => Err(match tembra::core::Code::parse(&code) {
+                    Some(code) => tembra::Error::new(code, reason, message),
+                    None => tembra::Error::invalid("platform_reply", message),
+                }),
+                Ok(Answer::Error(Refusal::Text(message))) => {
                     Err(tembra::Error::invalid("platform_reply", message))
                 }
                 Err(e) => Err(tembra::Error::invalid("platform_reply", e.to_string())),
