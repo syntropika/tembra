@@ -4,7 +4,7 @@ import { Errors, type ErrorDescriptor } from "./errors.ts";
 const codes: ReadonlySet<unknown> = new Set(Object.values(Code));
 
 /** Check for a structured error descriptor. */
-function isDescriptor(value: unknown): value is ErrorDescriptor {
+export function isDescriptor(value: unknown): value is ErrorDescriptor {
   return (
     typeof value === "object" &&
     value !== null &&

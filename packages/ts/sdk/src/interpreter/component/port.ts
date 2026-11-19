@@ -21,8 +21,8 @@
  * `unavailable/wasm_executor_quarantined` with the trap's message. A structured error that traps
  * the guest, such as a dependency's refusal, is a trap too.
  */
-import { TembraError } from "../../error.ts";
-import { Errors } from "../../errors.ts";
+import { isDescriptor, TembraError } from "../../error.ts";
+import { Errors, type ErrorDescriptor } from "../../errors.ts";
 import type { CoreLimits, TaskObserver } from "./instance.ts";
 import type { CallbackScope } from "./scope.ts";
 import { abortable, type WasiHost } from "./wasi-host.ts";
@@ -43,15 +43,18 @@ export interface Callback {
   readonly exited: () => void;
 }
 
-/** Whether `error` is the executor's own answer to a fault, which is answered unchanged. */
-function executorFault(error: unknown): error is TembraError {
-  return error instanceof TembraError && error.reason === Errors.Unavailable.WasmExecutor.reason;
+/**
+ * Whether `error` is the executor's own answer to a fault, which is answered unchanged. Structured
+ * errors are recognized by their fields, as `failure` does, so one from another SDK copy counts.
+ */
+function executorFault(error: unknown): error is ErrorDescriptor {
+  return isDescriptor(error) && error.reason === Errors.Unavailable.WasmExecutor.reason;
 }
 
 /** The text of a failure, a structured one as the native worker writes it: `code/reason: message`. */
 export function failureText(error: unknown): string {
   try {
-    if (error instanceof TembraError) return `${error.code}/${error.reason}: ${error.message}`;
+    if (isDescriptor(error)) return `${error.code}/${error.reason}: ${error.message}`;
     return error instanceof Error ? error.message : String(error);
   } catch {
     // An arbitrary thrown value must not hide the fault it stands for.
@@ -74,13 +77,13 @@ const faults = new WeakMap<object, TembraError>();
  * refusal is its WIT `err`, a value that never reaches here.
  */
 function fault(error: unknown): TembraError {
-  if (executorFault(error)) return error;
+  if (error instanceof TembraError && executorFault(error)) return error;
   const object = typeof error === "object" && error !== null ? error : undefined;
   const known = object && faults.get(object);
   if (known) return known;
-  const answer = new TembraError(Errors.Unavailable.WasmExecutor, trapMessage(error), {
-    cause: error,
-  });
+  const answer = executorFault(error)
+    ? new TembraError(error, error.message, { cause: error })
+    : new TembraError(Errors.Unavailable.WasmExecutor, trapMessage(error), { cause: error });
   if (object) faults.set(object, answer);
   return answer;
 }
@@ -367,9 +370,11 @@ export class ComponentPort {
   /** Mark the instance unusable after a trap observed outside `run`. */
   poison(cause?: unknown): void {
     if (!this.#poisoned) {
-      // Waiters see the actual trap; later entries are refused as quarantined.
-      this.#rejectTrap(cause ?? new Error("The component revision is quarantined after a trap"));
-      this.#cause = cause;
+      // Waiters see the actual trap; later entries are refused as quarantined, naming the same
+      // trap, which a trap without a cause names alike for both.
+      const trap = cause ?? new Error("the component trapped");
+      this.#rejectTrap(trap);
+      this.#cause = trap;
     }
     this.#poisoned = true;
     this.#retired.abort();

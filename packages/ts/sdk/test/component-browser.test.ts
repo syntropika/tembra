@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import { converters, type TypeGraph } from "../src/interpreter/component/values.ts";
 import { Gate } from "../src/interpreter/gate.ts";
 import { ComponentPort } from "../src/interpreter/component/port.ts";
@@ -343,26 +344,61 @@ describe("component port", () => {
     expect(instance.usable).toBe(true);
   });
 
-  test("a dependency's refusal traps its caller as the native worker's does", async () => {
-    const instance = port();
-    const caller = scope();
-    caller.call = () => Promise.reject(new TembraError(Errors.Released.Reference));
-    const math = dependencyImport(instance, "example:deps/math@1.0.0", [
-      {
-        name: "double",
-        spelling: "double",
-        values: convert({ params: [{ name: "value", type: "u32" }] }),
-      },
-    ]) as Record<string, (value: number) => Promise<unknown>>;
-    const message =
-      "component trap: dependency call failed: released/reference: The reference has been released";
-    await expect(instance.run(1n, caller, () => math.double!(2))).rejects.toMatchObject({
-      code: "unavailable",
-      reason: "wasm_executor",
-      message,
+  // A refusal from this SDK, a structured error from another SDK copy (another realm), and the
+  // cancellation the caller's root answers a dependency call with: each traps the caller, as the
+  // native worker answers them, `wasm_executor` with the refusal's `code/reason: message`.
+  for (const [what, refusal, text] of [
+    [
+      "a dependency's refusal",
+      () => new TembraError(Errors.Released.Reference),
+      "released/reference: The reference has been released",
+    ],
+    [
+      "a foreign structured refusal",
+      () =>
+        runInNewContext("Object.assign(new Error(message), { code, reason })", {
+          ...Errors.Released.Reference,
+        }),
+      "released/reference: The reference has been released",
+    ],
+    [
+      "a caller's cancellation",
+      () => new TembraError(Errors.Cancelled.Root),
+      "cancelled/root: The operation was cancelled",
+    ],
+  ] as const) {
+    test(`${what} traps its caller as the native worker's does`, async () => {
+      const instance = port();
+      const caller = scope();
+      caller.call = () => Promise.reject(refusal());
+      const math = dependencyImport(instance, "example:deps/math@1.0.0", [
+        {
+          name: "double",
+          spelling: "double",
+          values: convert({ params: [{ name: "value", type: "u32" }] }),
+        },
+      ]) as Record<string, (value: number) => Promise<unknown>>;
+      const message = `component trap: dependency call failed: ${text}`;
+      await expect(instance.run(1n, caller, () => math.double!(2))).rejects.toMatchObject({
+        code: "unavailable",
+        reason: "wasm_executor",
+        message,
+      });
+      await expect(instance.run(2n, scope(), () => 1)).rejects.toMatchObject({
+        code: "unavailable",
+        reason: "wasm_executor_quarantined",
+        message,
+      });
     });
+  }
+
+  test("a trap without a cause names one trap before and after the quarantine", async () => {
+    const instance = port();
+    const message = "component trap: the component trapped";
+    const pending = instance.run(1n, scope(), () => new Promise(() => {}));
+    instance.poison();
+    await expect(pending).rejects.toMatchObject({ reason: "wasm_executor", message });
     await expect(instance.run(2n, scope(), () => 1)).rejects.toMatchObject({
-      code: "unavailable",
       reason: "wasm_executor_quarantined",
       message,
     });
