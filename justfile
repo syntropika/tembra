@@ -200,6 +200,8 @@ build-import-resources target-dir:
     cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/import-provider.wasm"
     cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features rpc-consumer --target-dir "$1" -- -Clinker=wasm-component-ld
     cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/import-consumer.wasm"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features packet-reader --target-dir "$1" -- -Clinker=wasm-component-ld
+    cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/packet-reader.wasm"
 
 # Execute real macro component boundaries; acceptance uses the same fixture builder.
 test-orb-macro:
@@ -213,6 +215,7 @@ test-orb-macro:
     TEMBRA_WASM_CODEC_CONSUMER="$fixture_target/codec-consumer.wasm" \
     TEMBRA_WASM_IMPORT_PROVIDER="$fixture_target/import-provider.wasm" \
     TEMBRA_WASM_IMPORT_CONSUMER="$fixture_target/import-consumer.wasm" \
+    TEMBRA_WASM_PACKET_READER="$fixture_target/packet-reader.wasm" \
     TEMBRA_WASM_ORB_MACRO_ASYNC="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm" \
     TEMBRA_WASM_ORB_MACRO_STD="$fixture_target/std.wasm" \
     TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \

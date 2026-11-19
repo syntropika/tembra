@@ -222,6 +222,7 @@ for (const suite of selected) {
         TEMBRA_WASM_CODEC_CONSUMER: path.join(macro, "codec-consumer.wasm"),
         TEMBRA_WASM_IMPORT_PROVIDER: path.join(macro, "import-provider.wasm"),
         TEMBRA_WASM_IMPORT_CONSUMER: path.join(macro, "import-consumer.wasm"),
+        TEMBRA_WASM_PACKET_READER: path.join(macro, "packet-reader.wasm"),
         TEMBRA_WASM_ORB_MACRO_ASYNC: path.join(
           macro,
           "wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm",

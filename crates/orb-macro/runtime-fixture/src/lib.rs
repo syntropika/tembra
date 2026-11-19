@@ -19,6 +19,9 @@ mod cellar;
 #[cfg(feature = "codec-consumer")]
 #[path = "../../native-fixture/src/codec/consumer.rs"]
 mod codec_consumer;
+#[cfg(feature = "packet-reader")]
+#[path = "../../native-fixture/src/codec/packets.rs"]
+mod packet_reader;
 #[cfg(feature = "codec-provider")]
 #[path = "../../native-fixture/src/codec/provider.rs"]
 mod codec_provider;
