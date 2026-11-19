@@ -21,17 +21,18 @@ impl Host {
 }
 
 impl Context {
-    /// Hand a record to the host's log observer, attributed to the Orb running this invocation;
-    /// without an observer it is dropped. Writing needs no admission: a cancelled call still logs.
-    /// An observer that panics does not interrupt the call.
+    /// Hand a record to the host's log observer, attributed to the Orb running this invocation,
+    /// or, in a resource's opener or closer, to the Orb owning the resource; without an observer
+    /// it is dropped. Writing needs no admission: a cancelled call still logs. An observer that
+    /// panics does not interrupt the call.
     pub fn log(&self, level: impl Into<String>, message: impl Into<String>) -> Result<()> {
-        let call = self.invocation()?;
+        let orb = self.attributed()?;
         let observer = self.host.0.log_observer.borrow().clone();
         let Some(observer) = observer else {
             return Ok(());
         };
         let record = LogRecord {
-            orb: self.host.kernel().orb(call.orb)?.declaration.name,
+            orb,
             level: level.into(),
             message: message.into(),
         };

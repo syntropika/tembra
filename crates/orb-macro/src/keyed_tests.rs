@@ -25,11 +25,13 @@ interface counter {
 ";
 
 const ROUTER: &str = "mod router {
-    #[service]
-    pub struct Routing;
-    impl Routing {
-        pub async fn route(key: String) -> Result<u32, String> {
-            Ok(counter_ref::get(vec![key]).await?.add(1))
+    pub mod routing {
+        #[service]
+        pub struct Routing;
+        impl Routing {
+            pub async fn route(key: String) -> Result<u32, String> {
+                Ok(super::counter_ref::get(vec![key]).await?.add(1))
+            }
         }
     }
 }";
@@ -381,11 +383,13 @@ interface counter { use cursors.{cursor}; read: func() -> u32; }
 #[test]
 fn an_implemented_interface_is_imported_by_key() {
     const PROXY: &str = "mod proxy {
-        #[service(\"example:counters/counter@1.0.0\")]
-        pub struct Counter;
-        impl Counter {
-            pub fn add(amount: u32) -> u32 { amount }
-            pub async fn read() -> counter::Tally { counter::Tally { key: vec![], count: 0 } }
+        pub mod counting {
+            #[service(\"example:counters/counter@1.0.0\")]
+            pub struct Counter;
+            impl Counter {
+                pub fn add(amount: u32) -> u32 { amount }
+                pub async fn read() -> super::counter::Tally { super::counter::Tally { key: vec![], count: 0 } }
+            }
         }
     }";
     let dir = consumed("implemented", COUNTERS);
@@ -411,13 +415,15 @@ fn an_implemented_interface_is_imported_by_key() {
     let relaying = PROXY.replace(
         "\n    }",
         "
-        #[service]
-        pub struct Relay;
-        impl Relay {
-            /// The tally of the object of `key` of the provider the view reaches.
-            pub async fn relayed(key: String) -> Result<counter::Tally, String> {
-                let tally = counter_ref::get(vec![key]).await?.read().await;
-                Ok(counter::Tally { key: tally.key, count: tally.count })
+        pub mod relay {
+            #[service]
+            pub struct Relay;
+            impl Relay {
+                /// The tally of the object of `key` of the provider the view reaches.
+                pub async fn relayed(key: String) -> Result<super::counter::Tally, String> {
+                    let tally = super::counter_ref::get(vec![key]).await?.read().await;
+                    Ok(super::counter::Tally { key: tally.key, count: tally.count })
+                }
             }
         }
     }",
@@ -461,21 +467,25 @@ fn a_derived_signature_names_an_implemented_interfaces_types_through_its_export(
     let proxy = |relayed: &str| {
         format!(
             "mod proxy {{
-                #[service(\"example:counters/counter@1.0.0\")]
-                pub struct Counter;
-                impl Counter {{
-                    pub fn add(amount: u32) -> u32 {{ amount }}
-                    pub async fn read() -> counter::Tally {{ counter::Tally {{ key: vec![], count: 0 }} }}
+                pub mod counting {{
+                    #[service(\"example:counters/counter@1.0.0\")]
+                    pub struct Counter;
+                    impl Counter {{
+                        pub fn add(amount: u32) -> u32 {{ amount }}
+                        pub async fn read() -> super::counter::Tally {{ super::counter::Tally {{ key: vec![], count: 0 }} }}
+                    }}
                 }}
-                #[service]
-                pub struct Relay;
-                impl Relay {{ {relayed} }}
+                pub mod relay {{
+                    #[service]
+                    pub struct Relay;
+                    impl Relay {{ {relayed} }}
+                }}
             }}"
         )
     };
     for path in [
-        "counter::Tally",
-        "exports::example::counters::counter::Tally",
+        "super::counter::Tally",
+        "super::exports::example::counters::counter::Tally",
     ] {
         expanded(
             options(Some(&dir), &["example:counters/counter@1.0.0"]),
@@ -510,19 +520,23 @@ interface counter {
     let module = expanded(
         options(Some(&dir), &["example:counters/counter@1.0.0"]),
         "mod proxy {
-            #[service(\"example:counters/counter@1.0.0\")]
-            pub struct Counter;
-            impl Counter {
-                pub fn add(amount: u32) -> u32 { amount }
-                pub async fn read() -> counter::Tally { counter::Tally { key: vec![], count: 0 } }
-            }
-            #[service]
-            pub struct Relay;
-            impl Relay {
-                pub async fn relayed(key: String) -> Result<counter_ref::Tally, String> {
-                    Ok(counter_ref::get(vec![key]).await?.read().await)
+            pub mod counting {
+                #[service(\"example:counters/counter@1.0.0\")]
+                pub struct Counter;
+                impl Counter {
+                    pub fn add(amount: u32) -> u32 { amount }
+                    pub async fn read() -> super::counter::Tally { super::counter::Tally { key: vec![], count: 0 } }
                 }
-                pub fn counted(last: self::example::counters::counter::Tally) -> u32 { last.count }
+            }
+            pub mod relay {
+                #[service]
+                pub struct Relay;
+                impl Relay {
+                    pub async fn relayed(key: String) -> Result<super::counter_ref::Tally, String> {
+                        Ok(super::counter_ref::get(vec![key]).await?.read().await)
+                    }
+                    pub fn counted(last: super::example::counters::counter::Tally) -> u32 { last.count }
+                }
             }
         }",
     );

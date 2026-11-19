@@ -137,7 +137,7 @@ fn a_native_consumer_calls_a_native_provider_through_its_imports() {
             "{method}"
         );
     }
-    let client = metering::ReadingsClient::new(readings.clone());
+    let client = metering::readings::ReadingsClient::new(readings.clone());
     let reading = |amount, times| gauge::Reading { amount, times };
     let kernel = host.kernel();
     let (local, claims) = pool
@@ -250,7 +250,7 @@ fn a_failed_get_releases_its_claim() {
         picky,
         metering::orb_named("metering", 1, providers()).unwrap(),
     ]);
-    let client = metering::ReadingsClient::new(readings.clone());
+    let client = metering::readings::ReadingsClient::new(readings.clone());
     let kernel = host.kernel();
     let (fed, claims) = pool
         .run_until(host.root("alice", move |context| {

@@ -24,13 +24,17 @@ refused, then binds the import to `greeter` and calls the welcomer.
     import = "example:greeter/greeting@1.0.0"
 )]
 mod welcomer {
-    #[service]
-    pub struct Welcoming;
+    pub mod welcoming {
+        use super::greeting;
 
-    impl Welcoming {
-        /// Greet each name through the imported interface and return the greetings.
-        pub fn welcome(names: Vec<String>) -> Vec<String> {
-            names.iter().map(|name| greeting::hello(name)).collect()
+        #[service]
+        pub struct Welcoming;
+
+        impl Welcoming {
+            /// Greet each name through the imported interface and return the greetings.
+            pub fn welcome(names: Vec<String>) -> Vec<String> {
+                names.iter().map(|name| greeting::hello(name)).collect()
+            }
         }
     }
 }

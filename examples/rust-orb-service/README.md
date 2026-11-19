@@ -11,8 +11,9 @@ This example writes a compiled Orb using Rust's standard library without a WIT f
 | `host/src/main.rs`             | The wiring: loads the packaged artifact and calls two methods; it defines no Orb      |
 | `run.sh`                       | Build, show the derived WIT, run the host                                             |
 
-`greeting` greets by name and measures a text. The author writes a `pub struct Stats`, a unit
-struct `Greeting` and three `pub fn`; [the macro](../../crates/orb-macro/README.md) turns them into a
+`greeting` greets by name and measures a text. The author writes a `pub struct Stats`, then a
+module of its own for the service, `pub mod greeting`, with a unit struct `Greeting` and three
+`pub fn`; [the macro](../../crates/orb-macro/README.md) turns them into a
 `record`, an exported `interface` and three `func`s, and generates the `wit-bindgen` bindings and
 the `export!`. The macro leaves allocation and panic handling to `std`; this guest does not
 depend on `dlmalloc`. The other Rust Orb examples use the explicit `no_std` option for their

@@ -5,14 +5,16 @@
 
 #[sdk::orb(package = "example:italian@1.0.0", wit = "../wit", crate = "sdk")]
 pub mod italian {
-    /// Implements `greeting` of the shared package.
-    #[service("example:greeter/greeting@1.0.0")]
-    pub struct Greeting;
+    pub mod greeter {
+        /// Implements `greeting` of the shared package.
+        #[service("example:greeter/greeting@1.0.0")]
+        pub struct Greeting;
 
-    impl Greeting {
-        /// Greet by name.
-        pub fn hello(name: String) -> String {
-            format!("Ciao, {name}!")
+        impl Greeting {
+            /// Greet by name.
+            pub fn hello(name: String) -> String {
+                format!("Ciao, {name}!")
+            }
         }
     }
 }

@@ -1,0 +1,5 @@
+error: the dependencies of `Totals` form a cycle through `Counts`: a resource opens after the resources it depends on
+  --> tests/ui/resource_dependencies_form_a_cycle.rs:15:27
+   |
+15 |     #[resource(depends = [Counts])]
+   |                           ^^^^^^

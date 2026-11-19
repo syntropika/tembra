@@ -25,8 +25,8 @@ pub struct Count {
 }
 ```
 
-`#[state]` marks the struct as the state of the objects of a service: the module's only one here,
-otherwise `#[state(service = Counter)]`. The kernel keeps exactly one state per object, so a service
+`#[state]` marks the struct as the state of the objects of a service: the service whose module
+holds it, `Counter` here, which sits beside `Count` in `pub mod counter`. The kernel keeps exactly one state per object, so a service
 has one state struct; `version` is what the kernel compares when the Orb is reloaded. The macro
 generates `Count::read()` and `Count::update(|count| ...)`. The initial value is
 `Count::default()`, and the kernel keeps the value as the JSON `serde` writes: the struct derives

@@ -1,5 +1,5 @@
 error: `Entry` comes into this module through a glob import, which the macro does not follow for a contract type; import it by name, `use self::model::Entry;`
-  --> tests/ui/contract_type_through_a_glob.rs:15:27
+  --> tests/ui/contract_type_through_a_glob.rs:16:31
    |
-15 |         pub fn first() -> Entry {
-   |                           ^^^^^
+16 |             pub fn first() -> Entry {
+   |                               ^^^^^

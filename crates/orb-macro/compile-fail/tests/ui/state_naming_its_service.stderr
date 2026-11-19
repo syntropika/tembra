@@ -1,0 +1,5 @@
+error: #[state] takes no `service`: the state belongs to the service whose module holds it, so put it in that module
+ --> tests/ui/state_naming_its_service.rs:4:17
+  |
+4 |         #[state(service = Tickets)]
+  |                 ^^^^^^^

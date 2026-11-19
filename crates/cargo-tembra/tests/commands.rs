@@ -35,19 +35,23 @@ extern crate alloc;
     no_std
 )]
 mod dice {
-    #[service]
-    pub struct Die;
+    pub mod die {
+        use super::{monotonic_clock, random};
 
-    impl Die {
-        /// A throw of the die, from the host's secure random source.
-        pub fn throw() -> u8 {
-            (random::get_random_u64() % 6) as u8 + 1
-        }
+        #[service]
+        pub struct Die;
 
-        /// Wait on the host's monotonic clock, then throw.
-        pub async fn throw_after(nanoseconds: u64) -> u8 {
-            monotonic_clock::wait_for(nanoseconds).await;
-            Die::throw()
+        impl Die {
+            /// A throw of the die, from the host's secure random source.
+            pub fn throw() -> u8 {
+                (random::get_random_u64() % 6) as u8 + 1
+            }
+
+            /// Wait on the host's monotonic clock, then throw.
+            pub async fn throw_after(nanoseconds: u64) -> u8 {
+                monotonic_clock::wait_for(nanoseconds).await;
+                Die::throw()
+            }
         }
     }
 }
@@ -287,11 +291,14 @@ fn a_new_crate_builds_as_a_component_and_natively() {
     );
     cargo(&krate, &["build", "--features", "host"]);
     // A native host is another crate: it reaches the module `new` wrote by its path, and builds
-    // the Orb the module's `orb()` names. An integration test of the crate is such a host.
+    // the Orb the module's `orb()` names. An integration test of the crate is such a host. The
+    // service sits in a module of its own, `api`, which the host reaches below the Orb's module.
     std::fs::create_dir_all(krate.join("tests")).unwrap();
     std::fs::write(
         krate.join("tests/host.rs"),
-        "#[test]\nfn the_module_builds_its_orb() {\n    greeter_orb::greeter_orb::orb().unwrap();\n}\n",
+        "#[test]\nfn the_module_builds_its_orb() {\n    greeter_orb::greeter_orb::orb().unwrap();\n}\n\n\
+         #[test]\nfn the_service_sits_in_its_module() {\n    \
+         assert_eq!(greeter_orb::greeter_orb::api::Api::hello(\"Ada\".into()), \"Hello, Ada!\");\n}\n",
     )
     .unwrap();
     cargo(&krate, &["test", "--features", "host", "--test", "host"]);

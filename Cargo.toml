@@ -41,6 +41,8 @@ exclude = [
   "examples/rust-orb-context/host",
   "examples/rust-orb-service-lifetime/ledger",
   "examples/rust-orb-service-lifetime/host",
+  "examples/rust-orb-service-resource/harbor",
+  "examples/rust-orb-service-resource/host",
   "examples/rust-orb-shared-interface/book",
   "examples/rust-orb-shared-interface/host",
   "examples/rust-orb-import/greeter",

@@ -11,39 +11,46 @@
     tembra::orb(package = "example:holder@1.0.0", wit = "rights")
 )]
 pub mod holder {
-    use alloc::vec::Vec;
-
     /// Every flag of the access.
     fn all() -> rights::Access {
         rights::Access::READ | rights::Access::WRITE | rights::Access::SHARE
     }
 
-    /// The rights of the consumed package.
-    #[service("example:rights/rights@1.0.0")]
-    pub struct Rights;
+    pub mod access_rights {
+        use super::{all, rights};
+        use alloc::vec::Vec;
 
-    impl Rights {
-        pub fn invert(access: rights::Access) -> rights::Access {
-            access ^ all()
-        }
+        /// The rights of the consumed package.
+        #[service("example:rights/rights@1.0.0")]
+        pub struct Rights;
 
-        pub fn merged(grants: Vec<rights::Grant>) -> rights::Access {
-            grants
-                .iter()
-                .fold(rights::Access::empty(), |merged, grant| {
-                    merged | grant.access
-                })
+        impl Rights {
+            pub fn invert(access: rights::Access) -> rights::Access {
+                access ^ all()
+            }
+
+            pub fn merged(grants: Vec<rights::Grant>) -> rights::Access {
+                grants
+                    .iter()
+                    .fold(rights::Access::empty(), |merged, grant| {
+                        merged | grant.access
+                    })
+            }
         }
     }
 
-    /// Checks an access against what a holder wants.
-    #[service]
-    pub struct Checks;
+    pub mod checks {
+        use super::{all, rights};
 
-    impl Checks {
-        /// The flags of `wanted` that `access` lacks.
-        pub fn missing(access: rights::Access, wanted: rights::Access) -> rights::Access {
-            wanted & (access ^ all())
+        /// Checks an access against what a holder wants.
+        #[service]
+        pub struct Checks;
+
+        impl Checks {
+            /// The flags of `wanted` that `access` lacks.
+            pub fn missing(access: rights::Access, wanted: rights::Access) -> rights::Access {
+                wanted & (access ^ all())
+            }
         }
     }
 }

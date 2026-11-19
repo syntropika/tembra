@@ -6,11 +6,15 @@
 //! Each module of the Orb serves one feature of that test's list. `imports` turns the dials of
 //! another Orb, through the plain import and the view of the import by key; `cancellation` stops
 //! awaiting a call of the plain import; `ledger` keeps a state, and `sketching` one holding an
-//! internally tagged enum; `tallies` issues WIT resources; `checks` takes and returns what the
-//! boundary checks; and `names` names the types of `checks` through a `use` with `as` and an
-//! alias. A new scenario is a module here, or a
-//! function of one, and a row of the test's list. The Orb holds nothing a native host refuses by
-//! design, a hook declaration, a synchronous import or a WASI import, and nothing native only.
+//! internally tagged enum; `tallies` issues WIT resources, and `vault`, a private service's module,
+//! a WIT resource and a state each in a module below it; `checks` takes and returns what the
+//! boundary checks; `names` names the types of `checks` through a `use` with `as` and an alias;
+//! `cellar` holds root resources, one depending on the other; and `dock` gives each object of a
+//! service resources of its own, one depending on a root resource and one on the other, and each
+//! raft a buoy whose `#[open]` fails once the root's one buoy is taken. A new
+//! scenario is a module here, or a function of one, and a row of the test's list. The Orb holds nothing a native host
+//! refuses by design, a hook declaration, a synchronous import or a WASI import, and nothing
+//! native only.
 
 #[tembra::orb(
     package = "example:parity@1.0.0",
@@ -123,7 +127,7 @@ pub mod parity {
         }
 
         /// The book of one ledger object, which the kernel keeps.
-        #[state(service = Ledger)]
+        #[state]
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Book {
             pub entries: Vec<Entry>,
@@ -236,6 +240,57 @@ pub mod parity {
                     Shape::Square { side } => side,
                     Shape::Dot | Shape::Circle { .. } => 0,
                 }
+            }
+        }
+    }
+
+    /// A service in a private module, whose state sits in a module below it, `kept`, and whose WIT
+    /// resource, with a constructor that counts in that state, in another, `tags`: each belongs to
+    /// the service of the nearest service's module above it.
+    mod vault {
+        pub mod kept {
+            /// How many tokens an object of the vault issued.
+            #[state]
+            #[derive(Default, serde::Serialize, serde::Deserialize)]
+            pub struct Issued {
+                pub count: u32,
+            }
+        }
+
+        pub mod tags {
+            /// A numbered token.
+            #[wit_resource]
+            pub struct Token {
+                n: u32,
+            }
+
+            impl Token {
+                /// A token numbered `n`, counted in the state of the object issuing it.
+                #[constructor]
+                pub fn new(n: u32) -> Token {
+                    super::kept::Issued::update(|issued| issued.count += 1);
+                    Token { n }
+                }
+
+                /// The token's number.
+                pub fn number(&self) -> u32 {
+                    self.n
+                }
+            }
+        }
+
+        #[service]
+        pub struct Vault;
+
+        impl Vault {
+            /// A token numbered `n`.
+            pub fn open(n: u32) -> tags::Token {
+                tags::Token::new(n)
+            }
+
+            /// How many tokens this object issued.
+            pub fn issued() -> u32 {
+                kept::Issued::read().count
             }
         }
     }
@@ -436,6 +491,184 @@ pub mod parity {
             /// Whether the colour is red.
             pub fn red(hue: Hue) -> bool {
                 matches!(hue, Hue::Red)
+            }
+        }
+    }
+
+    /// Two resources of the Orb's root, the cache depending on the database, whose rows its
+    /// `#[open]` function reads: the cache comes first here, and opens after the database.
+    pub mod cellar {
+        use core::cell::Cell;
+
+        /// The rows the database held when the cache opened.
+        #[resource(depends = [Db])]
+        pub struct Cache {
+            pub seen: u32,
+        }
+
+        impl Cache {
+            #[open]
+            pub fn open() -> Cache {
+                Cache {
+                    seen: Db::with(|db| db.rows.get()),
+                }
+            }
+        }
+
+        /// The database, and its rows.
+        #[resource]
+        pub struct Db {
+            pub rows: Cell<u32>,
+        }
+
+        impl Db {
+            #[open]
+            pub fn open() -> Db {
+                Db { rows: Cell::new(3) }
+            }
+        }
+
+        pub mod stock {
+            use super::{Cache, Db};
+
+            #[service]
+            pub struct Stock;
+
+            impl Stock {
+                /// Add rows to the database: the rows the cache saw when it opened, and the
+                /// database's rows now.
+                pub fn add(rows: u32) -> (u32, u32) {
+                    let now = Db::with(|db| {
+                        db.rows.set(db.rows.get() + rows);
+                        db.rows.get()
+                    });
+                    (Cache::with(|cache| cache.seen), now)
+                }
+            }
+        }
+    }
+
+    /// A resource of the root, the harbor, and two of each `Ship` object: its mooring, whose
+    /// `#[open]` function takes the harbor's next berth, and its line, whose `#[open]` function
+    /// reads the mooring's berth and whose value each call changes.
+    pub mod dock {
+        use core::cell::Cell;
+
+        /// The berths issued so far.
+        #[resource]
+        pub struct Harbor {
+            pub issued: Cell<u32>,
+        }
+
+        impl Harbor {
+            #[open]
+            pub fn open() -> Harbor {
+                Harbor {
+                    issued: Cell::new(0),
+                }
+            }
+        }
+
+        pub mod ship {
+            use super::Harbor;
+
+            #[service]
+            pub struct Ship;
+
+            impl Ship {
+                /// The berth this ship moors at.
+                pub fn berth() -> u32 {
+                    Mooring::with(|mooring| mooring.berth)
+                }
+
+                /// Tie `knots` more in this ship's line, and answer how many it has.
+                pub fn tie(knots: u32) -> u32 {
+                    Line::with(|line| {
+                        line.knots += knots;
+                        line.knots
+                    })
+                }
+            }
+
+            /// The berth of one ship, the next the harbor issues.
+            #[resource(depends = [Harbor])]
+            pub struct Mooring {
+                pub berth: u32,
+            }
+
+            impl Mooring {
+                #[open]
+                pub fn open() -> Mooring {
+                    let berth = Harbor::with(|harbor| {
+                        harbor.issued.set(harbor.issued.get() + 1);
+                        harbor.issued.get()
+                    });
+                    Mooring { berth }
+                }
+            }
+
+            /// The line of one ship, tied at its berth.
+            #[resource(depends = [Mooring])]
+            pub struct Line {
+                pub berth: u32,
+                pub knots: u32,
+            }
+
+            impl Line {
+                #[open]
+                pub fn open() -> Line {
+                    Line {
+                        berth: Mooring::with(|mooring| mooring.berth),
+                        knots: 0,
+                    }
+                }
+            }
+        }
+
+        /// The one buoy of the root, which the first raft takes.
+        #[resource]
+        pub struct Buoys {
+            pub free: Cell<u32>,
+        }
+
+        impl Buoys {
+            #[open]
+            pub fn open() -> Buoys {
+                Buoys { free: Cell::new(1) }
+            }
+        }
+
+        pub mod raft {
+            use super::Buoys;
+
+            #[service]
+            pub struct Raft;
+
+            impl Raft {
+                /// The buoy this raft is tied to.
+                pub fn buoy() -> u32 {
+                    Buoy::with(|buoy| buoy.number)
+                }
+            }
+
+            /// The buoy of one raft, which the root's buoys hand out while one is free: the open
+            /// of every raft after the first answers `Err`, which fails the raft's creation.
+            #[resource(depends = [Buoys])]
+            pub struct Buoy {
+                pub number: u32,
+            }
+
+            impl Buoy {
+                #[open]
+                pub fn open() -> Result<Buoy, String> {
+                    Buoys::with(|buoys| match buoys.free.get() {
+                        0 => Err(String::from("no buoy is free")),
+                        free => {
+                            buoys.free.set(free - 1);
+                            Ok(Buoy { number: free })
+                        }
+                    })
+                }
             }
         }
     }

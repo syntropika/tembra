@@ -7,12 +7,14 @@ mod lending {
         }
     }
 
-    #[service]
-    pub struct Passing;
+    pub mod passing {
+        #[service]
+        pub struct Passing;
 
-    impl Passing {
-        pub fn add(amount: i64) -> i64 {
-            amount
+        impl Passing {
+            pub fn add(amount: i64) -> i64 {
+                amount
+            }
         }
     }
 }

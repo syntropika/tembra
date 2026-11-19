@@ -48,6 +48,15 @@ pub fn call(
     .unwrap()
 }
 
+/// Collect the messages the Orbs of `host` log through their `context`, from now on: the closure
+/// takes what was logged since it was last called.
+pub fn logged(host: &Host) -> impl Fn() -> Vec<String> {
+    let records = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = records.clone();
+    host.on_log(move |record| sink.borrow_mut().push(record.message.clone()));
+    move || records.take()
+}
+
 /// The message of the error a native host gets for the Orb `orb()` built: `unsupported/native`,
 /// naming what the native side does not cover.
 pub fn refused(orb: facade::Result<Orb>) -> String {

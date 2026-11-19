@@ -3,14 +3,16 @@
 
 #[tembra::orb(package = "example:tally@1.0.0")]
 pub mod tally {
-    /// A counter.
-    #[service]
-    pub struct Counter;
+    pub mod counter {
+        /// A counter.
+        #[service]
+        pub struct Counter;
 
-    impl Counter {
-        /// The provider's first count, plus `by`.
-        pub fn add(by: u32) -> u32 {
-            tembra_config_provider::FIRST + by
+        impl Counter {
+            /// The provider's first count, plus `by`.
+            pub fn add(by: u32) -> u32 {
+                tembra_config_provider::FIRST + by
+            }
         }
     }
 }

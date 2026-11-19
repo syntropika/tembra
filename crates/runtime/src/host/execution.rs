@@ -235,7 +235,14 @@ impl Host {
         if let core::Effect::Open { resource } = effect {
             let open = self.0.openers.borrow_mut().remove(resource);
             if let Some(open) = open {
-                std::panic::AssertUnwindSafe(async move { open().await })
+                // The opener runs outside any call, under a root of the host's, as a closer does.
+                let root = self.kernel().cleanup_root("host")?;
+                let _guard = RootGuard {
+                    host: self.clone(),
+                    root,
+                };
+                let context = self.context(root, None)?;
+                std::panic::AssertUnwindSafe(async move { open(context).await })
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|_| {

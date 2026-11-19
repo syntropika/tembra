@@ -89,13 +89,17 @@ impl Declaration {
         )
     }
 
-    /// Declares an asynchronous resource whose dependencies must physically open first.
+    /// Declares an asynchronous resource whose dependencies must physically open first. The
+    /// opener and the closer each get a context of the resource's owner, outside any call: its
+    /// `log` is attributed to the owning Orb, its `address` is the owning object's, for a resource
+    /// of an object, and the opener's `signal` is the resource's own, which a cancelled opening
+    /// fires; its `principal` is `host`, as a cleanup's.
     pub fn resource_async<T: 'static>(
         &self,
         name: &str,
         version: u32,
         dependencies: &[ResourceKey],
-        open: impl FnOnce(ResourceSignal) -> LocalBoxFuture<'static, Result<T>> + 'static,
+        open: impl FnOnce(Context) -> LocalBoxFuture<'static, Result<T>> + 'static,
         close: impl FnOnce(Rc<T>, Context) -> LocalBoxFuture<'static, Result<()>> + 'static,
     ) -> Result<Resource<T>> {
         self.check_declaration()?;
@@ -163,12 +167,28 @@ impl Declaration {
             .cancellations
             .borrow_mut()
             .insert(resource, signal.clone());
+        // The Orb's name now: a reload opens a new revision's resources before the kernel commits
+        // the revision, and closes a kept resource through the closer of the revision that declared
+        // it, once the kernel has forgotten that revision.
+        let owner = super::context::Owner {
+            orb: match self.owner {
+                core::Owner::Host => None,
+                core::Owner::Orb(_) | core::Owner::Object(_) => {
+                    Some(self.host.orb_info(self.orb)?.declaration.name)
+                }
+            },
+            object: match self.owner {
+                core::Owner::Object(object) => Some(object),
+                core::Owner::Host | core::Owner::Orb(_) => None,
+            },
+        };
         self.host.0.openers.borrow_mut().insert(
             resource,
-            Box::new(move || {
+            Box::new(move |context| {
                 async move {
                     signal.check()?;
-                    let value = Rc::new(open(signal.clone()).await?);
+                    let context = context.owned(owner.clone(), Some(signal.clone()));
+                    let value = Rc::new(open(context).await?);
                     let id = host.kernel().allocate_handle()?;
                     host.0.values.borrow_mut().insert(
                         id,
@@ -177,10 +197,10 @@ impl Declaration {
                             portable: None,
                         },
                     );
-                    host.0
-                        .closers
-                        .borrow_mut()
-                        .insert(resource, Box::new(move |context| close(value, context)));
+                    host.0.closers.borrow_mut().insert(
+                        resource,
+                        Box::new(move |context| close(value, context.owned(owner, None))),
+                    );
                     if let Err(error) = host.kernel().resource_opened(resource, id) {
                         host.drop_value(id);
                         return Err(error);

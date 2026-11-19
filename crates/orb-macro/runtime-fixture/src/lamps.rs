@@ -1,21 +1,9 @@
 use alloc::string::String;
 
-/// Note what a lamp went through. A component writes it to the host's log, since its `context`
-/// serves a resource's functions; natively the `context` serves only a call's methods, so the
-/// note goes to the journal the native tests read.
+/// Note what a lamp went through, in the host's log: the module's `context` serves a resource's
+/// functions, as a component and natively, where the host reads the records through `Host::on_log`.
 fn note(event: String) {
-    #[cfg(target_arch = "wasm32")]
     lamps::context::log(lamps::context::Level::Info, &event);
-    #[cfg(not(target_arch = "wasm32"))]
-    JOURNAL.with(|journal| journal.borrow_mut().push(event));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-std::thread_local! {
-    /// What the lamps of the Orbs this thread hosts went through, natively, in order.
-    static JOURNAL: core::cell::RefCell<alloc::vec::Vec<String>> = const {
-        core::cell::RefCell::new(alloc::vec::Vec::new())
-    };
 }
 
 /// A lamp, a resource of the Orb's root at version 1, whose `#[open]` and `#[close]` functions note
@@ -53,17 +41,21 @@ pub mod lamps {
         }
     }
 
-    /// Lights the lamp.
-    #[service]
-    pub struct Switch;
+    pub mod switch {
+        use super::Lamp;
 
-    impl Switch {
-        /// Light the lamp and return how many times it was lit.
-        pub fn light() -> u32 {
-            Lamp::with(|lamp| {
-                lamp.lit.set(lamp.lit.get() + 1);
-                lamp.lit.get()
-            })
+        /// Lights the lamp.
+        #[service]
+        pub struct Switch;
+
+        impl Switch {
+            /// Light the lamp and return how many times it was lit.
+            pub fn light() -> u32 {
+                Lamp::with(|lamp| {
+                    lamp.lit.set(lamp.lit.get() + 1);
+                    lamp.lit.get()
+                })
+            }
         }
     }
 }
@@ -101,39 +93,41 @@ pub mod lamps {
         }
     }
 
-    /// Lights the lamp.
-    #[service]
-    pub struct Switch;
+    pub mod switch {
+        use super::Lamp;
 
-    impl Switch {
-        /// Light the lamp and return how many times it was lit.
-        pub fn light() -> u32 {
-            Lamp::with(|lamp| {
-                lamp.lit.set(lamp.lit.get() + 1);
-                lamp.lit.get()
-            })
+        /// Lights the lamp.
+        #[service]
+        pub struct Switch;
+
+        impl Switch {
+            /// Light the lamp and return how many times it was lit.
+            pub fn light() -> u32 {
+                Lamp::with(|lamp| {
+                    lamp.lit.set(lamp.lit.get() + 1);
+                    lamp.lit.get()
+                })
+            }
         }
     }
 }
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    use super::{JOURNAL, lamps};
-    use crate::native::{call, hosting, ready};
+    use super::lamps;
+    use crate::native::{call, hosting, logged, ready};
     use serde_json::json;
-
-    /// What the lamps went through since the last call.
-    fn journal() -> Vec<String> {
-        JOURNAL.with(|journal| journal.take())
-    }
 
     /// Natively, the host opens the lamp of the revision built, at its version, once the Orb is
     /// installed; a reload of the same code keeps the lamp, lit as it was, since its version stays
-    /// the same; and the host closes it, through its `#[close]` function, when it closes.
+    /// the same; and the host closes it, through its `#[close]` function, when it closes. The
+    /// `#[open]` and `#[close]` functions log through the module's `context`, the close after the
+    /// reload, through the closer of the revision that declared the lamp.
     #[test]
     fn the_lamp_opens_and_closes_natively() {
         let version = if cfg!(feature = "revised") { 2 } else { 1 };
         let (mut pool, host) = hosting(lamps::orb().unwrap());
+        let journal = logged(&host);
         let switch = ready(&mut pool, &host, "example:lamps/switch@1.0.0");
         let light = |pool: &mut _| call(pool, &host, &switch, "alice", "light", json!([]));
         assert_eq!(light(&mut pool), json!(1));

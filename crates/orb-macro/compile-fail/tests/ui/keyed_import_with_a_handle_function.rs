@@ -4,12 +4,14 @@
     import("example:counters/handles@1.0.0", keyed)
 )]
 mod router {
-    #[service]
-    pub struct Routing;
+    pub mod routing {
+        #[service]
+        pub struct Routing;
 
-    impl Routing {
-        pub fn total() -> u32 {
-            0
+        impl Routing {
+            pub fn total() -> u32 {
+                0
+            }
         }
     }
 }

@@ -1,0 +1,5 @@
+error: #[open] returns `Self` or a `Result<Self, E>` with `E: Display`, whose error fails the open of `Counts` with its text
+  --> tests/ui/open_returning_an_option.rs:10:26
+   |
+10 |         pub fn open() -> Option<Self> {
+   |                          ^^^^^^^^^^^^

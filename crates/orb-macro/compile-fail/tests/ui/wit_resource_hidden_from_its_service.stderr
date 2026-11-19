@@ -17,7 +17,7 @@ error[E0603]: module `c` is private
   |
 5 |             mod c {
   |                 ^ private module
-6 |                 #[wit_resource(service = Walker)]
+6 |                 #[wit_resource]
 7 |                 pub struct Pen {
   |                            --- struct `Pen` is not publicly re-exported
   |

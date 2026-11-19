@@ -4,12 +4,16 @@
     import("example:counters/counter@1.0.0", keyed)
 )]
 mod router {
-    #[service]
-    pub struct Routing;
+    pub mod routing {
+        use super::counter_ref;
 
-    impl Routing {
-        pub fn total(count: counter_ref::Count) -> u32 {
-            count.value
+        #[service]
+        pub struct Routing;
+
+        impl Routing {
+            pub fn total(count: counter_ref::Count) -> u32 {
+                count.value
+            }
         }
     }
 }

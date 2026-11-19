@@ -169,14 +169,42 @@ impl crate::host::Inner {
         affected.into_iter().collect()
     }
 
+    /// The unopened scopes below `scopes`, through the scope tree alone: the scopes of the same
+    /// owner's objects waiting on an activation, which fail as it does, not the scopes of other
+    /// owners that depend on one of its resources, which `failed_scope_dependents` collects too.
+    pub(super) fn failed_scope_children(&self, scopes: &[Id]) -> BTreeSet<Id> {
+        let mut pending = scopes.to_vec();
+        let mut children = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !children.insert(id) {
+                continue;
+            }
+            pending.extend(
+                self.scope_children
+                    .members(&id)
+                    .filter(|child| !self.scopes[child].active),
+            );
+        }
+        children
+    }
+
     /// Cancel activations and release scope resource claims once.
     pub(crate) fn begin_cleanup(&mut self, scopes: &[Id]) {
+        self.begin_cleanup_after(scopes, None);
+    }
+
+    /// Cancel activations and release scope resource claims once, failing an activation that
+    /// waits on the scopes with `cause`, the error of the activation that failed, so a call
+    /// waiting on the Orb root's activation learns why; without one, the scope is closing.
+    pub(crate) fn begin_cleanup_after(&mut self, scopes: &[Id], cause: Option<&Error>) {
         for id in scopes {
             if let Some(program) = self.scope_activations.get(id).copied()
                 && let Some(record) = self.programs.get_mut(&program)
             {
                 record.error.get_or_insert_with(|| {
-                    Error::new(Code::Cancelled, Reason::ScopeClosed, "scope is closing")
+                    cause.cloned().unwrap_or_else(|| {
+                        Error::new(Code::Cancelled, Reason::ScopeClosed, "scope is closing")
+                    })
                 });
                 record.running = true;
                 self.ready_programs.insert(program);

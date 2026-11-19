@@ -1,0 +1,5 @@
+error: the #[hook] `Guard` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module
+ --> tests/ui/hook_in_a_service_module.rs:6:24
+  |
+6 |             pub struct Guard;
+  |                        ^^^^^

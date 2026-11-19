@@ -10,21 +10,23 @@
     tembra::orb(package = "example:versioned@1.0.0")
 )]
 pub mod counting {
-    /// The count of one counter object.
-    #[state(version = 1)]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Count {
-        pub total: u32,
-    }
+    pub mod counter {
+        /// The count of one counter object.
+        #[state(version = 1)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Count {
+            pub total: u32,
+        }
 
-    /// Counts.
-    #[service]
-    pub struct Counter;
+        /// Counts.
+        #[service]
+        pub struct Counter;
 
-    impl Counter {
-        /// Add `by` to the count and return the total.
-        pub fn add(by: u32) -> u32 {
-            Count::update(|count| count.total += by).total
+        impl Counter {
+            /// Add `by` to the count and return the total.
+            pub fn add(by: u32) -> u32 {
+                Count::update(|count| count.total += by).total
+            }
         }
     }
 }
@@ -40,26 +42,28 @@ pub mod counting {
     tembra::orb(package = "example:versioned@1.0.0")
 )]
 pub mod counting {
-    /// The count of one counter object, and how many additions made it.
-    #[state(version = 2)]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Count {
-        pub total: u32,
-        pub additions: u32,
-    }
+    pub mod counter {
+        /// The count of one counter object, and how many additions made it.
+        #[state(version = 2)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Count {
+            pub total: u32,
+            pub additions: u32,
+        }
 
-    /// Counts.
-    #[service]
-    pub struct Counter;
+        /// Counts.
+        #[service]
+        pub struct Counter;
 
-    impl Counter {
-        /// Add `by` to the count and return the total.
-        pub fn add(by: u32) -> u32 {
-            let count = Count::update(|count| {
-                count.total += by;
-                count.additions += 1;
-            });
-            count.total
+        impl Counter {
+            /// Add `by` to the count and return the total.
+            pub fn add(by: u32) -> u32 {
+                let count = Count::update(|count| {
+                    count.total += by;
+                    count.additions += 1;
+                });
+                count.total
+            }
         }
     }
 }

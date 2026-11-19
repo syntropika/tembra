@@ -1,16 +1,16 @@
 //! `#[cfg(..)]` on the items the macro reads into the WIT and into `orb(..)`: a `#[service]`
 //! struct, an inherent `impl` block of one, a `pub fn` or the `#[create]` of such a block, a free
-//! function marked `#[root]`, a function or a struct marked `#[hook]`, and a sub-module holding
-//! any of these. An attribute macro reads its input before the compiler evaluates the `#[cfg]`s
-//! inside it, so the macro cannot tell whether such an item exists in the configuration being
-//! built. Instead, it expands the module once per combination of their distinct predicates, a
-//! predicate under `not(..)` being the same one: each copy of the module leaves out the items its
-//! combination rules out, drops the `#[cfg]`s it evaluated, and goes through `#[tembra::orb]` again
-//! under the `#[cfg]` of its combination, which the copy also carries for the errors of its
-//! expansion. The compiler keeps the one copy whose combination holds and expands only that one, so
-//! the WIT, the signatures, `orb(..)` and the contract the macro writes are those of the
-//! configuration being built. Any other `#[cfg]` is left to the compiler, such as one on a field
-//! of the `#[inputs]` struct, which `orb(..)` takes whole.
+//! function marked `#[root]`, a function or a struct marked `#[hook]`, and a sub-module holding any
+//! of these, a service's own module first. An attribute macro reads its input before the compiler
+//! evaluates the `#[cfg]`s inside it, so the macro cannot tell whether such an item exists in the
+//! configuration being built. Instead, it expands the module once per combination of their distinct
+//! predicates, a predicate under `not(..)` being the same one: each copy of the module leaves out
+//! the items its combination rules out, drops the `#[cfg]`s it evaluated, and goes through
+//! `#[tembra::orb]` again under the `#[cfg]` of its combination, which the copy also carries for
+//! the errors of its expansion. The compiler keeps the one copy whose combination holds and expands
+//! only that one, so the WIT, the signatures, `orb(..)` and the contract the macro writes are those
+//! of the configuration being built. Any other `#[cfg]` is left to the compiler, such as one on a
+//! field of the `#[inputs]` struct, which `orb(..)` takes whole.
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::quote;
 use syn::{Attribute, ImplItem, Item, ItemMod, Type, Visibility, spanned::Spanned};
@@ -21,6 +21,11 @@ const MOST: usize = 4;
 /// The attribute a copy of the module carries, with the predicate of its combination, for the
 /// errors of its expansion; the expansion removes it.
 const CONFIGURATION: &str = "__tembra_configuration";
+
+/// The attribute a copy puts on a module whose `#[service]` struct its combination leaves out,
+/// with the service's name, so that the expansion refuses a `#[resource]` left there, which would
+/// otherwise turn into a resource of the root; the expansion removes it.
+const GATED: &str = "__tembra_gated_service";
 
 /// The copies of the module `item`, one per combination of the predicates of the `#[cfg]`s on the
 /// items the macro reads, each under the `#[cfg]` of its combination and the macro's attribute
@@ -86,7 +91,21 @@ pub(crate) fn combinations(
             })
             .collect();
         let mut copy = module.clone();
+        // Whether an item's `#[cfg]`s that the macro evaluates hold in this combination.
+        let kept = |attrs: &[Attribute]| {
+            attrs.iter().all(|attribute| match predicate(attribute) {
+                Some((predicate, positive)) => {
+                    let key = predicate.to_string();
+                    predicates
+                        .iter()
+                        .position(|(known, _)| *known == key)
+                        .is_none_or(|index| holds(index) == positive)
+                }
+                None => true,
+            })
+        };
         if let Some((_, items)) = &mut copy.content {
+            mark_gated(items, &kept);
             places(items, &mut |attrs| {
                 let mut stays = true;
                 attrs.retain(|attribute| match predicate(attribute) {
@@ -111,6 +130,41 @@ pub(crate) fn combinations(
         }
     });
     Ok(Some(quote! { #(#copies)* }))
+}
+
+/// Mark each module among `items`, at any depth, whose `#[service]` struct `kept` leaves out with
+/// `GATED` and the service's name.
+fn mark_gated(items: &mut [Item], kept: &dyn Fn(&[Attribute]) -> bool) {
+    for item in items {
+        let Item::Mod(module) = item else {
+            continue;
+        };
+        let Some((_, inner)) = &mut module.content else {
+            continue;
+        };
+        let gated = inner.iter().find_map(|item| match item {
+            Item::Struct(item) if marked(&item.attrs, "service") && !kept(&item.attrs) => {
+                Some(item.ident.clone())
+            }
+            _ => None,
+        });
+        if let Some(service) = gated {
+            let marker = syn::Ident::new(GATED, proc_macro2::Span::call_site());
+            module
+                .attrs
+                .push(syn::parse_quote! { #[#marker(#service)] });
+        }
+        mark_gated(inner, kept);
+    }
+}
+
+/// Take from a module's attributes the name of the service its copy's combination leaves out of
+/// it, if any (`mark_gated`).
+pub(crate) fn gated(attrs: &mut Vec<Attribute>) -> Option<syn::Ident> {
+    let index = attrs
+        .iter()
+        .position(|attribute| attribute.path().is_ident(GATED))?;
+    attrs.remove(index).parse_args().ok()
 }
 
 /// Take from a module's attributes the predicate of the combination it is the copy for, if it is

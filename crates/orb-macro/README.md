@@ -13,29 +13,36 @@ contribution to another Orb's hook and keeps its counts in a resource of the Orb
 ```rust
 #[tembra::orb(package = "example:greeter@1.0.0")]
 mod greeter {
-    /// Counts over a text.
-    pub struct Stats {
-        pub words: u32,
-        pub chars: u32,
-    }
-
-    /// The service: a unit struct marked #[service], with an impl block of public functions.
-    #[service]
-    pub struct Greeting;
-
-    impl Greeting {
-        /// Greet by name.
-        pub fn hello(name: String) -> String {
-            format!("Hello, {name}!")
+    /// The service's module: the service and what belongs to it.
+    pub mod greeting {
+        /// Counts over a text.
+        pub struct Stats {
+            pub words: u32,
+            pub chars: u32,
         }
 
-        /// Words and characters of a text.
-        pub fn measure(text: String) -> Stats {
-            Stats { words: text.split_whitespace().count() as u32, chars: text.chars().count() as u32 }
+        /// The service: a unit struct marked #[service], with an impl block of public functions.
+        #[service]
+        pub struct Greeting;
+
+        impl Greeting {
+            /// Greet by name.
+            pub fn hello(name: String) -> String {
+                format!("Hello, {name}!")
+            }
+
+            /// Words and characters of a text.
+            pub fn measure(text: String) -> Stats {
+                Stats { words: text.split_whitespace().count() as u32, chars: text.chars().count() as u32 }
+            }
         }
     }
 }
 ```
+
+Each service lives in an inline module of its own, with its `impl`, its state, its WIT
+resources and the resources of its objects; what lies outside every service's module belongs to
+the Orb, see [organizing the module in sub-modules](#organizing-the-module-in-sub-modules).
 
 The public Rust facade re-exports this macro. A guest enables only the authoring entry point,
 without linking the application's host runtime:
@@ -81,13 +88,15 @@ extern crate alloc;
 
 #[tembra::orb(package = "example:greeter@1.0.0", no_std)]
 mod greeter {
-    use alloc::string::String;
+    pub mod greeting {
+        use alloc::string::String;
 
-    #[service]
-    pub struct Greeting;
+        #[service]
+        pub struct Greeting;
 
-    impl Greeting {
-        pub fn hello(name: String) -> String { name }
+        impl Greeting {
+            pub fn hello(name: String) -> String { name }
+        }
     }
 }
 ```
@@ -101,41 +110,41 @@ starts with this explicit freestanding mode.
 
 ## What the macro reads
 
-| In the module                                                               | In the WIT                                                                                                                                                           |
-| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| the module name                                                             | the `world`                                                                                                                                                          |
-| `package = "..."` on the attribute                                          | `package ns:name@version;`                                                                                                                                           |
-| `wit = "dir"` on the attribute                                              | the directory with the WIT packages the Orb consumes, relative to the crate                                                                                          |
-| `context` on the attribute                                                  | `import tembra:guest/context` in the world: the call's principal and cancellation, the object's address, the log                                                     |
-| a unit struct with `#[service]` and an `impl` block of `pub fn`             | an exported `interface`, in kebab-case                                                                                                                               |
-| `#[service("ns:name/interface@version")]` on a unit struct                  | `export` of that interface of a consumed package, implemented by the `impl` block                                                                                    |
-| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`                | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                                                                   |
-| `import = "ns:name/interface@version"` on the attribute                     | `import` of that interface of a consumed package, bound to a provider at installation                                                                                |
-| `import = "wasi:name/interface@0.3.0"` on the attribute                     | `import` of that interface of a WASI package bundled with `tembra-contracts`, granted at installation                                                                |
-| `import("ns:name/interface@version", keyed)` on the attribute               | `import` of a view of that interface, `interface-ref` in the package: a resource with the interface's functions as methods, and `get`, selecting an object by key    |
-| a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods                                            |
-| a `#[wit_resource]` struct or an imported `iface::Name` as a parameter      | an owned handle, `own<t>`, which the call takes from its caller; an imported interface's resource is `use`d from it                                                  |
-| a consumed interface's type named through its module, `greeting::Entry`     | `use` of that type from its interface, in the derived interface naming it: the consumed package's type, which the bindings and the author's code share               |
-| each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                          |
-| a struct with named fields, when a service method uses it                   | a `record`; the struct stays the author's, converted to and from the bindings' type at the boundary                                                                  |
-| an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`; the enum stays the author's, converted to and from the bindings' type at the boundary                  |
-| a case with named fields, `Refused { reason: String }`, of such an enum     | a `record` of its own, `<enum>-<case>`, the case's payload; the enum stays the author's, converted to and from the bindings' type, and so does every type holding it |
-| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                         |
-| free JSON, `serde_json::Value`, by that path                                | a `string` that holds its JSON text, written and read at the boundary; a type holding it stays the author's, converted to and from the bindings' type                |
-| a newtype, a tuple struct of one field, `struct Id(String)`                 | its field's type, `string`: the struct stays the author's, written as its field, read back through `From`, natively `TryFrom`; a type holding it stays the author's  |
-| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                                                            |
-| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`       | `import` and `export` of that hook interface in the world: a declaration                                                                                             |
-| a unit struct with `#[hook(composition = c, input = Type)]`                 | a hook `interface` of the package under the struct's name, its callback `apply` and the types the input reaches, imported and exported by the world: a declaration   |
-| a struct with named fields and `#[state(service = Name, version = n)]`      | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it                                                  |
-| a struct with `#[resource(version = n)]` and a function marked `#[open]`    | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                                                                |
-| `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload                                                                                              |
-| `#[derive(..)]` on a struct or an enum that enters the WIT                  | nothing in the WIT: the type stays the author's, with its derives, attributes and impls as written                                                                   |
-| `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                                                                    |
-| an inline `mod`                                                             | nothing of its own: its items are read as the Orb's, grouped with what belongs to them                                                                               |
-| `///` comments and `/** */` blocks                                          | `///` comments in the WIT, one per line                                                                                                                              |
+| In the module                                                                           | In the WIT                                                                                                                                                           |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the module name                                                                         | the `world`                                                                                                                                                          |
+| `package = "..."` on the attribute                                                      | `package ns:name@version;`                                                                                                                                           |
+| `wit = "dir"` on the attribute                                                          | the directory with the WIT packages the Orb consumes, relative to the crate                                                                                          |
+| `context` on the attribute                                                              | `import tembra:guest/context` in the world: the call's principal and cancellation, the object's address, the log                                                     |
+| a unit struct with `#[service]` and an `impl` block of `pub fn`, in a module of its own | an exported `interface`, in kebab-case                                                                                                                               |
+| `#[service("ns:name/interface@version")]` on a unit struct                              | `export` of that interface of a consumed package, implemented by the `impl` block                                                                                    |
+| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`                            | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                                                                   |
+| `import = "ns:name/interface@version"` on the attribute                                 | `import` of that interface of a consumed package, bound to a provider at installation                                                                                |
+| `import = "wasi:name/interface@0.3.0"` on the attribute                                 | `import` of that interface of a WASI package bundled with `tembra-contracts`, granted at installation                                                                |
+| `import("ns:name/interface@version", keyed)` on the attribute                           | `import` of a view of that interface, `interface-ref` in the package: a resource with the interface's functions as methods, and `get`, selecting an object by key    |
+| a struct with `#[wit_resource]` and an `impl` block of `pub fn`                         | a `resource` of the interface of the service whose module holds it: the `#[constructor]` function its constructor, the `&self` functions its methods                 |
+| a `#[wit_resource]` struct or an imported `iface::Name` as a parameter                  | an owned handle, `own<t>`, which the call takes from its caller; an imported interface's resource is `use`d from it                                                  |
+| a consumed interface's type named through its module, `greeting::Entry`                 | `use` of that type from its interface, in the derived interface naming it: the consumed package's type, which the bindings and the author's code share               |
+| each `pub fn` without `self`                                                            | a `func`; name and parameters in kebab-case                                                                                                                          |
+| a struct with named fields, when a service method uses it                               | a `record`; the struct stays the author's, converted to and from the bindings' type at the boundary                                                                  |
+| an enum, when a service method uses it                                                  | an `enum` when every variant is empty, otherwise a `variant`; the enum stays the author's, converted to and from the bindings' type at the boundary                  |
+| a case with named fields, `Refused { reason: String }`, of such an enum                 | a `record` of its own, `<enum>-<case>`, the case's payload; the enum stays the author's, converted to and from the bindings' type, and so does every type holding it |
+| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples                   | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                         |
+| free JSON, `serde_json::Value`, by that path                                            | a `string` that holds its JSON text, written and read at the boundary; a type holding it stays the author's, converted to and from the bindings' type                |
+| a newtype, a tuple struct of one field, `struct Id(String)`                             | its field's type, `string`: the struct stays the author's, written as its field, read back through `From`, natively `TryFrom`; a type holding it stays the author's  |
+| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`                    | `import` and `export` of that hook interface in the world: a contribution                                                                                            |
+| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`                   | `import` and `export` of that hook interface in the world: a declaration                                                                                             |
+| a unit struct with `#[hook(composition = c, input = Type)]`                             | a hook `interface` of the package under the struct's name, its callback `apply` and the types the input reaches, imported and exported by the world: a declaration   |
+| a struct with named fields and `#[state(version = n)]` in a service's module            | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it                                                  |
+| a struct with `#[resource(version = n)]` and a function marked `#[open]`                | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world; in a service's module, `export tembra:guest/service-resources-init` instead   |
+| `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct             | nothing in the WIT: the state's rule, run on every update and on reload                                                                                              |
+| `#[derive(..)]` on a struct or an enum that enters the WIT                              | nothing in the WIT: the type stays the author's, with its derives, attributes and impls as written                                                                   |
+| `#[close]` on a `fn(self)` of a `#[resource]` struct                                    | nothing in the WIT: run by the kernel at teardown, or when the object owning the resource goes                                                                       |
+| an inline `mod`                                                                         | nothing of its own: a service's module holds the service and what belongs to it, any other module holds items of the Orb or of the service above it                  |
+| `///` comments and `/** */` blocks                                                      | `///` comments in the WIT, one per line                                                                                                                              |
 
-Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of its
-`impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT only
+Nothing is exported by accident. A service is a unit struct marked `#[service]`, in a module of
+its own; the `pub fn` of its `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT only
 when a service method, a WIT resource's function or a hook's input uses it, directly or through the
 fields of another type that enters; a state alone does not make a type enter. The other types of the
 module, and unit structs without the marker, remain ordinary Rust, whatever they hold: only a type
@@ -256,13 +265,17 @@ mod gate {
 
     pub struct Admission { pub value: i32, pub blocked: bool }
 
-    #[service]
-    pub struct Admissions;
+    pub mod admissions {
+        use super::{Admission, Guard};
 
-    impl Admissions {
-        /// Run the hook over a fresh admission and report what the contributors decided.
-        pub fn admit(value: i32) -> Admission {
-            Guard::run(Admission { value, blocked: false })
+        #[service]
+        pub struct Admissions;
+
+        impl Admissions {
+            /// Run the hook over a fresh admission and report what the contributors decided.
+            pub fn admit(value: i32) -> Admission {
+                Guard::run(Admission { value, blocked: false })
+            }
         }
     }
 }
@@ -286,15 +299,16 @@ provider is native, is declared by its identity instead, with the directory hold
 `#[hook("example:admission/guard@1.0.0", composition = waterfall)]` under `wit = "../wit"`. The
 hook's types then belong to the consumed package, re-exported under the interface's name,
 `guard::Admission`, and `run` takes and returns them; the macro checks that the callback's shape
-fits the composition. Those are the types of the hook's import, which `run` calls; the world exports
-the hook too, as the portable hook contract requires, and a derived interface takes the copy of the
-types the export holds, another Rust type, so a service's function does not name
-`guard::Admission`: it reports the hook's value in a type of the module, converted from it. A type
-the hook `use`s from an interface the world only imports has no copy of its own: the import and the
-export both name that interface's type, which a service's function names as the hook's module
-does. A state holds the import's types as they are. Which role an interface plays travels in the
-`tembra:manifest` section next to the contribution priorities, and `cargo tembra build` packages
-it; an Orb declares a hook or contributes to it, never both. The world holds an interface in one
+fits the composition. The world imports the hook, which `run` calls, and exports it, as the
+portable hook contract requires; the bindings would spell the hook's types once per side, so the
+macro gives them one copy, the export's: `guard` is the export's module, and the bindings of the
+hook's import, generated apart, name its types. A service's function takes and returns
+`guard::Admission` as a derived interface's type, as `run` does, a state holds it as it is, and the
+view of the hook's keyed import names it too; a type the hook `use`s from another interface of its
+package, `guard::Verdict`, is that interface's, which every side names. The `gatehouse` of the
+[runtime fixture](runtime-fixture/src/hooks.rs) does each. Which role an interface plays travels in
+the `tembra:manifest` section next to the contribution priorities, and `cargo tembra build`
+packages it; an Orb declares a hook or contributes to it, never both. The world holds an interface in one
 role: the macro refuses a hook's interface the module also implements or imports plainly, and an
 interface imported or implemented twice, at the second import or item, naming both.
 
@@ -327,30 +341,32 @@ bundle's own declaration.
 
 The kernel keeps one state per service object: a versioned value it retains across reloads and
 whose changes it reports to whoever observes the object's reference. A struct with named fields
-marked `#[state]` is that state for the objects of one service; it names the service when the
-module has more than one, and a version (default 1) the kernel compares on reload:
+marked `#[state]` is that state for the objects of one service, the service whose module holds it,
+directly or in a module below; it takes a version (default 1) the kernel compares on reload:
 
 ```rust
 #[tembra::orb(package = "example:counter@1.0.0")]
 mod tally {
-    /// The state of one counter object.
-    #[state(service = Counter, version = 1)]
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Count {
-        pub total: i64,
-        pub steps: u32,
-    }
+    pub mod counter {
+        /// The state of one counter object.
+        #[state(version = 1)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Count {
+            pub total: i64,
+            pub steps: u32,
+        }
 
-    #[service]
-    pub struct Counter;
+        #[service]
+        pub struct Counter;
 
-    impl Counter {
-        /// Add `by` to the count and return the new count.
-        pub fn add(by: i64) -> Count {
-            Count::update(|count| {
-                count.total += by;
-                count.steps += 1;
-            })
+        impl Counter {
+            /// Add `by` to the count and return the new count.
+            pub fn add(by: i64) -> Count {
+                Count::update(|count| {
+                    count.total += by;
+                    count.steps += 1;
+                })
+            }
         }
     }
 }
@@ -427,8 +443,11 @@ the fields they care about.
 
 A resource is a value the kernel opens when the Orb is activated and closes when it is torn down,
 in the order its dependencies require, and that every method and hook callback of the Orb can
-use. A struct marked `#[resource]`, with a function marked `#[open]`, `fn() -> Self`, and
-optionally one marked `#[close]`, `fn(self)`, in its `impl` block, is a resource of the Orb's root:
+use. A struct marked `#[resource]`, with a function marked `#[open]`, `fn() -> Self` or
+`fn() -> Result<Self, E>`, and optionally one marked `#[close]`, `fn(self)`, in its `impl` block,
+outside every service's module, is a resource of the Orb's root; in a service's module it is a
+resource of each of the service's objects, see
+[resources of a service's objects](#resources-of-a-services-objects):
 
 ```rust
 /// What this contributor observed.
@@ -450,7 +469,8 @@ pub fn block_negative(input: guard::Admission) -> guard::Admission {
 The macro gives the type `Counts::with(|counts| ...)`, which gives the closure the open value and
 returns its result; before the resource is opened, or after it is closed, it traps. Behind it, the world imports
 `tembra:guest/resources` and exports `tembra:guest/resources-init`: when the kernel creates the
-root it asks the component for its resource declarations (name and version), runs the `#[open]`
+root it asks the component for its resource declarations (name, version and the resources it
+depends on), runs the `#[open]`
 function during activation and the `#[close]` one at teardown; `with` asks the kernel for the handle of the open resource
 first. The value lives in the component, one per instance, as the TypeScript guest's root
 resources do: a reload gives the Orb a fresh instance whose resources the kernel opens again. A
@@ -461,10 +481,116 @@ type, even with the same fields, so a reload to another module whose resource ke
 needs a new version: otherwise each call of the new code answers `invalid/rust_type` before it
 runs, as the runtime answers a hand-written Orb that reads the value as another type. At a new
 version, `#[resource(version = 2)]`, the host opens the new code's resource with its `#[open]`
-function, then closes the old value, once, through the old code's `#[close]` function. A resource
+function, then closes the old value, once, through the old code's `#[close]` function. A native
+host keeps a resource only while the resources it [depends on](#resources-of-the-orbs-root) are
+the ones it opened after, so a resource whose dependency opens again opens again too, whatever its
+own version: when `Db` moves to version 2, a `Cache` with `depends = [Db]` that stays at version 1
+opens with the new `Db` and its old value closes. A resource
 struct enters the WIT only when a service method uses it; a resource may hold types the WIT has no
 spelling for, such as a client of some granted I/O. A native host opens the same resources, see
 [using the Orb natively](#using-the-orb-natively).
+
+A resource that needs another one open names it, by its struct's name, in `depends`:
+
+```rust
+#[resource]
+pub struct Db { /* .. */ }
+
+#[resource(depends = [Db])]
+pub struct Cache { pub rows: u32 }
+
+impl Cache {
+    #[open]
+    pub fn open() -> Cache { Cache { rows: Db::with(|db| db.rows()) } }
+}
+```
+
+The kernel opens `Db` before `Cache` and closes `Cache` before `Db`, as a component and natively,
+so the `#[open]` and `#[close]` functions of `Cache` may use `Db` with its `with`. The component's
+declarations list each resource after the resources it depends on, and otherwise in the module's
+order, with their names as its dependencies; natively the Orb's create declares them in the same
+order with `Declaration::resource_async`, each with the keys of its dependencies. A name that is
+not a `#[resource]` of the Orb, the resource itself and a cycle are errors on the name in the
+attribute.
+
+An `#[open]` that can fail returns `Result<Self, E>`, with `E: Display`, or an alias of
+`Result` with one type argument, such as `io::Result<Self>` or `anyhow::Result<Self>`; `Self`
+may also be a path to the resource's struct:
+
+```rust
+impl Db {
+    #[open]
+    pub fn open() -> Result<Db, Refused> { Db::connect() }
+}
+```
+
+An `Err` fails the open with the error's text, as a component and natively: the component's
+`open` answers it as `err`, and the host, the worker or the JS adapter, fails the open with
+`unavailable/resource` and ``the resource `db` did not open: ..``, the error a native opener
+fails with too. The Orb's activation fails, a call waiting on it fails with that error, and the
+kernel closes the resources that already opened, in reverse. A panic in `#[open]` is not an
+answer: it traps a component, while a native host catches it. An `E` without `Display` is an
+error on `E`, and any return type other than `Self` or a `Result` of it is an error on the type.
+
+## Resources of a service's objects
+
+A `#[resource]` struct in a service's module, or in a module below it, is a resource of each
+object of that service: the kernel opens one value when it creates the object, before the object
+answers a call, and closes it when the object goes. Its `#[open]`, `#[close]` and `depends` are
+written as for a root resource, and `with`, in a method of the service, gives the value of the
+object running the call:
+
+```rust
+#[resource]
+pub struct Harbor { pub berths: u32, pub taken: u32 }
+
+pub mod ship {
+    #[service]
+    pub struct Ship;
+
+    impl Ship {
+        /// The berth this ship moors at.
+        pub fn berth() -> u32 { Mooring::with(|mooring| mooring.berth) }
+    }
+
+    /// The berth of one ship, taken from the harbor when the kernel creates the ship.
+    #[resource(depends = [Harbor])]
+    pub struct Mooring { pub berth: u32 }
+
+    impl Mooring {
+        #[open]
+        pub fn open() -> Result<Mooring, String> {
+            super::Harbor::with(|harbor| {
+                if harbor.taken < harbor.berths { harbor.taken += 1; Ok(Mooring { berth: harbor.taken }) }
+                else { Err(String::from("no berth is free")) }
+            })
+        }
+    }
+}
+```
+
+Behind it, the world exports `tembra:guest/service-resources-init`, beside `resources-init` when
+the root owns resources too: when the kernel creates an object of the service it asks the component
+for the declarations of the service's resources, by the service's interface, opens each for that
+object after the root's resources it depends on, and closes it when the object goes, before them.
+The `#[open]` function runs once per object; its value lives in the component, in a table of the
+objects' values under the handle the open answered, which `with` reads back from the kernel for the
+object running the call. In the `#[open]` and `#[close]` functions `with` reaches the root's
+resources and the object's earlier ones; the object's state does not exist yet there. An `Err`
+fails the creation of that object with the same words as a failed root open, and the kernel closes
+what the object already opened; the other objects and the root are unaffected. A root resource
+depends on root resources alone, since it opens before any object; a service resource on root
+resources and on resources of its own service, never on another service's, whose objects come and
+go on their own: either dependency is an error on the name in `depends`, as is a second resource
+of a name, since `depends` and the kernel name a resource by its struct's name in kebab-case,
+wherever the struct sits: `DbPool` and `DBPool` are both `db-pool`. A native host opens the same
+resources per object, see [using the Orb natively](#using-the-orb-natively); the
+[service resource example](../../examples/rust-orb-service-resource/README.md) runs one both ways.
+
+A service resource's `with` belongs to the code of its service's objects. Called anywhere else,
+from another service's method, from a contribution to a hook, or from the `#[open]` of a root
+resource, it finds no object of the service: a component traps, which retires the revision for
+every object, and natively it panics, which the call answers as an error.
 
 ## The call's context
 
@@ -475,17 +601,20 @@ interface, re-exported as `context`, and reads that view:
 ```rust
 #[tembra::orb(package = "example:audit@1.0.0", context)]
 mod audit {
-    use alloc::{format, string::String};
+    pub mod auditor {
+        use super::context;
+        use alloc::{format, string::String};
 
-    #[service]
-    pub struct Auditor;
+        #[service]
+        pub struct Auditor;
 
-    impl Auditor {
-        /// Who is calling, and which object answers.
-        pub fn whoami() -> String {
-            let object = context::object();
-            context::log(context::Level::Info, "whoami was asked");
-            format!("{} calls {:?} of {}", context::principal(), object.key, object.principal)
+        impl Auditor {
+            /// Who is calling, and which object answers.
+            pub fn whoami() -> String {
+                let object = context::object();
+                context::log(context::Level::Info, "whoami was asked");
+                format!("{} calls {:?} of {}", context::principal(), object.key, object.principal)
+            }
         }
     }
 }
@@ -509,16 +638,19 @@ the directory `wit = "dir"` points to, and the `impl` block implements it:
 ```rust
 #[tembra::orb(package = "example:keeper@1.0.0", wit = "../wit")]
 mod keeper {
-    use alloc::vec::Vec;
+    pub mod keeping {
+        use super::book;
+        use alloc::vec::Vec;
 
-    /// Implements `book` of the shared package: every function of the interface.
-    #[service("example:ledger/book@1.0.0")]
-    pub struct Keeper;
+        /// Implements `book` of the shared package: every function of the interface.
+        #[service("example:ledger/book@1.0.0")]
+        pub struct Keeper;
 
-    impl Keeper {
-        pub fn add(entry: book::Entry) -> u32 { /* ... */ }
-        pub fn total() -> i64 { /* ... */ }
-        pub fn entries() -> Vec<book::Entry> { /* ... */ }
+        impl Keeper {
+            pub fn add(entry: book::Entry) -> u32 { /* ... */ }
+            pub fn total() -> i64 { /* ... */ }
+            pub fn entries() -> Vec<book::Entry> { /* ... */ }
+        }
     }
 }
 ```
@@ -529,8 +661,8 @@ from each WIT function to the `pub fn` of the same WIT name, `move_` or `r#move`
 `move`, named in the bridge as the bindings name it. The interface is fixed by its WIT: the
 `impl` provides every function, with its parameter and result types, and nothing else; a missing or
 extra `pub fn` is a compile error and a wrong type fails to compile at the bridge. A resource of the
-interface is implemented by a `#[wit_resource(service = Keeper)]` struct of the resource's name,
-with its constructor and methods; they too take and return what the WIT says, in the package's
+interface is implemented by a `#[wit_resource]` struct of the resource's name, in the module of
+`Keeper`, with its constructor and methods; they too take and return what the WIT says, in the package's
 types, `book::Entry` or an owned `book::Cursor` handle as a parameter, so no type of the module
 enters the WIT through them. A function returning the resource, alone or in an `Option`, a
 `Result`, a `Vec` or a tuple, returns the struct there, and the bridge wraps it into its handle. The
@@ -554,12 +686,16 @@ interface to the world and re-exports its generated module under the interface's
     import = "example:greeter/greeting@1.0.0"
 )]
 mod welcomer {
-    #[service]
-    pub struct Welcoming;
+    pub mod welcoming {
+        use super::greeting;
 
-    impl Welcoming {
-        pub fn welcome(names: Vec<String>) -> Vec<String> {
-            names.iter().map(|name| greeting::hello(name)).collect()
+        #[service]
+        pub struct Welcoming;
+
+        impl Welcoming {
+            pub fn welcome(names: Vec<String>) -> Vec<String> {
+                names.iter().map(|name| greeting::hello(name)).collect()
+            }
         }
     }
 }
@@ -593,14 +729,18 @@ repeatable, reaches the object of a key the call chooses, as a TypeScript Orb do
     import("example:counters/counter@1.0.0", keyed)
 )]
 mod router {
-    #[service]
-    pub struct Routing;
+    pub mod routing {
+        use super::counter_ref;
 
-    impl Routing {
-        /// Add one to the count of the object of `key` and return its count.
-        pub async fn bump(key: String) -> Result<u32, String> {
-            let counter = counter_ref::get(vec![key]).await?;
-            Ok(counter.add(1))
+        #[service]
+        pub struct Routing;
+
+        impl Routing {
+            /// Add one to the count of the object of `key` and return its count.
+            pub async fn bump(key: String) -> Result<u32, String> {
+                let counter = counter_ref::get(vec![key]).await?;
+                Ok(counter.add(1))
+            }
         }
     }
 }
@@ -671,11 +811,12 @@ copy of the export the derived interface takes; the view's `counter_ref::Tally` 
 which the view's methods take and return, and the compiler reports it in a derived signature as a
 type other than the one the derived interface takes. So for a view of a hook the module
 contributes to or declares beside the keyed import, an interface the world exports too: a derived
-signature names a contributed hook's types through the hook's module, `guard::Admission`, and the
-macro refuses those of a declared hook. A type such an interface `use`s from an
+signature names a contributed hook's types through the hook's module, `guard::Admission`. A
+declared hook's types have one copy, the export's, which the hook's module and the view name
+alike ([declaring a hook](#declaring-a-hook)). A type such an interface `use`s from an
 interface the world only imports has no copy of its own: the import, the export and the view all
 name that interface's type, so a derived signature names it through the view and through the
-interface's module alike, a declared hook's included. The
+interface's module alike. The
 `counting` and `lending` services of the [runtime fixture](runtime-fixture/src/lib.rs) import by
 key, `lending` the interface the fixture implements.
 
@@ -691,19 +832,23 @@ The host serves WASI 0.3 to a compiled Orb, under the grants of its installation
     import = "wasi:clocks/monotonic-clock@0.3.0"
 )]
 mod dice {
-    #[service]
-    pub struct Die;
+    pub mod die {
+        use super::{monotonic_clock, random};
 
-    impl Die {
-        /// A throw of the die, from the host's secure random source.
-        pub fn throw() -> u8 {
-            (random::get_random_u64() % 6) as u8 + 1
-        }
+        #[service]
+        pub struct Die;
 
-        /// Wait on the host's monotonic clock, then throw.
-        pub async fn throw_after(nanoseconds: u64) -> u8 {
-            monotonic_clock::wait_for(nanoseconds).await;
-            Die::throw()
+        impl Die {
+            /// A throw of the die, from the host's secure random source.
+            pub fn throw() -> u8 {
+                (random::get_random_u64() % 6) as u8 + 1
+            }
+
+            /// Wait on the host's monotonic clock, then throw.
+            pub async fn throw_after(nanoseconds: u64) -> u8 {
+                monotonic_clock::wait_for(nanoseconds).await;
+                Die::throw()
+            }
         }
     }
 }
@@ -781,15 +926,19 @@ or a case of a record or a variant of the module that enters the WIT:
     import = "example:greeter/greeting@1.0.0"
 )]
 mod archivist {
-    /// A greeter's entry, with when it was archived.
-    pub struct Archived { pub entry: greeting::Entry, pub at: u64 }
+    pub mod archive {
+        use super::greeting;
 
-    #[service]
-    pub struct Archive;
+        /// A greeter's entry, with when it was archived.
+        pub struct Archived { pub entry: greeting::Entry, pub at: u64 }
 
-    impl Archive {
-        pub fn keep(entry: greeting::Entry, at: u64) -> Archived { Archived { entry, at } }
-        pub fn latest(archived: Vec<Archived>) -> Option<greeting::Entry> { /* ... */ }
+        #[service]
+        pub struct Archive;
+
+        impl Archive {
+            pub fn keep(entry: greeting::Entry, at: u64) -> Archived { Archived { entry, at } }
+            pub fn latest(archived: Vec<Archived>) -> Option<greeting::Entry> { /* ... */ }
+        }
     }
 }
 ```
@@ -843,9 +992,6 @@ the type that names it:
 - a type that holds an option of an option, a map or a list of a fixed length anywhere, which the
   runtime refuses in a signature;
 - an object of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
-- a type of a hook the module declares from a consumed package, whose `run` speaks the import's
-  types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook)), but
-  one the hook `use`s from an interface the world only imports, which both name;
 - a type of an implemented interface or of a hook the module contributes to named through the
   bindings' module of its import, `self::example::counters::counter::Tally`, or through a name a
   `use` binds to it, `counter::Tally` after `use super::example::counters::counter;`, the import's
@@ -881,29 +1027,31 @@ its `library` service the records of an interface it implements; see
 
 ## Exporting a WIT resource
 
-A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose
-methods hand it out: the function marked `#[constructor]`, `fn(..) -> Self`, is its constructor,
+A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose module
+holds it, directly or in a module below: the function marked `#[constructor]`, `fn(..) -> Self`, is its constructor,
 the `pub fn` taking `&self` are its methods, the other `pub fn` its static functions; a `pub fn new`
 without the marker is one of those.
 
 ```rust
-/// A text under construction: the caller owns it and pushes one character per call.
-#[wit_resource]
-pub struct Builder { text: RefCell<String> }
+pub mod texts {
+    /// A text under construction: the caller owns it and pushes one character per call.
+    #[wit_resource]
+    pub struct Builder { text: RefCell<String> }
 
-impl Builder {
-    #[constructor]
-    pub fn new() -> Builder { /* the constructor */ }
-    pub fn push(&self, ch: char) -> u32 { /* a method */ }
-    pub fn text(&self) -> String { /* a method */ }
-}
+    impl Builder {
+        #[constructor]
+        pub fn new() -> Builder { /* the constructor */ }
+        pub fn push(&self, ch: char) -> u32 { /* a method */ }
+        pub fn text(&self) -> String { /* a method */ }
+    }
 
-#[service]
-pub struct Texts;
+    #[service]
+    pub struct Texts;
 
-impl Texts {
-    /// Start an empty text; the caller owns the returned handle.
-    pub fn start() -> Builder { Builder::new() }
+    impl Texts {
+        /// Start an empty text; the caller owns the returned handle.
+        pub fn start() -> Builder { Builder::new() }
+    }
 }
 ```
 
@@ -924,9 +1072,8 @@ its place, which crosses to the caller, native or compiled, and every method cal
 under the caller's own admission; when the last owner drops the handle, the kernel destroys the
 value, which runs `Drop`. WIT methods borrow `self`, so a method changes a value through `Cell` or
 `RefCell`; a `&mut self` method is a compile error. A function of the interface takes the resource
-back as a parameter, [below](#taking-a-resource). The resource belongs to one interface, that of
-`#[wit_resource(service = Name)]` or of the module's only service, and only that interface returns
-it: the runtime returns a resource only from the interface that defines it, so a function of
+back as a parameter, [below](#taking-a-resource). The resource belongs to one interface, that of the service whose module
+holds it, and only that interface returns it: the runtime returns a resource only from the interface that defines it, so a function of
 another service or of another service's resource returning it, alone, nested or in a record or a
 variant, is a compile error on its result type. A record or an enum is defined in the interface
 of the earliest service, in declaration order, that mentions it, in its functions or its
@@ -989,14 +1136,24 @@ from the interface that defines it.
 
 ## Organizing the module in sub-modules
 
-The Orb module may hold sub-modules, written inline; the macro reads them as part of the Orb and
-leaves them in place, so a service can live with what belongs to it:
+The Orb module holds sub-modules, written inline; the macro reads them as part of the Orb and
+leaves them in place. One rule says what belongs to whom: **every service lives in an inline module
+of its own**, its service's module, which holds one service.
 
 ```rust
 #[tembra::orb(package = "example:ledger@1.0.0")]
 mod ledger {
+    /// The Orb's: a resource of the root, outside every service's module.
+    #[resource]
+    pub struct Audit { pub entries: Cell<u32> }
+
+    impl Audit {
+        #[open]
+        pub fn open() -> Audit { Audit { entries: Cell::new(0) } }
+    }
+
     pub mod pinned {
-        /// The balance of one pinned ledger object, kept by the kernel.
+        /// Pinned's: the balance of one pinned ledger object, kept by the kernel.
         #[state]
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Balance { pub total: i64 }
@@ -1005,7 +1162,10 @@ mod ledger {
         pub struct Pinned;
 
         impl Pinned {
-            pub fn add(amount: i64) -> i64 { Balance::update(|balance| balance.total += amount).total }
+            pub fn add(amount: i64) -> i64 {
+                super::Audit::with(|audit| audit.entries.set(audit.entries.get() + 1));
+                Balance::update(|balance| balance.total += amount).total
+            }
         }
     }
 
@@ -1013,33 +1173,38 @@ mod ledger {
 }
 ```
 
-A state or a WIT resource that names no service belongs to the one service of its sub-module, else
-to the one service of the Orb. A service's methods are the `pub fn` of the `impl` blocks of its own
-module, and a marked function goes in the module of its struct. The bridges the macro generates for
-an item go in the item's module, so the author's types and functions resolve where they were
-written: a WIT resource's bridge, for a derived or an implemented interface, sits next to its struct
-and calls its `#[constructor]` whatever its visibility. What the Orb module itself reaches, a state,
-a root resource, a WIT resource, the `#[inputs]` struct, a state's `#[validate]` function and a root
-resource's `#[open]` and `#[close]` functions, is visible to the Orb module: `pub` or `pub(crate)`
-at any depth, `pub(super)` one level down only. The macro names such an item through every module
+What a service's module holds, directly or in a module below it, belongs to that service: its
+`#[service]` struct and `impl` blocks, its `#[state]`, its `#[wit_resource]` structs and the
+`#[resource]` structs of its objects. The owner of a state, a WIT resource or a service resource is
+the service of the nearest service's module above it, so a state may sit in `pinned::kept` as well
+as in `pinned`. What lies outside every service's module belongs to the Orb: the `#[root]`, the
+`#[inputs]` struct, the root's `#[resource]` structs, the `#[hook]` declarations and the
+contributions. Types and functions that are neither may sit anywhere. The macro refuses, on the
+item, with the fix in the error: a `#[service]` in the Orb module; two services in one module, or a
+service's module inside another's; a `#[state]` or a `#[wit_resource]` outside every service's
+module, and `service = Name` on either, which the rule replaces; and a `#[root]`, an `#[inputs]` or
+a `#[hook]` inside a service's module.
+
+A service's methods are the `pub fn` of the `impl` blocks of its own module, and a marked function
+goes in the module of its struct. The bridges the macro generates for an item go in the item's
+module, so the author's types and functions resolve where they were written: a WIT resource's
+bridge, for a derived or an implemented interface, sits next to its struct and calls its
+`#[constructor]` whatever its visibility. What the Orb module itself reaches, a state, a
+resource, of the root or of a service's objects, a WIT resource, the `#[inputs]` struct, a state's
+`#[validate]` function and a resource's `#[open]` and `#[close]` functions, is visible to the Orb
+module: `pub` or `pub(crate)` at any depth, `pub(super)` one level down only. The macro names such an item through every module
 of its path, from the Orb module, and a WIT resource from its service's module, so each of those
 modules is visible there too: a WIT resource may sit below a private module that also holds its
 service. A `pub use` re-exporting the item past a module hidden there does not help. The compiler
-reports an item or a module that is not visible, on the author's line. Natively, a
-WIT resource's `#[constructor]` and static functions are methods of its service's client, written
-in the resource's module: a resource with one sees that client, so its service and each module of
-the service's path are visible to the resource's module, at least `pub(crate)` where it sits
-elsewhere. Otherwise the module still builds, as a component and natively, and its `orb()` answers
-an error naming them, so only a host that installs the Orb fails. A resource with neither has no
-such rule. As
-for the other visibility rules, the macro counts a `pub(in ..)` path from `crate` as visible
-everywhere and leaves it to the compiler, which then reports the module or the service the
-resource's module cannot see. A name that
-enters the WIT is one across the modules, because the package has one namespace: the services, the
-hooks, the resources and the types a method or a hook mentions; a state that stays out of the WIT
-may repeat its name module by module, as `Balance` does. The modules the macro re-exports in the Orb
-module, `context`, an imported interface, a hook declared from a consumed package, are reached from
-a sub-module through `super::`. See
+reports an item or a module that is not visible, on the author's line. Natively, a WIT resource's
+`#[constructor]` and static functions are methods of its service's client, written in the
+resource's module, which sits in the service's module or below it and so sees the client.
+
+A name that enters the WIT is one across the modules, because the package has one namespace: the
+services, the hooks, the resources and the types a method or a hook mentions; a state that stays
+out of the WIT may repeat its name module by module, as `Balance` does. The modules the macro
+re-exports in the Orb module, `context`, an imported interface, a hook declared from a consumed
+package, and the Orb's own items are reached from a service's module through `super::`. See
 [rust-orb-service-lifetime](../../examples/rust-orb-service-lifetime/README.md).
 
 A type that a signature, a hook's input or a field of a type entering the WIT names resolves as
@@ -1085,12 +1250,14 @@ before installing it, a host may append services written by hand and the require
 ```rust,ignore
 #[tembra::orb(package = "example:calculator@1.0.0")]
 pub mod calculator {
-    #[service]
-    pub struct Math;
+    pub mod math {
+        #[service]
+        pub struct Math;
 
-    impl Math {
-        pub fn add(a: u32, b: u32) -> u32 {
-            a + b
+        impl Math {
+            pub fn add(a: u32, b: u32) -> u32 {
+                a + b
+            }
         }
     }
 }
@@ -1101,7 +1268,7 @@ let math = host.get("calculator::example:calculator/math@1.0.0", vec!["main".int
 let math = Rc::new(math);
 let sum: u32 = math.call(&context, "add", (1u32, 2u32)).await?;
 let sum: Value = math.call_portable(&context, "add", json!([1, 2])).await?;
-let sum: u32 = calculator::MathClient::new(math).add(&context, 1, 2).await?;
+let sum: u32 = calculator::math::MathClient::new(math).add(&context, 1, 2).await?;
 ```
 
 The native items sit inside `tembra::__host!`, a hidden macro of the facade that expands its input
@@ -1124,7 +1291,8 @@ fields may hold anything, such as `Rc` handles or closures. An Orb has at most o
 Orb module, without generic parameters.
 
 A service reads them in its function marked `#[create]`,
-`fn(&Inputs, &Declaration) -> tembra::Result<Self>`, which builds each object of the service, a
+`fn(&Inputs, &Declaration) -> tembra::Result<Self>`, naming the inputs `super::Inputs` or through a
+`use` from the service's module, which builds each object of the service, a
 key and a principal, before its first call, and builds it again for the new code when the host
 reloads the Orb with `Host::reload`. The `Declaration` gives the object's address and declares its
 state, its resources and its tasks. What the create returns is the object's environment: the
@@ -1158,7 +1326,7 @@ What every object of the Orb shares comes from the free function marked `#[root]
 for an asynchronous open that depends on other resources or an asynchronous close, its background
 tasks, and the references it keeps. A `#[create]` reads the value as an `Rc<T>` with
 `declaration.orb::<T>()`, and may keep it for its methods. An Orb has at most one, visible to the
-Orb module.
+Orb module, outside every service's module.
 
 ```rust,ignore
 pub struct Catalogue {
@@ -1170,10 +1338,14 @@ fn catalogue(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Catal
     Ok(Catalogue { books: Cell::new(0) })
 }
 
-impl Shelf {
-    #[create]
-    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
-        Ok(Self { catalogue: declaration.orb::<Catalogue>()? })
+pub mod shelf {
+    use super::{Catalogue, Inputs};
+
+    impl Shelf {
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            Ok(Self { catalogue: declaration.orb::<Catalogue>()? })
+        }
     }
 }
 ```
@@ -1320,10 +1492,10 @@ a tuple, each handle naming its own value:
 
 ```rust,ignore
 // In a native host, under a root context, with a reference to the `texts` object.
-let texts = text::TextsClient::new(reference);
-let builder: text::BuilderHandle = texts.new_builder(&context).await?;
+let texts = text::texts::TextsClient::new(reference);
+let builder: text::texts::BuilderHandle = texts.new_builder(&context).await?;
 assert_eq!(builder.push(&context, 'a').await?, 1);
-let (labelled, label): (text::BuilderHandle, String) =
+let (labelled, label): (text::texts::BuilderHandle, String) =
     texts.labelled(&context, "b".into()).await?;
 assert_eq!((labelled.text(&context).await?, label), (String::new(), "b".into()));
 drop(builder); // drops the resource: the Orb's value closes
@@ -1356,15 +1528,17 @@ its own.
 
 A [`#[resource]`](#resources-of-the-orbs-root) of the Orb's root serves a native host as it serves
 a component. `orb(..)` gives each Orb it builds a table of its resources, which the Orb's create
-fills, declaring each with `Declaration::resource` before the `#[root]`, if any, runs: the host
-opens each with its `#[open]` function once the create returns, once for the Orb and before any
-object of it is built, and closes it, through its `#[close]` function, when it removes the Orb. A
-reload keeps it while its version stays the same, and replaces it at a new version, as
-[above](#resources-of-the-orbs-root). The value lives in the host, one per Orb, so a crate
+fills, declaring each with `Declaration::resource_async` before the `#[root]`, if any, runs: the
+host opens each with its `#[open]` function once the create returns, after the resources it
+[depends on](#resources-of-the-orbs-root), once for the Orb and before any object of it is built,
+and closes it, through its `#[close]` function, when it removes the Orb, before the resources it
+depends on. A reload keeps it while its version and its dependencies stay the same, and replaces it
+at a new version or with a dependency it replaces, as [above](#resources-of-the-orbs-root). The value lives in the host, one per Orb, so a crate
 installed twice under two names has two of each.
 `with` gives the open value to the methods of every service of the Orb and the functions of their
 WIT resources, which the native side runs with their Orb's table around each poll of their future,
-as for the `context` functions.
+as for the `context` functions, and to the `#[open]` and `#[close]` functions of its resources,
+which run with that table too.
 Elsewhere, in the root, a `#[create]` or a task, and before the host opens the resource or after
 it closes it, `with` panics, as it traps a component. A root that fails fails the create, and no
 resource opens.
@@ -1406,6 +1580,23 @@ wait for its answer: an import of an interface with a synchronous function, plai
 the module's `orb()` answer an error naming it where the runtime is linked, and works in a
 component build of the same module.
 
+The resources of a service's objects serve a native host too: the factory of the service declares
+each on the object's declaration, in the order the component lists them, after the root's resources
+and the object's earlier ones it depends on, so the host opens them with the object and closes them
+when the object goes. `with` on such a resource gives the value of the object running the call in
+the service's methods and in the functions of its WIT resources, and in the `#[open]` and `#[close]`
+functions of the object's later resources; elsewhere, in a contribution, a method of another service
+or a root resource's functions, it panics, as it traps a component. An `#[open]` that answers `Err`
+fails the creation of that object alone, with `unavailable/resource` and the error's text, as a
+component's does. With the `context` option, an `#[open]` or `#[close]` function reads the
+`context` natively as a component's does: the host runs it outside any call, in a context of the
+resource's owner, so `log` writes for the Orb, `object()` is the owning object's address for a
+service resource and, for a root resource, an empty key with the principal `host`, as in a hook
+contribution, and `cancelled()` answers the resource's own cancellation in an `#[open]`.
+`principal()` is `host`, as a component and natively. The
+[service resource example](../../examples/rust-orb-service-resource/README.md)
+logs from its openers and closers both ways.
+
 A [contribution to a hook](#contributing-to-a-hook) serves a native host too. `Providers` names the
 Orb that declares each hook the module contributes to, under the name of the hook's module,
 `guard`, and the Orb requires the hook of it, with the signature of its callback, as the plan of a
@@ -1429,10 +1620,11 @@ facade there: such a module names the facade `::tembra`, as in `::tembra::Result
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, newtypes, `Result`s, and `Vec`, `Option` and
 tuples of them, the types of an implemented or imported interface or of a hook among them, WIT
-resources as above, states, the resources of the Orb's root, the imports of interfaces of
-`async func`s and contributions to hooks. What it does not cover yet, such as a type of a consumed
-interface that holds a resource, an import of an interface with a resource, a WASI import or an
-`Option` of an `Option`, which the boundary's JSON cannot tell from `None`, and the other cases
+resources as above, states, the resources of the Orb's root and of a service's objects, the
+imports of interfaces of `async func`s and contributions to hooks. What it does not cover yet, such
+as a type of a consumed interface that holds a resource, an import of an interface with a resource,
+a WASI import or an `Option` of an `Option`, which the boundary's JSON cannot tell from `None`, and
+the other cases
 above, leaves the module compiling where the runtime is linked: its `orb()` and `orb_named(..)`,
 which take the inputs if the module has an `#[inputs]` struct and no providers, answer an error
 with the code `unsupported` and the reason `native`, naming the item, so only a host that installs
@@ -1533,6 +1725,69 @@ that imports the interface was built against the old WIT and no longer pairs wit
 installation, which compares the interface's contract. Raise the version of the providing package
 and rebuild the Orbs that import it together.
 
+An Orb written before every service lived in a module of its own moves in four steps; until
+each is done, the macro or rustc refuses the module on the item, with the fix in the error:
+
+1. Put each `#[service]` in an inline module of its own, `pub mod <service in snake_case>`, with
+   its `impl` blocks, its `#[state]` and its `#[wit_resource]` structs. The `#[root]`, the
+   `#[inputs]` struct, the root's `#[resource]` structs and the `#[hook]` items stay outside every
+   service's module.
+2. Drop `service = Name` from `#[state]` and `#[wit_resource]`: the module that holds the item says
+   which service owns it, the nearest service's module above it.
+3. Name through `super::` what the Orb module holds, from the service's module: `context`, the
+   module of an imported interface, an implemented one or a hook, and the types the services share,
+   `use super::{context, greeting, Entry};`.
+4. A native host names the service's client, and a WIT resource's handle, through the service's
+   module: `english::greeter::GreetingClient` where it named `english::GreetingClient`.
+
+```rust
+// Before.
+#[tembra::orb(package = "example:counter@1.0.0", context)]
+mod tally {
+    #[state(service = Counter)]
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
+    pub struct Count { pub total: i64 }
+
+    #[service]
+    pub struct Counter;
+
+    impl Counter {
+        pub fn add(by: i64) -> String {
+            let count = Count::update(|count| count.total += by);
+            format!("{} counts {}", context::principal(), count.total)
+        }
+    }
+}
+
+// After.
+#[tembra::orb(package = "example:counter@1.0.0", context)]
+mod tally {
+    pub mod counter {
+        use super::context;
+
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Count { pub total: i64 }
+
+        #[service]
+        pub struct Counter;
+
+        impl Counter {
+            pub fn add(by: i64) -> String {
+                let count = Count::update(|count| count.total += by);
+                format!("{} counts {}", context::principal(), count.total)
+            }
+        }
+    }
+}
+```
+
+The WIT, the interfaces' names and the contract stay the same: only the Rust paths move. The
+compile-fail cases `service_in_the_orb_module`, `two_services_in_one_module`,
+`service_module_inside_another`, `state_outside_every_service`,
+`wit_resource_outside_every_service`, `state_naming_its_service`, `root_in_a_service_module`,
+`inputs_in_a_service_module` and `hook_in_a_service_module` show each error.
+
 Tests: the state's derives, `a_states_default_and_serde_derives_are_the_authors` and the
 compile-fail cases `state_without_default` and `state_reaches_a_type_without_serde`; the `#[flags]`
 struct as a record, `a_struct_of_bool_fields_is_a_record` and `flags_on_a_record`; names of contract
@@ -1599,13 +1854,17 @@ pub mod calculator {
         Rect { width: u32, height: u32 },
     }
 
-    #[service]
-    pub struct Plotter;
+    pub mod plotter {
+        use super::Shape;
 
-    impl Plotter {
-        /// The area of a shape, or why it has none.
-        pub fn area(shape: Shape) -> Result<u64, String> {
-            /* .. */
+        #[service]
+        pub struct Plotter;
+
+        impl Plotter {
+            /// The area of a shape, or why it has none.
+            pub fn area(shape: Shape) -> Result<u64, String> {
+                /* .. */
+            }
         }
     }
 }
@@ -1639,7 +1898,7 @@ assert_eq!(area, Ok(6));
 let rect = json!([{ "tag": "rect", "val": { "width": 2, "height": 3 } }]);
 let area = plotter.call_portable::<_, Value>(&context, "area", rect).await?;
 assert_eq!(area, json!({ "tag": "ok", "val": 6 }));
-let client = calculator::PlotterClient::new(plotter);
+let client = calculator::plotter::PlotterClient::new(plotter);
 assert_eq!(client.area(&context, Shape::Rect { width: 2, height: 2 }).await?, Ok(4));
 ```
 
@@ -1657,28 +1916,32 @@ the WIT, the signatures, `orb(..)` and the contract the macro writes are those o
 being built.
 
 ```rust,ignore
-#[service]
-pub struct Notes;
+pub mod notes {
+    #[service]
+    pub struct Notes;
 
-impl Notes {
-    pub fn add(text: String) -> u32 {
-        /* .. */
-    }
+    impl Notes {
+        pub fn add(text: String) -> u32 {
+            /* .. */
+        }
 
-    #[cfg(feature = "archive")]
-    pub fn archive() -> u32 {
-        /* .. */
+        #[cfg(feature = "archive")]
+        pub fn archive() -> u32 {
+            /* .. */
+        }
     }
 }
 
+/// The service's module, and the service with it, goes with the feature.
 #[cfg(feature = "archive")]
-#[service]
-pub struct Shelf;
+pub mod shelf {
+    #[service]
+    pub struct Shelf;
 
-#[cfg(feature = "archive")]
-impl Shelf {
-    pub fn count() -> u32 {
-        /* .. */
+    impl Shelf {
+        pub fn count() -> u32 {
+            /* .. */
+        }
     }
 }
 ```
@@ -1695,7 +1958,10 @@ takes whole, or on a sub-module holding no service, root or hook, such as `#[cfg
 it works as anywhere else; on another item the macro reads, such as a `#[state]`, a `#[resource]`
 or a type that enters the WIT, it is a compile error, since the macro would read the item in every
 configuration. A `#[cfg_attr(..)]` wrapping a `#[cfg(..)]` on an item of this section is a compile
-error too: the macro evaluates the plain form alone.
+error too: the macro evaluates the plain form alone. A `#[cfg]` on a `#[service]` struct leaves its
+module behind, so a `#[state]`, a `#[wit_resource]` or a `#[resource]` there is a compile error in
+the configuration that leaves the service out; put the `#[cfg]` on the service's module instead, as
+`shelf` above does, and the module's items go with the service.
 
 The contract the macro writes follows the last build that compiled the crate for itself, with its
 features: `cargo test --all-features` writes the contract of every feature, and a later
@@ -1754,6 +2020,11 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    remove a copy of the kernel's package an encoded package holds, since it brings that package
    itself. With a WASI import, the WASI packages it needs are nested the same way, from the
    sources `tembra-contracts` bundles.
+   With a hook declared from a consumed package, also `with` on the hook's import, mapped to its
+   export module, so the bindings generate no import of the hook, and a second `generate!` in the
+   hidden module `__tembra_declared`, of a world importing the hooks alone, whose `with` maps the
+   types each hook defines to the export's and the interfaces they use to the first invocation's
+   modules: `run` calls that import, and the hook's types have one Rust type.
    With a state holding a consumed type, also `serde` derives on the bindings of the consumed
    records, variants and enums the state holds, directly or through the types of the module, and
    of those they hold, each by its full name in `additional_type_attributes`, and on no other
@@ -1766,8 +2037,8 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    options, results and tuples too, a resource of the module wrapped into its handle type or taken
    back from it. The bindings name a field or a case from its WIT name, `type_` for `r#type`, so
    each side keeps its own names;
-   `pub use exports::...::guard;` for each contributed hook and each
-   implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
+   `pub use exports::...::guard;` for each contributed hook, each hook declared from a consumed
+   package and each implemented interface, `pub use ...::counter;`, the import module, for each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    but that of a service its `#[create]` builds, by forwarding to the author's functions, hook
@@ -1783,11 +2054,14 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    the state each method's object declared natively, inside `tembra::__host!`; and the kernel's
    `validate` callback, which reads the value a reload would adopt as the state type and runs the
    state's `#[validate]` function on it;
-9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
-   function and emptied by the `#[close]` one, and the `with` function on each resource type,
-   which reaches the slot in a component build, inside `tembra::__guest!`, and natively, inside
-   `tembra::__host!`, the resource of the Orb whose method runs, from a hidden table of the Orb's
-   resources that the Orb's create fills;
+9. with a resource, one slot in the component's memory per root resource, filled by the `#[open]`
+   function and emptied by the `#[close]` one, and one table per service resource, holding each
+   object's value under the handle its open answered, and the `with` function on each resource
+   type, which reaches the slot, or the running object's value in the table, in a component build,
+   inside `tembra::__guest!`, and natively, inside `tembra::__host!`, the resource of the Orb whose
+   method runs, from a hidden table of the Orb's root resources that the Orb's create fills, or of
+   the object whose method runs, from a table per object that the service's factory fills,
+   declaring each resource after the root's and the object's earlier ones it depends on;
 10. inside `tembra::__host!`, so only in a native build that links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
     `pub fn orb_named(name, api_version, ..)`, whose Orb's create declares the root's resources and
@@ -1823,15 +2097,16 @@ the version whose rules the macro follows, and the generated code reaches it the
   Orb's WIT by importing an interface, plainly or by key, implementing one or contributing to a
   hook, and passes the interface's data types on as they are. A view takes the name of the
   interface imported by key, so two interfaces of one name are not both imported by key.
-- A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a newtype, a scalar, a string or a list, of the module's own types, and a newtype, alone or held, converts to each side of the hook's bindings, the export's and the import's copy of the record its field holds. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
+- A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a newtype, a scalar, a string or a list, of the module's own types, and a newtype, alone or held, converts to each side of the hook's bindings, the export's and the import's copy of the record its field holds. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`, unless the service's
   `#[create]` builds its objects, natively; the methods of a `#[wit_resource]` struct take
   `&self`, and none takes `&mut self`. Besides a service's state, a resource's fields, the root's
   resources and the fields of a service its `#[create]` builds, data lives in `static`s, as in
   the compiled fixtures of `executor-wasm`.
-- Root resources, `#[resource]`, belong to the root, declare no dependencies on one another, and
-  are opened in the order the kernel chooses; the `#[open]` and `#[close]` functions take no
-  arguments besides the value.
+- A `#[resource]` outside every service's module belongs to the root, one per Orb, and one in a
+  service's module to each object of that service; each opens after the resources its `depends`
+  names and closes before them. The `#[open]` and `#[close]` functions take no arguments besides
+  the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary, a consumed type's
   included. The state's `Default` and `serde`'s derives are the author's, on the state and on every
@@ -1921,21 +2196,23 @@ interface feed {
 ```rust,ignore
 #[tembra::orb(package = "example:consumer@1.0.0", wit = "wit")]
 mod events {
-    #[service("example:events/feed@1.0.0")]
-    pub struct Feed;
+    pub mod feeding {
+        #[service("example:events/feed@1.0.0")]
+        pub struct Feed;
 
-    impl Feed {
-        pub async fn subscribe() -> Updates {
-            Updates
+        impl Feed {
+            pub async fn subscribe() -> Updates {
+                Updates
+            }
         }
-    }
 
-    #[wit_resource(service = Feed)]
-    pub struct Updates;
+        #[wit_resource]
+        pub struct Updates;
 
-    impl Updates {
-        pub async fn next(&self) -> Option<u64> {
-            Some(1)
+        impl Updates {
+            pub async fn next(&self) -> Option<u64> {
+                Some(1)
+            }
         }
     }
 }

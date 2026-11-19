@@ -14,16 +14,19 @@ extern crate alloc;
     tembra::orb(package = "example:probe@1.0.0", context)
 )]
 mod probe {
-    use alloc::string::String;
+    pub mod caller {
+        use super::context;
+        use alloc::string::String;
 
-    /// The service: it reports who calls it.
-    #[service]
-    pub struct Caller;
+        /// The service: it reports who calls it.
+        #[service]
+        pub struct Caller;
 
-    impl Caller {
-        /// The principal of the call.
-        pub fn principal() -> String {
-            context::principal()
+        impl Caller {
+            /// The principal of the call.
+            pub fn principal() -> String {
+                context::principal()
+            }
         }
     }
 }

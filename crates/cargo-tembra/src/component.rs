@@ -359,7 +359,7 @@ pub fn summary(
         if guest::reserved(&id) {
             // The kernel's callbacks, answered to the kernel.
             state |= id == guest::STATE_INIT;
-            resources |= id == guest::RESOURCE_INIT;
+            resources |= id == guest::RESOURCE_INIT || id == guest::SERVICE_RESOURCE_INIT;
             continue;
         }
         if let WorldItem::Interface { id: interface, .. } = item {
@@ -425,7 +425,7 @@ pub fn summary(
     if resources {
         writeln!(
             out,
-            "kernel-managed resources: the kernel opens and closes the resources of this Orb's root ({})",
+            "kernel-managed resources: the kernel opens and closes the resources of this Orb's root and service objects ({})",
             guest::RESOURCE
         )?;
     }
