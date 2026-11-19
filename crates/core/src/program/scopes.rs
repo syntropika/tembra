@@ -171,12 +171,21 @@ impl crate::host::Inner {
 
     /// Cancel activations and release scope resource claims once.
     pub(crate) fn begin_cleanup(&mut self, scopes: &[Id]) {
+        self.begin_cleanup_after(scopes, None);
+    }
+
+    /// Cancel activations and release scope resource claims once, failing an activation that
+    /// waits on the scopes with `cause`, the error of the activation that failed, so a call
+    /// waiting on the Orb root's activation learns why; without one, the scope is closing.
+    pub(crate) fn begin_cleanup_after(&mut self, scopes: &[Id], cause: Option<&Error>) {
         for id in scopes {
             if let Some(program) = self.scope_activations.get(id).copied()
                 && let Some(record) = self.programs.get_mut(&program)
             {
                 record.error.get_or_insert_with(|| {
-                    Error::new(Code::Cancelled, Reason::ScopeClosed, "scope is closing")
+                    cause.cloned().unwrap_or_else(|| {
+                        Error::new(Code::Cancelled, Reason::ScopeClosed, "scope is closing")
+                    })
                 });
                 record.running = true;
                 self.ready_programs.insert(program);

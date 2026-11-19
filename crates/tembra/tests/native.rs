@@ -259,3 +259,68 @@ fn native_shutdown_signals_openers_but_waits_for_physical_settlement() {
     assert_eq!(host.kernel().diagnostics().objects, 0);
     drop(reference);
 }
+
+/// A root resource whose open fails: the call waiting on the Orb's activation receives the
+/// opener's error, the resources that opened close, and the Orb activates again on the next get.
+#[test]
+fn a_failed_root_open_answers_the_waiting_call_with_the_openers_error() {
+    let mut executor = LocalPool::new();
+    let host = Host::new(executor.spawner());
+    let closes = Rc::new(Cell::new(0));
+    let attempts = Rc::new(Cell::new(0));
+    let orb = Orb::new("native.root", 1)
+        .create({
+            let (closes, attempts) = (closes.clone(), attempts.clone());
+            move |self_| {
+                let closed = closes.clone();
+                self_.resource(
+                    "a",
+                    1,
+                    || Ok(1_u32),
+                    move |_, _| {
+                        closed.set(closed.get() + 1);
+                        async { Ok(()) }.boxed_local()
+                    },
+                )?;
+                let attempt = attempts.clone();
+                self_.resource(
+                    "c",
+                    1,
+                    move || {
+                        attempt.set(attempt.get() + 1);
+                        if attempt.get() == 1 {
+                            return Err(Error::invalid("down", "the store is down"));
+                        }
+                        Ok(2_u32)
+                    },
+                    |_, _| async { Ok(()) }.boxed_local(),
+                )?;
+                Ok(())
+            }
+        })
+        .service(
+            Service::new("native.root", |_| Ok(()))
+                .method("read", |_, _, (): ()| async { Ok(7_u32) }),
+        );
+    host.install(vec![orb]).unwrap();
+    let first = host
+        .get("native.root", vec!["main".into()], "alice")
+        .unwrap();
+    let error = executor.run_until(first.ready()).unwrap_err();
+    assert_eq!(
+        (error.code, error.reason.as_str(), error.message.as_str()),
+        (tembra::core::Code::Invalid, "down", "the store is down"),
+        "{error}"
+    );
+    executor.run_until_stalled();
+    assert_eq!(closes.get(), 1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let next = host
+        .get("native.root", vec!["main".into()], "alice")
+        .unwrap();
+    executor.run_until(next.ready()).unwrap();
+    assert_eq!(attempts.get(), 2);
+    next.release().unwrap();
+    executor.run_until(host.close()).unwrap();
+    assert_eq!(closes.get(), 2);
+}

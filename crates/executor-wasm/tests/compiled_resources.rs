@@ -6,7 +6,9 @@
 //! The fixture is a real component encoded from a small core module, so the test runs without a
 //! guest toolchain. Its callbacks log each open at level info and each close at level warn, with
 //! the resource's name as the message; opening `c` answers `err("down")` when `down` says so.
-use futures::executor::LocalPool;
+use futures::{FutureExt, executor::LocalPool};
+use serde_json::{Value, json};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tembra::Host;
 use tembra_contracts::ComponentRoles;
@@ -34,7 +36,7 @@ const PROBE: &str = "stack::example:stack/probe@1.0.0";
 /// `b` and `c` at 64, 65 and 66, the message `down` at 72, dependency lists from 96, three
 /// declarations of 20 bytes (name, version, dependencies) from 256, and the list itself at the
 /// return area 128. The result of an open is written at 512: `ok(7)`, or `err("down")` for `c`
-/// when `down` says so.
+/// the first time it opens, when `down` says so.
 fn module(declarations: &str, down: bool) -> String {
     let down = i32::from(down);
     format!(
@@ -42,6 +44,8 @@ fn module(declarations: &str, down: bool) -> String {
   (import "tembra:guest/context@1.0.0" "log" (func $log (param i32 i32 i32)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 1024))
+  ;; Whether `c` already refused to open once.
+  (global $refused (mut i32) (i32.const 0))
   (data (i32.const 64) "abc")
   (data (i32.const 72) "down")
   {declarations}
@@ -56,12 +60,14 @@ fn module(declarations: &str, down: bool) -> String {
     local.get $block)
   (func (export "tembra:guest/resources-init@1.0.0#declare") (result i32)
     i32.const 128)
-  ;; open(name) -> result<u32, string>: `c` is down when the module says so; otherwise log the
-  ;; name at level info (2) and answer the handle 7.
+  ;; open(name) -> result<u32, string>: `c` is down the first time, when the module says so;
+  ;; otherwise log the name at level info (2) and answer the handle 7.
   (func (export "tembra:guest/resources-init@1.0.0#open") (param i32 i32) (result i32)
     local.get 0 i32.load8_u i32.const 99 i32.eq
     i32.const {down} i32.and
+    global.get $refused i32.eqz i32.and
     if
+      (global.set $refused (i32.const 1))
       (i32.store8 (i32.const 512) (i32.const 1))
       (i32.store (i32.const 516) (i32.const 72))
       (i32.store (i32.const 520) (i32.const 4))
@@ -212,8 +218,10 @@ fn a_dependency_not_declared_before_its_resource_refuses_the_orb() {
     );
 }
 
-/// Opening `c` answers `err("down")` after `a` and `b` opened: the activation fails, and the
-/// kernel closes `b`, then `a`, through the component, which stays serving.
+/// Opening `c` answers `err("down")` after `a` and `b` opened: the call waiting on the
+/// activation fails with the message, nothing else reports it, and the kernel closes `b`, then
+/// `a`, through the component, which stays serving: the next get opens `a`, `b` and `c`, and a
+/// call answers.
 #[test]
 fn an_open_that_answers_an_error_fails_the_activation_and_closes_what_opened() {
     let (engine, records) = engine();
@@ -230,19 +238,51 @@ fn an_open_that_answers_an_error_fails_the_activation_and_closes_what_opened() {
         .run_until(probe.ready())
         .expect_err("the activation fails")
         .to_string();
-    // The object waiting on the root's activation is told that the root's scope is closing, as
-    // it is for a native Orb whose root resource fails to open; the opener's message stays with
-    // the root's activation program.
-    assert!(refused.contains("scope_closed"), "{refused}");
+    assert!(
+        refused.contains("the resource `c` did not open: down"),
+        "{refused}"
+    );
+    pool.run_until(host.settled());
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let logged = || -> Vec<(String, String)> {
+        records
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|record| (record.level.clone(), record.message.clone()))
+            .collect()
+    };
+    let expected = |records: &[(&str, &str)]| -> Vec<(String, String)> {
+        records
+            .iter()
+            .map(|(level, name)| (level.to_string(), name.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        logged(),
+        expected(&[("info", "a"), ("info", "b"), ("warn", "b"), ("warn", "a")])
+    );
+    let probe = Rc::new(host.get(PROBE, vec!["main".into()], "alice").unwrap());
+    pool.run_until(probe.ready()).unwrap();
+    let called = probe.clone();
+    let answer: Value = pool
+        .run_until(host.root("alice", move |context| {
+            async move { called.call::<_, Value>(&context, "ping", json!([])).await }.boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(answer, json!(1));
+    probe.release().unwrap();
     pool.run_until(host.close()).unwrap();
     assert!(host.errors().is_empty(), "{:?}", host.errors());
-    let records: Vec<(String, String)> = records
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|record| (record.level.clone(), record.message.clone()))
-        .collect();
-    let expected = [("info", "a"), ("info", "b"), ("warn", "b"), ("warn", "a")]
-        .map(|(level, name)| (level.to_owned(), name.to_owned()));
-    assert_eq!(records, expected);
+    assert_eq!(
+        logged()[4..],
+        expected(&[
+            ("info", "a"),
+            ("info", "b"),
+            ("info", "c"),
+            ("warn", "c"),
+            ("warn", "b"),
+            ("warn", "a"),
+        ])
+    );
 }

@@ -13,7 +13,8 @@ impl Host {
             let mut inner = self.inner.borrow_mut();
             program.scopes = inner.failed_scope_dependents(&program.scopes);
             program.scope_set = program.scopes.iter().copied().collect();
-            inner.begin_cleanup(&program.scopes);
+            // The activations waiting on these scopes fail as this one did.
+            inner.begin_cleanup_after(&program.scopes, program.error.as_ref());
         }
         effects.extend(program.scopes.iter().map(|scope| Effect::Stop {
             scope: *scope,
