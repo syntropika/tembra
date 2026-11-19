@@ -26,10 +26,14 @@ pub struct Guard;
 /// One admission: the value, and whether a contributor blocked it.
 pub struct Admission { pub value: i32, pub blocked: bool }
 
-impl Admissions {
-    /// Run the guard hook over a fresh admission and report what the contributors decided.
-    pub fn admit(value: i32) -> Admission {
-        Guard::run(Admission { value, blocked: false })
+pub mod admissions {
+    use super::{Admission, Guard};
+
+    impl Admissions {
+        /// Run the guard hook over a fresh admission and report what the contributors decided.
+        pub fn admit(value: i32) -> Admission {
+            Guard::run(Admission { value, blocked: false })
+        }
     }
 }
 ```

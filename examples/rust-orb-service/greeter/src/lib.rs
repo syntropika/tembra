@@ -9,26 +9,30 @@ mod greeter {
         pub chars: u32,
     }
 
-    /// The service: a unit struct marked #[service], with an impl block of public functions.
-    #[service]
-    pub struct Greeting;
+    pub mod greeting {
+        use super::Stats;
 
-    impl Greeting {
-        /// Greet by name.
-        pub fn hello(name: String) -> String {
-            format!("Hello, {name}!")
-        }
+        /// The service: a unit struct marked #[service], with an impl block of public functions.
+        #[service]
+        pub struct Greeting;
 
-        /// Count the words of a text.
-        pub fn count_words(text: String) -> u32 {
-            text.split_whitespace().count() as u32
-        }
+        impl Greeting {
+            /// Greet by name.
+            pub fn hello(name: String) -> String {
+                format!("Hello, {name}!")
+            }
 
-        /// Words and characters of a text.
-        pub fn measure(text: String) -> Stats {
-            Stats {
-                words: Self::count_words(text.clone()),
-                chars: text.chars().count() as u32,
+            /// Count the words of a text.
+            pub fn count_words(text: String) -> u32 {
+                text.split_whitespace().count() as u32
+            }
+
+            /// Words and characters of a text.
+            pub fn measure(text: String) -> Stats {
+                Stats {
+                    words: Self::count_words(text.clone()),
+                    chars: text.chars().count() as u32,
+                }
             }
         }
     }

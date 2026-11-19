@@ -4,14 +4,16 @@
 
 #[tembra::orb(package = "example:english@1.0.0", wit = "../wit")]
 pub mod english {
-    /// Implements `greeting` of the shared package.
-    #[service("example:greeter/greeting@1.0.0")]
-    pub struct Greeting;
+    pub mod greeter {
+        /// Implements `greeting` of the shared package.
+        #[service("example:greeter/greeting@1.0.0")]
+        pub struct Greeting;
 
-    impl Greeting {
-        /// Greet by name.
-        pub fn hello(name: String) -> String {
-            format!("Hello, {name}!")
+        impl Greeting {
+            /// Greet by name.
+            pub fn hello(name: String) -> String {
+                format!("Hello, {name}!")
+            }
         }
     }
 }

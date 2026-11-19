@@ -22,8 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         host.get(&service, vec!["main".into()], "alice")
             .map(Rc::new)
     };
-    let in_english = english::GreetingClient::new(main("english")?);
-    let in_italian = italian::GreetingClient::new(main("italian")?);
+    let in_english = english::greeter::GreetingClient::new(main("english")?);
+    let in_italian = italian::greeter::GreetingClient::new(main("italian")?);
     let (hello, ciao) = pool.run_until(host.root("alice", move |context| {
         Box::pin(async move {
             // Each call takes the local entrypoint with Rust values: no JSON crosses.

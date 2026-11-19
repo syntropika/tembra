@@ -20,12 +20,14 @@ code, run natively, without an artifact or a WebAssembly engine.
 ```rust
 #[tembra::orb(package = "example:english@1.0.0", wit = "../wit")]
 pub mod english {
-    #[service("example:greeter/greeting@1.0.0")]
-    pub struct Greeting;
+    pub mod greeter {
+        #[service("example:greeter/greeting@1.0.0")]
+        pub struct Greeting;
 
-    impl Greeting {
-        pub fn hello(name: String) -> String {
-            format!("Hello, {name}!")
+        impl Greeting {
+            pub fn hello(name: String) -> String {
+                format!("Hello, {name}!")
+            }
         }
     }
 }
@@ -49,7 +51,7 @@ let main = |orb: &str| {
     let service = format!("{orb}::example:greeter/greeting@1.0.0");
     host.get(&service, vec!["main".into()], "alice").map(Rc::new)
 };
-let in_english = english::GreetingClient::new(main("english")?);
+let in_english = english::greeter::GreetingClient::new(main("english")?);
 // Under a root context.
 let hello: String = in_english.hello(&context, "Ada".into()).await?;
 ```
@@ -57,8 +59,8 @@ let hello: String = in_english.hello(&context, "Ada".into()).await?;
 `orb()` builds the Orb that `[package.metadata.tembra]` of its crate names, `english` at API
 version 1, with one service per `#[service]`, named `<orb>::<interface identity>` as for a
 component and carrying the signature of the shared interface: the kernel checks both greeters
-against one contract. `GreetingClient` is the typed client the macro generates for each service:
-each method takes the call's context and then the function's parameters, so the compiler checks
+against one contract. `GreetingClient` is the typed client the macro generates for each service,
+in the service's module: each method takes the call's context and then the function's parameters, so the compiler checks
 the call, and the arguments move as Rust values, without JSON.
 
 ## Build

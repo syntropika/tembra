@@ -17,17 +17,21 @@ mod gate {
         pub blocked: bool,
     }
 
-    /// The gate's service.
-    #[service]
-    pub struct Admissions;
+    pub mod admissions {
+        use super::{Admission, Guard};
 
-    impl Admissions {
-        /// Run the guard hook over a fresh admission and report what the contributors decided.
-        pub fn admit(value: i32) -> Admission {
-            Guard::run(Admission {
-                value,
-                blocked: false,
-            })
+        /// The gate's service.
+        #[service]
+        pub struct Admissions;
+
+        impl Admissions {
+            /// Run the guard hook over a fresh admission and report what the contributors decided.
+            pub fn admit(value: i32) -> Admission {
+                Guard::run(Admission {
+                    value,
+                    blocked: false,
+                })
+            }
         }
     }
 }

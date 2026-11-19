@@ -27,16 +27,22 @@ tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
 ```rust,ignore
 #[tembra::orb(package = "example:greeting@1.0.0")]
 mod greeting {
-    #[service]
-    pub struct Api;
+    pub mod api {
+        #[service]
+        pub struct Api;
 
-    impl Api {
-        pub fn hello(name: String) -> String {
-            format!("Hello, {name}!")
+        impl Api {
+            pub fn hello(name: String) -> String {
+                format!("Hello, {name}!")
+            }
         }
     }
 }
 ```
+
+Each service lives in a module of its own, with its `#[state]` and its `#[wit_resource]` structs;
+the Orb's own items, such as a root `#[resource]` or a `#[hook]`, stay outside every service's
+module.
 
 The macro uses `std` by default. A freestanding guest uses `#![no_std]`, the `no_std` macro
 option and `dlmalloc`; see the [macro guide](../crates/orb-macro/README.md). The `macros`

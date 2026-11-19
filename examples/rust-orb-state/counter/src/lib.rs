@@ -6,48 +6,50 @@ extern crate alloc;
 
 #[tembra::orb(no_std, package = "example:counter@1.0.0")]
 mod tally {
-    use alloc::{format, string::String};
+    pub mod counter {
+        use alloc::{format, string::String};
 
-    /// The state of one counter object: its total and the number of additions made.
-    #[state(version = 1)]
-    // A state derives its initial value, `Default`, and the traits of `serde` with which the
-    // kernel keeps it as JSON.
-    #[derive(Default, serde::Serialize, serde::Deserialize)]
-    pub struct Count {
-        pub total: i64,
-        pub steps: u32,
-    }
+        /// The state of one counter object: its total and the number of additions made.
+        #[state(version = 1)]
+        // A state derives its initial value, `Default`, and the traits of `serde` with which the
+        // kernel keeps it as JSON.
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Count {
+            pub total: i64,
+            pub steps: u32,
+        }
 
-    impl Count {
-        /// The rule of this state, the function marked `#[validate]`: a total never goes below
-        /// zero. Every `update` checks it before the kernel stores the value, and a reload
-        /// checks it on the value the new instance inherits before adopting it.
-        #[validate]
-        pub fn validate(&self) -> Result<(), String> {
-            if self.total < 0 {
-                return Err(format!("a total of {} is below zero", self.total));
+        impl Count {
+            /// The rule of this state, the function marked `#[validate]`: a total never goes below
+            /// zero. Every `update` checks it before the kernel stores the value, and a reload
+            /// checks it on the value the new instance inherits before adopting it.
+            #[validate]
+            pub fn validate(&self) -> Result<(), String> {
+                if self.total < 0 {
+                    return Err(format!("a total of {} is below zero", self.total));
+                }
+                Ok(())
             }
-            Ok(())
-        }
-    }
-
-    /// A counter. The module has one service, so `Count` is the state of its objects.
-    #[service]
-    pub struct Counter;
-
-    impl Counter {
-        /// Add `by` to the count and return the new count, or the refusal when the total would
-        /// go below zero; the kernel then keeps the previous count.
-        pub fn add(by: i64) -> Result<Count, String> {
-            Count::update(|count| {
-                count.total += by;
-                count.steps += 1;
-            })
         }
 
-        /// The count so far.
-        pub fn read() -> Count {
-            Count::read()
+        /// A counter. The module has one service, so `Count` is the state of its objects.
+        #[service]
+        pub struct Counter;
+
+        impl Counter {
+            /// Add `by` to the count and return the new count, or the refusal when the total would
+            /// go below zero; the kernel then keeps the previous count.
+            pub fn add(by: i64) -> Result<Count, String> {
+                Count::update(|count| {
+                    count.total += by;
+                    count.steps += 1;
+                })
+            }
+
+            /// The count so far.
+            pub fn read() -> Count {
+                Count::read()
+            }
         }
     }
 }

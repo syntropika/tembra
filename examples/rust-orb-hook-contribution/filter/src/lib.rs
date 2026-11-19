@@ -45,14 +45,18 @@ mod filter {
         input
     }
 
-    /// The contributor's own service.
-    #[service]
-    pub struct Report;
+    pub mod report {
+        use super::Counts;
 
-    impl Report {
-        /// Admissions seen and blocked so far by this instance of the Orb.
-        pub fn read() -> Counts {
-            Counts::with(|counts| *counts)
+        /// The contributor's own service.
+        #[service]
+        pub struct Report;
+
+        impl Report {
+            /// Admissions seen and blocked so far by this instance of the Orb.
+            pub fn read() -> Counts {
+                Counts::with(|counts| *counts)
+            }
         }
     }
 }

@@ -12,16 +12,19 @@ extern crate alloc;
     import = "example:greeter/greeting@1.0.0"
 )]
 mod welcomer {
-    use alloc::{string::String, vec::Vec};
+    pub mod welcoming {
+        use super::greeting;
+        use alloc::{string::String, vec::Vec};
 
-    /// The service: welcomes a list of names, one call to the greeter per name.
-    #[service]
-    pub struct Welcoming;
+        /// The service: welcomes a list of names, one call to the greeter per name.
+        #[service]
+        pub struct Welcoming;
 
-    impl Welcoming {
-        /// Greet each name through the imported interface and return the greetings.
-        pub fn welcome(names: Vec<String>) -> Vec<String> {
-            names.iter().map(|name| greeting::hello(name)).collect()
+        impl Welcoming {
+            /// Greet each name through the imported interface and return the greetings.
+            pub fn welcome(names: Vec<String>) -> Vec<String> {
+                names.iter().map(|name| greeting::hello(name)).collect()
+            }
         }
     }
 }
