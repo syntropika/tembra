@@ -5069,6 +5069,33 @@ fn a_declared_hook_may_name_a_consumed_interface() {
     assert!(error.contains("hooks need wit ="), "{error}");
 }
 
+/// The world of the hooks' imports takes a name that no interface or world of the Orb's package
+/// holds: an Orb module `tembra_declared_hooks`, whose world has the name, and a service whose
+/// interface has the next one lengthen it twice.
+#[test]
+fn the_world_of_a_declared_hooks_import_takes_a_free_name() {
+    let dir = consumed("admission-names", ADMISSION_WIT);
+    let source = SHARED_GATE
+        .replace("mod gate {", "mod tembra_declared_hooks {")
+        .replace("Admissions", "TembraDeclaredHooksX");
+    let module = orb_with(options("example:gate@1.0.0", Some(&dir)), &source)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let text = wit(&module);
+    for taken in [
+        "world tembra-declared-hooks {",
+        "interface tembra-declared-hooks-x {",
+    ] {
+        assert!(text.contains(taken), "{taken}\n{text}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "world tembra-declared-hooks-x-x {\\n  import example:admission/guard@1.0.0;\\n}",
+        "world : \"tembra-declared-hooks-x-x\"",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
 /// `run` hands the hook's import its input the way the bindings take it: by reference for a
 /// string, a list, or a record or variant that holds one anywhere, by value otherwise; for a hook
 /// derived from the module and for one named from a consumed package alike.

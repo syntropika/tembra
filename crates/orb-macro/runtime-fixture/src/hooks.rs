@@ -1,14 +1,25 @@
 /// Declares a hook of each composition: a series and a bail derived from their input, the series'
 /// holding a newtype, and the waterfall `guard` of the package in `admission/`, declared by its
-/// identity, whose callback answers a `verdict`: the admission's fields under another name. Other
-/// Orbs contribute; the desk runs each hook and reports what the contributions decided.
+/// identity, whose callback answers a `verdict` the hook uses from the package's `types`: the
+/// admission's fields under another name. Other Orbs contribute; the desk runs each hook and
+/// reports what the contributions decided, keeps the last admission in its state, and names the
+/// hook's types through the view of its keyed import too.
 #[cfg_attr(
     feature = "no-std",
-    tembra::orb(package = "example:gatehouse@1.0.0", wit = "admission", no_std)
+    tembra::orb(
+        package = "example:gatehouse@1.0.0",
+        wit = "admission",
+        import("example:admission/guard@1.0.0", keyed),
+        no_std
+    )
 )]
 #[cfg_attr(
     not(feature = "no-std"),
-    tembra::orb(package = "example:gatehouse@1.0.0", wit = "admission")
+    tembra::orb(
+        package = "example:gatehouse@1.0.0",
+        wit = "admission",
+        import("example:admission/guard@1.0.0", keyed)
+    )
 )]
 pub mod gatehouse {
     use alloc::string::String;
@@ -89,8 +100,17 @@ pub mod gatehouse {
     pub struct Guard;
 
     pub mod desk {
-        use super::{Guard, Hour, Rooms, Spots, Visit, Visits, guard, keys, lobby, places};
+        use super::{
+            Guard, Hour, Rooms, Spots, Visit, Visits, guard, guard_ref, keys, lobby, places,
+        };
         use alloc::string::String;
+
+        /// The last admission the desk ran the guard on, in the hook's own type.
+        #[state]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct Gate {
+            pub last: Option<guard::Admission>,
+        }
 
         /// Runs the hooks.
         #[service]
@@ -133,10 +153,36 @@ pub mod gatehouse {
             /// interface and `Guard::run` name one `guard::Admission`.
             pub fn admitted(admission: guard::Admission) -> guard::Admission {
                 let verdict = Guard::run(admission);
-                guard::Admission {
+                let admission = guard::Admission {
                     value: verdict.value,
                     blocked: verdict.blocked,
-                }
+                };
+                Gate::update(|gate| {
+                    gate.last = Some(guard::Admission {
+                        value: admission.value,
+                        blocked: admission.blocked,
+                    })
+                });
+                admission
+            }
+
+            /// The verdict the contributions answer, in the type the hook uses from `types`.
+            pub fn judged(value: i32) -> guard::Verdict {
+                Guard::run(guard::Admission {
+                    value,
+                    blocked: false,
+                })
+            }
+
+            /// The last admission `admitted` answered, which the state holds.
+            pub fn last() -> Option<guard::Admission> {
+                Gate::read().last
+            }
+
+            /// An admission named through the view of the hook's keyed import, which is the type
+            /// the desk's interface and `Guard::run` name.
+            pub fn viewed(admission: guard_ref::Admission) -> guard::Admission {
+                admission
             }
         }
     }
@@ -144,14 +190,15 @@ pub mod gatehouse {
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    /// Natively, the module compiles and `orb()` answers why a host cannot install it: a hook's
-    /// `run` is synchronous, and a native method has no fiber to suspend while the kernel runs the
-    /// contributions, so only a component serves a declaration.
+    /// Natively, the module compiles and `orb()` answers why a host cannot install it: the
+    /// keyed import of the guard and a hook's `run` are synchronous, and a native method has no
+    /// fiber to suspend while the kernel completes the call or runs the contributions, so only a
+    /// component serves the module. The first part it names is the keyed import.
     #[test]
     fn a_hook_declaration_is_refused_natively() {
         assert_eq!(
             crate::native::refused(super::gatehouse::orb()),
-            "the declaration of the hook example:gatehouse/visits@1.0.0 works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook"
+            "the import of example:admission/guard@1.0.0 by key works in a component build only: its function `apply` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`"
         );
     }
 }

@@ -303,9 +303,12 @@ fits the composition. The world imports the hook, which `run` calls, and exports
 portable hook contract requires; the bindings would spell the hook's types once per side, so the
 macro gives them one copy, the export's: `guard` is the export's module, and the bindings of the
 hook's import, generated apart, name its types. A service's function takes and returns
-`guard::Admission` as a derived interface's type, as `run` does, and a state holds it as it is. Which role an interface plays travels in the
-`tembra:manifest` section next to the contribution priorities, and `cargo tembra build` packages
-it; an Orb declares a hook or contributes to it, never both. The world holds an interface in one
+`guard::Admission` as a derived interface's type, as `run` does, a state holds it as it is, and the
+view of the hook's keyed import names it too; a type the hook `use`s from another interface of its
+package, `guard::Verdict`, is that interface's, which every side names. The `gatehouse` of the
+[runtime fixture](runtime-fixture/src/hooks.rs) does each. Which role an interface plays travels in
+the `tembra:manifest` section next to the contribution priorities, and `cargo tembra build`
+packages it; an Orb declares a hook or contributes to it, never both. The world holds an interface in one
 role: the macro refuses a hook's interface the module also implements or imports plainly, and an
 interface imported or implemented twice, at the second import or item, naming both.
 
@@ -799,11 +802,12 @@ copy of the export the derived interface takes; the view's `counter_ref::Tally` 
 which the view's methods take and return, and the compiler reports it in a derived signature as a
 type other than the one the derived interface takes. So for a view of a hook the module
 contributes to or declares beside the keyed import, an interface the world exports too: a derived
-signature names a contributed hook's types through the hook's module, `guard::Admission`, and the
-macro refuses those of a declared hook. A type such an interface `use`s from an
+signature names a contributed hook's types through the hook's module, `guard::Admission`. A
+declared hook's types have one copy, the export's, which the hook's module and the view name
+alike ([declaring a hook](#declaring-a-hook)). A type such an interface `use`s from an
 interface the world only imports has no copy of its own: the import, the export and the view all
 name that interface's type, so a derived signature names it through the view and through the
-interface's module alike, a declared hook's included. The
+interface's module alike. The
 `counting` and `lending` services of the [runtime fixture](runtime-fixture/src/lib.rs) import by
 key, `lending` the interface the fixture implements.
 
@@ -2086,7 +2090,7 @@ the version whose rules the macro follows, and the generated code reaches it the
   Orb's WIT by importing an interface, plainly or by key, implementing one or contributing to a
   hook, and passes the interface's data types on as they are. A view takes the name of the
   interface imported by key, so two interfaces of one name are not both imported by key.
-- A hook declared from a consumed package keeps the types of its export, which `run` takes and returns and a derived interface takes too: a method that reports its record returns `guard::Admission`. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a newtype, a scalar, a string or a list, of the module's own types, and a newtype, alone or held, converts to each side of the hook's bindings, the export's and the import's copy of the record its field holds. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
+- A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a newtype, a scalar, a string or a list, of the module's own types, and a newtype, alone or held, converts to each side of the hook's bindings, the export's and the import's copy of the record its field holds. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`, unless the service's
   `#[create]` builds its objects, natively; the methods of a `#[wit_resource]` struct take
   `&self`, and none takes `&mut self`. Besides a service's state, a resource's fields, the root's

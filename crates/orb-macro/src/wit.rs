@@ -1690,6 +1690,26 @@ pub(crate) struct DeclaredBindings {
     pub imports: Vec<(String, String)>,
 }
 
+/// The name of the world the second invocation of `DeclaredBindings` reads, added to the Orb's
+/// package `wit`: `tembra-declared-hooks`, lengthened by `-x` while an interface or a world of the
+/// package holds the name, as a service or an Orb module of that name would.
+pub(crate) fn declared_world(wit: &str) -> String {
+    let taken: BTreeSet<&str> = wit
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("interface ")
+                .or_else(|| line.strip_prefix("world "))
+        })
+        .filter_map(|rest| rest.split([' ', '{']).next())
+        .map(|name| name.trim_start_matches('%'))
+        .collect();
+    let mut name = "tembra-declared-hooks".to_owned();
+    while taken.contains(name.as_str()) {
+        name.push_str("-x");
+    }
+    name
+}
+
 /// The `with` entries of the hooks `hooks`, declared from the consumed packages of `dir`
 /// (`DeclaredBindings`).
 pub(crate) fn declared_bindings(

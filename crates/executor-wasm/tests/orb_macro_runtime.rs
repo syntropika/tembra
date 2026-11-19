@@ -2146,7 +2146,33 @@ const SPOTS: &str = "example:gatehouse/spots@1.0.0";
 const DOORS: &str = "example:gatehouse/doors@1.0.0";
 const ROOMS: &str = "example:gatehouse/rooms@1.0.0";
 const GUARD: &str = "example:admission/guard@1.0.0";
+const GUARD_VIEW: &str = "example:gatehouse/guard-ref@1.0.0";
 const DESK: &str = "gatehouse::example:gatehouse/desk@1.0.0";
+
+/// The native Orb that serves the guard by key, which the gatehouse's view of its keyed import
+/// is bound to: a service of `example:admission/guard@1.0.0` answering each admission as it is.
+const GUARDS: &str = "guards";
+
+fn guards() -> Orb {
+    let wit = format!(
+        "{}\nworld provider {{ export guard; }}\n",
+        include_str!("../../orb-macro/runtime-fixture/admission/admission.wit")
+    );
+    let service = Contract::from_source("admission.wit", &wit, Some("provider"))
+        .unwrap()
+        .plan(GUARDS, 1, &BTreeMap::new())
+        .unwrap()
+        .orb
+        .services
+        .remove(0);
+    Orb::new(GUARDS, 1).service(
+        Service::new(service.name, |_| Ok(()))
+            .signature(service.signature)
+            .method("apply", |_, _, (admission,): (Value,)| async move {
+                Ok(admission)
+            }),
+    )
+}
 
 /// A native Orb contributing twice to each hook of the gatehouse, at the priorities -1 and 1:
 /// both see each visit and each spot, which they note in `seen`; the first answers a room above the ground floor
@@ -2218,7 +2244,9 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
 /// module, a series in a module of no imports whose input is a newtype of a `String` declared in
 /// another, and a bail from their input, and the waterfall of a consumed package by its identity,
 /// which the component's roles name with their compositions, and whose admission a function of the
-/// desk takes and returns as the hook's own type. Native contributions answer them in plan order:
+/// desk takes and returns as the hook's own type, the desk's state keeps, and the view of the
+/// hook's keyed import names, and whose verdict, a type the hook uses from another interface, a
+/// function returns. Native contributions answer them in plan order:
 /// every contribution to a series sees each visit, spot and door, a newtype as its field, the first
 /// answer of the bail gives the room, and each contribution to the waterfall changes the admission
 /// in turn. Without contributions, the series end, the bail answers nothing
@@ -2260,7 +2288,15 @@ fn compose_the_declared_hooks(engine: &Engine) {
         );
         let seen = Rc::new(RefCell::new(Vec::new()));
         for contributed in [false, true] {
-            let mut orbs = vec![engine.load(&artifact, Install::default()).unwrap()];
+            let mut orbs = vec![
+                engine
+                    .load(
+                        &artifact,
+                        Install::default().requires(GUARD_VIEW, GUARDS, 1),
+                    )
+                    .unwrap(),
+                guards(),
+            ];
             if contributed {
                 orbs.push(contributions(module.contract(), seen.clone()));
             }
@@ -2276,8 +2312,16 @@ fn compose_the_declared_hooks(engine: &Engine) {
             assert_eq!(call("knock", json!(["east"])), Value::Null, "{features}");
             let rooms = [0, 3].map(|floor| call("room", json!([floor])));
             let admitted = [5, 10].map(|value| call("admit", json!([value])));
+            assert_eq!(call("last", json!([])), Value::Null, "{features}");
             let admissions =
                 [5, 10].map(|value| call("admitted", json!([{"value": value, "blocked": false}])));
+            // The state keeps the last admission, in the hook's own type.
+            assert_eq!(call("last", json!([])), admissions[1], "{features}");
+            // The view of the hook's keyed import names the same type.
+            let viewed = json!({"value": 3, "blocked": true});
+            assert_eq!(call("viewed", json!([viewed])), viewed, "{features}");
+            // The verdict, a type the hook uses from another interface of its package.
+            let judged = call("judged", json!([7]));
             let visit = json!({"who": "ada", "hour": 9});
             let spot = json!({"floor": 3, "door": "east"});
             let door = json!("east");
@@ -2308,6 +2352,7 @@ fn compose_the_declared_hooks(engine: &Engine) {
                     ],
                     "{features}"
                 );
+                assert_eq!(judged, json!({"value": 8, "blocked": false}), "{features}");
             } else {
                 assert!(seen.borrow().is_empty(), "{features}");
                 assert_eq!(rooms, [Value::Null, Value::Null], "{features}");
@@ -2324,6 +2369,7 @@ fn compose_the_declared_hooks(engine: &Engine) {
                     ],
                     "{features}"
                 );
+                assert_eq!(judged, json!({"value": 7, "blocked": false}), "{features}");
             }
             desk.release().unwrap();
             pool.run_until(host.close()).unwrap();

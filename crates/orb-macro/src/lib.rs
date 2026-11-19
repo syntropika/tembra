@@ -3334,7 +3334,7 @@ fn component(
             };
             let world_with = entries(&bindings.world)?;
             let imports_with = entries(&bindings.imports)?;
-            let imports_world = "tembra-declared-hooks";
+            let imports_world = wit::declared_world(wit);
             let imports_text = declared_hooks
                 .iter()
                 .map(|hook| format!("  import {hook};\n"))
@@ -3343,7 +3343,7 @@ fn component(
                 &format!("{wit}\nworld {imports_world} {{\n{imports_text}}}\n{beside}"),
                 Span::call_site(),
             );
-            let imports_world = LitStr::new(imports_world, Span::call_site());
+            let imports_world = LitStr::new(&imports_world, Span::call_site());
             let imports = quote! {
                 #[doc(hidden)]
                 mod __tembra_declared {
