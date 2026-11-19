@@ -282,6 +282,11 @@ install-tools:
     cargo install --locked cargo-machete --version 0.9.2
     cargo install --locked wasm-bindgen-cli --version 0.2.129
     cargo install --locked wasm-component-ld --version 0.5.31
+    cargo install --locked git-cliff --version 2.14.2
+
+# Render the changelog of the commits since the last release tag; arguments go to git-cliff, as `just changelog --output CHANGELOG.md`.
+changelog *args:
+    git-cliff --unreleased "$@"
 
 install-ts: install
 check-all: check

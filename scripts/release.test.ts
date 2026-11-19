@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -226,5 +226,94 @@ test("publication resumes identical versions and stops on conflicting bytes or r
     expect(submissions).toEqual([]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the changelog skips merge commits, lists each breaking footer and refuses other unconventional commits", () => {
+  // `just install-tools` pins git-cliff, so a missing or different binary fails here instead of skipping.
+  const version = spawnSync("git-cliff", ["--version"], { encoding: "utf8" });
+  if (version.error || version.status !== 0)
+    throw new Error("git-cliff is not on PATH: run `just install-tools`, which installs 2.14.2.");
+  expect(version.stdout.trim()).toBe("git-cliff 2.14.2");
+  const config = fileURLToPath(new URL("../cliff.toml", import.meta.url));
+  const base = mkdtempSync(path.join(tmpdir(), "tembra-changelog-"));
+  // A caller's GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE, as `git rebase -x` sets, would override the
+  // fixture's directory, and GIT_CLIFF_* would override cliff.toml; the fixture keeps none of them.
+  const environment = (inherited: NodeJS.ProcessEnv) => ({
+    ...Object.fromEntries(Object.entries(inherited).filter(([name]) => !name.startsWith("GIT_"))),
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.com",
+    GIT_COMMITTER_NAME: "Fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.com",
+  });
+  // Build a repository with a merge commit, a breaking commit and, last, the commit `last`.
+  const fixture = (name: string, last: string, inherited: NodeJS.ProcessEnv = process.env) => {
+    const cwd = path.join(base, name);
+    mkdirSync(cwd);
+    const env = environment(inherited);
+    const git = (...args: string[]) => execFileSync("git", args, { cwd, env, stdio: "pipe" });
+    git("init", "--quiet", "--initial-branch=main");
+    git("commit", "--quiet", "--allow-empty", "-m", "feat: start the fixture");
+    git("switch", "--quiet", "-c", "side");
+    git("commit", "--quiet", "--allow-empty", "-m", "fix(core): mend the side branch");
+    git("switch", "--quiet", "main");
+    git("merge", "--quiet", "--no-ff", "-m", "Merge branch 'side'", "side");
+    git(
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "feat(sdk)!: rename the entry point",
+      "-m",
+      "BREAKING CHANGE: `start` is now `run`.\nBREAKING CHANGE: `stop` takes a reason.",
+    );
+    git("commit", "--quiet", "--allow-empty", "-m", last);
+    return spawnSync("git-cliff", ["--config", config, "--unreleased"], {
+      cwd,
+      env,
+      encoding: "utf8",
+    });
+  };
+  try {
+    const decoy = path.join(base, "decoy");
+    mkdirSync(decoy);
+    const inDecoy = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: decoy,
+        env: environment(process.env),
+        stdio: "pipe",
+        encoding: "utf8",
+      });
+    inDecoy("init", "--quiet", "--initial-branch=main");
+    inDecoy("commit", "--quiet", "--allow-empty", "-m", "chore: hold the decoy");
+    const decoyRefs = inDecoy("show-ref");
+    const rendered = fixture("conventional", "docs: close the fixture", {
+      ...process.env,
+      GIT_DIR: path.join(decoy, ".git"),
+      GIT_WORK_TREE: decoy,
+      GIT_INDEX_FILE: path.join(decoy, ".git/index"),
+    });
+    expect(inDecoy("show-ref")).toBe(decoyRefs);
+    expect(rendered.stderr).not.toContain("ERROR");
+    expect(rendered.status).toBe(0);
+    expect(rendered.stdout).not.toContain("Merge");
+    expect(rendered.stdout).toContain("- **core:** mend the side branch");
+    expect(rendered.stdout).toContain("- close the fixture");
+    expect(rendered.stdout).toMatch(
+      /- \*\*sdk:\*\* \*\*breaking:\*\* rename the entry point \(`[0-9a-f]{7}`\)\n\s*\n {2}- `start` is now `run`\.\n {2}- `stop` takes a reason\.\n/,
+    );
+    // Only a commit with two parents is skipped: a title that starts with "Merge" is still refused.
+    for (const [name, last] of [
+      ["unconventional", "update the fixture"],
+      ["merge-titled", "Merge the two parsers into one"],
+    ]) {
+      const refused = fixture(name, last);
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toContain("UnconventionalCommitsError(1)");
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });

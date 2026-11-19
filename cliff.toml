@@ -10,15 +10,19 @@ body = """
 {% else %}
 ## Unreleased
 {% endif %}
-{% for group, commits in commits | group_by(attribute="group") %}
+{%- for group, commits in commits | group_by(attribute="group") %}
 ### {{ group }}
 {% for commit in commits %}
 - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{% if commit.breaking %}**breaking:** {% endif %}{{ commit.message | split(pat="\n") | first }} (`{{ commit.id | truncate(length=7, end="") }}`)
+{%- for footer in commit.footers | filter(attribute="breaking", value=true) %}
+  - {{ footer.value | split(pat="\n") | join(sep=" ") }}
+{%- endfor %}
 {% endfor %}
 {% endfor %}
 """
 footer = "\n"
-trim = true
+# Keep the body's indentation, so each breaking footer nests under its commit's line.
+trim = false
 render_always = true
 format = true
 
@@ -30,6 +34,8 @@ filter_commits = false
 split_commits = false
 protect_breaking_commits = true
 commit_parsers = [
+  # Merge commits carry no change of their own; any other unconventional commit is still refused.
+  { field = "merge_commit", pattern = "true", skip = true },
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Fixes" },
   { message = "^perf", group = "Performance" },
