@@ -14,14 +14,21 @@ use std::{
 use tembra_executor_wasm::{PortEvent, PortEvents, PortReply};
 
 /// Keep request identities unique across exchanges so a late reply cannot resolve a newer call.
+///
+/// A refused entry arrives instead of its events and completes the exchange with that refusal's
+/// code, reason and message, as a callback's own failure completes it.
 pub(super) fn spawn(
     callback: EventCallback,
-    start: mpsc::Receiver<PortEvents>,
+    start: mpsc::Receiver<tembra::Result<PortEvents>>,
     replies: Arc<Mutex<BTreeMap<u32, PortReply>>>,
     sequence: Arc<AtomicU32>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
     thread::Builder::new().name("tembra-node-events".into()).spawn(move || {
-        let Ok(events)=start.recv() else {return};
+        let events=match start.recv() {
+            Ok(Ok(events))=>events,
+            Ok(Err(refused))=>{let _=callback.call(complete(Err::<String,_>(refused)),ThreadsafeFunctionCallMode::NonBlocking);return}
+            Err(_)=>return,
+        };
         let mut delivering=true;
         loop {
             match events.receive() {
@@ -56,6 +63,30 @@ pub(super) fn spawn(
             }
         }
     })
+}
+
+/// The `complete` event of an ordinary exchange: its result, or its error's code, reason and
+/// message.
+pub(super) fn complete<T: serde::Serialize>(result: tembra::Result<T>) -> String {
+    json!({"event":"complete","result":envelope(result)}).to_string()
+}
+
+/// The `complete` event of an incoming HTTP exchange, in the same envelope.
+pub(super) fn ingress_complete<T: serde::Serialize>(
+    result: tembra::Result<T>,
+) -> super::NodeIngressEvent {
+    super::NodeIngressEvent {
+        kind: "complete".into(),
+        id: None,
+        asynchronous: None,
+        packet: None,
+        result: Some(envelope(result).to_string()),
+        status: None,
+        fields: None,
+        data: None,
+        message: None,
+        code: None,
+    }
 }
 
 /// Forward one incoming HTTP exchange's events as typed objects.

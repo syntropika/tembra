@@ -234,20 +234,26 @@ impl NodeInterpreterPort {
         if let Some(thread) = self.bridge.borrow_mut().take() {
             let _ = thread.join();
         }
-        let (start, receive) = std::sync::mpsc::channel::<tembra_executor_wasm::PortEvents>();
+        let (start, receive) =
+            std::sync::mpsc::channel::<tembra::Result<tembra_executor_wasm::PortEvents>>();
         let replies = self.replies.clone();
         let sequence = self.sequence.clone();
         let bridge = events::spawn(callback, receive, replies, sequence).map_err(js_error)?;
         let (ticket, events) = match port.begin(packet) {
             Ok(exchange) => exchange,
-            Err(error) => {
-                drop(start);
-                let _ = bridge.join();
-                return Err(js_error(error));
+            // A refused entry, such as one into a quarantined revision, completes the exchange
+            // with its code and reason; `finish` then joins the bridge that delivered it.
+            Err(refused) => {
+                if let Err(unsent) = start.send(Err(refused)) {
+                    let _ = bridge.join();
+                    return Err(js_error(unsent.0.err().expect("the refusal")));
+                }
+                *self.bridge.borrow_mut() = Some(bridge);
+                return Ok(());
             }
         };
         *self.ticket.borrow_mut() = Some(ticket);
-        if start.send(events).is_err() {
+        if start.send(Ok(events)).is_err() {
             self.ticket.borrow_mut().take();
             let _ = bridge.join();
             return Err(js_error("interpreter event bridge stopped before dispatch"));
@@ -282,7 +288,17 @@ impl NodeInterpreterPort {
             path_with_query: head.path_with_query,
             fields: ingress_fields(head.fields),
         };
-        let (ticket, events, carrier) = port.begin_ingress(packet, head).map_err(js_error)?;
+        let (ticket, events, carrier) = match port.begin_ingress(packet, head) {
+            Ok(exchange) => exchange,
+            // A refused entry completes the exchange with its code and reason, as in `dispatch`.
+            Err(refused) => {
+                let refusal = events::ingress_complete(Err::<String, _>(refused));
+                if callback.call(refusal, ThreadsafeFunctionCallMode::NonBlocking) != Status::Ok {
+                    return Err(js_error("the Node callback is closing"));
+                }
+                return Ok(());
+            }
+        };
         let carrier = Arc::new(carrier);
         let bridge = events::spawn_ingress(
             callback,
@@ -451,5 +467,33 @@ mod tests {
         );
         assert!(super::decode_raw(r#"{"ok": invalid}"#).is_err());
         assert!(super::decode_raw(r#"{"error":"refused"}"#).is_err());
+    }
+
+    /// A refused entry completes an ordinary or an incoming HTTP exchange with its code and reason,
+    /// in the envelope the SDK reads a callback's failure from.
+    #[test]
+    fn a_refused_entry_completes_with_its_code_and_reason() {
+        let refused = || {
+            Err::<String, _>(tembra::Error::new(
+                tembra::core::Code::Unavailable,
+                "wasm_executor_quarantined",
+                "component trap: unreachable",
+            ))
+        };
+        let error = serde_json::json!({
+            "code": "unavailable",
+            "reason": "wasm_executor_quarantined",
+            "message": "component trap: unreachable",
+        });
+        let event: serde_json::Value =
+            serde_json::from_str(&super::events::complete(refused())).unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({"event": "complete", "result": {"error": error}})
+        );
+        let ingress = super::events::ingress_complete(refused());
+        assert_eq!(ingress.kind, "complete");
+        let result: serde_json::Value = serde_json::from_str(&ingress.result.unwrap()).unwrap();
+        assert_eq!(result, serde_json::json!({"error": error}));
     }
 }

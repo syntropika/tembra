@@ -239,20 +239,13 @@ test(
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line));
-      const trap = { code: "unavailable", reason: "wasm_executor" };
-      for (const answer of [native[0], adapted[0]]) {
-        assert.deepEqual({ code: answer.code, reason: answer.reason }, trap, answer.message);
-        assert.match(answer.message, /^component trap: /);
+      for (const [trap, quarantined] of [native, adapted]) {
+        const answer = (reason) => ({ code: "unavailable", reason, message: trap.message });
+        assert.deepEqual(trap, answer("wasm_executor"));
+        assert.match(trap.message, /^component trap: /);
+        // Every later entry is refused with the trap that quarantined the revision.
+        assert.deepEqual(quarantined, answer("wasm_executor_quarantined"));
       }
-      // The quarantine names the trap. The Node host passes the native worker's refusal of an
-      // entry as text, so only its reason is compared there.
-      assert.deepEqual(
-        { code: adapted[1].code, reason: adapted[1].reason },
-        { code: "unavailable", reason: "wasm_executor_quarantined" },
-        adapted[1].message,
-      );
-      assert.equal(adapted[1].message, adapted[0].message);
-      assert.match(native[1].message, /^unavailable\/wasm_executor_quarantined: component trap: /);
     }),
 );
 
