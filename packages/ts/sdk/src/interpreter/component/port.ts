@@ -18,8 +18,8 @@
  * A callback answers its faults as the native worker's do: a trap, an uncaught guest exception or
  * a timeout `unavailable/wasm_executor` with a `component trap: ` message, a busy or closed instance
  * `unavailable/wasm_executor`, and every entry of a quarantined instance
- * `unavailable/wasm_executor_quarantined` with the trap's message. A structured error the guest's
- * callback failed with keeps its own code and reason.
+ * `unavailable/wasm_executor_quarantined` with the trap's message. A structured error that traps
+ * the guest, such as a dependency's refusal, is a trap too.
  */
 import { TembraError } from "../../error.ts";
 import { Errors } from "../../errors.ts";
@@ -43,25 +43,38 @@ export interface Callback {
   readonly exited: () => void;
 }
 
-/** The message of a component fault, as the native worker words a trap. */
-function trapMessage(cause: unknown): string {
-  if (cause instanceof TembraError && cause.reason === Errors.Unavailable.WasmExecutor.reason)
-    return cause.message;
-  let text = "the component trapped";
+/** Whether `error` is the executor's own answer to a fault, which is answered unchanged. */
+function executorFault(error: unknown): error is TembraError {
+  return error instanceof TembraError && error.reason === Errors.Unavailable.WasmExecutor.reason;
+}
+
+/** The text of a failure, a structured one as the native worker writes it: `code/reason: message`. */
+export function failureText(error: unknown): string {
   try {
-    if (cause !== undefined) text = cause instanceof Error ? cause.message : String(cause);
+    if (error instanceof TembraError) return `${error.code}/${error.reason}: ${error.message}`;
+    return error instanceof Error ? error.message : String(error);
   } catch {
     // An arbitrary thrown value must not hide the fault it stands for.
+    return "the component trapped";
   }
-  return `component trap: ${text}`;
+}
+
+/** The message of a component fault, as the native worker words a trap. */
+function trapMessage(cause: unknown): string {
+  if (executorFault(cause)) return cause.message;
+  return `component trap: ${cause === undefined ? "the component trapped" : failureText(cause)}`;
 }
 
 /** The answer of each fault already answered: every wait the fault ends sees one error. */
 const faults = new WeakMap<object, TembraError>();
 
-/** The error a callback answers for a fault of the component: `unavailable/wasm_executor`. */
+/**
+ * The error a callback answers for a fault of the component: `unavailable/wasm_executor`, whatever
+ * caused it, a structured error included, since anything the guest throws traps it. A guest's own
+ * refusal is its WIT `err`, a value that never reaches here.
+ */
 function fault(error: unknown): TembraError {
-  if (error instanceof TembraError) return error;
+  if (executorFault(error)) return error;
   const object = typeof error === "object" && error !== null ? error : undefined;
   const known = object && faults.get(object);
   if (known) return known;

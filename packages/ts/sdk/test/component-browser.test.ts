@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { converters, type TypeGraph } from "../src/interpreter/component/values.ts";
 import { Gate } from "../src/interpreter/gate.ts";
 import { ComponentPort } from "../src/interpreter/component/port.ts";
+import { dependencyImport } from "../src/interpreter/component/host.ts";
+import { TembraError } from "../src/error.ts";
+import { Errors } from "../src/errors.ts";
 import type { CallbackScope } from "../src/interpreter/component/scope.ts";
 import { checkPublicWasi } from "../src/interpreter/component/wasi.ts";
 
@@ -338,6 +341,31 @@ describe("component port", () => {
     );
     expect(await first).toBe(1);
     expect(instance.usable).toBe(true);
+  });
+
+  test("a dependency's refusal traps its caller as the native worker's does", async () => {
+    const instance = port();
+    const caller = scope();
+    caller.call = () => Promise.reject(new TembraError(Errors.Released.Reference));
+    const math = dependencyImport(instance, "example:deps/math@1.0.0", [
+      {
+        name: "double",
+        spelling: "double",
+        values: convert({ params: [{ name: "value", type: "u32" }] }),
+      },
+    ]) as Record<string, (value: number) => Promise<unknown>>;
+    const message =
+      "component trap: dependency call failed: released/reference: The reference has been released";
+    await expect(instance.run(1n, caller, () => math.double!(2))).rejects.toMatchObject({
+      code: "unavailable",
+      reason: "wasm_executor",
+      message,
+    });
+    await expect(instance.run(2n, scope(), () => 1)).rejects.toMatchObject({
+      code: "unavailable",
+      reason: "wasm_executor_quarantined",
+      message,
+    });
   });
 
   test("a trap or timeout quarantines the instance and refuses re-entry", async () => {
