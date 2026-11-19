@@ -1,0 +1,5 @@
+error: the module of `Other` is inside `tickets`, the module of the service `Tickets`: put each service's module outside every other service's module
+  --> tests/ui/service_module_inside_another.rs:15:24
+   |
+15 |             pub struct Other;
+   |                        ^^^^^

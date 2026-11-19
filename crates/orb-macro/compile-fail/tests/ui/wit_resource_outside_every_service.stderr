@@ -1,0 +1,5 @@
+error: the #[wit_resource] `Token` is outside every service's module: put it in the module of the service whose interface defines it
+ --> tests/ui/wit_resource_outside_every_service.rs:5:20
+  |
+5 |         pub struct Token;
+  |                    ^^^^^

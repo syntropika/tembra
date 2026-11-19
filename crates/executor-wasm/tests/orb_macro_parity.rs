@@ -281,6 +281,21 @@ fn scenarios() -> Vec<Scenario> {
         ),
         row(
             WitResources,
+            "a service in a private module issues tokens of a module below it, whose constructor counts in the state of another module below it",
+            vec![
+                State("vault"),
+                Call("vault", "[constructor]token", json!([3])),
+                Method(0, "[method]token.number", json!([])),
+                Call("vault", "open", json!([4])),
+                Method(1, "[method]token.number", json!([])),
+                Call("vault", "issued", json!([])),
+                State("vault"),
+                Drop(0),
+                Drop(1),
+            ],
+        ),
+        row(
+            WitResources,
             "a function returns tallies nested in a list, an option and a tuple, each handle naming its own tally",
             vec![
                 Call("tallies", "dropped", json!([])),

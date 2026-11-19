@@ -6,7 +6,8 @@
 //! Each module of the Orb serves one feature of that test's list. `imports` turns the dials of
 //! another Orb, through the plain import and the view of the import by key; `cancellation` stops
 //! awaiting a call of the plain import; `ledger` keeps a state, and `sketching` one holding an
-//! internally tagged enum; `tallies` issues WIT resources; `checks` takes and returns what the
+//! internally tagged enum; `tallies` issues WIT resources, and `vault`, a private service's module,
+//! a WIT resource and a state each in a module below it; `checks` takes and returns what the
 //! boundary checks; and `names` names the types of `checks` through a `use` with `as` and an
 //! alias. A new scenario is a module here, or a
 //! function of one, and a row of the test's list. The Orb holds nothing a native host refuses by
@@ -123,7 +124,7 @@ pub mod parity {
         }
 
         /// The book of one ledger object, which the kernel keeps.
-        #[state(service = Ledger)]
+        #[state]
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct Book {
             pub entries: Vec<Entry>,
@@ -236,6 +237,57 @@ pub mod parity {
                     Shape::Square { side } => side,
                     Shape::Dot | Shape::Circle { .. } => 0,
                 }
+            }
+        }
+    }
+
+    /// A service in a private module, whose state sits in a module below it, `kept`, and whose WIT
+    /// resource, with a constructor that counts in that state, in another, `tags`: each belongs to
+    /// the service of the nearest service's module above it.
+    mod vault {
+        pub mod kept {
+            /// How many tokens an object of the vault issued.
+            #[state]
+            #[derive(Default, serde::Serialize, serde::Deserialize)]
+            pub struct Issued {
+                pub count: u32,
+            }
+        }
+
+        pub mod tags {
+            /// A numbered token.
+            #[wit_resource]
+            pub struct Token {
+                n: u32,
+            }
+
+            impl Token {
+                /// A token numbered `n`, counted in the state of the object issuing it.
+                #[constructor]
+                pub fn new(n: u32) -> Token {
+                    super::kept::Issued::update(|issued| issued.count += 1);
+                    Token { n }
+                }
+
+                /// The token's number.
+                pub fn number(&self) -> u32 {
+                    self.n
+                }
+            }
+        }
+
+        #[service]
+        pub struct Vault;
+
+        impl Vault {
+            /// A token numbered `n`.
+            pub fn open(n: u32) -> tags::Token {
+                tags::Token::new(n)
+            }
+
+            /// How many tokens this object issued.
+            pub fn issued() -> u32 {
+                kept::Issued::read().count
             }
         }
     }

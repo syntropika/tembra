@@ -1,0 +1,5 @@
+error: the #[resource] `Counts` is in `tickets`, the module of the service `Tickets`: it belongs to the Orb, so put it outside every service's module
+ --> tests/ui/resource_in_a_service_module.rs:5:20
+  |
+5 |         pub struct Counts;
+  |                    ^^^^^^

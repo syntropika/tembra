@@ -440,7 +440,7 @@ impl Service {
 struct WitResource {
     ident: Ident,
     docs: Vec<String>,
-    /// The owning service, as named by `service = ...` or resolved to the module's only one.
+    /// The owning service: the service of the nearest service's module at or above it.
     service: Option<Ident>,
     constructor: Option<Constructor>,
     methods: Vec<Function>,
@@ -545,7 +545,7 @@ impl Composition {
 /// of one service.
 struct State {
     ident: Ident,
-    /// The owning service, as named by `service = ...` or resolved to the module's only one.
+    /// The owning service: the service of the nearest service's module at or above it.
     service: Option<Ident>,
     version: u32,
     /// The function marked `#[validate]`, `fn(&self) -> Result<(), String>`: every update runs it
@@ -800,10 +800,6 @@ struct Scan {
     package: String,
     /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
     modules: Vec<Vec<Ident>>,
-    /// Where each module of each module's path is visible, by scope: the depth of the module of
-    /// the path it is visible in, and so in every module below that one. The macro names an item
-    /// through every module of its path.
-    seen_from: Vec<Vec<usize>>,
     candidates: Vec<Candidate>,
     services: Vec<Service>,
     contributions: Vec<Contribution>,
@@ -959,71 +955,6 @@ impl Uses {
     }
 }
 
-/// How many modules above the one declaring it an item of this visibility is visible in: none
-/// when private, one for `pub(super)`, as many as the `super`s of `pub(in ..)`, and all of them for
-/// `pub`, `pub(crate)` and a path from `crate`, which the macro cannot place and leaves to the
-/// compiler.
-fn reach(vis: &Visibility) -> usize {
-    match vis {
-        Visibility::Public(_) => usize::MAX,
-        Visibility::Restricted(restricted) => {
-            let segments = &restricted.path.segments;
-            if segments
-                .first()
-                .is_some_and(|segment| segment.ident == "crate")
-            {
-                usize::MAX
-            } else {
-                segments
-                    .iter()
-                    .filter(|segment| segment.ident == "super")
-                    .count()
-            }
-        }
-        Visibility::Inherited => 0,
-    }
-}
-
-/// Why the native side cannot build an Orb whose WIT resource `resource`, with a constructor or a
-/// static function, sits in the module at `from`, when that module cannot name the native client
-/// of its service, `service`, declared in the module at `path`, where `seen_from` says each module
-/// of the path is visible: the native side writes those functions on the client, in the resource's
-/// module. The message names the module of the path and the service to make visible to it; the
-/// Orb's `orb()` answers it, and a component build, which needs no client, is never refused for
-/// it. Writing the calls in the service's module instead would name the parameter types from
-/// there, and raising a visibility would change the author's code. A `pub(in crate::..)` module or
-/// service counts as visible everywhere, as `reach` leaves it to the compiler, which reports one
-/// the resource's module cannot see.
-fn client_seen(
-    service: &Service,
-    path: &[Ident],
-    seen_from: &[usize],
-    from: &[Ident],
-    resource: &Ident,
-) -> Result<(), String> {
-    let module = seen_from
-        .iter()
-        .position(|&depth| !from.starts_with(&path[..depth]))
-        .map(|position| format!("the module `{}`", path[position]));
-    let declared = path.len().saturating_sub(reach(&service.vis));
-    let hidden =
-        (!from.starts_with(&path[..declared])).then(|| format!("the service `{}`", service.ident));
-    let hidden: Vec<String> = module.into_iter().chain(hidden).collect();
-    if hidden.is_empty() {
-        return Ok(());
-    }
-    let viewer = if from.is_empty() {
-        "the Orb module".to_owned()
-    } else {
-        format!("the module {}", describe(from))
-    };
-    Err(format!(
-        "`{resource}` has a constructor or a static function, which a native build writes on the client of its service `{}` in {viewer}, which cannot see it: make {} visible to {viewer}, at least `pub(crate)`",
-        service.ident,
-        hidden.join(" and ")
-    ))
-}
-
 /// Whether a type alias names a namesake, `pub type Token = super::sessions::Token;`: a path
 /// ending in the alias's own name, with generics on neither, which the alias stands for as
 /// `use super::sessions::Token;` would.
@@ -1046,7 +977,6 @@ impl Scan {
     fn scan(&mut self, items: Vec<Item>, scope: usize) -> syn::Result<(Vec<Item>, Vec<Module>)> {
         let mut passthrough = Vec::new();
         let mut children = Vec::new();
-        let depth = self.modules[scope].len();
         for item in items {
             self.uses[scope].add_item(&item);
             let declared_type = match &item {
@@ -1073,9 +1003,6 @@ impl Scan {
                     let mut path = self.modules[scope].clone();
                     path.push(module.ident.clone());
                     self.modules.push(path);
-                    let mut seen_from = self.seen_from[scope].clone();
-                    seen_from.push(depth.saturating_sub(reach(&module.vis)));
-                    self.seen_from.push(seen_from);
                     self.uses.push(Uses::default());
                     let (items, grandchildren) = self.scan(inner, child)?;
                     // The code the macro writes for an item it marks names the item in every
@@ -1550,32 +1477,139 @@ fn describe(path: &[Ident]) -> String {
         .join("::")
 }
 
-/// The service owning a state or a WIT resource: the one named, else the only service of the
-/// item's module, else the only service of the Orb.
-fn owner_of<'a>(
+/// The service whose module holds the module `scope`: the service of that module, else of the
+/// nearest module above it that is a service's. None outside every service's module.
+fn service_of<'a>(
     services: &'a [Service],
-    named: Option<&Ident>,
     scope: usize,
-    span: Span,
-    hint: &str,
-) -> syn::Result<&'a Service> {
-    if let Some(ident) = named {
-        return services
+    modules: &[Vec<Ident>],
+) -> Option<&'a Service> {
+    let mut at = Some(scope);
+    while let Some(scope) = at {
+        if let Some(service) = services.iter().find(|service| service.scope == scope) {
+            return Some(service);
+        }
+        at = parent(scope, modules);
+    }
+    None
+}
+
+/// The items of a scan that the rule of the services' modules places, for `placed_by_service`.
+struct Placed<'a> {
+    services: &'a [Service],
+    states: &'a [State],
+    wit_resources: &'a [WitResource],
+    resources: &'a [Resource],
+    declared: &'a [Declared],
+    contributions: &'a [Contribution],
+    root: Option<&'a Root>,
+    inputs: Option<&'a Inputs>,
+    modules: &'a [Vec<Ident>],
+}
+
+/// Refuse a module whose items break the rule of the services' modules: each `#[service]` sits in
+/// an inline module of its own, below no other service's module; a `#[state]` and a
+/// `#[wit_resource]` sit in their service's module or below it; and the Orb's items, `#[root]`,
+/// `#[inputs]`, `#[resource]` and `#[hook]`, outside every service's module. Each error falls on
+/// the item and names the fix.
+fn placed_by_service(placed: &Placed) -> syn::Result<()> {
+    let Placed {
+        services, modules, ..
+    } = *placed;
+    for (index, service) in services.iter().enumerate() {
+        let ident = &service.ident;
+        if service.scope == 0 {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` is a #[service] of the Orb module: put each service in a module of its own, with its impl, its state and its WIT resources, `pub mod {} {{ #[service] pub struct {ident}; .. }}`",
+                    ident.to_string().to_snake_case()
+                ),
+            ));
+        }
+        if let Some(first) = services[..index]
             .iter()
-            .find(|service| &service.ident == ident)
-            .ok_or_else(|| {
-                syn::Error::new(
-                    ident.span(),
-                    format!("`{ident}` is not a #[service] of this module"),
-                )
-            });
+            .find(|other| other.scope == service.scope)
+        {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` shares the module {} with the service `{}`: put each service in a module of its own",
+                    describe(&modules[service.scope]),
+                    first.ident
+                ),
+            ));
+        }
+        if let Some(outer) =
+            parent(service.scope, modules).and_then(|above| service_of(services, above, modules))
+        {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "the module of `{ident}` is inside {}, the module of the service `{}`: put each service's module outside every other service's module",
+                    describe(&modules[outer.scope]),
+                    outer.ident
+                ),
+            ));
+        }
     }
-    let mut local = services.iter().filter(|service| service.scope == scope);
-    match (local.next(), local.next(), services.len()) {
-        (Some(only), None, _) => Ok(only),
-        (_, _, 1) => Ok(&services[0]),
-        _ => Err(syn::Error::new(span, hint)),
+    for state in placed.states {
+        if service_of(services, state.scope, modules).is_none() {
+            return Err(syn::Error::new(
+                state.ident.span(),
+                format!(
+                    "the #[state] `{}` is outside every service's module: put it in the module of the service whose objects own it",
+                    state.ident
+                ),
+            ));
+        }
     }
+    for resource in placed.wit_resources {
+        if service_of(services, resource.scope, modules).is_none() {
+            return Err(syn::Error::new(
+                resource.ident.span(),
+                format!(
+                    "the #[wit_resource] `{}` is outside every service's module: put it in the module of the service whose interface defines it",
+                    resource.ident
+                ),
+            ));
+        }
+    }
+    let orb_items = placed
+        .resources
+        .iter()
+        .map(|item| ("#[resource]", &item.ident, item.scope))
+        .chain(
+            placed
+                .declared
+                .iter()
+                .map(|item| ("#[hook]", &item.ident, item.scope)),
+        )
+        .chain(
+            placed
+                .contributions
+                .iter()
+                .map(|item| ("#[hook]", &item.ident, item.scope)),
+        )
+        .chain(placed.root.map(|item| ("#[root]", &item.ident, item.scope)))
+        .chain(
+            placed
+                .inputs
+                .map(|item| ("#[inputs]", &item.ident, item.scope)),
+        );
+    for (marker, ident, scope) in orb_items {
+        if let Some(service) = service_of(services, scope, modules) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "the {marker} `{ident}` is in {}, the module of the service `{}`: it belongs to the Orb, so put it outside every service's module",
+                    describe(&modules[service.scope]),
+                    service.ident
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The module as the analysis leaves it for the emitters: the head of the Orb module and the
@@ -1597,9 +1631,6 @@ struct Analysis {
     ident: Ident,
     /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
     modules: Vec<Vec<Ident>>,
-    /// Where each module of each module's path is visible, by scope, as the scan found it: the
-    /// depth of the module of the path it is visible in, and so in every module below that one.
-    seen_from: Vec<Vec<usize>>,
     /// The Orb module and its sub-modules with the author's items that stay theirs: the types
     /// that stay out of the WIT, with the serde derives a state needs of them, and the types the
     /// macro converts, `converted`, with the serde derives a state needs of them. Every other type
@@ -1772,7 +1803,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     let mut scan = Scan {
         package: package.clone(),
         modules: vec![Vec::new()],
-        seen_from: vec![Vec::new()],
         candidates: Vec::new(),
         services: Vec::new(),
         contributions: Vec::new(),
@@ -1802,7 +1832,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     };
     let Scan {
         modules,
-        seen_from,
         mut candidates,
         mut services,
         contributions,
@@ -1820,6 +1849,18 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         own_types,
         ..
     } = scan;
+    // Each service's module holds the service and what belongs to it; the Orb's items lie outside.
+    placed_by_service(&Placed {
+        services: &services,
+        states: &states,
+        wit_resources: &wit_resources,
+        resources: &resources,
+        declared: &declared,
+        contributions: &contributions,
+        root: root.as_ref(),
+        inputs: inputs.as_ref(),
+        modules: &modules,
+    })?;
     // A method's error channel is spelled through the name the crate depends on the facade under.
     let facade = options.facade();
     // A service's methods are the pub fn of the impl blocks of its own module, but its create;
@@ -2293,17 +2334,12 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             ));
         }
     }
-    // Each state belongs to the objects of one service, the one named, the only one of its
-    // module or the only one of the Orb, and an object declares exactly one state.
+    // Each state belongs to the objects of the service whose module holds it, and an object
+    // declares exactly one state.
     let mut owners = BTreeMap::new();
     for state in &mut states {
-        let owner = owner_of(
-            &services,
-            state.service.as_ref(),
-            state.scope,
-            state.ident.span(),
-            "name the service whose objects own this state, #[state(service = Name)], or put the state in the service's sub-module",
-        )?;
+        let owner = service_of(&services, state.scope, &modules)
+            .expect("a state placed in a service's module");
         if let Some(previous) = owners.insert(owner.ident.to_string(), state.ident.to_string()) {
             return Err(syn::Error::new(
                 state.ident.span(),
@@ -2316,16 +2352,10 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         state.identity = owner.identity(&package);
         state.service = Some(owner.ident.clone());
     }
-    // Each WIT resource belongs to the interface of one service, found the same way. The bindings
-    // name it from that service's module, through every module of its path.
+    // Each WIT resource belongs to the interface of the service whose module holds it.
     for resource in &mut wit_resources {
-        let owner = owner_of(
-            &services,
-            resource.service.as_ref(),
-            resource.scope,
-            resource.ident.span(),
-            "name the service whose interface defines this resource, #[wit_resource(service = Name)], or put the resource in the service's sub-module",
-        )?;
+        let owner = service_of(&services, resource.scope, &modules)
+            .expect("a WIT resource placed in a service's module");
         resource.service = Some(owner.ident.clone());
     }
     // The modules the Orb module re-exports for the consumed interfaces name the consumed types and
@@ -2620,7 +2650,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 return Err(syn::Error::new(
                     service.ident.span(),
                     format!(
-                        "{identity} defines the resource `{}`: mark a struct `{ident}` with #[wit_resource(service = {})] and give it the resource's functions",
+                        "{identity} defines the resource `{}`: mark a struct `{ident}` with #[wit_resource] in the module of `{}` and give it the resource's functions",
                         resource.name, service.ident
                     ),
                 ));
@@ -2707,7 +2737,6 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         vis: module.vis,
         ident: module.ident,
         modules,
-        seen_from,
         tree,
         services,
         wit_resources,
@@ -3668,23 +3697,22 @@ fn service_attribute(
     })
 }
 
-/// Read a WIT resource: a struct, with the service whose interface defines it.
+/// Read a WIT resource: a struct, which belongs to the service of its module.
 fn wit_resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<WitResource> {
-    let mut service = None;
     if !matches!(attribute.meta, syn::Meta::Path(_)) {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("service") {
-                service = Some(meta.value()?.parse::<Ident>()?);
-            } else {
-                return Err(meta.error("unknown option; use #[wit_resource(service = Name)]"));
+                return Err(meta.error(
+                    "#[wit_resource] takes no `service`: the resource belongs to the service whose module holds it, so put it in that module",
+                ));
             }
-            Ok(())
+            Err(meta.error("#[wit_resource] takes no options"))
         })?;
     }
     Ok(WitResource {
         ident: item.ident.clone(),
         docs: wit::docs(&item.attrs)?,
-        service,
+        service: None,
         constructor: None,
         methods: Vec::new(),
         statics: Vec::new(),
@@ -6042,7 +6070,8 @@ fn refusal(ty: &Type) -> bool {
             if path.path.segments.last().is_some_and(|segment| segment.ident == "String"))
 }
 
-/// Read a state: a struct with named fields, the owning service and the version (default 1).
+/// Read a state: a struct with named fields and its version (default 1); it belongs to the service
+/// whose module holds it.
 fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
     let Fields::Named(_) = &item.fields else {
         return Err(syn::Error::new(
@@ -6050,12 +6079,13 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
             "a state is a struct with named fields",
         ));
     };
-    let mut service = None;
     let mut version = 1;
     if !matches!(attribute.meta, syn::Meta::Path(_)) {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("service") {
-                service = Some(meta.value()?.parse::<Ident>()?);
+                return Err(meta.error(
+                    "#[state] takes no `service`: the state belongs to the service whose module holds it, so put it in that module",
+                ));
             } else if meta.path.is_ident("version") {
                 let literal: LitInt = meta.value()?.parse()?;
                 version = literal.base10_parse::<u32>()?;
@@ -6063,14 +6093,14 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
                     return Err(syn::Error::new(literal.span(), "versions start at 1"));
                 }
             } else {
-                return Err(meta.error("unknown option; use #[state(service = Name, version = n)]"));
+                return Err(meta.error("unknown option; use #[state(version = n)]"));
             }
             Ok(())
         })?;
     }
     Ok(State {
         ident: item.ident.clone(),
-        service,
+        service: None,
         version,
         validator: None,
         identity: String::new(),

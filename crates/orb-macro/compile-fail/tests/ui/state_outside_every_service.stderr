@@ -1,0 +1,5 @@
+error: the #[state] `Count` is outside every service's module: put it in the module of the service whose objects own it
+ --> tests/ui/state_outside_every_service.rs:5:16
+  |
+5 |     pub struct Count {
+  |                ^^^^^

@@ -127,19 +127,6 @@ fn a_refused_facade_name_reports_the_refusal_alone() {
     }
 }
 
-/// A guest whose WIT resource has a constructor, in a module that cannot name its service's native
-/// client, builds as a component: only the native side needs that client, and only a host that
-/// installs the Orb fails, through its `orb()`.
-#[test]
-#[ignore = "runs cargo on a fixture: just test-configurations"]
-fn a_resource_that_cannot_see_its_client_builds_as_a_component() {
-    let manifest = fixture("hidden-client/Cargo.toml");
-    let args = ["build", "--lib", "--target", "wasm32-unknown-unknown"];
-    if let Err(errors) = cargo(&manifest, &args) {
-        panic!("{errors}");
-    }
-}
-
 /// A manifest in TOML 1.1 syntax, with a trailing comma in an inline table, which Cargo reads:
 /// the macro reads it too, for the Orb's name in `orb()`, so the crate builds natively.
 #[test]

@@ -1,0 +1,5 @@
+error: `Other` shares the module `tickets` with the service `Tickets`: put each service in a module of its own
+  --> tests/ui/two_services_in_one_module.rs:14:20
+   |
+14 |         pub struct Other;
+   |                    ^^^^^
