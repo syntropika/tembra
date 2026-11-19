@@ -1,7 +1,7 @@
 //! Compose canonical packages without a copied dependency tree.
 #[tembra::orb(
     package = "example:composed@1.0.0",
-    wit = ["model", "metadata", "tools", "context"],
+    wit = ["wit/model", "wit/metadata", "wit/tools", "wit/context"],
     contract = env!("OUT_DIR"),
     import = "example:model-agent/agent@1.0.0"
 )]

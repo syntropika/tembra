@@ -3376,10 +3376,14 @@ fn component(
         standard.clone()
     };
     let inline = LitStr::new(&format!("{wit}{beside}"), Span::call_site());
-    let path = parsed.path().map(|dir| {
-        let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
-        quote! { path: #dir, }
-    });
+    // Complete inline documents must not load the author's implicit `wit/` directory.
+    let path = parsed.path().map_or_else(
+        || quote! { path: [], },
+        |dir| {
+            let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
+            quote! { path: #dir, }
+        },
+    );
     // A state's JSON holds the consumed types it reaches as the bindings generate them: those
     // types alone, and the types they hold, take serde's derives, each selected by its full name.
     let serialized = serialized

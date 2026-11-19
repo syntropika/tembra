@@ -273,6 +273,7 @@ fn the_facade_checks_for_wasm32_with_macros() {
 }
 
 /// Canonical capability packages compose in place and Cargo supplies the only output directory.
+/// Separate packages under `wit/` must not trigger wit-bindgen's implicit directory loading.
 #[test]
 #[ignore = "runs cargo on a fixture: just test-configurations"]
 fn canonical_packages_emit_the_contract_in_cargos_output_directory() {

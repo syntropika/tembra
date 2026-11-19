@@ -2,10 +2,10 @@
 #[tembra::orb(
     package = "example:canonical-provider@1.0.0",
     wit = [
-        "../config-fixtures/canonical-packages/model",
-        "../config-fixtures/canonical-packages/metadata",
-        "../config-fixtures/canonical-packages/tools",
-        "../config-fixtures/canonical-packages/context"
+        "../config-fixtures/canonical-packages/wit/model",
+        "../config-fixtures/canonical-packages/wit/metadata",
+        "../config-fixtures/canonical-packages/wit/tools",
+        "../config-fixtures/canonical-packages/wit/context"
     ],
     import = "example:context/context@1.0.0"
 )]
@@ -38,10 +38,10 @@ pub mod provider {
 #[tembra::orb(
     package = "example:canonical-consumer@1.0.0",
     wit = [
-        "../config-fixtures/canonical-packages/context",
-        "../config-fixtures/canonical-packages/tools",
-        "../config-fixtures/canonical-packages/metadata",
-        "../config-fixtures/canonical-packages/model"
+        "../config-fixtures/canonical-packages/wit/context",
+        "../config-fixtures/canonical-packages/wit/tools",
+        "../config-fixtures/canonical-packages/wit/metadata",
+        "../config-fixtures/canonical-packages/wit/model"
     ],
     import = "example:model-agent/agent@1.0.0"
 )]
