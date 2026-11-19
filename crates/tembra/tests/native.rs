@@ -227,8 +227,9 @@ fn native_shutdown_signals_openers_but_waits_for_physical_settlement() {
                     "pending",
                     1,
                     &[],
-                    move |signal| {
+                    move |context| {
                         async move {
+                            let signal = context.signal();
                             signal.cancelled().await;
                             cancelled.set(true);
                             receive.await.unwrap();

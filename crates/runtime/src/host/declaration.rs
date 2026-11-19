@@ -89,13 +89,17 @@ impl Declaration {
         )
     }
 
-    /// Declares an asynchronous resource whose dependencies must physically open first.
+    /// Declares an asynchronous resource whose dependencies must physically open first. The
+    /// opener and the closer each get a context of the resource's owner, outside any call: its
+    /// `log` is attributed to the owning Orb, its `address` is the owning object's, for a resource
+    /// of an object, and the opener's `signal` is the resource's own, which a cancelled opening
+    /// fires; its `principal` is `host`, as a cleanup's.
     pub fn resource_async<T: 'static>(
         &self,
         name: &str,
         version: u32,
         dependencies: &[ResourceKey],
-        open: impl FnOnce(ResourceSignal) -> LocalBoxFuture<'static, Result<T>> + 'static,
+        open: impl FnOnce(Context) -> LocalBoxFuture<'static, Result<T>> + 'static,
         close: impl FnOnce(Rc<T>, Context) -> LocalBoxFuture<'static, Result<()>> + 'static,
     ) -> Result<Resource<T>> {
         self.check_declaration()?;
@@ -163,12 +167,20 @@ impl Declaration {
             .cancellations
             .borrow_mut()
             .insert(resource, signal.clone());
+        let owner = super::context::Owner {
+            orb: self.orb,
+            object: match self.owner {
+                core::Owner::Object(object) => Some(object),
+                core::Owner::Host | core::Owner::Orb(_) => None,
+            },
+        };
         self.host.0.openers.borrow_mut().insert(
             resource,
-            Box::new(move || {
+            Box::new(move |context| {
                 async move {
                     signal.check()?;
-                    let value = Rc::new(open(signal.clone()).await?);
+                    let context = context.owned(owner, Some(signal.clone()));
+                    let value = Rc::new(open(context).await?);
                     let id = host.kernel().allocate_handle()?;
                     host.0.values.borrow_mut().insert(
                         id,
@@ -177,10 +189,10 @@ impl Declaration {
                             portable: None,
                         },
                     );
-                    host.0
-                        .closers
-                        .borrow_mut()
-                        .insert(resource, Box::new(move |context| close(value, context)));
+                    host.0.closers.borrow_mut().insert(
+                        resource,
+                        Box::new(move |context| close(value, context.owned(owner, None))),
+                    );
                     if let Err(error) = host.kernel().resource_opened(resource, id) {
                         host.drop_value(id);
                         return Err(error);

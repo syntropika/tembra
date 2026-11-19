@@ -1,16 +1,20 @@
 //! Install the harbor, moor two ships, each with a mooring of its own, see the third refused when
 //! every berth is taken, release a ship and watch the kernel close its mooring, then close the
-//! host. The same steps run on the compiled Orb, loaded from the artifact given, and on the native
-//! Orb the module's `orb()` builds, with `--native`: both print the same lines. No Orb is defined
-//! here.
+//! host and watch the moorings close before the harbor. The same steps run on the compiled Orb,
+//! loaded from the artifact given, and on the native Orb the module's `orb()` builds, with
+//! `--native`: both print the same lines. No Orb is defined here.
 //!
-//! The harbor logs what the moorings go through; the host reads the log through `log` after each
-//! step, so that the order of opens and closes shows between the calls.
+//! The resources log what they go through, through the kernel's context; the host prints each
+//! record as it comes, from the engine for the compiled Orb and from the host for the native one,
+//! so that the order of opens and closes shows between the calls.
 use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::wasm::{Engine, Install, Limits};
 use tembra::{Host, Reference};
+
+/// The service of the Orb `harbor`, named after its exported interface.
+const SHIP: &str = "harbor::example:harbor/ship@1.0.0";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let argument = std::env::args()
@@ -18,24 +22,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: host <path to harbor.orb.wasm> | host --native")?;
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    // The world imports the kernel's resources interface, which the executor serves itself:
-    // nothing to require, nothing to grant. Natively the Orb is the module's `orb()`.
-    let (orb, name) = if argument == "--native" {
-        (tembra_example_harbor::port::orb()?, "harbor")
+    // The world imports the kernel's resources and context interfaces, which the executor serves
+    // itself: nothing to require, nothing to grant. Natively the Orb is the module's `orb()`, and
+    // the host's log observer takes what the compiled Orb's engine takes.
+    let orb = if argument == "--native" {
+        host.on_log(|record| println!("  log: {}", record.message));
+        tembra_example_harbor::port::orb()?
     } else {
-        let engine = Engine::new(Limits::default())?;
-        (
-            engine.load(&std::fs::read(&argument)?, Install::default())?,
-            "harbor",
-        )
+        let engine =
+            Engine::new(Limits::default())?.on_log(|record| println!("  log: {}", record.message));
+        engine.load(&std::fs::read(&argument)?, Install::default())?
     };
     host.install(vec![orb])?;
-    let ship_service = format!("{name}::example:harbor/ship@1.0.0");
 
     // 1. Two ships: creating each opens its mooring, after the harbor, which opens once.
-    let one = moor(&mut pool, &host, &ship_service, "one")?;
-    let two = moor(&mut pool, &host, &ship_service, "two")?;
-    log(&mut pool, &host, &one)?;
+    let one = moor(&mut pool, &host, "one")?;
+    let two = moor(&mut pool, &host, "two")?;
     println!(
         "berth(one) -> {}   berth(two) -> {}",
         call(&mut pool, &host, &one, "berth", json!([]))?,
@@ -51,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. A third ship finds every berth taken: its mooring's `#[open]` answers an error, which
     //    fails the creation of that ship alone.
-    match moor(&mut pool, &host, &ship_service, "three") {
+    match moor(&mut pool, &host, "three") {
         Ok(_) => return Err("the third ship moored".into()),
         Err(error) => println!("ship three -> {error}"),
     }
@@ -61,13 +63,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     one.release()?;
     pool.run_until(host.settled());
     println!("released one");
-    log(&mut pool, &host, &two)?;
     println!(
         "load(two, 1) -> {}",
         call(&mut pool, &host, &two, "load", json!([1]))?
     );
-    let three = moor(&mut pool, &host, &ship_service, "three")?;
-    log(&mut pool, &host, &three)?;
+    let three = moor(&mut pool, &host, "three")?;
     println!(
         "berth(three) -> {}",
         call(&mut pool, &host, &three, "berth", json!([]))?
@@ -87,28 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// A reference to the ship `key`, acquired by `alice`, once the kernel created it and opened its
 /// mooring, or the error of a mooring that did not open.
-fn moor(
-    pool: &mut LocalPool,
-    host: &Host,
-    service: &str,
-    key: &str,
-) -> tembra::Result<Rc<Reference>> {
-    let ship = Rc::new(host.get(service, vec![key.into()], "alice")?);
+fn moor(pool: &mut LocalPool, host: &Host, key: &str) -> tembra::Result<Rc<Reference>> {
+    let ship = Rc::new(host.get(SHIP, vec![key.into()], "alice")?);
     pool.run_until(ship.ready())?;
     println!("ship {key} moored");
     Ok(ship)
-}
-
-/// Print what the moorings went through since the last reading, which any ship answers.
-fn log(pool: &mut LocalPool, host: &Host, ship: &Rc<Reference>) -> tembra::Result<()> {
-    for line in call(pool, host, ship, "log", json!([]))?
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
-        println!("  log: {}", line.as_str().unwrap_or_default());
-    }
-    Ok(())
 }
 
 /// Call one method of a ship under a root context of the principal `alice`.

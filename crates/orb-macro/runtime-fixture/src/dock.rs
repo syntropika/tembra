@@ -1,20 +1,10 @@
 use alloc::string::String;
 
-/// Note what a resource went through. A component writes it to the host's log, since its `context`
-/// serves a resource's functions; natively the note goes to the journal the native tests read.
+/// Note what a resource went through, in the host's log: the module's `context` serves a
+/// resource's functions, as a component and natively, where the host reads the records through
+/// `Host::on_log`.
 fn note(event: String) {
-    #[cfg(target_arch = "wasm32")]
     dock::context::log(dock::context::Level::Info, &event);
-    #[cfg(not(target_arch = "wasm32"))]
-    JOURNAL.with(|journal| journal.borrow_mut().push(event));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-std::thread_local! {
-    /// What the resources of the Orbs this thread hosts went through, natively, in order.
-    static JOURNAL: core::cell::RefCell<alloc::vec::Vec<String>> = const {
-        core::cell::RefCell::new(alloc::vec::Vec::new())
-    };
 }
 
 /// A resource of the Orb's root, the harbor, and two of each object of the service `Ship`, in the
@@ -134,7 +124,13 @@ pub mod dock {
                     harbor.moored += 1;
                     harbor.issued
                 });
-                super::super::note(format!("open mooring {berth}"));
+                // The context of a service resource's opener: the ship's address.
+                let address = super::super::dock::context::object();
+                super::super::note(format!(
+                    "open mooring {berth} at [{}] of {}",
+                    address.key.join("/"),
+                    address.principal
+                ));
                 Mooring { berth }
             }
 
@@ -176,17 +172,12 @@ pub mod dock {
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    use super::{JOURNAL, dock};
-    use crate::native::{call, hosting};
+    use super::dock;
+    use crate::native::{call, hosting, logged};
     use futures::FutureExt;
     use serde_json::json;
     use std::rc::Rc;
     use tembra::{core::Code, portable::Owned};
-
-    /// What the resources went through since the last call.
-    fn journal() -> Vec<String> {
-        JOURNAL.with(|journal| journal.take())
-    }
 
     /// Natively, the host opens a ship's mooring and line when it creates the ship, after the
     /// harbor, each reading what it depends on with `with`, and closes them in reverse when the
@@ -196,6 +187,7 @@ mod tests {
     #[test]
     fn a_service_resource_opens_and_closes_per_object_natively() {
         let (mut pool, host) = hosting(dock::orb().unwrap());
+        let journal = logged(&host);
         let ship = |key: &str| {
             Rc::new(
                 host.get(
@@ -214,9 +206,9 @@ mod tests {
             journal(),
             [
                 "open harbor",
-                "open mooring 1",
+                "open mooring 1 at [one] of alice",
                 "open line at berth 1",
-                "open mooring 2",
+                "open mooring 2 at [two] of alice",
                 "open line at berth 2",
             ]
         );
@@ -270,7 +262,13 @@ mod tests {
             ),
             "{refused}"
         );
-        assert_eq!(journal(), ["open mooring 3", "close mooring 3, 2 moored"]);
+        assert_eq!(
+            journal(),
+            [
+                "open mooring 3 at [three] of alice",
+                "close mooring 3, 2 moored"
+            ]
+        );
         one.release().unwrap();
         pool.run_until(host.settled());
         assert_eq!(

@@ -802,14 +802,25 @@ pub(crate) fn state_access(facade: &Ident) -> TokenStream {
 /// which the service's factory fills (`object_resources`), declaring each on the object's
 /// declaration after the root's resources and the object's earlier ones it depends on; the scope
 /// of a method of the service sets it around each poll beside the Orb's, and `with` on such a
-/// resource type reaches the value of the object running the method. The runtime's types are
+/// resource type reaches the value of the object running the method. With the `context` option,
+/// each `#[open]` and `#[close]` function runs in the scope of the context the host gives the
+/// opener or closer, the resource's owner's, so the module's `context` answers there as it does
+/// for a component: `log` writes for the Orb, `object()` is the owning object's address, or the
+/// root's fallback for a root resource, and `principal()` is the host's. The runtime's types are
 /// reached through the facade named `facade`.
 pub(crate) fn resource_access(
     resources: &[Resource],
     modules: &[Vec<Ident>],
     facade: &Ident,
+    context: bool,
 ) -> TokenStream {
     let objects = object_resources(resources, modules, facade);
+    // The scope an opener's or a closer's future runs in: the module's `context`, with the option.
+    let in_context = if context {
+        quote! { super::context::__scoped(context, future) }
+    } else {
+        quote! { { let _ = context; future } }
+    };
     let resources: Vec<&Resource> = resources
         .iter()
         .filter(|resource| resource.service.is_none())
@@ -857,21 +868,23 @@ pub(crate) fn resource_access(
                         #name,
                         #version,
                         &dependencies,
-                        move |_| {
-                            ::std::boxed::Box::pin(async move {
+                        move |__tembra_context| {
+                            ::std::boxed::Box::pin(in_context(__tembra_context, async move {
                                 // The `#[open]` function reads its dependencies with `with`.
                                 let _entered = table.upgrade().map(Entered::enter);
                                 let slot = Slot::new();
                                 slot.open(#opened);
                                 ::core::result::Result::Ok(slot)
-                            })
+                            }))
                         },
-                        move |slot, _| {
-                            // The `#[close]` function reads its dependencies with `with` too,
-                            // which the host closes after it.
-                            let _entered = closing.upgrade().map(Entered::enter);
-                            #close
-                            ::std::boxed::Box::pin(async { ::core::result::Result::Ok(()) })
+                        move |slot, __tembra_context| {
+                            ::std::boxed::Box::pin(in_context(__tembra_context, async move {
+                                // The `#[close]` function reads its dependencies with `with`
+                                // too, which the host closes after it.
+                                let _entered = closing.upgrade().map(Entered::enter);
+                                #close
+                                ::core::result::Result::Ok(())
+                            }))
                         },
                     )?;
                     let _ = self.#field.set(resource);
@@ -993,6 +1006,16 @@ pub(crate) fn resource_access(
 
         #(#accessors)*
         #objects
+
+        /// Run an opener's or a closer's future in the context the host gives it, the resource's
+        /// owner's: with the `context` option, in the scope of the module's `context`, whose
+        /// functions then read it, as a component's do.
+        fn in_context<F: ::core::future::Future>(
+            context: ::#facade::Context,
+            future: F,
+        ) -> impl ::core::future::Future<Output = F::Output> {
+            #in_context
+        }
     };
     wrapped(facade, items)
 }
@@ -1070,8 +1093,8 @@ fn object_resources(resources: &[Resource], modules: &[Vec<Ident>], facade: &Ide
                     #name,
                     #version,
                     &dependencies,
-                    move |_| {
-                        ::std::boxed::Box::pin(async move {
+                    move |__tembra_context| {
+                        ::std::boxed::Box::pin(in_context(__tembra_context, async move {
                             // The `#[open]` function reads the root's resources and the
                             // object's earlier ones with `with`.
                             let _entered = table.upgrade().map(Entered::enter);
@@ -1079,14 +1102,17 @@ fn object_resources(resources: &[Resource], modules: &[Vec<Ident>], facade: &Ide
                             let slot = Slot::new();
                             slot.open(#opened);
                             ::core::result::Result::Ok(slot)
-                        })
+                        }))
                     },
-                    move |slot, _| {
-                        // The `#[close]` function reads them too, which the host closes after it.
-                        let _entered = closing.upgrade().map(Entered::enter);
-                        let _object = closing_object.upgrade().map(#entered::enter);
-                        #close
-                        ::std::boxed::Box::pin(async { ::core::result::Result::Ok(()) })
+                    move |slot, __tembra_context| {
+                        ::std::boxed::Box::pin(in_context(__tembra_context, async move {
+                            // The `#[close]` function reads them too, which the host closes
+                            // after it.
+                            let _entered = closing.upgrade().map(Entered::enter);
+                            let _object = closing_object.upgrade().map(#entered::enter);
+                            #close
+                            ::core::result::Result::Ok(())
+                        }))
                     },
                 )?;
                 let _ = self.#field.set(resource);

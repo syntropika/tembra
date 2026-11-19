@@ -1,20 +1,10 @@
 use alloc::string::String;
 
-/// Note what a resource went through. A component writes it to the host's log, since its `context`
-/// serves a resource's functions; natively the note goes to the journal the native tests read.
+/// Note what a resource went through, in the host's log: the module's `context` serves a
+/// resource's functions, as a component and natively, where the host reads the records through
+/// `Host::on_log`.
 fn note(event: String) {
-    #[cfg(target_arch = "wasm32")]
     cellar::context::log(cellar::context::Level::Info, &event);
-    #[cfg(not(target_arch = "wasm32"))]
-    JOURNAL.with(|journal| journal.borrow_mut().push(event));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-std::thread_local! {
-    /// What the resources of the Orbs this thread hosts went through, natively, in order.
-    static JOURNAL: core::cell::RefCell<alloc::vec::Vec<String>> = const {
-        core::cell::RefCell::new(alloc::vec::Vec::new())
-    };
 }
 
 /// Two resources of the Orb's root, the cache depending on the database: the kernel opens the
@@ -65,7 +55,13 @@ pub mod cellar {
     impl Db {
         #[open]
         pub fn open() -> Db {
-            super::note("open db".into());
+            // The context of a root resource's opener: the Orb's root, as a hook contribution's.
+            let address = context::object();
+            super::note(format!(
+                "open db at [{}] of {}",
+                address.key.join("/"),
+                address.principal
+            ));
             Db { rows: 3 }
         }
 
@@ -93,30 +89,30 @@ pub mod cellar {
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    use super::{JOURNAL, cellar};
-    use crate::native::{call, hosting, ready};
+    use super::cellar;
+    use crate::native::{call, hosting, logged, ready};
     use serde_json::json;
-
-    /// What the resources went through since the last call.
-    fn journal() -> Vec<String> {
-        JOURNAL.with(|journal| journal.take())
-    }
 
     /// Natively, the host opens the database before the cache, whose `#[open]` function reads the
     /// database, and closes the cache, whose `#[close]` function writes to the database, before
-    /// the database.
+    /// the database; the `#[open]` and `#[close]` functions log through the module's `context`,
+    /// as a component's do, with the root's address.
     #[test]
     fn a_resource_opens_after_and_closes_before_its_dependency_natively() {
         let (mut pool, host) = hosting(cellar::orb().unwrap());
+        let logged = logged(&host);
         let shelf = ready(&mut pool, &host, "example:cellar/shelf@1.0.0");
         assert_eq!(
             call(&mut pool, &host, &shelf, "alice", "rows", json!([])),
             json!(3)
         );
-        assert_eq!(journal(), ["open db", "open cache, 3 rows"]);
+        assert_eq!(
+            logged(),
+            ["open db at [] of host", "open cache, 3 rows"]
+        );
         shelf.release().unwrap();
         pool.run_until(host.close()).unwrap();
-        assert_eq!(journal(), ["close cache, 6 rows", "close db, 6 rows"]);
+        assert_eq!(logged(), ["close cache, 6 rows", "close db, 6 rows"]);
         assert!(host.errors().is_empty(), "{:?}", host.errors());
     }
 }

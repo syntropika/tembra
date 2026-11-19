@@ -1,16 +1,14 @@
 //! A compiled Orb whose service objects own resources. The harbor is a resource of the Orb's root,
 //! opened once at activation; each `ship` object owns a mooring, opened when the kernel creates
 //! the ship and closed when it goes. The mooring depends on the harbor: its `#[open]` function
-//! takes the harbor's next berth, and its `#[close]` function gives it back. The harbor keeps a
-//! log of what the moorings go through, which a method hands the host, so that the host sees the
-//! kernel's order of opens and closes.
+//! takes the harbor's next berth, and its `#[close]` function gives it back. The resources log
+//! what they go through, through the kernel's context, so that the host sees the kernel's order
+//! of opens and closes.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
-#[tembra::orb(no_std, package = "example:harbor@1.0.0")]
+#[tembra::orb(no_std, package = "example:harbor@1.0.0", context)]
 pub mod port {
-    use alloc::{string::String, vec::Vec};
-
     /// The harbor: a resource of the Orb's root, since it sits outside every service's module.
     #[resource]
     pub struct Harbor {
@@ -20,25 +18,28 @@ pub mod port {
         pub moored: u32,
         /// How many berths were issued so far, which numbers them.
         pub issued: u32,
-        /// What the moorings went through since the host last asked, in order.
-        pub log: Vec<String>,
     }
 
     impl Harbor {
         #[open]
         pub fn open() -> Harbor {
+            context::log(context::Level::Info, "open harbor");
             Harbor {
                 berths: 2,
                 moored: 0,
                 issued: 0,
-                log: Vec::new(),
             }
+        }
+
+        #[close]
+        pub fn close(self) {
+            context::log(context::Level::Info, "close harbor");
         }
     }
 
     pub mod ship {
-        use super::Harbor;
-        use alloc::{format, string::String, vec::Vec};
+        use super::{Harbor, context};
+        use alloc::{format, string::String};
 
         /// A ship, which moors at a berth of the harbor.
         #[service]
@@ -57,11 +58,6 @@ pub mod port {
                     mooring.cargo
                 })
             }
-
-            /// What the moorings of the harbor went through since the host last asked.
-            pub fn log() -> Vec<String> {
-                Harbor::with(|harbor| core::mem::take(&mut harbor.log))
-            }
         }
 
         /// The mooring of one ship: a resource of each `Ship` object, since it sits in the
@@ -74,36 +70,38 @@ pub mod port {
         }
 
         impl Mooring {
-            /// Take the next free berth; when every berth is taken, the ship is not created.
+            /// Take the next free berth; when every berth is taken, the ship is not created. The
+            /// context here is the ship's: `object()` is its address.
             #[open]
             pub fn open() -> Result<Mooring, String> {
                 let berth = Harbor::with(|harbor| {
                     if harbor.moored < harbor.berths {
                         harbor.moored += 1;
                         harbor.issued += 1;
-                        harbor
-                            .log
-                            .push(format!("open mooring at berth {}", harbor.issued));
                         Some(harbor.issued)
                     } else {
                         None
                     }
                 });
-                match berth {
-                    Some(berth) => Ok(Mooring { berth, cargo: 0 }),
-                    None => Err(String::from("every berth is taken")),
-                }
+                let Some(berth) = berth else {
+                    return Err(String::from("every berth is taken"));
+                };
+                let ship = context::object().key.join("/");
+                context::log(
+                    context::Level::Info,
+                    &format!("open mooring at berth {berth} for ship {ship}"),
+                );
+                Ok(Mooring { berth, cargo: 0 })
             }
 
             /// Give the berth back.
             #[close]
             pub fn close(self) {
-                Harbor::with(|harbor| {
-                    harbor.moored -= 1;
-                    harbor
-                        .log
-                        .push(format!("close mooring at berth {}", self.berth));
-                });
+                Harbor::with(|harbor| harbor.moored -= 1);
+                context::log(
+                    context::Level::Info,
+                    &format!("close mooring at berth {}", self.berth),
+                );
             }
         }
     }

@@ -18,6 +18,7 @@ impl Host {
             frame: invocation.as_ref().map_or(0, |call| call.context),
             call: invocation,
             signal: self.context_signal(root),
+            owner: None,
         })
     }
 
@@ -85,6 +86,29 @@ pub struct Context {
     /// calls, first read once the kernel has forgotten the root, still finds whether it was
     /// cancelled.
     signal: Cancellation,
+    /// The owner of the resource whose opener or closer runs with this context, which has no
+    /// invocation: the Orb the record of a `log` is attributed to, and the object whose address
+    /// `address` answers, for a resource of an object.
+    owner: Option<Owner>,
+}
+
+/// The owner of a resource, as the context of its opener or closer knows it.
+#[derive(Clone, Copy)]
+pub(super) struct Owner {
+    pub(super) orb: core::Id,
+    pub(super) object: Option<core::Id>,
+}
+
+impl Context {
+    /// This context as a resource's opener or closer gets it: attributed to the resource's owner,
+    /// and, for an opener, cancelled with the resource's own signal.
+    pub(super) fn owned(mut self, owner: Owner, signal: Option<Cancellation>) -> Self {
+        self.owner = Some(owner);
+        if let Some(signal) = signal {
+            self.signal = signal;
+        }
+        self
+    }
 }
 
 impl Context {
@@ -109,6 +133,7 @@ impl Context {
             call: self.call.clone(),
             frame,
             signal: self.signal.clone(),
+            owner: self.owner,
         })
     }
 
@@ -122,6 +147,7 @@ impl Context {
             call: self.call.clone(),
             frame,
             signal: self.signal.clone(),
+            owner: self.owner,
         })
     }
 
@@ -161,10 +187,31 @@ impl Context {
     }
 
     /// Read the canonical address of the object running this invocation, as
-    /// [`Declaration::address`] reads it while the object declares.
+    /// [`Declaration::address`] reads it while the object declares; in the opener or closer of an
+    /// object's resource, the address of that object.
     pub fn address(&self) -> Result<core::Address> {
-        let call = self.invocation()?;
-        self.host.kernel().object_address(call.object)
+        let object = match (&self.call, self.owner) {
+            (Some(call), _) => call.object,
+            (
+                None,
+                Some(Owner {
+                    object: Some(object),
+                    ..
+                }),
+            ) => object,
+            (None, _) => self.invocation()?.object,
+        };
+        self.host.kernel().object_address(object)
+    }
+
+    /// The Orb a record of this context is attributed to: the one running the invocation, or the
+    /// one owning the resource whose opener or closer runs.
+    pub(super) fn attributed(&self) -> Result<core::Id> {
+        match (&self.call, self.owner) {
+            (Some(call), _) => Ok(call.orb),
+            (None, Some(owner)) => Ok(owner.orb),
+            (None, None) => Ok(self.invocation()?.orb),
+        }
     }
 
     /// The entered invocation that issues calls made from this context, if any.

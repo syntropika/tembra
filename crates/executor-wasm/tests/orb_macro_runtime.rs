@@ -2498,7 +2498,11 @@ fn a_root_resource_opens_after_its_dependency_both_ways() {
             json!(3),
             "{features}"
         );
-        assert_eq!(logged(), ["open db", "open cache, 3 rows"], "{features}");
+        assert_eq!(
+            logged(),
+            ["open db at [] of host", "open cache, 3 rows"],
+            "{features}"
+        );
         shelf.release().unwrap();
         pool.run_until(host.close()).unwrap();
         assert_eq!(
@@ -2602,9 +2606,9 @@ fn a_service_resource_opens_and_closes_per_object_both_ways() {
             logged(),
             [
                 "open harbor",
-                "open mooring 1",
+                "open mooring 1 at [one] of alice",
                 "open line at berth 1",
-                "open mooring 2",
+                "open mooring 2 at [two] of alice",
                 "open line at berth 2",
             ],
             "{features}"
@@ -2686,7 +2690,10 @@ fn a_service_resource_opens_and_closes_per_object_both_ways() {
         );
         assert_eq!(
             logged(),
-            ["open mooring 3", "close mooring 3, 2 moored"],
+            [
+                "open mooring 3 at [three] of alice",
+                "close mooring 3, 2 moored"
+            ],
             "{features}"
         );
         one.release().unwrap();

@@ -13,7 +13,7 @@ prints the same lines for both.
 | File                       | Role                                                                                                      |
 | -------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `harbor/src/lib.rs`        | The Orb: a `#[resource]` outside every service's module, and one inside the `ship` module                 |
-| `harbor/contract/port.wit` | The contract `cargo tembra build` wrote: the kernel's resource interfaces in the world                    |
+| `harbor/contract/port.wit` | The contract `cargo tembra build` wrote: the kernel's resource and context interfaces in the world        |
 | `host/src/main.rs`         | The wiring: creates ships, calls them, releases one; the compiled Orb or, with `--native`, the native one |
 | `run.sh`                   | Build, show the contract, run the host on the compiled Orb, then on the native one                        |
 
@@ -52,13 +52,14 @@ before the mooring and closes after it, so both marked functions may use the har
 mooring of the object running the call: `berth` and `load` read and change the mooring of their
 own ship. An `Err` from `#[open]` fails the creation of that ship alone, with the code
 `unavailable`, the reason `resource` and the error's text. The world gains two lines for the
-root's resources and one for the service's:
+root's resources, one for the service's and, with the `context` option, the context's import:
 
 ```wit
 world port {
   import tembra:guest/resources@1.0.0;
   export tembra:guest/resources-init@1.0.0;
   export tembra:guest/service-resources-init@1.0.0;
+  import tembra:guest/context@1.0.0;
   export ship;
 }
 ```
@@ -71,9 +72,10 @@ before the harbor. The value lives in the component, one per object; `with` asks
 the handle of the running object's resource and reaches the value through it. The executor serves
 the import itself: the installer requires and grants nothing.
 
-The moorings note what they go through in the harbor's `log`, which the `log` method hands the
-host: the `#[open]` and `#[close]` functions run outside any call, so they cannot use the kernel's
-`context` natively, where a component's could log through it.
+The resources log what they go through with `context::log`, from their `#[open]` and `#[close]`
+functions: the kernel runs those outside any call, in a context of the resource's owner, so
+`context::object()` in the mooring's `#[open]` is the ship's address, and the record is the Orb's,
+as a component and natively.
 
 ## Build
 
@@ -88,8 +90,9 @@ The summary names the resources next to the service:
 
 ```text
 exports, the services of harbor:
-  harbor::example:harbor/ship@1.0.0  methods: berth, load, log
+  harbor::example:harbor/ship@1.0.0  methods: berth, load
 kernel-managed resources: the kernel opens and closes the resources of this Orb's root and service objects (tembra:guest/resources@1.0.0)
+kernel-served context: the call's principal and cancellation, the object's address and the log (tembra:guest/context@1.0.0)
 imports: none; the installer grants nothing
 ```
 
@@ -103,27 +106,32 @@ cargo run --manifest-path examples/rust-orb-service-resource/host/Cargo.toml -- 
 Both print:
 
 ```text
+  log: open harbor
+  log: open mooring at berth 1 for ship one
 ship one moored
+  log: open mooring at berth 2 for ship two
 ship two moored
-  log: open mooring at berth 1
-  log: open mooring at berth 2
 berth(one) -> 1   berth(two) -> 2
 load(one, 3) -> 3   load(one, 2) -> 5   load(two, 1) -> 1
 ship three -> unavailable/resource: the resource `mooring` did not open: every berth is taken
-released one
   log: close mooring at berth 1
+released one
 load(two, 1) -> 2
+  log: open mooring at berth 3 for ship three
 ship three moored
-  log: open mooring at berth 3
 berth(three) -> 3
+  log: close mooring at berth 2
+  log: close mooring at berth 3
+  log: close harbor
 ```
 
-The `log:` lines are what the moorings noted in the harbor since the host last asked. Each ship's
-mooring opens when the ship is created and closes when the ship is released, giving its berth
-back; the third ship is refused while both berths are taken, and moors at a fresh berth once a
-ship left. Closing the host closes the remaining moorings first and the harbor last, which no
-method is left to report. Natively, the macro's `orb()` declares the harbor on the Orb and a
-mooring on each ship object, in the same order, as
+The `log:` lines come from the resources' `#[open]` and `#[close]` functions, through the kernel's
+context; the host prints each record as the engine, or natively the host, hands it over. The harbor
+opens once, with the first ship; each ship's mooring opens when the ship is created, naming the
+ship, and closes when the ship is released, giving its berth back; the third ship is refused while
+both berths are taken, and moors at a fresh berth once a ship left. Closing the host closes the
+remaining moorings first and the harbor last. Natively, the macro's `orb()` declares the harbor on
+the Orb and a mooring on each ship object, in the same order, as
 [the macro guide](../../crates/orb-macro/README.md#using-the-orb-natively) describes; the host
 links the harbor crate and installs `port::orb()` where it loads the artifact otherwise.
 
@@ -133,4 +141,4 @@ A service resource belongs to one object and is reached by the methods of that o
 and the `#[open]` and `#[close]` functions of the object's later resources: a root resource
 cannot depend on it, nor can a resource of another service, whose objects come and go on their
 own. Resource names are unique in the Orb, since the kernel and `depends` name a resource by its
-struct's name. An `#[open]` or `#[close]` function cannot use the `context` natively.
+struct's name.

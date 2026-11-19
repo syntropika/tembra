@@ -1575,11 +1575,15 @@ the service's methods and in the functions of its WIT resources, and in the `#[o
 functions of the object's later resources; elsewhere, in a contribution, a method of another service
 or a root resource's functions, it panics, as it traps a component. An `#[open]` that answers `Err`
 fails the creation of that object alone, with `unavailable/resource` and the error's text, as a
-component's does. An `#[open]` or `#[close]` function cannot use the `context` natively, of a root
-or a service resource: the native `context` reads the call of the method being polled, and the host
-runs the openers and closers outside any call, so a `context::log` there panics, where a component
-logs. Log from a method, or note what a resource goes through in a field of the resource, as the
-[service resource example](../../examples/rust-orb-service-resource/README.md) does.
+component's does. With the `context` option, an `#[open]` or `#[close]` function reads the
+`context` natively as a component's does: the host runs it outside any call, in a context of the
+resource's owner, so `log` writes for the Orb, `object()` is the owning object's address for a
+service resource and, for a root resource, an empty key with the principal `host`, as in a hook
+contribution, and `cancelled()` answers the resource's own cancellation in an `#[open]`.
+`principal()` is `host` natively, while a component's opener or closer has no admitted call to
+answer it, so it traps there: read the owner's principal from `object()` instead. The
+[service resource example](../../examples/rust-orb-service-resource/README.md)
+logs from its openers and closers both ways.
 
 A [contribution to a hook](#contributing-to-a-hook) serves a native host too. `Providers` names the
 Orb that declares each hook the module contributes to, under the name of the hook's module,

@@ -3197,7 +3197,7 @@ fn component(
         tree.at(declaration.scope).generated.push(code);
     }
     let state_code = state_code(states, modules, &facade);
-    let resource_code = resource_code(resources, modules, &facade);
+    let resource_code = resource_code(resources, modules, &facade, options.context);
     // The native side's items of each sub-module, after the component's, with the services they
     // register and the types whose JSON they write; a component build expands them to nothing.
     for (scope, items) in nested {
@@ -6570,11 +6570,13 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
 /// handle `open` answered; and `with` on each type, which reaches the component's slot, or the
 /// value of the object running the call in the table, in a component build, and the Orb's
 /// resource natively, where the native side declares each root resource in the Orb's create and
-/// writes its own `with`, through the facade named `facade`.
+/// writes its own `with`, through the facade named `facade`; with the `context` option, the native
+/// `#[open]` and `#[close]` functions run in the context the host gives them.
 fn resource_code(
     resources: &[Resource],
     modules: &[Vec<Ident>],
     facade: &Ident,
+    context: bool,
 ) -> proc_macro2::TokenStream {
     if resources.is_empty() {
         return quote! {};
@@ -6794,7 +6796,7 @@ fn resource_code(
             }
         }
     });
-    let native = native::resource_access(resources, modules, facade);
+    let native = native::resource_access(resources, modules, facade, context);
     quote! {
         #root_code
         #service_code
