@@ -421,7 +421,7 @@ world chain {
 
 /**
  * A compiled Orb whose root lists `declarations` and records each open and close in `events`;
- * the opener of each resource named in `refused` answers `err` with its message.
+ * the opener of each resource named in `refused` answers `err` with its message the first time.
  */
 const chain = async (
   declarations: readonly { name: string; dependencies: string[] }[],
@@ -435,7 +435,8 @@ const chain = async (
       declare: () => declarations.map((declaration) => ({ ...declaration, version: 1 })),
       open: (name: string) => {
         events.push(`open ${name}`);
-        if (name in refused) throw refusal(refused[name]!);
+        if (name in refused && events.filter((event) => event === `open ${name}`).length === 1)
+          throw refusal(refused[name]!);
         return 0;
       },
       close: (name: string) => void events.push(`close ${name}`),
@@ -518,24 +519,38 @@ describe("a root resource that does not open", () => {
     }
   };
 
-  test("of a compiled Orb fails the waiting calls with the opener's message", async () => {
+  test("of a compiled Orb fails the waiting call, closes in reverse, and opens again", async () => {
+    // Opening `c` answers `err("down")` after `a` and `b` opened, the first time only.
     const events: string[] = [];
     const owner = host([
       await chain(
         [
           { name: "a", dependencies: [] },
           { name: "b", dependencies: ["a"] },
+          { name: "c", dependencies: ["b"] },
         ],
         events,
-        { b: "down" },
+        { c: "down" },
       ),
     ]);
-    const install = () => owner.install({ artifact: Uint8Array.of(0) });
-    await refused(owner, install, "chain::test:chain/probe@1.0.0", events, {
-      code: Code.Unavailable,
-      reason: "resource",
-      message: "the resource `b` did not open: down",
-    });
+    try {
+      await expect(owner.install({ artifact: Uint8Array.of(0) })).rejects.toMatchObject({
+        code: Code.Unavailable,
+        reason: "resource",
+        message: "the resource `c` did not open: down",
+      });
+      expect(events).toEqual(["open a", "open b", "open c", "close b", "close a"]);
+      // The component stays serving: the next get opens all three, and a call answers.
+      const probe = await owner.get("chain::test:chain/probe@1.0.0", "main");
+      expect(events.slice(5)).toEqual(["open a", "open b", "open c"]);
+      expect(await probe.ping()).toBe(0);
+      probe.release();
+    } finally {
+      await owner.close();
+    }
+    expect(events.slice(8)).toEqual(["close c", "close b", "close a"]);
+    // A rejection nobody handles fails the running test; the message lands on the waiter only.
+    expect(owner.errors()).toEqual([]);
   });
 
   test("of a TypeScript Orb fails the waiting calls with the opener's error", async () => {
@@ -704,5 +719,160 @@ describe("resources of a compiled Orb's service objects", () => {
     }
     expect(events.slice(5)).toEqual(["close y", "close x", "close a"]);
     expect(owner.errors()).toEqual([]);
+  });
+});
+
+const DESKS = `package test:desks@1.0.0;
+interface desk {
+  /// This object's state.
+  stored: func() -> string;
+}
+interface counter {
+  /// The handle of this object's \`w\`.
+  mine: func() -> u32;
+}
+world desks {
+  import tembra:guest/state@1.0.0;
+  import tembra:guest/resources@1.0.0;
+  export tembra:guest/resources-init@1.0.0;
+  export tembra:guest/state-init@1.0.0;
+  export tembra:guest/service-resources-init@1.0.0;
+  export desk;
+  export counter;
+}`;
+
+const DESK = "test:desks/desk@1.0.0";
+const COUNTER = "test:desks/counter@1.0.0";
+
+/**
+ * A compiled Orb whose root owns `a` and whose services `desk` and `counter` each keep a state.
+ * Each `desk` object lists `desk`'s resources; each `counter` object owns `w`, which depends on
+ * `a`. `state-init.declare` tries to read `y`, and each opener of a service resource tries to read
+ * the object's state: `seen` records what each answered.
+ */
+const desks = async (
+  desk: readonly { name: string; dependencies: string[] }[],
+  events: string[],
+  seen: string[],
+): Promise<Compiled> => ({
+  name: "desks",
+  contract: await contract(DESKS, "desks"),
+  component: ({ "tembra:guest/state@1.0.0": state, "tembra:guest/resources@1.0.0": resources }) => {
+    let next = 0;
+    const attempt = (what: string, read: () => unknown) => {
+      try {
+        seen.push(`${what}: ${String(read())}`);
+      } catch (error) {
+        seen.push(`${what}: ${(error as Error).message}`);
+      }
+    };
+    const open = (name: string) => {
+      events.push(`open ${name}`);
+      return ++next;
+    };
+    return {
+      "tembra:guest/resources-init@1.0.0": {
+        declare: () => [{ name: "a", version: 1, dependencies: [] }],
+        open,
+        close: (name: string) => void events.push(`close ${name}`),
+      },
+      "tembra:guest/state-init@1.0.0": {
+        declare: () => {
+          attempt("declare", () => resources!.read("y"));
+          return { initial: "{}", version: 1, validated: false };
+        },
+        validate: () => {},
+      },
+      "tembra:guest/service-resources-init@1.0.0": {
+        declare: (service: string) =>
+          (service === DESK ? desk : [{ name: "w", dependencies: ["a"] }]).map((resource) => ({
+            ...resource,
+            version: 1,
+          })),
+        open: (_service: string, name: string) => {
+          attempt(`open ${name}`, () => state!.read());
+          return open(name);
+        },
+        close: (_service: string, name: string) => {
+          attempt(`close ${name}`, () => state!.read());
+          events.push(`close ${name}`);
+        },
+      },
+      [DESK]: { stored: () => state!.read() },
+      [COUNTER]: { mine: () => resources!.read("w") },
+    };
+  },
+});
+
+describe("the kernel's view of a compiled service object while it opens", () => {
+  test("an opener and a closer read no state; the state's declaration reads no resource of the object", async () => {
+    const events: string[] = [];
+    const seen: string[] = [];
+    const owner = host([
+      await desks(
+        [
+          { name: "x", dependencies: ["a"] },
+          { name: "y", dependencies: ["x"] },
+        ],
+        events,
+        seen,
+      ),
+    ]);
+    try {
+      await owner.install({ artifact: Uint8Array.of(0) });
+      const desk = (await owner.get(`desks::${DESK}`, "one")) as unknown as {
+        stored(): Promise<string>;
+        release(): void;
+      };
+      // An admitted call reads the state the opener could not.
+      expect(await desk.stored()).toBe("{}");
+      desk.release();
+    } finally {
+      await owner.close();
+    }
+    const refused = "this service object declares no kernel state";
+    expect(seen).toEqual([
+      "declare: neither this object nor the Orb root declares a resource named y",
+      `open x: ${refused}`,
+      `open y: ${refused}`,
+      `close y: ${refused}`,
+      `close x: ${refused}`,
+    ]);
+    expect(events).toEqual(["open a", "open x", "open y", "close y", "close x", "close a"]);
+    expect(owner.errors()).toEqual([]);
+  });
+
+  test("a dependency the object cannot have refuses that object only, naming both", async () => {
+    // Unknown, another service's, and a later one of its own.
+    for (const dependency of ["z", "w", "y"]) {
+      const events: string[] = [];
+      const owner = host([
+        await desks(
+          [
+            { name: "x", dependencies: [dependency] },
+            { name: "y", dependencies: [] },
+          ],
+          events,
+          [],
+        ),
+      ]);
+      try {
+        await owner.install({ artifact: Uint8Array.of(0) });
+        const counter = (await owner.get(`desks::${COUNTER}`, "one")) as unknown as {
+          mine(): Promise<number>;
+          release(): void;
+        };
+        await expect(owner.get(`desks::${DESK}`, "one")).rejects.toThrow(
+          `the resource \`x\` depends on \`${dependency}\`, which the Orb does not declare before it`,
+        );
+        // The root and the other service's object keep serving.
+        expect(await counter.mine()).toBe(2);
+        counter.release();
+      } finally {
+        await owner.close();
+      }
+      expect(events).toEqual(["open a", "open w", "close w", "close a"]);
+      expect(owner.errors()).toEqual([]);
+    }
   });
 });

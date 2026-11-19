@@ -240,34 +240,37 @@ export class ComponentKernel {
       }
       // Only the objects of a service the component exports own kernel state and resources.
       if (contract === undefined) return;
+      // The state first, then the resources, as the native worker asks: neither declaration
+      // reads a resource of this object, which the object has not declared yet.
+      const describe = this.#exports.get(`${STATE_INIT}#declare`);
+      const declared = describe
+        ? ((await this.#call(environment, callback, describe, [contract])) as {
+            initial?: unknown;
+            version?: unknown;
+            validated?: unknown;
+          } | null)
+        : null;
+      if (declared !== null) {
+        if (!isU32(declared.version)) throw new Error("The state declaration carries no version");
+        if (typeof declared.validated !== "boolean")
+          throw new Error("The state declaration does not say whether it is validated");
+        table.state = execution.sync({
+          operation: "state.declare",
+          initial: json(declared.initial, "The initial state"),
+          version: declared.version,
+          // A validated state gets a number of its own; the kernel runs it, through
+          // `validateEnvironment`, on the value a reload would hand to this instance.
+          validate: declared.validated
+            ? this.#number({ kind: "validate", environment: environment.id, service: contract })
+            : null,
+        }) as number;
+      }
       // This object's resources: the component lists them for the service, each declared in the
       // object's own table; the kernel opens them before the object answers a call.
       const resources = this.#exports.get(`${SERVICE_RESOURCES_INIT}#declare`);
-      if (resources) {
-        const declared = await this.#call(environment, callback, resources, [contract]);
-        this.#declareResources(environment, table, execution, declared, contract);
-      }
-      const describe = this.#exports.get(`${STATE_INIT}#declare`);
-      if (!describe) return;
-      const declared = (await this.#call(environment, callback, describe, [contract])) as {
-        initial?: unknown;
-        version?: unknown;
-        validated?: unknown;
-      } | null;
-      if (declared === null) return;
-      if (!isU32(declared.version)) throw new Error("The state declaration carries no version");
-      if (typeof declared.validated !== "boolean")
-        throw new Error("The state declaration does not say whether it is validated");
-      table.state = execution.sync({
-        operation: "state.declare",
-        initial: json(declared.initial, "The initial state"),
-        version: declared.version,
-        // A validated state gets a number of its own; the kernel runs it, through
-        // `validateEnvironment`, on the value a reload would hand to this instance.
-        validate: declared.validated
-          ? this.#number({ kind: "validate", environment: environment.id, service: contract })
-          : null,
-      }) as number;
+      if (!resources) return;
+      const listed = await this.#call(environment, callback, resources, [contract]);
+      this.#declareResources(environment, table, execution, listed, contract);
     } finally {
       callback.cancel();
     }
@@ -528,8 +531,9 @@ export class ComponentKernel {
   }
 
   /**
-   * Open or close a root resource by the number this revision declared it with, under the
-   * authority the kernel issued: a signal for an opener, an admitted root call for a closer.
+   * Open or close a resource of the root or of a service object by the number this revision
+   * declared it with, under the authority the kernel issued: a signal for an opener, an admitted
+   * root call for a closer.
    */
   async #execute(command: string, execution: ExecutionScope, authority: Authority) {
     const { callback: number, value } = JSON.parse(command) as {
@@ -548,10 +552,17 @@ export class ComponentKernel {
     );
     if (!exported) throw new Error("The component declares no kernel resource callbacks");
     const named = service === undefined ? [numbered.name] : [service, numbered.name];
-    const callback =
+    const issued =
       "context" in authority
         ? environment.exchange(authority.context, execution)
         : environment.callback(authority, execution);
+    // The callback runs under the kernel's opening or closing, where no state is read.
+    const access = issued.kernel;
+    let callback = issued;
+    if (access?.table.state !== undefined) {
+      const { state: _state, ...table } = access.table;
+      callback = { ...issued, kernel: { ...access, table } };
+    }
     const release = await this.owner.gate.enter(undefined, callback.signal);
     try {
       if (numbered.kind === "open") {
