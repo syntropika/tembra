@@ -2015,15 +2015,19 @@ async fn serve(
                 return Ok(Ok(answer));
             }
             // An opener answers `result<u32, string>`: its error fails this open with the
-            // message, so the kernel closes what already opened, as for a native opener.
+            // message, `unavailable/resource` as a native opener's, so the kernel closes what
+            // already opened.
             let answer: Value = serde_json::from_str(&answer)?;
             Ok(match answer["tag"].as_str() {
                 Some("ok") => Ok(answer["val"].to_string()),
-                Some("err") => Err(answer["val"]
-                    .as_str()
-                    .map(|message| format!("the resource `{name}` did not open: {message}"))
-                    .unwrap_or_else(|| format!("the resource `{name}` did not open"))
-                    .into()),
+                Some("err") => Err(Failed::Coded(tembra::Error::new(
+                    tembra::core::Code::Unavailable,
+                    tembra::core::Reason::Resource,
+                    answer["val"]
+                        .as_str()
+                        .map(|message| format!("the resource `{name}` did not open: {message}"))
+                        .unwrap_or_else(|| format!("the resource `{name}` did not open")),
+                ))),
                 _ => Err("the resource opener answered no result".into()),
             })
         }

@@ -236,10 +236,18 @@ fn an_open_that_answers_an_error_fails_the_activation_and_closes_what_opened() {
     let probe = host.get(PROBE, vec!["main".into()], "alice").unwrap();
     let refused = pool
         .run_until(probe.ready())
-        .expect_err("the activation fails")
-        .to_string();
-    assert!(
-        refused.contains("the resource `c` did not open: down"),
+        .expect_err("the activation fails");
+    assert_eq!(
+        (
+            refused.code,
+            refused.reason.as_str(),
+            refused.message.as_str()
+        ),
+        (
+            tembra::core::Code::Unavailable,
+            "resource",
+            "the resource `c` did not open: down"
+        ),
         "{refused}"
     );
     pool.run_until(host.settled());

@@ -21,6 +21,8 @@ mod hooks;
 mod io;
 #[cfg(feature = "keywords")]
 mod keywords;
+#[cfg(feature = "kiln")]
+mod kiln;
 #[cfg(feature = "lamps")]
 mod lamps;
 #[cfg(all(test, any(feature = "native", feature = "native-sdk")))]

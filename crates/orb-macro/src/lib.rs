@@ -559,12 +559,19 @@ struct State {
 }
 
 /// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a function
-/// marked `#[open]`, `fn() -> Self`, and, optionally, one marked `#[close]`, `fn(self)`.
+/// marked `#[open]`, `fn() -> Self` or `fn() -> Result<Self, E>`, and, optionally, one marked
+/// `#[close]`, `fn(self)`.
 struct Resource {
     ident: Ident,
     version: u32,
     /// The function marked `#[open]`, once found.
     open: Option<Ident>,
+    /// Whether the `#[open]` function returns `Result<Self, E>`, whose error fails the open with
+    /// its `Display` text.
+    fallible: bool,
+    /// Where a fallible `#[open]` names its error type, which the generated code asks for
+    /// `Display` there.
+    failure: Span,
     /// The function marked `#[close]`, if any.
     close: Option<Ident>,
     /// The resources of `depends = [..]`, by their struct's name, which open before this one.
@@ -646,7 +653,7 @@ struct NativeOnly {
 enum Marker {
     /// `#[validate]`: a state's rule, `fn(&self) -> Result<(), String>`.
     Validate,
-    /// `#[open]`: a root resource's opening, `fn() -> Self`.
+    /// `#[open]`: a root resource's opening, `fn() -> Self` or `fn() -> Result<Self, E>`.
     Open,
     /// `#[close]`: a root resource's closing, `fn(self)`.
     Close,
@@ -683,7 +690,7 @@ impl Marker {
     fn shape(self) -> &'static str {
         match self {
             Self::Validate => "`fn(&self) -> Result<(), String>` of a #[state] struct",
-            Self::Open => "`fn() -> Self` of a #[resource] struct",
+            Self::Open => "`fn() -> Self` or `fn() -> Result<Self, E>` of a #[resource] struct",
             Self::Close => "`fn(self)` of a #[resource] struct",
             Self::Constructor => "`fn(..) -> Self`, without self, of a #[wit_resource] struct",
             Self::Create => {
@@ -2066,6 +2073,9 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 format!("#[open] marks {}", Marker::Open.shape()),
             ));
         }
+        let failure = opens_fallibly(&signature.output, &resource.ident)?;
+        resource.fallible = failure.is_some();
+        resource.failure = failure.unwrap_or_else(Span::call_site);
         resource.open = Some(signature.ident.clone());
         if let Some(close) =
             marked_function(&marked, Marker::Close, &resource.ident, resource.scope)?
@@ -6317,6 +6327,44 @@ fn state_code(
     }
 }
 
+/// Where an `#[open]` function returning `output` names its error, if it may fail: `Self`, or a
+/// path to the resource's struct `ident`, opens always, and a `Result` of either, `Result<Self, E>`
+/// or an alias such as `io::Result<Self>`, fails with the error's `Display` text, which `E`, or the
+/// alias, names. Any other type is an error on it.
+fn opens_fallibly(output: &ReturnType, ident: &Ident) -> syn::Result<Option<Span>> {
+    let ReturnType::Type(_, ty) = output else {
+        return Ok(None);
+    };
+    let is_self = |ty: &Type| {
+        matches!(ty, Type::Path(path) if path.qself.is_none()
+        && (path.path.is_ident("Self")
+            || path.path.segments.last().is_some_and(|last| {
+                last.ident == *ident && matches!(last.arguments, syn::PathArguments::None)
+            })))
+    };
+    if is_self(ty) {
+        return Ok(None);
+    }
+    if let Type::Path(path) = &**ty
+        && path.qself.is_none()
+        && let Some(last) = path.path.segments.last()
+        && last.ident == "Result"
+        && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
+        && matches!(arguments.args.first(), Some(syn::GenericArgument::Type(ok)) if is_self(ok))
+    {
+        return Ok(Some(match arguments.args.iter().nth(1) {
+            Some(error) => error.span(),
+            None => last.ident.span(),
+        }));
+    }
+    Err(syn::Error::new_spanned(
+        ty,
+        format!(
+            "#[open] returns `Self` or a `Result<Self, E>` with `E: Display`, whose error fails the open of `{ident}` with its text"
+        ),
+    ))
+}
+
 /// The resources in the order the kernel opens them: each after the resources it depends on, and
 /// otherwise in the module's order. A dependency that is not a `#[resource]` of the Orb, the
 /// resource itself, or one that closes a cycle is an error on its name in the attribute.
@@ -6407,6 +6455,8 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
         ident: item.ident.clone(),
         version,
         open: None,
+        fallible: false,
+        failure: Span::call_site(),
         close: None,
         depends,
         scope: 0,
@@ -6454,7 +6504,23 @@ fn resource_code(
             .as_ref()
             .expect("a resource has its #[open] function");
         let slot = slot(resource);
-        quote! { #name => { #slot.open(#path::#open()); ::core::result::Result::Ok(1) } }
+        if resource.fallible {
+            // A missing `Display` falls on the error type the author wrote.
+            let text = quote_spanned! {resource.failure=>
+                __tembra_resource::ToString::to_string(&error)
+            };
+            quote! {
+                #name => match #path::#open() {
+                    ::core::result::Result::Ok(value) => {
+                        #slot.open(value);
+                        ::core::result::Result::Ok(1)
+                    }
+                    ::core::result::Result::Err(error) => ::core::result::Result::Err(#text),
+                }
+            }
+        } else {
+            quote! { #name => { #slot.open(#path::#open()); ::core::result::Result::Ok(1) } }
+        }
     });
     let closers = resources.iter().map(|resource| {
         let name = wit::kebab(&resource.ident);
@@ -6522,7 +6588,10 @@ fn resource_code(
         #[doc(hidden)]
         pub mod __tembra_resource {
             extern crate alloc;
-            pub use alloc::{string::String, vec::Vec};
+            pub use alloc::{
+                string::{String, ToString},
+                vec::Vec,
+            };
 
             /// One resource's value, absent until the kernel opens it and after it closes it.
             pub struct Slot<T>(::core::cell::RefCell<::core::option::Option<T>>);

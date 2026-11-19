@@ -35,7 +35,7 @@ use crate::{
 };
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Literal, Span, TokenStream};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
@@ -828,6 +828,29 @@ pub(crate) fn resource_access(
                     .open
                     .as_ref()
                     .expect("a resource has its #[open] function");
+                // A fallible `#[open]` fails the open with its error's text, as the worker words
+                // a component's.
+                let opened = if resource.fallible {
+                    let failed = format!("the resource `{name}` did not open: {{}}");
+                    // A missing `Display` falls on the error type the author wrote.
+                    let text = quote_spanned! {resource.failure=>
+                        ::std::string::ToString::to_string(&error)
+                    };
+                    quote! {
+                        match #path::#open() {
+                            ::core::result::Result::Ok(value) => value,
+                            ::core::result::Result::Err(error) => {
+                                return ::core::result::Result::Err(::#facade::Error::new(
+                                    ::#facade::core::Code::Unavailable,
+                                    ::#facade::core::Reason::Resource,
+                                    ::std::format!(#failed, #text),
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    quote! { #path::#open() }
+                };
                 let close = match &resource.close {
                     Some(close) => quote! {
                         if let ::core::option::Option::Some(value) = slot.close() {
@@ -854,7 +877,7 @@ pub(crate) fn resource_access(
                                 // The `#[open]` function reads its dependencies with `with`.
                                 let _entered = table.upgrade().map(Entered::enter);
                                 let slot = Slot::new();
-                                slot.open(#path::#open());
+                                slot.open(#opened);
                                 ::core::result::Result::Ok(slot)
                             })
                         },

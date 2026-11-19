@@ -440,9 +440,9 @@ the fields they care about.
 
 A resource is a value the kernel opens when the Orb is activated and closes when it is torn down,
 in the order its dependencies require, and that every method and hook callback of the Orb can
-use. A struct marked `#[resource]`, with a function marked `#[open]`, `fn() -> Self`, and
-optionally one marked `#[close]`, `fn(self)`, in its `impl` block, outside every service's module,
-is a resource of the Orb's root:
+use. A struct marked `#[resource]`, with a function marked `#[open]`, `fn() -> Self` or
+`fn() -> Result<Self, E>`, and optionally one marked `#[close]`, `fn(self)`, in its `impl` block,
+outside every service's module, is a resource of the Orb's root:
 
 ```rust
 /// What this contributor observed.
@@ -502,6 +502,25 @@ order, with their names as its dependencies; natively the Orb's create declares 
 order with `Declaration::resource_async`, each with the keys of its dependencies. A name that is
 not a `#[resource]` of the Orb, the resource itself and a cycle are errors on the name in the
 attribute.
+
+An `#[open]` that can fail returns `Result<Self, E>`, with `E: Display`, or an alias of
+`Result` with one type argument, such as `io::Result<Self>` or `anyhow::Result<Self>`; `Self`
+may also be a path to the resource's struct:
+
+```rust
+impl Db {
+    #[open]
+    pub fn open() -> Result<Db, Refused> { Db::connect() }
+}
+```
+
+An `Err` fails the open with the error's text, as a component and natively: the component's
+`open` answers it as `err`, and the host, the worker or the JS adapter, fails the open with
+`unavailable/resource` and ``the resource `db` did not open: ..``, the error a native opener
+fails with too. The Orb's activation fails, a call waiting on it fails with that error, and the
+kernel closes the resources that already opened, in reverse. A panic in `#[open]` is not an
+answer: it traps a component, while a native host catches it. An `E` without `Display` is an
+error on `E`, and any return type other than `Self` or a `Result` of it is an error on the type.
 
 ## The call's context
 

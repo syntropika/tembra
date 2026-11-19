@@ -2512,6 +2512,56 @@ fn a_root_resource_opens_after_its_dependency_both_ways() {
     module_natively("cellar");
 }
 
+/// An `#[open]` that returns `Result`, in a component build, std and freestanding, and natively:
+/// in the `kiln` feature the wood opens through `Ok`, and the fire, which depends on it, answers
+/// `Err`, so the activation fails as it does for a native Orb whose resource fails to open, and
+/// the kernel closes the wood. The object waiting on the activation fails with the opener's
+/// error, the same both ways: its code, reason and the error's `Display` text.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn an_open_that_answers_an_error_fails_the_activation_both_ways() {
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for features in ["kiln", "kiln,no-std"] {
+        let (_, orb) = module_orb(&engine, &module_component(features), "kiln");
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let hearth = host
+            .get(
+                "kiln::example:kiln/hearth@1.0.0",
+                vec!["main".into()],
+                "alice",
+            )
+            .unwrap();
+        let refused = pool
+            .run_until(hearth.ready())
+            .expect_err("the activation fails");
+        assert_eq!(
+            (
+                refused.code,
+                refused.reason.as_str(),
+                refused.message.as_str()
+            ),
+            (
+                Code::Unavailable,
+                "resource",
+                "the resource `fire` did not open: 2 damp logs"
+            ),
+            "{features}: {refused}"
+        );
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+        assert_eq!(logged(), ["open wood", "close wood"], "{features}");
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("kiln");
+}
+
 /// An interface with `flags` consumed by a guest that depends on the facade alone, in a component
 /// build, std and freestanding: the module `holder` of the `flagged` feature implements
 /// `example:rights/rights@1.0.0`, whose `access` the bindings generate without `wit-bindgen`'s

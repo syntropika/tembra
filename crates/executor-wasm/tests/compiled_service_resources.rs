@@ -303,10 +303,18 @@ fn an_object_whose_open_answers_an_error_is_not_created_and_closes_what_opened()
     let two = Rc::new(host.get(PROBE, vec!["two".into()], "alice").unwrap());
     let refused = pool
         .run_until(two.ready())
-        .expect_err("the object is not created")
-        .to_string();
-    assert!(
-        refused.contains("the resource `y` did not open: down"),
+        .expect_err("the object is not created");
+    assert_eq!(
+        (
+            refused.code,
+            refused.reason.as_str(),
+            refused.message.as_str()
+        ),
+        (
+            tembra::core::Code::Unavailable,
+            "resource",
+            "the resource `y` did not open: down"
+        ),
         "{refused}"
     );
     assert_eq!(

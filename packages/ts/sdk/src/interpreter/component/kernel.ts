@@ -22,6 +22,8 @@
  * Mirrors the component worker of `crates/executor-wasm/src/component/worker.rs`.
  */
 import type { Declaration } from "../../authoring/declaration.ts";
+import { Code, Reason } from "../../bridge/identifiers.ts";
+import { TembraError } from "../../error.ts";
 import type { Gate } from "../gate.ts";
 import { encode, VALUE_LIMIT, type Encoded } from "../codec.ts";
 import type { LogLevel } from "../host-protocol.ts";
@@ -554,17 +556,18 @@ export class ComponentKernel {
     try {
       if (numbered.kind === "open") {
         // An opener answers `result<u32, string>`: its error fails this open with the message,
-        // so the kernel closes what already opened, as for a native opener.
+        // `unavailable/resource` as a native opener's, so the kernel closes what already opened.
         const answer = (await this.#call(environment, callback, exported, named)) as {
           tag?: unknown;
           val?: unknown;
         };
-        if (answer?.tag === "err")
-          throw new Error(
+        if (answer?.tag === "err") {
+          const message =
             typeof answer.val === "string"
               ? `the resource \`${numbered.name}\` did not open: ${answer.val}`
-              : `the resource \`${numbered.name}\` did not open`,
-          );
+              : `the resource \`${numbered.name}\` did not open`;
+          throw new TembraError({ code: Code.Unavailable, reason: Reason.Resource, message });
+        }
         if (answer?.tag !== "ok") throw new Error("the resource opener answered no result");
         const handle = answer.val;
         if (!isU32(handle)) throw new Error("resource handle is not a u32");

@@ -7833,6 +7833,58 @@ fn the_orbs_create_declares_its_root_resources_natively() {
     }
 }
 
+/// An `#[open]` returning `Result<Self, E>`, or an alias of `Result` with one type argument: a
+/// component's `open` answers the error's `Display` text, which the worker words as "the resource
+/// `name` did not open: ..", and the native opener fails with the same words and
+/// `unavailable/resource`; an `#[open]` returning `Self`, or a path to its struct, opens as before.
+#[test]
+fn an_open_returning_a_result_fails_with_its_error_both_ways() {
+    let module = expanded(
+        PACKAGE,
+        "mod kiln {
+            #[resource]
+            pub struct Fire { pub heat: u32 }
+            impl Fire {
+                #[open]
+                pub fn open() -> Result<Self, String> { Err(String::new()) }
+            }
+            #[resource]
+            pub struct Wood { pub logs: u32 }
+            impl Wood {
+                #[open]
+                pub fn open() -> super::kiln::Wood { Wood { logs: 0 } }
+            }
+            #[resource]
+            pub struct Ash { pub grams: u32 }
+            impl Ash {
+                #[open]
+                pub fn open() -> std::io::Result<self::Ash> { Ok(Ash { grams: 0 }) }
+            }
+            pub mod hearth {
+                #[service]
+                pub struct Hearth;
+                impl Hearth { pub fn heat() -> u32 { 0 } }
+            }
+        }",
+    );
+    let generated = tokens(&module);
+    for expected in [
+        "\"fire\" => match Fire :: open () { :: core :: result :: Result :: Ok (value) => { __TEMBRA_RESOURCE_FIRE . open (value) ; :: core :: result :: Result :: Ok (1) } :: core :: result :: Result :: Err (error) => :: core :: result :: Result :: Err (__tembra_resource :: ToString :: to_string (& error)) , }",
+        "\"wood\" => { __TEMBRA_RESOURCE_WOOD . open (Wood :: open ()) ; :: core :: result :: Result :: Ok (1) }",
+        "\"ash\" => match Ash :: open () {",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let resources = native(&module, &["__tembra_resource"]);
+    for expected in [
+        "slot . open (match super :: Fire :: open () { :: core :: result :: Result :: Ok (value) => value , :: core :: result :: Result :: Err (error) => { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: core :: Code :: Unavailable , :: tembra :: core :: Reason :: Resource , :: std :: format ! (\"the resource `fire` did not open: {}\" , :: std :: string :: ToString :: to_string (& error)) ,)) ; } }) ;",
+        "slot . open (super :: Wood :: open ()) ;",
+        "slot . open (match super :: Ash :: open () {",
+    ] {
+        assert!(resources.contains(expected), "{expected}\n{resources}");
+    }
+}
+
 /// What the native side does not cover yet leaves the module compiling inside the facade's wrapper,
 /// with an `orb()` that answers an error naming it, and a component build of the module unaffected:
 /// a WASI import, an import, plain or by key, of an interface with a synchronous function, and a

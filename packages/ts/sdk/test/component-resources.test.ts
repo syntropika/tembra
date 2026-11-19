@@ -533,7 +533,7 @@ describe("a root resource that does not open", () => {
     const install = () => owner.install({ artifact: Uint8Array.of(0) });
     await refused(owner, install, "chain::test:chain/probe@1.0.0", events, {
       code: Code.Unavailable,
-      reason: "callback",
+      reason: "resource",
       message: "the resource `b` did not open: down",
     });
   });
@@ -690,7 +690,11 @@ describe("resources of a compiled Orb's service objects", () => {
     try {
       await owner.install({ artifact: Uint8Array.of(0) });
       const one = await get(owner, "one");
-      await expect(get(owner, "two")).rejects.toThrow("the resource `y` did not open: down");
+      await expect(get(owner, "two")).rejects.toMatchObject({
+        code: Code.Unavailable,
+        reason: "resource",
+        message: "the resource `y` did not open: down",
+      });
       expect(events).toEqual(["open a", "open x", "open y", "open x", "close x"]);
       expect(await one.mine()).toBe(3);
       expect(await one.shared()).toBe(1);
