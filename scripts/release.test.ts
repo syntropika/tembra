@@ -308,7 +308,7 @@ test("the changelog skips merge commits, lists each breaking footer and refuses 
     for (const [name, last] of [
       ["unconventional", "update the fixture"],
       ["merge-titled", "Merge the two parsers into one"],
-    ]) {
+    ] as const) {
       const refused = fixture(name, last);
       expect(refused.status).not.toBe(0);
       expect(refused.stderr).toContain("UnconventionalCommitsError(1)");
