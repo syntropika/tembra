@@ -1,0 +1,2 @@
+package example:model-agent@1.0.0;
+interface agent { use example:metadata/metadata@1.0.0.{metadata}; use example:tools/tools@1.0.0.{tool}; record model { metadata: metadata, tools: list<tool> } describe: func() -> model; }

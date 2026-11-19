@@ -33,7 +33,9 @@ pub mod packet_reader {
                 let (batch, ticket) = received.unwrap();
                 let mut total = ticket.value().await;
                 for event in batch.into_iter().flatten() {
-                    if let packets::Event::Created(envelope) | packets::Event::Guest(envelope) = event {
+                    if let packets::Event::Created(envelope) | packets::Event::Guest(envelope) =
+                        event
+                    {
                         total += envelope.amount + envelope.ticket.value().await;
                     }
                 }

@@ -12,6 +12,13 @@ mod rpc_provider;
 #[path = "../../native-fixture/src/rpc_consumer.rs"]
 mod rpc_consumer;
 
+#[cfg(feature = "hook-gate")]
+#[path = "../../native-fixture/src/hook_gate.rs"]
+mod hook_gate;
+#[cfg(feature = "hook-watch")]
+#[path = "../../native-fixture/src/hook_watch.rs"]
+mod hook_watch;
+
 #[cfg(feature = "authored")]
 mod authored;
 #[cfg(feature = "cellar")]

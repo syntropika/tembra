@@ -1,4 +1,4 @@
-/** Generated clients use the SDK's existing captured delivery and resource ownership lane. */
+/** Generated clients use checked WIT delivery on their reference's existing transport. */
 import type { CapturedInvocation, ResourceCapability } from "#tembra-adapters";
 import type { DynamicReference } from "../authoring/types.ts";
 import { bindingName } from "../interpreter/component/names.ts";
@@ -17,11 +17,12 @@ export interface WitResource {
   release(): void;
 }
 
-/** Build-time checked metadata retained by generated resource clients. */
+/** Build-time checked metadata retained by generated WIT clients. */
 export interface WitClientSchema extends TypeGraph {
   readonly imports?: readonly { readonly binding: string; readonly contract?: string }[];
   readonly identity: string;
   readonly signature: string;
+  readonly resources: Readonly<Record<string, number>>;
   readonly functions: Readonly<Record<string, GraphFunction>>;
 }
 
@@ -67,6 +68,15 @@ export function bindWitReference(
 export function witClient(reference: DynamicReference, schema: WitClientSchema): WitClient {
   const remote = backends.get(reference);
   if (remote) return resourceClient(schema, remote(schema));
+  if (Object.keys(schema.resources).length === 0)
+    return {
+      /** Preserve local data values and the reference's existing context and checks. */
+      async call<T>(method: string, args: readonly unknown[]): Promise<T> {
+        if (!Object.hasOwn(schema.functions, method))
+          throw new Error(`Unknown WIT function ${method}`);
+        return reference[method](...args) as Promise<T>;
+      },
+    };
   const { session, record } = referenceOrigin(reference);
   return resourceClient(schema, {
     identity: session,

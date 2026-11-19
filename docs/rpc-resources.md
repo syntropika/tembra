@@ -84,17 +84,24 @@ retain that existing path; receivers and owned arguments always require resource
 
 ## Protocol
 
-The resource protocol requires updated peers. Ordinary data calls still use the common RPC
-operations. Resource delivery is explicitly checked with `resources: 1` in `get`; the Rust host
-returns the same value and the checked WIT service signature. Generated resource clients require
+The resource protocol requires updated peers. Untyped data calls still use the common RPC
+operations. Generated WIT clients, including data-only interfaces, use checked captured delivery
+so `u64` and `s64` retain their entire ranges. Delivery is explicitly checked with `resources: 1` in `get`; the Rust host
+returns the same value and the checked WIT service signature. All generated RPC clients require
 that signature and capability support before any WIT method is called. The JavaScript RPC server
-does not supply this resource channel.
+does not supply this checked WIT channel; generated RPC clients reject it during acquisition
+before invoking provider code. Local data-only clients keep the ordinary local Reference path,
+which already carries JavaScript `bigint` values directly. Local resource-bearing interfaces
+continue to require matching captured delivery.
 
 A captured call uses the existing `call` operation with `input` containing WIT JSON text and
 `capabilities` containing its signature, optional receiver and owned arguments. Its response has
 WIT JSON text in `output` and an `owned` descriptor array. Keeping WIT text inside the envelope
 preserves wide integers and valid large integral floating-point values without changing the
-ordinary RPC codec. Each descriptor contains a reference ID, a random token, defining interface,
+ordinary RPC codec. Ordinary Rust RPC arguments and results retain numeric WIT integers;
+generated clients use the existing captured text conversion rather than sending the generic
+JSON codec's tagged BigInt objects into that numeric boundary. No global string conversion or
+additional protocol is involved. Each descriptor contains a reference ID, a random token, defining interface,
 resource name and provider revision. The existing `release` operation checks that descriptor.
 The one-way `accept` operation acknowledges successful result delivery; `cancel` also discards
 unaccepted results. No executor-specific resource protocol is used.
@@ -124,7 +131,10 @@ Ordinary serde methods use data calls.
 
 `just test-rpc-resources` builds a real Rust host, a macro-generated fixed-WIT decoder provider as
 both native code and a component, and the existing resource-container component. The same generated
-SDK clients run over actual bytes for both executor types. Tests cover constructors, statics,
+SDK clients run over actual bytes for both executor types. Data-only fixed-WIT clients verify
+`u64::MAX`, `i64::MIN` and `i64::MAX` inside records, lists, tuples, nullable options, variants and
+results, plus cancellation and refusal of an unprepared channel before provider execution.
+Resource tests cover constructors, statics,
 synchronous and asynchronous methods, moves, aliases, containers, cancellation, delayed replies,
 ordinary saturation, bounded release cleanup, release while running, host closure, disconnect,
 reload, forged and cross-session handles,

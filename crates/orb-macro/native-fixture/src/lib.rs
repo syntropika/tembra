@@ -1963,9 +1963,7 @@ pub mod turnstile {
     }
 }
 
-/// Declares a hook, whose `run` is synchronous: a native method could not wait for the hook's
-/// contributions, so the declaration works in a component build only, and the module's `orb()`
-/// answers an error naming it.
+/// Declares a hook with an awaitable Rust entry and a synchronous WIT callback.
 #[tembra::orb(package = "example:checkpoint@1.0.0")]
 pub mod checkpoint {
     /// The hook: a waterfall, each contributor may change the inspection, in plan order.
@@ -1987,11 +1985,12 @@ pub mod checkpoint {
 
         impl Inspector {
             /// Run the hook over a fresh inspection of the value.
-            pub fn inspect(value: i32) -> Inspection {
+            pub async fn inspect(value: i32) -> Inspection {
                 Inspect::run(Inspection {
                     value,
                     stopped: false,
                 })
+                .await
             }
         }
     }
@@ -2316,3 +2315,12 @@ pub mod codec;
 pub mod rpc_consumer;
 /// Shared native/component provider used by actual RPC client tests.
 pub mod rpc_provider;
+
+/// Compose separately owned canonical WIT packages.
+pub mod canonical_packages;
+
+#[path = "hook_gate.rs"]
+pub mod hook_gate;
+
+#[path = "hook_watch.rs"]
+pub mod hook_watch;

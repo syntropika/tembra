@@ -22,9 +22,9 @@ serde_json.workspace = true
 syn = { version = "2", features = ["full"] }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
 wit-parser = "=0.261.0"
+wit-component = "=0.261.0"
 
 [dev-dependencies]
-wit-component = "=0.261.0"
 # The tests read the source text an error falls on.
 proc-macro2 = { version = "1", features = ["span-locations"] }
 

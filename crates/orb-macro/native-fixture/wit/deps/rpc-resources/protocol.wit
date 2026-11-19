@@ -23,7 +23,16 @@ interface codec {
   stats: func() -> tuple<u32, u32>;
 }
 
+interface values {
+  record limits { unsigned-max: u64, signed-min: s64, signed-max: s64 }
+  variant choice { empty, limits(limits) }
+  echo: func(value: limits) -> limits;
+  wait: async func(value: limits) -> limits;
+  nested: async func(values: list<option<tuple<u64, s64>>>, selected: choice, outcome: result<limits, s64>) -> tuple<list<option<tuple<u64, s64>>>, choice, result<limits, s64>>;
+}
+
 world provider {
   import gate;
   export codec;
+  export values;
 }

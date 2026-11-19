@@ -5,14 +5,14 @@
 )]
 pub mod provider {
     pub mod implementation {
-        
+
         use std::cell::Cell;
         thread_local! { static DROPPED: Cell<u32> = const { Cell::new(0) }; }
-    
+
         /// The existing provider protocol, whose pure functions remain synchronous.
         #[service("example:protocol/codec@1.0.0")]
         pub struct Codec;
-    
+
         impl Codec {
             /// Normalize a request without changing the synchronous WIT contract.
             pub fn normalize(value: u64) -> u64 {
@@ -37,13 +37,13 @@ pub mod provider {
                 DROPPED.with(Cell::get)
             }
         }
-    
+
         /// One provider-owned decoder.
         #[wit_resource]
         pub struct Decoder {
             total: Cell<u64>,
         }
-    
+
         impl Decoder {
             /// Construct a decoder with its own identity and state.
             #[constructor]
@@ -81,7 +81,7 @@ pub mod provider {
                 Some(self.total.get())
             }
         }
-    
+
         impl Drop for Decoder {
             fn drop(&mut self) {
                 DROPPED.with(|n| n.set(n.get() + 1));

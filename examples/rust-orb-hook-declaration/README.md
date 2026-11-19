@@ -31,8 +31,8 @@ pub mod admissions {
 
     impl Admissions {
         /// Run the guard hook over a fresh admission and report what the contributors decided.
-        pub fn admit(value: i32) -> Admission {
-            Guard::run(Admission { value, blocked: false })
+        pub async fn admit(value: i32) -> Admission {
+            Guard::run(Admission { value, blocked: false }).await
         }
     }
 }
@@ -67,7 +67,7 @@ world gate {
 }
 ```
 
-The macro gives the struct `Guard::run(input)`, which hands the input to the kernel; the kernel
+The macro gives the struct `Guard::run(input).await`, which hands the input to the kernel; the kernel
 calls the contributions in plan order and returns the composed value, for a waterfall the admission
 as the last contributor left it. In the contract the hook interface is both imported and exported.
 The export is what the portable hook contract requires of a provider, and the macro answers it with
@@ -148,3 +148,5 @@ composition and observation are not exposed to compiled Orbs. `Guard::run` runs 
 call, because the kernel runs a plan under an admitted invocation. The input of a derived hook is a
 record, an enum, a variant, a scalar, a string or a list; the types it reaches are defined in the
 hook's interface, and the services borrow them with `use`.
+
+The same awaitable entry works in native hosts with the facade's `hooks` feature. The hook callback stays WIT `func`; the service that awaits it exports `async func`. A synchronous component hook import does not yield merely because its Rust wrapper is awaitable.

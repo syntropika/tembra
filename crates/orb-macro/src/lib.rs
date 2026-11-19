@@ -41,6 +41,7 @@
 //! `cargo tembra build` compiles the crate, reads the same WIT and the hook priorities from the
 //! component and packages the artifact.
 mod cfg;
+mod contract_output;
 mod foreign;
 mod imports;
 mod keyed;
@@ -131,7 +132,23 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
         if meta.path.is_ident("package") {
             options.package = Some(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("wit") {
-            options.wit = Some(meta.value()?.parse::<LitStr>()?.value());
+            let value = meta.value()?;
+            if value.peek(syn::token::Bracket) {
+                let content;
+                syn::bracketed!(content in value);
+                options.wit_roots = content
+                    .parse_terminated(|input| input.parse::<LitStr>(), Token![,])?
+                    .into_iter()
+                    .map(|path| path.value())
+                    .collect();
+                if options.wit_roots.is_empty() {
+                    return Err(meta.error("`wit` needs at least one canonical package path"));
+                }
+            } else {
+                options.wit = Some(value.parse::<LitStr>()?.value());
+            }
+        } else if meta.path.is_ident("contract") {
+            options.contract = Some(contract_output::parse(meta.value()?.parse()?)?);
         } else if meta.path.is_ident("import") && meta.input.peek(syn::token::Paren) {
             options.keyed.push(keyed::option(&meta)?);
         } else if meta.path.is_ident("import") {
@@ -150,7 +167,7 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
             })?);
         } else {
             return Err(meta.error(
-                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", import(\"ns:name/interface@version\", keyed), context, no_std, crate = \"name\")]",
+                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", contract = env!(\"OUT_DIR\"), import = \"ns:name/interface@version\", import(\"ns:name/interface@version\", keyed), context, no_std, crate = \"name\")]",
             ));
         }
         Ok(())
@@ -221,6 +238,10 @@ struct Options {
     package: Option<LitStr>,
     /// A directory with the WIT packages this Orb consumes, relative to the crate manifest.
     wit: Option<String>,
+    /// Canonical package roots resolved together without a staged dependency directory.
+    wit_roots: Vec<String>,
+    /// The explicit contract output directory, literal or named by Cargo's environment.
+    contract: Option<contract_output::Output>,
     /// The module imports the kernel's `tembra:guest/context` interface.
     context: bool,
     /// Supply the allocator and panic handler for a freestanding Wasm guest.
@@ -1822,15 +1843,13 @@ fn expand(
     // and `contract/deps/` with the standard packages, the files `cargo tembra build` writes,
     // rewritten only when their content changes. A compile error names what went wrong.
     if let Some(crate_dir) = crate_dir {
+        let output = contract_output::directory(analysis.options.contract.as_ref(), crate_dir)?;
         tembra_contracts::ModuleContract::new(&analysis.wit, analysis.wit_dir.as_deref())
-            .and_then(|contract| contract.write(crate_dir))
+            .and_then(|contract| contract.write_to(&output))
             .map_err(|error| {
                 syn::Error::new(
                     analysis.ident.span(),
-                    format!(
-                        "writing the contract into {}: {error}",
-                        crate_dir.join("contract").display()
-                    ),
+                    format!("writing the contract into {}: {error}", output.display()),
                 )
             })?;
     }
@@ -1838,10 +1857,14 @@ fn expand(
     let vis = &analysis.vis;
     let ident = &analysis.ident;
     let wit_literal = LitStr::new(&analysis.wit, Span::call_site());
+    let output_tracking = contract_output::tracking(analysis.options.contract.as_ref());
+    let source_tracking = analysis.parsed.tracking();
     Ok(quote! {
         #(#outer_attrs)*
         #vis mod #ident {
             #(#inner_attrs)*
+            #output_tracking
+            #source_tracking
 
             /// The WIT derived from this module.
             pub const WIT: &str = #wit_literal;
@@ -2130,7 +2153,36 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             if constructor.is_some_and(|marked| marked.function.sig.ident == function.sig.ident) {
                 continue;
             }
-            match resource_function(function)? {
+            let read = resource_function(function, &facade)?;
+            let (ResourceFunction::Method(member) | ResourceFunction::Static(member)) = &read;
+            if member.context.is_some()
+                && declares(&mut tree, &candidates, resource.scope, "Context")
+            {
+                return Err(syn::Error::new(
+                    member.ident.span(),
+                    format!(
+                        "`{}::{}` takes `&Context`, and this module declares a `Context` of its own: pass that type owned, as WIT parameters are, or rename it for the method to take the call's `&Context`",
+                        resource.ident, member.ident
+                    ),
+                ));
+            }
+            for input in &function.sig.inputs {
+                if let FnArg::Typed(typed) = input
+                    && is_context(&typed.ty)
+                {
+                    native_only.push(NativeOnly {
+                        name: "&Context".to_owned(),
+                        span: typed.ty.span(),
+                    });
+                }
+            }
+            if let (true, ReturnType::Type(_, ty)) = (member.fallible, &function.sig.output) {
+                native_only.push(NativeOnly {
+                    name: format!("{facade}::Result"),
+                    span: ty.span(),
+                });
+            }
+            match read {
                 ResourceFunction::Method(method) => resource.methods.push(method),
                 ResourceFunction::Static(function) => resource.statics.push(function),
             }
@@ -2495,8 +2547,15 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     }
     // Consumed packages, parsed once for the expansion: the callback of every hook, contributed or
     // declared, and every interface implemented or imported are read from their WIT packages.
-    let parsed = wit::Parsed::new(options.wit.as_deref().map(wit::absolute).transpose()?);
-    let wit_dir = parsed.dir().map(|dir| dir.path().to_path_buf());
+    let parsed = wit::Parsed::new(
+        options.wit.as_deref().map(wit::absolute).transpose()?,
+        options
+            .wit_roots
+            .iter()
+            .map(|path| wit::absolute(path))
+            .collect::<syn::Result<_>>()?,
+    )?;
+    let wit_dir = parsed.path().map(Path::to_path_buf);
     let implemented: Vec<String> = services
         .iter()
         .filter_map(|service| service.implements.clone())
@@ -2702,7 +2761,8 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             if !implemented.is_empty()
                 || !imported.is_empty()
                 || !views.is_empty()
-                || !hooks.is_empty() =>
+                || !hooks.is_empty()
+                || declared.iter().any(|hook| hook.input.is_none()) =>
         {
             wit::ConsumedTypes::read(
                 dir,
@@ -2710,6 +2770,12 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                     .iter()
                     .map(|identity| (identity.as_str(), true))
                     .chain(hooks.keys().map(|hook| (hook.as_str(), true)))
+                    .chain(
+                        declared
+                            .iter()
+                            .filter(|hook| hook.input.is_none())
+                            .map(|hook| (hook.hook.as_str(), false)),
+                    )
                     .chain(imported.iter().map(|identity| (identity.as_str(), false)))
                     .chain(views.iter().map(|view| (view.target.as_str(), false))),
             )?
@@ -2822,7 +2888,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             *spelling = consumed_modules.spelled(ty, resource.scope)?;
         }
     }
-    let wit = wit::render(
+    let mut wit = wit::render(
         &package,
         &world,
         wit::Items {
@@ -2844,6 +2910,9 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             context: options.context,
         },
     )?;
+    if let Some(inline) = parsed.inline() {
+        wit.push_str(inline);
+    }
     Ok(Analysis {
         options,
         package,
@@ -3273,7 +3342,7 @@ fn component(
             &holding,
             defining.as_ref(),
             converting,
-            depth,
+            (depth, &facade),
         )?;
         tree.at(declaration.scope).generated.push(code);
     }
@@ -3307,8 +3376,8 @@ fn component(
         standard.clone()
     };
     let inline = LitStr::new(&format!("{wit}{beside}"), Span::call_site());
-    let path = parsed.dir().map(|dir| {
-        let dir = LitStr::new(&dir.path().display().to_string(), Span::call_site());
+    let path = parsed.path().map(|dir| {
+        let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
         quote! { path: #dir, }
     });
     // A state's JSON holds the consumed types it reaches as the bindings generate them: those
@@ -3892,8 +3961,9 @@ enum ResourceFunction {
     Static(Function),
 }
 
-/// Read one `pub fn` of a WIT resource; `&mut self` and `self` are refused.
-fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction> {
+/// Read one resource function with the service's context and transport-result rules; consuming
+/// or mutable receivers are refused.
+fn resource_function(function: &syn::ImplItemFn, facade: &Ident) -> syn::Result<ResourceFunction> {
     let receiver = function.sig.inputs.first().and_then(|input| match input {
         FnArg::Receiver(receiver) => Some(receiver),
         FnArg::Typed(_) => None,
@@ -3906,19 +3976,7 @@ fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction
             "a WIT method borrows `&self`; change a resource through Cell or RefCell",
         ));
     }
-    let read = Function {
-        ident: function.sig.ident.clone(),
-        asynchronous: function.sig.asyncness.is_some(),
-        receiver: receiver.is_some(),
-        docs: wit::docs(&function.attrs)?,
-        params: typed_params(function)?,
-        result: match result(&function.sig.output) {
-            Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
-            None => None,
-        },
-        fallible: false,
-        context: None,
-    };
+    let read = method(function, false, facade)?;
     Ok(match receiver {
         Some(_) => ResourceFunction::Method(read),
         None => ResourceFunction::Static(read),
@@ -3969,7 +4027,7 @@ fn spell_names(
     Ok(())
 }
 
-/// The call of an author's service method as a bridge answers it: the value of a method returning
+/// The call of an author's exported method as a bridge answers it: the value of a method returning
 /// `tembra::Result<T>`, which only a native host links. Such a module builds no component, so the
 /// bridge, which a host build still type-checks, never runs.
 fn answered(function: &Function, call: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
@@ -4348,7 +4406,10 @@ fn derived_resource(
         let generated = rust_ident(&wit::kebab(name));
         let (params, names) = bridged(&function.params);
         let (asynchronous, await_) = async_bridge(function.asynchronous);
-        let call = quote! { #ident::#name(self, #(#names),*) #await_ };
+        let call = answered(
+            function,
+            quote! { #ident::#name(self, #(#names),*) #await_ },
+        );
         let (result, body) = derived_result(
             &function.result,
             scope,
@@ -4358,6 +4419,10 @@ fn derived_resource(
             modules,
             call,
         );
+        let body = match function.context {
+            Some(_) => native_only(ident, name, function.params.iter().map(|(name, _, _)| name)),
+            None => body,
+        };
         quote! { #asynchronous fn #generated(&self, #(#params),*) #result { #body } }
     });
     let statics = resource.statics.iter().map(|function| {
@@ -4365,7 +4430,7 @@ fn derived_resource(
         let generated = rust_ident(&wit::kebab(name));
         let (params, names) = bridged(&function.params);
         let (asynchronous, await_) = async_bridge(function.asynchronous);
-        let call = quote! { #ident::#name(#(#names),*) #await_ };
+        let call = answered(function, quote! { #ident::#name(#(#names),*) #await_ });
         let (result, body) = derived_result(
             &function.result,
             scope,
@@ -4375,6 +4440,10 @@ fn derived_resource(
             modules,
             call,
         );
+        let body = match function.context {
+            Some(_) => native_only(ident, name, function.params.iter().map(|(name, _, _)| name)),
+            None => body,
+        };
         quote! { #asynchronous fn #generated(#(#params),*) #result { #body } }
     });
     quote! {
@@ -4588,6 +4657,7 @@ fn implemented_service(
                 continue;
             };
             let authored = &author.params;
+            let authored_function = author;
             let author = &author.ident;
             let name = rust_ident(&function.name);
             let Signature {
@@ -4609,7 +4679,10 @@ fn implemented_service(
                     quote! { #ident::#author(#(#arguments),*) #await_ },
                 )
             };
-            let body = wrapped(handles, &local_module, call);
+            let body = match authored_function.context {
+                Some(_) => native_only(ident, author, &names),
+                None => wrapped(handles, &local_module, answered(authored_function, call)),
+            };
             members
                 .push(quote! { #asynchronous fn #name(#receiver #(#params),*) #result { #body } });
         }
@@ -5403,7 +5476,7 @@ fn declaration_code(
     holding: &BTreeSet<String>,
     defining: Option<&[Ident; 3]>,
     (converted, modules): (&BTreeMap<String, Ident>, &foreign::Modules),
-    depth: usize,
+    (depth, facade): (usize, &Ident),
 ) -> syn::Result<proc_macro2::TokenStream> {
     let path = hook_path(&declaration.hook);
     let root = supers(depth);
@@ -5419,7 +5492,7 @@ fn declaration_code(
                 &import_module(depth, defining),
             ),
             (converted, modules),
-            depth,
+            (depth, facade),
         ));
     }
     let callback = &callbacks[&declaration.hook];
@@ -5458,12 +5531,12 @@ fn declaration_code(
                 ::core::panic!(#message)
             }
         }
-        impl #ident {
+        ::#facade::__guest! { impl #ident {
             #[doc = #doc]
-            pub fn run(input: #input) #result {
+            pub async fn run(input: #input) #result {
                 #import::#name(#argument)
             }
-        }
+        } }
     })
 }
 
@@ -5521,7 +5594,7 @@ fn derived_hook_code(
     (hook_shapes, holding): (&BTreeSet<String>, &BTreeSet<String>),
     (export_types, import_types): (&proc_macro2::TokenStream, &proc_macro2::TokenStream),
     (converted, modules): (&BTreeMap<String, Ident>, &foreign::Modules),
-    depth: usize,
+    (depth, facade): (usize, &Ident),
 ) -> proc_macro2::TokenStream {
     let path = hook_path(&declaration.hook);
     let root = supers(depth);
@@ -5584,13 +5657,13 @@ fn derived_hook_code(
                 ::core::panic!(#message)
             }
         }
-        impl #ident {
+        ::#facade::__guest! { impl #ident {
             #[doc = #doc]
-            pub fn run(input: #input) #result {
+            pub async fn run(input: #input) #result {
                 let input: #import_input = #converted;
                 #body
             }
-        }
+        } }
     }
 }
 

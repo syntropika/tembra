@@ -68,9 +68,9 @@ fn files(directory: &Path) -> BTreeMap<PathBuf, String> {
 
 /// A guest's `tembra` with only `macros` gets the facade's `host` when another member of its
 /// workspace enables it, since Cargo unifies the features of the members it builds. The guests'
-/// modules compile all the same, so `cargo check --workspace` passes: a hook declaration the native
-/// side does not cover, and a contribution to a hook, which natively needs the runtime's `hooks`
-/// that the application leaves out.
+/// modules compile all the same, so `cargo check --workspace` passes: both hook declarations and
+/// contributions explicitly refuse native installation without the runtime's `hooks` feature,
+/// which the application leaves out.
 #[test]
 #[ignore = "runs cargo on a fixture: just test-configurations"]
 fn a_workspace_whose_application_enables_host_checks_beside_a_guest() {
@@ -270,4 +270,32 @@ fn the_facade_checks_for_wasm32_with_macros() {
         })
         .collect::<Vec<_>>();
     assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// Canonical capability packages compose in place and Cargo supplies the only output directory.
+#[test]
+#[ignore = "runs cargo on a fixture: just test-configurations"]
+fn canonical_packages_emit_the_contract_in_cargos_output_directory() {
+    let manifest = fixture("canonical-packages/Cargo.toml");
+    if let Err(errors) = cargo(&manifest, &["build", "--lib"]) {
+        panic!("{errors}");
+    }
+    let build = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .unwrap()
+        .join("config-fixtures/debug/build");
+    let output = std::fs::read_dir(build)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("out/composed.wit"))
+        .find(|path| path.is_file())
+        .expect("the primary library emits into OUT_DIR");
+    let text = std::fs::read_to_string(&output).unwrap();
+    assert!(text.contains("record session"), "{text}");
+    assert!(text.contains("example:model-agent/agent@1.0.0"), "{text}");
+    tembra_contracts::Contract::from_dir(output.parent().unwrap(), Some("composed")).unwrap();
+    assert!(!manifest.parent().unwrap().join("contract").exists());
+    if let Err(errors) = cargo(&manifest, &COMPONENT) {
+        panic!("{errors}");
+    }
 }

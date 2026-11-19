@@ -2004,7 +2004,7 @@ fn observer(contract: &Contract, provider: &str, hook: &str, seen: Rc<RefCell<Ve
 /// declares. The component, its WIT, the hooks its roles declare and the contract `cargo tembra
 /// build` writes from it hold the services, methods and hooks of the build's features, and the
 /// component answers them. Natively, `orb()` serves the notes without the feature, and refuses
-/// the hook's declaration with it, as the native side refuses any.
+/// the hook's declaration with it.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
 fn items_under_cfg_follow_the_features_both_ways() {
@@ -2250,8 +2250,7 @@ fn contributions(contract: &Contract, seen: Rc<RefCell<Vec<(i32, Value)>>>) -> O
 /// every contribution to a series sees each visit, spot and door, a newtype as its field, the first
 /// answer of the bail gives the room, and each contribution to the waterfall changes the admission
 /// in turn. Without contributions, the series end, the bail answers nothing
-/// and the waterfall hands its input back. Natively, the module compiles, and its `orb()` refuses
-/// the declarations, which only a component serves.
+/// and the waterfall hands its input back. Natively, the same declarations run with hooks enabled; hosts without hooks refuse installation.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
 fn hooks_a_component_declares_compose_their_contributions() {
@@ -2263,6 +2262,7 @@ fn hooks_a_component_declares_compose_their_contributions() {
         assert_eq!(engine.instances(), 0);
     }
     module_natively("hooks");
+    module_natively("hooks,native-hooks");
 }
 
 /// Load the gatehouse into `engine`, std and freestanding, with and without contributions, and
@@ -2376,6 +2376,62 @@ fn compose_the_declared_hooks(engine: &Engine) {
             assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
         }
     }
+}
+
+/// Both generated declarations and contributions use the same signed plan in either executor.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn generated_hook_declarations_and_contributions_compose_in_each_executor() {
+    use tembra_orb_native_fixture::{hook_gate::hook_gate, hook_watch::hook_watch};
+    let engine = Engine::new(Limits::default()).unwrap();
+    let (gate_module, gate_artifact) = module_artifact(&module_component("hook-gate"), "gate");
+    let (_, watch_artifact) = module_artifact(&module_component("hook-watch"), "watch");
+    assert!(
+        gate_module
+            .contract()
+            .function_signature("example:admission/guard@1.0.0", "apply", true)
+            .is_ok()
+    );
+    for native_gate in [false, true] {
+        for native_watch in [false, true] {
+            let gate = if native_gate {
+                hook_gate::orb_named("gate", 1).unwrap()
+            } else {
+                engine.load(&gate_artifact, Install::default()).unwrap()
+            };
+            let watch = if native_watch {
+                hook_watch::orb_named(
+                    "watch",
+                    1,
+                    hook_watch::Providers {
+                        guard: tembra::Provider::new("gate", 1),
+                    },
+                )
+                .unwrap()
+            } else {
+                engine
+                    .load(
+                        &watch_artifact,
+                        Install::default().requires("example:admission/guard@1.0.0", "gate", 1),
+                    )
+                    .unwrap()
+            };
+            let mut pool = LocalPool::new();
+            let host = Host::new(pool.spawner());
+            host.install(vec![gate, watch]).unwrap();
+            let reference = ready(&mut pool, &host, "gate::example:hook-gate/gate@1.0.0");
+            assert_eq!(
+                counting_call(&mut pool, &host, &reference, "alice", "admit", json!([10])),
+                json!([11, true]),
+                "native gate: {native_gate}, native watch: {native_watch}"
+            );
+            reference.release().unwrap();
+            pool.run_until(host.close()).unwrap();
+            assert_eq!(host.kernel().diagnostics().calls, 0);
+            assert!(host.errors().is_empty());
+        }
+    }
+    assert_eq!(engine.instances(), 0);
 }
 
 /// A module that contributes to a hook builds whatever the runtime's features: as a component, std

@@ -60,6 +60,34 @@ pub mod provider {
         }
     }
 
+    use values::{Choice, Limits};
+
+    /// A fixed-WIT data-only interface served by both executor types.
+    #[service("example:rpc-resources/values@1.0.0")]
+    pub struct Values;
+
+    impl Values {
+        /// Echo integer boundaries without arithmetic or floating-point conversion.
+        pub fn echo(value: Limits) -> Limits {
+            value
+        }
+
+        /// Retain ordinary context cancellation while awaiting another Orb.
+        pub async fn wait(value: Limits) -> Limits {
+            gate::wait().await;
+            value
+        }
+
+        /// Preserve every supported data container across an asynchronous WIT function.
+        pub async fn nested(
+            values: Vec<Option<(u64, i64)>>,
+            selected: Choice,
+            outcome: Result<Limits, i64>,
+        ) -> (Vec<Option<(u64, i64)>>, Choice, Result<Limits, i64>) {
+            (values, selected, outcome)
+        }
+    }
+
     /// A provider-owned resource whose state survives asynchronous method suspension.
     #[wit_resource(service = Codec)]
     pub struct Decoder {

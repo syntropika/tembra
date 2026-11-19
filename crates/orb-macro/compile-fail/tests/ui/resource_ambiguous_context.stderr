@@ -1,0 +1,5 @@
+error: `Session::read` takes `&Context`, and this module declares a `Context` of its own: pass that type owned, as WIT parameters are, or rename it for the method to take the call's `&Context`
+  --> tests/ui/resource_ambiguous_context.rs:11:16
+   |
+11 |         pub fn read(&self, context: &Context) {}
+   |                ^^^^

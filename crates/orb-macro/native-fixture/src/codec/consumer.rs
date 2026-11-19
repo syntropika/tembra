@@ -12,18 +12,18 @@ pub mod consumer {
         thread_local! {
             static HELD: RefCell<Option<Rc<codec::Decoder>>> = const { RefCell::new(None) };
         }
-    
+
         /// Compose the provider through its WIT import.
         #[service]
         pub struct Pipeline;
-    
+
         impl Pipeline {
             /// Retain a provider-owned decoder across importing callbacks.
             pub async fn keep(seed: u64) {
                 let decoder = codec::open(seed).await;
                 HELD.with(|held| held.replace(Some(Rc::new(decoder))));
             }
-    
+
             /// Call the retained decoder under the current callback's authority.
             pub async fn read() -> u64 {
                 let decoder = HELD
@@ -31,12 +31,12 @@ pub mod consumer {
                     .expect("a retained decoder");
                 decoder.total().await
             }
-    
+
             /// Release a retained owner through the callback's normal settlement path.
             pub fn discard() {
                 HELD.with(|held| held.take());
             }
-    
+
             /// Exercise sync functions, constructors, statics, methods, containers and WIT drops.
             pub async fn run(seed: u64) -> (u64, u32) {
                 let input = (Some(String::from("model")), Ok(vec![String::from("frame")]));

@@ -20,6 +20,8 @@ fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
     Options {
         package: Some(literal(package)),
         wit: wit.map(|dir| dir.display().to_string()),
+        wit_roots: Vec::new(),
+        contract: None,
         context: false,
         no_std: false,
         facade: None,
@@ -1751,7 +1753,7 @@ fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
                 use super::{Guard, guard};
                 #[service]
                 pub struct Admissions;
-                impl Admissions { pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value }).value } }
+                impl Admissions { pub async fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value }).await.value } }
             }
         }",
     )
@@ -3692,7 +3694,7 @@ fn a_parameter_under_cfg_is_refused() {
             "impl Permits { fn helper(level: u32, #[cfg(test)] extra: u32) -> u32 { level } }
             #[cfg(test)]
             mod tests {
-                use super::*;
+use super::*;
                 impl Permits { pub fn probe(#[cfg(test)] extra: u32) -> u32 { extra } }
                 #[test]
                 fn one() {}
@@ -4692,7 +4694,7 @@ const GATE: &str = "mod gate {
         #[service]
         pub struct Admissions;
         impl Admissions {
-            pub fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }) }
+            pub async fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }).await }
         }
     }
 }";
@@ -4878,8 +4880,8 @@ fn a_derived_hook_converts_what_its_input_reaches() {
         &GATE
             .replace("input = Admission", "input = i32")
             .replace(
-                "pub fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }) }",
-                "pub fn admit(value: i32) -> i32 { Guard::run(value) }",
+                "pub async fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }).await }",
+                "pub async fn admit(value: i32) -> i32 { Guard::run(value).await }",
             ),
     );
     assert!(
@@ -5019,7 +5021,7 @@ const SHARED_GATE: &str = "mod gate {
         #[service]
         pub struct Admissions;
         impl Admissions {
-            pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value, blocked: false }).value }
+            pub async fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value, blocked: false }).await.value }
         }
     }
 }";
@@ -8097,34 +8099,17 @@ fn a_resource_in_a_service_module_belongs_to_each_object_of_the_service() {
     );
 }
 
-/// What the native side does not cover yet leaves the module compiling inside the facade's wrapper,
-/// with an `orb()` that answers an error naming it, and a component build of the module unaffected:
-/// a WASI import and a native hook declaration, whose `run` needs the component's suspension.
+/// A WASI import still leaves the module compiling and refuses native installation explicitly.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
-    let service = "pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }";
-    for (options, module, message) in [
-        (
-            Options {
-                imports: vec![literal("wasi:random/random@0.3.0")],
-                ..options(PACKAGE, None)
-            },
-            ledger("#[service]"),
-            "the import of wasi:random/random@0.3.0 is not supported natively yet".to_owned(),
-        ),
-        (
-            options(PACKAGE, None),
-            format!(
-                "mod book {{ #[hook(composition = series, input = Admission)] pub struct Guard; pub struct Admission {{ pub value: i32 }} {service} }}"
-            ),
-            "the declaration of the hook example:book/guard@1.0.0 works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook".to_owned(),
-        ),
-    ] {
-        let module =
-            orb_with(options, &module).unwrap_or_else(|error| panic!("{message}: {error}"));
-        assert_eq!(native(&module, &[]), unsupported(&message), "{message}");
-        assert!(wit(&module).starts_with("package "), "{message}");
-    }
+    let message = "the import of wasi:random/random@0.3.0 is not supported natively yet";
+    let configured = Options {
+        imports: vec![literal("wasi:random/random@0.3.0")],
+        ..options(PACKAGE, None)
+    };
+    let module = orb_with(configured, &ledger("#[service]")).unwrap();
+    assert_eq!(native(&module, &[]), unsupported(message));
+    assert!(wit(&module).starts_with("package "));
 }
 
 /// A synchronous WIT function keeps its calling convention, with an awaitable native import.
@@ -8562,7 +8547,7 @@ fn a_nested_option_in_a_derived_hooks_input_is_refused() {
                     use super::{{Order, Ordered}};
                     #[service]
                     pub struct Ledger;
-                    impl Ledger {{ pub fn order() {{ Ordered::run(Order {{ at: None }}) }} }}
+                    impl Ledger {{ pub async fn order() {{ Ordered::run(Order {{ at: None }}).await }} }}
                 }}
             }}"
         )
@@ -10081,4 +10066,99 @@ fn every_reader_of_the_bundled_packages_takes_them_parsed_once() {
         1,
         "the bundled WASI packages are parsed once"
     );
+}
+
+/// Canonical roots reject a package identity with two different defining owners.
+#[test]
+fn canonical_package_roots_refuse_duplicate_package_identities() {
+    let first = consumed(
+        "canonical-first",
+        "package example:duplicate@1.0.0; interface types { type name = string; }",
+    );
+    let second = consumed(
+        "canonical-second",
+        "package example:duplicate@1.0.0; interface types { type name = u32; }",
+    );
+    let problem = refused_with(
+        Options {
+            wit_roots: vec![first.display().to_string(), second.display().to_string()],
+            ..options("example:consumer@1.0.0", None)
+        },
+        "mod consumer { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } }",
+    );
+    assert!(
+        problem.contains("WIT package example:duplicate@1.0.0 is defined by both"),
+        "{problem}"
+    );
+}
+
+/// Cycles are resolved by the official WIT dependency resolver, before generating either target.
+#[test]
+fn canonical_package_roots_refuse_dependency_cycles() {
+    let first = consumed(
+        "canonical-cycle-first",
+        "package example:first@1.0.0; interface types { use example:second/types@1.0.0.{second}; type first = second; }",
+    );
+    let second = consumed(
+        "canonical-cycle-second",
+        "package example:second@1.0.0; interface types { use example:first/types@1.0.0.{first}; type second = first; }",
+    );
+    let problem = refused_with(
+        Options {
+            wit_roots: vec![first.display().to_string(), second.display().to_string()],
+            ..options("example:consumer@1.0.0", None)
+        },
+        "mod consumer { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } }",
+    );
+    assert!(problem.contains("cycle"), "{problem}");
+}
+
+/// A missing package is not acquired or replaced by a local schema copy.
+#[test]
+fn canonical_package_roots_refuse_missing_dependencies() {
+    let first = consumed(
+        "canonical-missing",
+        "package example:first@1.0.0; interface types { use example:absent/types@1.0.0.{second}; type first = second; }",
+    );
+    let problem = refused_with(
+        Options {
+            wit_roots: vec![first.display().to_string()],
+            ..options("example:consumer@1.0.0", None)
+        },
+        "mod consumer { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } }",
+    );
+    assert!(problem.contains("example:absent@1.0.0"), "{problem}");
+}
+
+/// Context and transport error authoring on resources retain the service's native-only rule.
+#[test]
+fn resource_context_and_transport_results_are_explicitly_native_only() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[wit_resource] pub struct Session;
+            impl Session {
+                pub fn read(&self, context: &tembra::Context) -> String { todo!() }
+                pub async fn next(&self) -> tembra::Result<Result<Option<String>, String>> { todo!() }
+            }
+            #[service] pub struct Sessions;
+            impl Sessions { pub fn open() -> Session { Session } }
+        }",
+    );
+    let contract = wit(&module);
+    assert!(contract.contains("read: func() -> string;"), "{contract}");
+    assert!(
+        contract.contains("next: async func() -> result<option<string>, string>;"),
+        "{contract}"
+    );
+    let generated = tokens(&module);
+    for marker in ["&Context", "tembra::Result"] {
+        let message = format!(
+            "`{marker}` makes this module native only, which a component build refuses: leave it out of a component, or compile the module for native targets only, under `#[cfg(not(target_arch = \"wasm32\"))]`"
+        );
+        let refused =
+            quote::quote!(#[cfg(target_arch = "wasm32")] ::core::compile_error!(#message);)
+                .to_string();
+        assert!(generated.contains(&refused), "{generated}");
+    }
 }

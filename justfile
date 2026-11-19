@@ -150,7 +150,7 @@ build-rpc-resources:
 
 # Exercise owned resources over real RPC bytes with both executor types.
 test-rpc-resources: build-rpc-resources
-    TEMBRA_RPC_HOST="$(realpath "${CARGO_TARGET_DIR:-target}")/debug/examples/rpc_resources" TEMBRA_RPC_COMPONENT="$(realpath "${CARGO_TARGET_DIR:-target}")/orb-macro/rpc-provider.wasm" TEMBRA_RPC_SHAPES_COMPONENT="$(realpath "${CARGO_TARGET_DIR:-target}")/orb-macro/wasm32-unknown-unknown/release/tembra_wasm_resource_provider.wasm" bun test packages/ts/sdk/test/rpc-resources.test.ts
+    TEMBRA_RPC_HOST="$(realpath "${CARGO_TARGET_DIR:-target}")/debug/examples/rpc_resources" TEMBRA_RPC_COMPONENT="$(realpath "${CARGO_TARGET_DIR:-target}")/orb-macro/rpc-provider.wasm" TEMBRA_RPC_SHAPES_COMPONENT="$(realpath "${CARGO_TARGET_DIR:-target}")/orb-macro/wasm32-unknown-unknown/release/tembra_wasm_resource_provider.wasm" bun test packages/ts/sdk/test/rpc-resources.test.ts packages/ts/sdk/test/rpc-data.test.ts
 
 # Use the generated client in Chrome over WebSocket RPC to the real Rust host.
 test-rpc-browser: build-rpc-resources

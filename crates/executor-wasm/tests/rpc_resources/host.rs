@@ -100,8 +100,23 @@ fn main() -> Result<()> {
     let reload_host = host.clone();
     let reopen = gate.clone();
     let stats = gate.clone();
+    let unprepared_calls = Rc::new(Cell::new(0_u32));
+    let refused_calls = unprepared_calls.clone();
+    let unprepared = Orb::new("unprepared", 1).service(
+        Service::new("unprepared::example:rpc-resources/values@1.0.0", |_| Ok(())).method(
+            "echo",
+            move |_, _, (value,): (Value,)| {
+                unprepared_calls.set(unprepared_calls.get() + 1);
+                async move { Ok(value) }
+            },
+        ),
+    );
     let replace = create.clone();
     let control = Orb::new("control", 1).service(Service::new("control", |_| Ok(()))
+        .method("unprepared-calls", move |_, _, (): ()| {
+            let calls = refused_calls.get();
+            async move { Ok(calls) }
+        })
         .method("open", move |_, _, (): ()| {
             let pending = std::mem::take(&mut *reopen.waiters.borrow_mut());
             async move { for waiter in pending { let _ = waiter.send(()); } Ok(()) }
@@ -125,11 +140,14 @@ fn main() -> Result<()> {
         gate_orb,
         create()?,
         control,
+        unprepared,
         shapes::pace(),
         shapes::provider(mode == "wasm")?,
     ])?;
     let mut options = rpc::Options::new("rpc-reader".into(), |service, _| {
         service == format!("codec::{CODEC}")
+            || service == "codec::example:rpc-resources/values@1.0.0"
+            || service == "unprepared::example:rpc-resources/values@1.0.0"
             || service == "control"
             || service == format!("shapes::{}", shapes::INTERFACE)
     });

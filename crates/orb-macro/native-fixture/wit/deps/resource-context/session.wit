@@ -1,0 +1,18 @@
+package example:contextual@1.0.0;
+
+interface sessions {
+  resource session {
+    inspect: func(prefix: string) -> string;
+    wait: async func();
+    refuse: static func(other: session);
+  }
+  open: func() -> session;
+}
+
+interface probes {
+  resource probe {
+    inspect: func(prefix: string) -> string;
+    fail: func() -> u32;
+  }
+  open: func() -> probe;
+}

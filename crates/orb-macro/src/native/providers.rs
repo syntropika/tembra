@@ -26,8 +26,8 @@
 //! Without the runtime's `hooks`, which that function needs, `orb(..)` answers an error naming the
 //! feature instead.
 use super::{
-    Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode, kind, refused,
-    spelled,
+    HookScope, Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode,
+    kind, refused, spelled,
 };
 use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident};
 use heck::ToSnakeCase;
@@ -241,6 +241,10 @@ pub(super) fn contribution(
         resources: (!analysis.resources.is_empty())
             .then(|| quote! { self::#root __tembra_resource::scoped }),
         imports: imported.then(|| quote! { self::#root __tembra_import::scoped }),
+        hooks: (!analysis.declared.is_empty()).then(|| HookScope {
+            object: None,
+            handles: quote! { __tembra_imports.hooks() },
+        }),
     };
     let ident = &contribution.ident;
     let (param, input) = &contribution.param;
@@ -541,7 +545,29 @@ pub(super) fn requirements(
 /// call the method stops awaiting is cancelled, and the method ends once it has ended, unless its
 /// own call is cancelled, as a component's executor joins an import its callback abandons; then it
 /// releases the claims of the views dropped in it. The runtime is the facade named `facade`.
-pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
+pub(super) fn table(imports: &[Import<'_>], facade: &Ident, hooked: bool) -> TokenStream {
+    let providers = (!imports.is_empty()).then(|| quote! { providers: &super::Providers });
+    let hook_type = hooked.then(|| quote! { ::std::rc::Rc<super::__tembra_hooks::Hooks> });
+    let hooks_field = hooked
+        .then(|| quote! { hooks: ::core::cell::RefCell<::core::option::Option<#hook_type>>, });
+    let hooks_initial =
+        hooked.then(|| quote! { hooks: ::core::cell::RefCell::new(::core::option::Option::None), });
+    let hooks_declare = hooked.then(|| quote! {
+        self.hooks.replace(::core::option::Option::Some(::std::rc::Rc::new(super::__tembra_hooks::Hooks::declare(declaration)?)));
+    });
+    let hooks_access = hooked.then(|| {
+        quote! {
+            impl Imports {
+                /// Read the handles bound to the Orb root's declaration.
+                pub(crate) fn hooks(&self) -> #hook_type {
+                    self.hooks.borrow().clone().expect("the Orb's root declared its hooks")
+                }
+            }
+        }
+    });
+    let call_hooks = hooked.then(|| quote! { pub(crate) hooks: #hook_type, });
+    let scoped_hooks = hooked.then(|| quote! { hooks: #hook_type, });
+    let held_hooks = hooked.then(|| quote! { hooks, });
     let (plain, keyed): (Vec<&Import<'_>>, Vec<&Import<'_>>) =
         imports.iter().partition(|import| import.view.is_none());
     let plain_fields: Vec<&Ident> = plain.iter().map(|import| &import.field).collect();
@@ -552,7 +578,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
         let methods = &import.methods;
         quote! { [#(#methods),*] }
     });
-    let plain_items = (!plain.is_empty()).then(|| {
+    let plain_items = (!plain.is_empty() || hooked).then(|| {
         quote! {
             impl Imports {
                 /// Declare the reference of the Orb's root to the `main` object of each plain
@@ -562,6 +588,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                     declaration: &::#facade::Declaration,
                 ) -> ::#facade::Result<()> {
                     #(self.#plain_fields.declare(declaration)?;)*
+                    #hooks_declare
                     ::core::result::Result::Ok(())
                 }
             }
@@ -714,12 +741,14 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
             pub(crate) struct Imports {
                 #(pub(crate) #plain_fields: Plain,)*
                 #(pub(crate) #keyed_fields: Keyed,)*
+                #hooks_field
             }
 
             impl Imports {
                 /// The imports of an Orb whose providers are `providers`.
-                pub(crate) fn new(providers: &super::Providers) -> Self {
+                pub(crate) fn new(#providers) -> Self {
                     Self {
+                        #hooks_initial
                         #(#plain_fields: Plain::new(::std::format!(
                             "{}::{}",
                             providers.#plain_fields.name,
@@ -736,6 +765,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
 
             #plain_items
             #keyed_items
+            #hooks_access
 
             ::std::thread_local! {
                 static CALL: ::core::cell::RefCell<::core::option::Option<::std::rc::Rc<Call>>> =
@@ -749,6 +779,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
             pub(crate) struct Call {
                 pub(crate) context: ::#facade::Context,
                 pub(crate) imports: ::std::rc::Rc<Imports>,
+                #call_hooks
                 failed: ::core::cell::RefCell<::core::option::Option<::#facade::Error>>,
                 abandoned: ::core::cell::RefCell<::std::vec::Vec<::#facade::IssuedCall>>,
                 dropped: ::core::cell::RefCell<::std::vec::Vec<Dropped>>,
@@ -776,6 +807,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
             pub(crate) fn scoped<T, F>(
                 context: ::#facade::Context,
                 imports: ::std::rc::Rc<Imports>,
+                #scoped_hooks
                 future: F,
             ) -> impl ::core::future::Future<Output = ::#facade::Result<T>>
             where
@@ -784,6 +816,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                 let call = ::std::rc::Rc::new(Call {
                     context,
                     imports,
+                    #held_hooks
                     failed: ::core::cell::RefCell::new(::core::option::Option::None),
                     abandoned: ::core::cell::RefCell::new(::std::vec::Vec::new()),
                     dropped: ::core::cell::RefCell::new(::std::vec::Vec::new()),

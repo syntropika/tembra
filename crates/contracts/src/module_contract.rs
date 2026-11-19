@@ -151,19 +151,23 @@ impl ModuleContract {
     /// `<world>.wit` of the directory depends on it; any other file stays. Builds of one crate
     /// may write at once: a file another one removed first is no error.
     pub fn write(&self, crate_dir: &Path) -> Result<WrittenContract, Error> {
-        let dir = crate_dir.join(DIRECTORY);
+        self.write_to(&crate_dir.join(DIRECTORY))
+    }
+
+    /// Write into the selected output directory, preserving files owned by other packages.
+    pub fn write_to(&self, dir: &Path) -> Result<WrittenContract, Error> {
         let contract = dir.join(format!("{}.wit", self.world));
-        std::fs::create_dir_all(&dir).map_err(|error| io("creating", &dir, error))?;
-        remove_stale_temporaries(&dir)?;
+        std::fs::create_dir_all(dir).map_err(|error| io("creating", dir, error))?;
+        remove_stale_temporaries(dir)?;
         // Removed before the new file is written: where file names ignore case, a former name
         // that differs only in case is the new file.
-        let former_contracts = former_contracts(&dir, &contract, &self.package)?;
+        let former_contracts = former_contracts(dir, &contract, &self.package)?;
         for former in &former_contracts {
             remove(former)?;
         }
         write_if_changed(&contract, &self.text)?;
         let (dependencies, former_dependencies) =
-            write_dependencies(&dir, &contract, &self.dependencies)?;
+            write_dependencies(dir, &contract, &self.dependencies)?;
         Ok(WrittenContract {
             contract,
             dependencies,

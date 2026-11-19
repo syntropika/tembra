@@ -1,6 +1,5 @@
-//! The guest of the workspace: an Orb that declares a hook. The native side does not cover a hook
-//! declaration, so with the application's `host` the module still compiles, and its `orb()` answers
-//! an error naming the declaration.
+//! A shared hook declarer compiles when Cargo enables the host without its hooks feature.
+//! Its generated orb() refuses installation explicitly in that configuration.
 
 #[tembra::orb(package = "example:gate@1.0.0")]
 pub mod gate {
@@ -23,11 +22,11 @@ pub mod gate {
 
         impl Admissions {
             /// Run the hook over a fresh admission of the value.
-            pub fn admit(value: i32) -> Admission {
+            pub async fn admit(value: i32) -> Admission {
                 Guard::run(Admission {
                     value,
                     blocked: false,
-                })
+                }).await
             }
         }
     }

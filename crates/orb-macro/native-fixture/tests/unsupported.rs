@@ -1,11 +1,11 @@
 //! A module the native side does not cover yet compiles where the runtime is linked, as this crate's
-//! modules `dice`, `turnstile`, `checkpoint` and `desk` do here, since Cargo enables the facade's
+//! modules `dice` and `desk` do here, since Cargo enables the facade's
 //! `host` for an Orb crate whenever another crate of the build does. Their `orb()` answers an error
 //! with the code `unsupported` and the reason `native`, naming what the native side does not
 //! cover, so only a host that installs such an Orb fails.
 use futures::executor::LocalPool;
 use tembra::{Host, Orb, core::Code};
-use tembra_orb_native_fixture::{checkpoint, desk, dice};
+use tembra_orb_native_fixture::{desk, dice};
 
 /// Install the Orb `orb()` answers in a host, as a native host does, and return the error the host
 /// gets: `unsupported/native`.
@@ -28,14 +28,6 @@ fn a_wasi_import_fails_the_installation() {
     assert_eq!(
         install(dice::orb),
         "the import of wasi:random/random@0.3.0 is not supported natively yet"
-    );
-}
-
-#[test]
-fn a_hook_declaration_fails_the_installation() {
-    assert_eq!(
-        install(checkpoint::orb),
-        "the declaration of the hook example:checkpoint/inspect@1.0.0 works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook"
     );
 }
 

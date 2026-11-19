@@ -14,6 +14,7 @@ const directory = await mkdtemp(
 const processes: ReturnType<typeof Bun.spawn<"pipe", "pipe", "pipe">>[] = [];
 const settled: Promise<void>[] = [];
 const source = `import {get as getCodec} from './example-rpc-resources-codec.ts';
+import {get as getValues} from './example-rpc-resources-values.ts';
 import {RemoteHost} from '@syntropika/tembra-sdk/rpc';
 function assert(condition, message) { if (!condition) throw new Error(message); }
 async function verify(mode) {
@@ -42,6 +43,15 @@ async function verify(mode) {
   try {
     const codec = await getCodec(connection, {orb: 'codec', key: 'main'});
     const control = await connection.get('control', 'main');
+    const values = await getValues(connection, {orb: 'codec', key: 'main'});
+    const limits = {unsignedMax:18446744073709551615n, signedMin:-9223372036854775808n, signedMax:9223372036854775807n};
+    const echoed = await values.echo(limits);
+    assert(echoed.unsignedMax === 18446744073709551615n && echoed.signedMin === -9223372036854775808n && echoed.signedMax === 9223372036854775807n, mode + ' data integer boundaries');
+    const nested = await values.nested([null,[18446744073709551615n,-9223372036854775808n]], {tag:'limits',val:limits}, {tag:'ok',val:limits});
+    assert(nested[0][0] === null && nested[0][1][0] === 18446744073709551615n && nested[0][1][1] === -9223372036854775808n && nested[1].val.signedMax === 9223372036854775807n && nested[2].val.unsignedMax === 18446744073709551615n, mode + ' nested data integer boundaries');
+    const refused = await values.nested([], {tag:'empty'}, {tag:'err',val:-9223372036854775808n});
+    assert(refused[1].tag === 'empty' && refused[2].val === -9223372036854775808n, mode + ' empty and error data cases');
+    values.reference.release();
     const decoder = await codec.newDecoder(9007199254740993n);
     assert(await decoder.push(2n) === 9007199254740995n, mode + ' exact synchronous call');
     assert(await codec.consume(await codec.open(7n)) === 7n, mode + ' ownership transfer');

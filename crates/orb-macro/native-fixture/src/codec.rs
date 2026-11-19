@@ -14,7 +14,7 @@ pub use packets::packet_reader;
 )]
 pub mod sink_reader {
     pub mod probe {
-        
+
         /// Import a foreign owned argument without relabeling its nominal resource type.
         #[service]
         pub struct Probe;

@@ -270,19 +270,17 @@ fn a_new_crate_builds_as_a_component_and_natively() {
     })
     .collect();
     assert_eq!(read(&out.join("checksums.txt")), checksums);
-    let written = read(&krate.join("contract/greeter-orb.wit"));
+    let written = read(&out.join("greeter-orb.wit"));
     assert!(written.contains("world greeter-orb {"), "{written}");
-    assert_eq!(
-        read(&out.join("greeter-orb.wit")),
-        written,
-        "the copy of the contract in `out`"
-    );
+    tembra_contracts::Contract::from_dir(&out, Some("greeter-orb")).unwrap();
 
     // Natively, first as an author's `cargo build` compiles it, without the host runtime, then with
     // the runtime that the facade's `host` feature links, which gives the module its `orb()`. The
-    // macro writes the contract in a native build too: the same text, which the first build writes
-    // again after the contract is removed.
-    std::fs::remove_dir_all(krate.join("contract")).unwrap();
+    // macro writes the same contract into the source default on the first ordinary native build.
+    assert!(
+        !krate.join("contract").exists(),
+        "--out creates no source contract mirror"
+    );
     cargo(&krate, &["build"]);
     assert_eq!(
         read(&krate.join("contract/greeter-orb.wit")),

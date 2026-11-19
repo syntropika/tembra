@@ -54,7 +54,9 @@ async function generated(shapes = false) {
     path.join(root, "node_modules/@syntropika/tembra-sdk"),
     "dir",
   );
-  const file = shapes ? files.find((file) => file.endsWith("-sessions.ts"))! : files[0]!;
+  const file = shapes
+    ? files.find((file) => file.endsWith("-sessions.ts"))!
+    : files.find((file) => file.endsWith("-codec.ts"))!;
   const { get } = (await import(file)) as { get: GetCodec };
   return {
     get,

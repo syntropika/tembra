@@ -164,7 +164,7 @@ test(
         "kebabName(firstValue: number, delete_: boolean, context_: Shape[], context?: Context): Promise<boolean>;",
       );
       expect(generated).toContain(
-        'kebabName: (...args) => reference["kebab-name"](...sent(args, 3)),',
+        'kebabName: (...args) => calls.call<boolean>("kebab-name", sent(args, 3)),',
       );
       expect(generated).toContain(
         "check(public_: boolean, static_: number, let_: string, arguments_: number[], eval_: number, implements_: number, await_: boolean, context?: Context): Promise<boolean>;",
@@ -205,6 +205,12 @@ test("a generated client acquires the kebab-case service and forwards each call 
       world: "provider",
       out: root,
     });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "tembra-data-client-check", type: "module" }),
+    );
+    await mkdir(path.join(root, "node_modules/@syntropika"), { recursive: true });
+    await symlink(sdk, path.join(root, "node_modules/@syntropika/tembra-sdk"), "dir");
     const { get, IDENTITY } = (await import(file!)) as {
       IDENTITY: string;
       get: (scope: unknown, address: unknown, options?: unknown) => Promise<any>;

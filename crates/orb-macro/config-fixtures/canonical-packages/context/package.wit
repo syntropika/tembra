@@ -1,0 +1,2 @@
+package example:context@1.0.0;
+interface context { record context { principal: string } }
