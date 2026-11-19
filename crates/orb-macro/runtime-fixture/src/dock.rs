@@ -39,7 +39,9 @@ pub mod dock {
     impl Harbor {
         #[open]
         pub fn open() -> Harbor {
-            super::note("open harbor".into());
+            // The context of an opener answers the host as its principal, as a component and
+            // natively: the kernel opens under no admitted call.
+            super::note(format!("open harbor by {}", context::principal()));
             Harbor {
                 berths: 2,
                 moored: 0,
@@ -210,7 +212,7 @@ mod tests {
         assert_eq!(
             journal(),
             [
-                "open harbor",
+                "open harbor by host",
                 "open mooring 1 at [one] of alice",
                 "open line at berth 1",
                 "open mooring 2 at [two] of alice",

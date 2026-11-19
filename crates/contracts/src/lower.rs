@@ -5,7 +5,7 @@ use crate::{
     service_name,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tembra_core::{Orb, Requirement, Service};
 
 /// An installation chooses a provider; a WIT import alone never grants authority.
@@ -426,8 +426,10 @@ impl PreparedContract {
             return Err(Error(format!("unused provider binding {unused}")));
         }
         // A kernel interface is declared through the export and used through the import: one
-        // without the other is a world that can never work.
-        for import in guest::PAIRS.iter().map(|(import, _)| *import) {
+        // without the other is a world that can never work. An import paired with several
+        // exports, as `resources` is, is checked once.
+        let imports: BTreeSet<&str> = guest::PAIRS.iter().map(|(import, _)| *import).collect();
+        for import in imports {
             let exports: Vec<&str> = guest::PAIRS
                 .iter()
                 .filter(|(paired, _)| *paired == import)

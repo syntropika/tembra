@@ -44,8 +44,9 @@ interface resources {
 /// Exported by a compiled Orb whose root owns resources. The kernel asks for the declarations
 /// when it creates the root, opens each resource during activation and closes it at teardown.
 interface resources-init {
-    /// A resource: its name, the version of its contract and the names of the resources that
-    /// open before it and close after it.
+    /// A resource, of the root or of a service's objects, as `service-resources-init` declares
+    /// one too: its name, the version of its contract and the names of the resources that open
+    /// before it and close after it.
     record declaration {
         name: string,
         version: u32,

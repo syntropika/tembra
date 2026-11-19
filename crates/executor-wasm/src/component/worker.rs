@@ -1999,6 +1999,9 @@ async fn serve(
                 Err(error) => return Ok(Err(error.into())),
             };
             authority.state = None;
+            // The kernel opens and closes under no admitted call: the context's principal is the
+            // host's, as the native host's cleanup root answers an opener and a closer.
+            authority.principal = Some(Arc::from("host"));
             let call = Call {
                 function,
                 roles: Resolved::default(),
@@ -2014,22 +2017,7 @@ async fn serve(
             if !open {
                 return Ok(Ok(answer));
             }
-            // An opener answers `result<u32, string>`: its error fails this open with the
-            // message, `unavailable/resource` as a native opener's, so the kernel closes what
-            // already opened.
-            let answer: Value = serde_json::from_str(&answer)?;
-            Ok(match answer["tag"].as_str() {
-                Some("ok") => Ok(answer["val"].to_string()),
-                Some("err") => Err(Failed::Coded(tembra::Error::new(
-                    tembra::core::Code::Unavailable,
-                    tembra::core::Reason::Resource,
-                    answer["val"]
-                        .as_str()
-                        .map(|message| format!("the resource `{name}` did not open: {message}"))
-                        .unwrap_or_else(|| format!("the resource `{name}` did not open")),
-                ))),
-                _ => Err("the resource opener answered no result".into()),
-            })
+            Ok(opened(&name, &answer))
         }
         Packet::Invoke {
             environment,
@@ -2177,6 +2165,37 @@ fn authority(
         address: environments.addresses.get(&environment).cloned(),
         principal: None,
     })
+}
+
+/// The handle an opener answered, from the JSON of its `result<u32, string>`: its `err` fails
+/// this open with the message, `unavailable/resource` as a native opener's, so the kernel closes
+/// what already opened; an answer that is no such result fails this open the same way, naming
+/// the resource, and never the component.
+fn opened(name: &str, answer: &str) -> std::result::Result<String, Failed> {
+    let failed = |message: String| {
+        Failed::Coded(tembra::Error::new(
+            tembra::core::Code::Unavailable,
+            tembra::core::Reason::Resource,
+            message,
+        ))
+    };
+    let answer: Value = serde_json::from_str(answer).map_err(|error| {
+        failed(format!(
+            "the resource `{name}` did not open: its opener answered no result: {error}"
+        ))
+    })?;
+    match answer["tag"].as_str() {
+        Some("ok") => Ok(answer["val"].to_string()),
+        Some("err") => Err(failed(
+            answer["val"]
+                .as_str()
+                .map(|message| format!("the resource `{name}` did not open: {message}"))
+                .unwrap_or_else(|| format!("the resource `{name}` did not open")),
+        )),
+        _ => Err(failed(format!(
+            "the resource `{name}` did not open: its opener answered no result"
+        ))),
+    }
 }
 
 /// A declaration refused by the host refuses only this object; a trap retires the Store.
@@ -2477,6 +2496,20 @@ async fn declare_resources(
             .as_str()
             .ok_or("a resource declaration carries no name")?
             .to_owned();
+        // Resource names are unique in the Orb: `read(name)` answers the object's resource in a
+        // call and the root's in a contribution, so a root resource's name is taken.
+        if let Some(Object {
+            interface,
+            resources: Some(root_resources),
+            ..
+        }) = &object
+            && root_resources.contains_key(&name)
+        {
+            return Err(format!(
+                "the resource `{name}` of each object of {interface} takes the name of the root's resource `{name}`: resource names are unique in the Orb"
+            )
+            .into());
+        }
         let version = resource["version"]
             .as_u64()
             .ok_or("a resource declaration carries no version")?;
@@ -3244,5 +3277,50 @@ mod state_value_tests {
             json!({"x": 0, "y": [0, 0.5, -1.5], "z": {"w": 0}, "s": "text"})
         );
         assert!(!value.to_string().contains("-0"), "{value}");
+    }
+}
+
+#[cfg(test)]
+mod opened_tests {
+    use super::opened;
+    use crate::worker::Failed;
+    use tembra::core::{Code, Reason};
+
+    /// The error an open failed with: its code, reason and message.
+    fn failure(name: &str, answer: &str) -> (Code, String, String) {
+        match opened(name, answer) {
+            Err(Failed::Coded(error)) => (error.code, error.reason, error.message),
+            other => panic!("the open fails with a coded error: {other:?}"),
+        }
+    }
+
+    /// An opener's `ok` answers the handle, its `err` fails the open with the message, and an
+    /// answer that is no `result<u32, string>`, malformed or of another shape, fails the open the
+    /// same way, naming the resource: never the component, which stays serving.
+    #[test]
+    fn an_openers_answer_opens_or_fails_that_open_alone() {
+        assert_eq!(opened("a", r#"{"tag":"ok","val":7}"#).unwrap(), "7");
+        assert_eq!(
+            failure("a", r#"{"tag":"err","val":"down"}"#),
+            (
+                Code::Unavailable,
+                Reason::Resource.to_string(),
+                "the resource `a` did not open: down".to_owned()
+            )
+        );
+        let (code, reason, message) = failure("a", "not json");
+        assert_eq!((code, reason.as_str()), (Code::Unavailable, "resource"));
+        assert!(
+            message.starts_with("the resource `a` did not open: its opener answered no result: "),
+            "{message}"
+        );
+        assert_eq!(
+            failure("a", r#"{"tag":"maybe"}"#),
+            (
+                Code::Unavailable,
+                Reason::Resource.to_string(),
+                "the resource `a` did not open: its opener answered no result".to_owned()
+            )
+        );
     }
 }

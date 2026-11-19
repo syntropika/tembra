@@ -2668,7 +2668,7 @@ fn a_service_resource_opens_and_closes_per_object_both_ways() {
         assert_eq!(
             logged(),
             [
-                "open harbor",
+                "open harbor by host",
                 "open mooring 1 at [one] of alice",
                 "open line at berth 1",
                 "open mooring 2 at [two] of alice",

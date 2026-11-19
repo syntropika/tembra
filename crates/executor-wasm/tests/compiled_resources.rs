@@ -192,17 +192,14 @@ fn a_dependency_not_declared_before_its_resource_refuses_the_orb() {
     let (engine, records) = engine();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    let installed = host
+    let refused = host
         .install(vec![
             engine
                 .load(&artifact(&declarations, false), Install::default())
                 .unwrap(),
         ])
-        .and_then(|()| {
-            let probe = host.get(PROBE, vec!["main".into()], "alice")?;
-            pool.run_until(probe.ready())
-        });
-    let refused = installed.expect_err("the Orb is refused").to_string();
+        .expect_err("the Orb is refused")
+        .to_string();
     assert!(
         refused.contains("the resource `b` depends on `c`"),
         "{refused}"

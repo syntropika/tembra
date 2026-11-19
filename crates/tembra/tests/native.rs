@@ -1,6 +1,6 @@
 use futures::{FutureExt, executor::LocalPool};
 use std::{cell::Cell, rc::Rc};
-use tembra::{Error, Host, Orb, Service};
+use tembra::{Error, Host, Orb, Service, core::Code};
 
 #[test]
 fn inspecting_an_orb_exposes_service_signatures_without_installing_or_executing_it() {
@@ -324,4 +324,87 @@ fn a_failed_root_open_answers_the_waiting_call_with_the_openers_error() {
     next.release().unwrap();
     executor.run_until(host.close()).unwrap();
     assert_eq!(closes.get(), 2);
+}
+
+/// The root of `provider` declares a resource whose opener fails once the test says so; an object
+/// of `provider` waits on that activation, and so does an object of `client`, whose resource
+/// depends on the provider's. The provider's object fails as its root did, with the opener's
+/// error; the client's object, another Orb's scope that only depends on a resource of the failed
+/// scope, is closed without that error: `cancelled/scope_closed`.
+#[test]
+fn a_failed_open_is_told_to_the_orbs_own_waiters_not_to_another_orbs_dependents() {
+    use futures::channel::oneshot;
+    use std::cell::RefCell;
+    let mut executor = LocalPool::new();
+    let host = Host::new(executor.spawner());
+    let (fail, failing) = oneshot::channel::<()>();
+    let failing = Rc::new(RefCell::new(Some(failing)));
+    let base: Rc<RefCell<Option<tembra::ResourceKey>>> = Rc::default();
+    let shared = base.clone();
+    let provider = Orb::new("provider", 1)
+        .create(move |declaration| {
+            let failing = failing.borrow_mut().take().expect("one create");
+            let resource = declaration.resource_async(
+                "base",
+                1,
+                &[],
+                move |_| {
+                    async move {
+                        let _ = failing.await;
+                        Err::<(), _>(Error::invalid("base", "the base did not open"))
+                    }
+                    .boxed_local()
+                },
+                |_, _| async { Ok(()) }.boxed_local(),
+            )?;
+            *shared.borrow_mut() = Some(resource.key());
+            Ok(())
+        })
+        .service(
+            Service::new("provider", |_| Ok(())).method("ping", |_, _, (): ()| async { Ok(1_u32) }),
+        );
+    let client = Orb::new("client", 1).service(
+        Service::new("client", move |declaration| {
+            let key = base
+                .borrow()
+                .clone()
+                .expect("the provider declared its base");
+            declaration.resource_async(
+                "link",
+                1,
+                &[key],
+                |_| async { Ok(()) }.boxed_local(),
+                |_, _| async { Ok(()) }.boxed_local(),
+            )?;
+            Ok(())
+        })
+        .method("ping", |_, _, (): ()| async { Ok(2_u32) }),
+    );
+    host.install(vec![provider, client]).unwrap();
+    executor.run_until_stalled();
+    let own = host.get("provider", vec!["main".into()], "alice").unwrap();
+    let other = host.get("client", vec!["main".into()], "alice").unwrap();
+    // Both wait on their activations as the base fails.
+    let waiting = futures::future::join(own.ready(), other.ready());
+    executor.run_until_stalled();
+    fail.send(()).unwrap();
+    let (refused, closed) = executor.run_until(waiting);
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        (
+            refused.code,
+            refused.reason.as_str(),
+            refused.message.as_str()
+        ),
+        (Code::Invalid, "base", "the base did not open"),
+        "{refused}"
+    );
+    let closed = closed.unwrap_err();
+    assert_eq!(
+        (closed.code, closed.reason.as_str()),
+        (Code::Cancelled, "scope_closed"),
+        "{closed}"
+    );
+    executor.run_until(host.close()).unwrap();
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
 }

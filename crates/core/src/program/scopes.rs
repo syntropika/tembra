@@ -169,6 +169,25 @@ impl crate::host::Inner {
         affected.into_iter().collect()
     }
 
+    /// The unopened scopes below `scopes`, through the scope tree alone: the scopes of the same
+    /// owner's objects waiting on an activation, which fail as it does, not the scopes of other
+    /// owners that depend on one of its resources, which `failed_scope_dependents` collects too.
+    pub(super) fn failed_scope_children(&self, scopes: &[Id]) -> BTreeSet<Id> {
+        let mut pending = scopes.to_vec();
+        let mut children = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !children.insert(id) {
+                continue;
+            }
+            pending.extend(
+                self.scope_children
+                    .members(&id)
+                    .filter(|child| !self.scopes[child].active),
+            );
+        }
+        children
+    }
+
     /// Cancel activations and release scope resource claims once.
     pub(crate) fn begin_cleanup(&mut self, scopes: &[Id]) {
         self.begin_cleanup_after(scopes, None);

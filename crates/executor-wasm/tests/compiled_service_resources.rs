@@ -47,22 +47,26 @@ world sockets {{
 
 const PROBE: &str = "sockets::example:sockets/probe@1.0.0";
 
-/// The names `a`, `x` and `y` at 64, 65 and 66; the dependency lists `[a]` at 96 and `[x]` at
-/// 104; the root's one declaration of 20 bytes at 256 and the service's two from 276; the root's
-/// list at the return area 128 and the service's at 136; the message `down` at 72. Without a root
-/// resource, `x` depends on nothing. The result of an open is written at 512.
-fn module(root: bool, down: bool) -> String {
+/// The names `a`, `x`, `y` and `z` at 64, 65, 66 and 67; the dependency lists `[a]` at 96, `[x]`
+/// at 104, `[y]` at 112 and `[z]` at 120; the root's one declaration of 20 bytes at 256 and the
+/// service's from 276, `service`, two by default; the root's list at the return area 128 and the
+/// service's at 136; the message `down` at 72. Without a root resource, `x` depends on nothing.
+/// The result of an open is written at 512.
+fn module(root: bool, down: bool, service: &[String]) -> String {
     let down = i32::from(down);
     let data = [
-        r#"(data (i32.const 64) "axy") (data (i32.const 72) "down")"#.to_owned(),
+        r#"(data (i32.const 64) "axyz") (data (i32.const 72) "down")"#.to_owned(),
         names(96, 64),
         names(104, 65),
+        names(112, 66),
+        names(120, 67),
         list(128, 256, 1),
-        list(136, 276, 2),
+        list(136, 276, service.len() as u32),
         declaration(256, 64, 96, 0),
-        declaration(276, 65, 96, u32::from(root)),
-        declaration(296, 66, 104, 1),
     ]
+    .into_iter()
+    .chain(service.iter().cloned())
+    .collect::<Vec<_>>()
     .join("\n  ");
     let root_callbacks = match root {
         true => {
@@ -130,10 +134,24 @@ fn module(root: bool, down: bool) -> String {
     )
 }
 
+/// The service's declarations as the tests mostly need them: `x`, depending on the root's `a`
+/// when there is one, and `y`, depending on `x`, at `version`.
+fn service(root: bool, version: u32) -> Vec<String> {
+    vec![
+        versioned(276, 65, version, 96, u32::from(root)),
+        versioned(296, 66, version, 104, 1),
+    ]
+}
+
 /// One declaration of 20 bytes at `at`: the one-byte name at `name`, version 1, and `count`
 /// dependency names at `dependencies`.
 fn declaration(at: u32, name: u32, dependencies: u32, count: u32) -> String {
-    words(at, &[name, 1, 1, dependencies, count])
+    versioned(at, name, 1, dependencies, count)
+}
+
+/// One declaration of 20 bytes at `at`, at `version`.
+fn versioned(at: u32, name: u32, version: u32, dependencies: u32, count: u32) -> String {
+    words(at, &[name, 1, version, dependencies, count])
 }
 
 /// The list of `count` declarations at `declarations`, at the return area `at`.
@@ -156,10 +174,15 @@ fn words(at: u32, words: &[u32]) -> String {
 }
 
 fn artifact(root: bool, down: bool) -> Vec<u8> {
+    declaring(root, down, &service(root, 1))
+}
+
+/// The artifact whose service declares `service`.
+fn declaring(root: bool, down: bool, service: &[String]) -> Vec<u8> {
     components::encode(
         &wit(root),
         "sockets",
-        &module(root, down),
+        &module(root, down, service),
         "sockets",
         &ComponentRoles::default(),
     )
@@ -336,4 +359,103 @@ fn an_object_whose_open_answers_an_error_is_not_created_and_closes_what_opened()
         logged(&records)[5..],
         expected(&[("warn", "y"), ("warn", "x"), ("warn", "a")])
     );
+}
+
+/// An object's declaration the kernel or the worker refuses refuses that object alone, naming
+/// what is wrong: a resource named like the root's `a`, since resource names are unique in the
+/// Orb; a dependency on `z`, which nothing declares; and a dependency of `x` on `y`, which the
+/// service declares after it. The root's `a` stays open, and an object of a sound declaration is
+/// not created either, since the service's declarations are its.
+#[test]
+fn an_objects_refused_declaration_refuses_that_object_naming_both() {
+    for (service, named) in [
+        (
+            vec![declaration(276, 64, 96, 0), declaration(296, 66, 104, 1)],
+            "the resource `a` of each object of example:sockets/probe@1.0.0 takes the name of the root's resource `a`",
+        ),
+        (
+            vec![declaration(276, 65, 120, 1), declaration(296, 66, 104, 1)],
+            "the resource `x` depends on `z`, which the Orb does not declare before it",
+        ),
+        (
+            vec![declaration(276, 65, 112, 1), declaration(296, 66, 96, 1)],
+            "the resource `x` depends on `y`, which the Orb does not declare before it",
+        ),
+    ] {
+        let (engine, records) = engine();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![
+            engine
+                .load(&declaring(true, false, &service), Install::default())
+                .unwrap(),
+        ])
+        .unwrap();
+        let one = Rc::new(host.get(PROBE, vec!["one".into()], "alice").unwrap());
+        let refused = pool
+            .run_until(one.ready())
+            .expect_err("the object is refused")
+            .to_string();
+        assert!(refused.contains(named), "{refused}");
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        assert_eq!(logged(&records), expected(&[("info", "a"), ("warn", "a")]));
+    }
+}
+
+/// A reload opens the objects' resources again in the fresh instance, as it does the root's, since
+/// the values live in the instance, and closes the old instance's once, whether the code keeps
+/// `x` and `y` at version 1 or moves them to version 2; the object stays, with the new handles.
+#[test]
+fn an_objects_resources_open_again_across_a_reload() {
+    for version in [1, 2] {
+        let (engine, records) = engine();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![
+            engine
+                .load(&artifact(true, false), Install::default())
+                .unwrap(),
+        ])
+        .unwrap();
+        let one = object(&mut pool, &host, "one");
+        assert_eq!(
+            logged(&records),
+            expected(&[("info", "a"), ("info", "x"), ("info", "y")]),
+            "version {version}"
+        );
+        pool.run_until(host.reload(
+            vec![
+                engine
+                    .load(&declaring(true, false, &service(true, version)), Install::default())
+                    .unwrap(),
+            ],
+            5_000,
+        ))
+        .unwrap();
+        pool.run_until(host.settled());
+        // The fresh instance opens the root's `a` and the object's `x` and `y` again, then the old
+        // instance's close, in reverse; the handles are the new instance's.
+        assert_eq!(
+            logged(&records)[3..],
+            expected(&[
+                ("info", "a"),
+                ("info", "x"),
+                ("info", "y"),
+                ("warn", "y"),
+                ("warn", "x"),
+                ("warn", "a"),
+            ]),
+            "version {version}"
+        );
+        assert_eq!(call(&mut pool, &host, &one, "mine"), 3, "version {version}");
+        one.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        assert_eq!(
+            logged(&records)[9..],
+            expected(&[("warn", "y"), ("warn", "x"), ("warn", "a")]),
+            "version {version}"
+        );
+    }
 }
