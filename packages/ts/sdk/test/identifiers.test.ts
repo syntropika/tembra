@@ -6,6 +6,8 @@ import { failure, TembraError } from "../src/error.ts";
 import { EffectType, KernelOp } from "../src/protocol.ts";
 import { createHost } from "../src/node.ts";
 import type { Kernel, KernelOutcome } from "../src/kernel.ts";
+import { orb } from "../src/index.ts";
+import { RemoteHost, serve } from "../src/rpc.ts";
 
 test("structured errors retain their fields, default message, cause and custom orb reasons", () => {
   const descriptor = Errors.Invalid.StateValidation;
@@ -28,6 +30,60 @@ test("structured errors retain their fields, default message, cause and custom o
     message: "Quota exceeded",
   };
   expect(new TembraError(custom)).toMatchObject(custom);
+});
+
+test("a native callback that throws answers unavailable/callback to its remote caller", async () => {
+  const endpoints = [0, 1].map(() => ({
+    receive: (_frame: Uint8Array) => {},
+    ended: () => {},
+  }));
+  const transports = endpoints.map((endpoint, index) => ({
+    send(frame: Uint8Array) {
+      const copy = frame.slice();
+      queueMicrotask(() => endpoints[1 - index]!.receive(copy));
+    },
+    listen(receive: (frame: Uint8Array) => void, ended: () => void) {
+      Object.assign(endpoint, { receive, ended });
+      return () => {
+        endpoint.receive = () => {};
+      };
+    },
+    close() {
+      for (const endpoint of endpoints) endpoint.ended();
+    },
+  }));
+  const host = createHost();
+  const server = serve(host, transports[0]!, { principal: "authenticated" });
+  const remote = new RemoteHost(transports[1]!);
+  try {
+    await host.install(
+      orb({
+        name: "thrower",
+        apiVersion: 1,
+        services: {
+          thrower: {
+            methods: {
+              fail() {
+                throw new Error("the callback failed");
+              },
+            },
+          },
+        },
+      }),
+    );
+    const reference = (await remote.get("thrower", "main")) as unknown as {
+      fail(): Promise<unknown>;
+    };
+    await expect(reference.fail()).rejects.toMatchObject({
+      code: Code.Unavailable,
+      reason: Reason.Callback,
+      message: "the callback failed",
+    });
+  } finally {
+    remote.close();
+    server.close();
+    await host.close();
+  }
 });
 
 test("named operations retain native wire errors and refuse unknown operations without mutation", async () => {

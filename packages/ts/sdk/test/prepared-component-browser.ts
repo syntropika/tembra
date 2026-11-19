@@ -94,12 +94,14 @@ function same(actual: unknown, expected: unknown, what: string): void {
   if (a !== e) throw new Error(`${what}: expected ${e}, received ${a}`);
 }
 
-/** The rejection message of an operation that must fail. */
+/** The rejection message of an operation that must fail, after its reason when it has one. */
 async function refusal(operation: Promise<unknown> | (() => unknown), what: string) {
   try {
     await (typeof operation === "function" ? operation() : operation);
   } catch (error) {
-    return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    if (!(error instanceof Error)) return String(error);
+    const reason = "reason" in error ? `${String(error.reason)}: ` : "";
+    return `${error.name}: ${reason}${error.message}`;
   }
   throw new Error(`${what} succeeded`);
 }
@@ -930,10 +932,11 @@ async function ingress(adapters: Adapters, base: object): Promise<void> {
       "handler trap rejects",
     );
     includes(
-      String(
-        await host.handleHttp("http-handler", request("/status", null)).catch((error) => error),
+      await refusal(
+        host.handleHttp("http-handler", request("/status", null)),
+        "request after the handler's trap",
       ),
-      "quarantined",
+      "wasm_executor_quarantined",
       "handler quarantined after its trap",
     );
   });

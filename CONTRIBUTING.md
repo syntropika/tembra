@@ -53,6 +53,8 @@ A change keeps each invariant below. Each one names the tests that guard it, and
 - Native and compiled Orbs answer the same codes and values for the same calls.
   - `the_native_build_and_the_component_answer_alike` in `crates/executor-wasm/tests/orb_macro_parity.rs` (`just test-orb-parity`). A new case is a scenario: a module or a function of `crates/orb-macro/parity-fixture`, and a row of its list.
   - `a_platform_port_answers_the_native_codes` in `crates/executor-wasm/tests/compiled_probe.rs`, for a compiled Orb served through a platform port (`cargo test --locked -p tembra-executor-wasm`), and `a_source_guest_that_rethrows_a_refusal_answers_its_code` in `crates/executor-wasm/tests/safety.rs`, for a source Orb that fails with a host's refusal (`just test-wasm-acceptance`, which builds the interpreter it needs).
+  - `a trap answers the same reasons in the native worker and in the JS component adapter` and `a TypeScript dependency's refusal traps its compiled caller alike in both hosts` in `packages/ts/sdk/test/component.node.test.mjs`, for the same component on both hosts (`just test-wasm-acceptance`).
+  - `portable_refused_entry_after_a_trap_keeps_its_code_and_reason` in `crates/mobile/tests/compiled_filesystem.rs`, for an entry the mobile port refuses after a trap (`just test-mobile-wasm`).
 - `Host` releases on close every callback it keeps, so that a callback holding the host does not keep it alive.
   - `closing_the_host_releases_its_observer` in `crates/tembra/tests/call_context.rs` (`cargo test --locked -p tembra`).
 - Every option that the macro's guide, `crates/orb-macro/README.md`, documents has a test that builds it, both ways where the guide promises both.

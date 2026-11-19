@@ -1,4 +1,5 @@
 import { createServer } from "node:net";
+import { missing } from "./skip-reason.mjs";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { test } from "node:test";
@@ -23,23 +24,27 @@ import {
 
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 
-test("Node: source Orbs select keyed instances per request", { skip: !fixtures }, async () => {
-  const host = createHost();
-  try {
-    await verifyContextAcquireScenario(
-      host,
-      async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
-    );
-  } finally {
-    await host.close();
-  }
-  assert.equal(host.diagnostics().references, 0);
-  assert.equal(host.diagnostics().pendingJobs, 0);
-});
+test(
+  "Node: source Orbs select keyed instances per request",
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
+  async () => {
+    const host = createHost();
+    try {
+      await verifyContextAcquireScenario(
+        host,
+        async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
+      );
+    } finally {
+      await host.close();
+    }
+    assert.equal(host.diagnostics().references, 0);
+    assert.equal(host.diagnostics().pendingJobs, 0);
+  },
+);
 
 test(
   "Node: compiled Orbs select keyed objects through reference views",
-  { skip: !fixtures },
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
   async () => {
     const host = createHost({ isolated: { limits: { packetBytes: 8192 } } });
     try {
@@ -56,33 +61,38 @@ test(
   },
 );
 
-test("Node: exact 64-bit values cross source Orbs without loss", { skip: !fixtures }, async () => {
-  const host = createHost();
-  try {
-    const report = await verifyPrecisionScenario(
-      host,
-      async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
-    );
-    assert.match(report, /application -> source -> source/);
-  } finally {
-    await host.close();
-  }
-  for (const key of [
-    "objects",
-    "references",
-    "calls",
-    "roots",
-    "resources",
-    "tasks",
-    "values",
-    "pendingJobs",
-  ])
-    if (typeof host.diagnostics()[key] === "number") assert.equal(host.diagnostics()[key], 0, key);
-});
+test(
+  "Node: exact 64-bit values cross source Orbs without loss",
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
+  async () => {
+    const host = createHost();
+    try {
+      const report = await verifyPrecisionScenario(
+        host,
+        async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
+      );
+      assert.match(report, /application -> source -> source/);
+    } finally {
+      await host.close();
+    }
+    for (const key of [
+      "objects",
+      "references",
+      "calls",
+      "roots",
+      "resources",
+      "tasks",
+      "values",
+      "pendingJobs",
+    ])
+      if (typeof host.diagnostics()[key] === "number")
+        assert.equal(host.diagnostics()[key], 0, key);
+  },
+);
 
 test(
   "isolated TypeScript hooks compose waterfall, series and bail with a compiled contributor",
-  { skip: !fixtures },
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -131,7 +141,7 @@ test(
 test(
   "published Node host installs real TS and Rust Wasm artifacts with grants, reload and physical disposal",
   {
-    skip: !fixtures,
+    skip: missing("TEMBRA_WASM_FIXTURES"),
     timeout: 180000,
   },
   async () => {
@@ -351,7 +361,7 @@ test(
 
 test(
   "cancelling a caller interrupts a pending source HTTP send without quarantining the Orb",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -438,7 +448,7 @@ test(
 
 test(
   "standard WASI source Orbs read raw bytes, retain descriptors and refuse forged handles natively",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -536,7 +546,7 @@ test(
 
 test(
   "TypeScript uses the complete standard filesystem path for binary writes and directory operations",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const data = await mkdtemp(
       path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-filesystem-"),
@@ -586,7 +596,7 @@ test(
 
 test(
   "standard clocks, random, CLI and builtin authority run through actual source Wasm",
-  { skip: !fixtures },
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
   async () => {
     const directory = await mkdtemp(
       path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-cli-"),
@@ -695,7 +705,7 @@ const ingressHost = async (limits) => {
 
 test(
   "Node: Host.handleHttp serves a source handler through the native typed carrier",
-  { skip: !fixtures, timeout: 120000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 120000 },
   async () => {
     const hosts = [];
     const { result, engines } = await countingStores(() =>
@@ -718,7 +728,7 @@ test(
 
 test(
   "Node: native ingress never waits on the application's body and fails broken bodies",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -830,7 +840,7 @@ test(
 
 test(
   "Node: a request body that cannot be opened never strands the native call (M-1, L-1)",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -940,7 +950,7 @@ const handlerWit = path.resolve(
 
 test(
   "Node: Host.handleHttp serves a compiled handler through the native typed carrier",
-  { skip: !httpHandler, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_HTTP_HANDLER"), timeout: 60000 },
   async () => {
     const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
     const artifact = new Uint8Array(
@@ -1025,9 +1035,12 @@ test(
         // later request is refused as quarantined until a reload.
         await assert.rejects(host.handleHttp("web", request("/trap")), /trap/);
         await settled(host);
-        await assert.rejects(host.handleHttp("web", request("/status")), (error) =>
-          /quarantined|closing/.test(`${error.reason} ${error.message}`),
-        );
+        await assert.rejects(host.handleHttp("web", request("/status")), (error) => {
+          assert.equal(error.code, "unavailable", error.message);
+          assert.equal(error.reason, "wasm_executor_quarantined", error.message);
+          assert.match(error.message, /^component trap: /);
+          return true;
+        });
         await settled(host);
       } finally {
         await host.close();
@@ -1050,5 +1063,77 @@ test(
       }
     });
     for (const host of hosts) assertRetired(host, engines);
+  },
+);
+
+test(
+  "Node: a refused incoming exchange stays active until its finish",
+  { skip: missing("TEMBRA_WASM_HTTP_HANDLER"), timeout: 60000 },
+  async () => {
+    const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
+    const artifact = new binding.NodeArtifact(
+      new Uint8Array(
+        new binding.NodeContract(handlerWit, "handler").componentArtifact(
+          new Uint8Array(await readFile(httpHandler)),
+          "web",
+          1,
+        ),
+      ),
+    );
+    const bindings = {
+      "wasi:http/types@0.3.0": { kind: "host", provider: "wasi:http/handler@0.3.0" },
+    };
+    const port = new binding.NodeInterpreter("{}", () => {}).open(
+      artifact,
+      JSON.stringify(bindings),
+      "{}",
+    );
+    /** The last request served, awaited before the port closes. */
+    let pending = Promise.resolve();
+    try {
+      for (const [environment, service] of [
+        [1, null],
+        [2, "handler"],
+      ])
+        assert.ok(
+          "ok" in
+            JSON.parse(
+              port.declare(JSON.stringify({ kind: "create", environment, service }), () => "null"),
+            ),
+        );
+      const packet = JSON.stringify({
+        kind: "ingress",
+        environment: 2,
+        service: "handler",
+        method: "handle",
+      });
+      /** Serve one request; resolves with its completion once the port finished it. */
+      const serve = (pathWithQuery) =>
+        (pending = new Promise((resolve) => {
+          port.ingress(packet, { method: "GET", pathWithQuery, fields: [] }, (event) => {
+            if (event.kind === "request-pull") port.supplyRequest(null, [], null);
+            if (event.kind !== "complete") return;
+            port.finish();
+            resolve(JSON.parse(event.result));
+          });
+        }));
+      const trapped = await serve("/trap");
+      assert.equal(trapped.error.reason, "wasm_executor", trapped.error.message);
+      // The quarantined revision refuses the request; its completion is still queued here.
+      const refused = serve("/status");
+      assert.throws(() => port.ingress(packet, { method: "GET", fields: [] }, () => {}), /active/);
+      assert.throws(() => port.dispatch("{}", () => {}), /active/);
+      assert.throws(() => port.close(), /settlement/);
+      port.disconnect();
+      assert.deepEqual((await refused).error, {
+        code: "unavailable",
+        reason: "wasm_executor_quarantined",
+        message: trapped.error.message,
+      });
+    } finally {
+      // An exchange a failed assertion left behind completes before the port closes.
+      await pending;
+      port.close();
+    }
   },
 );

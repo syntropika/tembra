@@ -14,7 +14,15 @@
  * import attribution from entry until that exit, even after its result was returned at
  * `task.return`. A trap, or a task that exits rejected, quarantines the instance and rejects
  * every waiter racing the trap signal. No event-loop timing is used as a completion signal.
+ *
+ * A callback answers its faults as the native worker's do. A trap, an uncaught guest exception or
+ * a timeout answers `unavailable/wasm_executor` with a `component trap: ` message. A busy or closed
+ * instance answers `unavailable/wasm_executor`. Every entry of a quarantined instance answers
+ * `unavailable/wasm_executor_quarantined` with the trap's message. A structured error that traps
+ * the guest, such as a dependency's refusal, is a trap too.
  */
+import { isDescriptor, TembraError } from "../../error.ts";
+import { Errors, type ErrorDescriptor } from "../../errors.ts";
 import type { CoreLimits, TaskObserver } from "./instance.ts";
 import type { CallbackScope } from "./scope.ts";
 import { abortable, type WasiHost } from "./wasi-host.ts";
@@ -33,6 +41,51 @@ export interface Callback {
   /** Resolves at that task's real exit. */
   readonly exit: Promise<void>;
   readonly exited: () => void;
+}
+
+/**
+ * Whether `error` is the executor's own answer to a fault, which is answered unchanged. Structured
+ * errors are recognized by their fields, as `failure` does, so one from another SDK copy counts.
+ */
+function executorFault(error: unknown): error is ErrorDescriptor {
+  return isDescriptor(error) && error.reason === Errors.Unavailable.WasmExecutor.reason;
+}
+
+/** The text of a failure, a structured one as the native worker writes it: `code/reason: message`. */
+export function failureText(error: unknown): string {
+  try {
+    if (isDescriptor(error)) return `${error.code}/${error.reason}: ${error.message}`;
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    // An arbitrary thrown value must not hide the fault it stands for.
+    return "the component trapped";
+  }
+}
+
+/** The message of a component fault, as the native worker words a trap. */
+function trapMessage(cause: unknown): string {
+  if (executorFault(cause)) return cause.message;
+  return `component trap: ${cause === undefined ? "the component trapped" : failureText(cause)}`;
+}
+
+/** The answer of each fault already answered: every wait the fault ends sees one error. */
+const faults = new WeakMap<object, TembraError>();
+
+/**
+ * The error a callback answers for a fault of the component: `unavailable/wasm_executor`, whatever
+ * caused it, a structured error included, since anything the guest throws traps it. A guest's own
+ * refusal is its WIT `err`, a value that never reaches here.
+ */
+function fault(error: unknown): TembraError {
+  if (error instanceof TembraError && executorFault(error)) return error;
+  const object = typeof error === "object" && error !== null ? error : undefined;
+  const known = object && faults.get(object);
+  if (known) return known;
+  const answer = executorFault(error)
+    ? new TembraError(error, error.message, { cause: error })
+    : new TembraError(Errors.Unavailable.WasmExecutor, trapMessage(error), { cause: error });
+  if (object) faults.set(object, answer);
+  return answer;
 }
 
 export class ComponentPort {
@@ -307,12 +360,21 @@ export class ComponentPort {
     return !this.#closed && !this.#poisoned;
   }
 
+  /** The refusal of an entry into this quarantined instance, naming its trap. */
+  #quarantined(): TembraError {
+    return new TembraError(Errors.Unavailable.WasmExecutorQuarantined, trapMessage(this.#cause), {
+      cause: this.#cause,
+    });
+  }
+
   /** Mark the instance unusable after a trap observed outside `run`. */
   poison(cause?: unknown): void {
     if (!this.#poisoned) {
-      // Waiters see the actual trap; later entries are refused as quarantined.
-      this.#rejectTrap(cause ?? new Error("The component revision is quarantined after a trap"));
-      this.#cause = cause;
+      // Waiters see the actual trap; later entries are refused as quarantined, naming the same
+      // trap, which a trap without a cause names alike for both.
+      const trap = cause ?? new Error("the component trapped");
+      this.#rejectTrap(trap);
+      this.#cause = trap;
     }
     this.#poisoned = true;
     this.#retired.abort();
@@ -354,13 +416,11 @@ export class ComponentPort {
     scope: CallbackScope,
     call: () => T | Promise<T>,
   ): { result: Promise<T>; finished: Promise<void>; physical: Promise<void>; park(): void } {
-    if (this.#poisoned)
-      throw new Error("The component revision is quarantined after a trap", {
-        cause: this.#cause,
-      });
+    if (this.#poisoned) throw this.#quarantined();
     if (this.#closed || this.#active || this.#destroying)
-      throw new Error("Component is closed or busy");
-    if (!this.exports) throw new Error("Component is not instantiated");
+      throw new TembraError(Errors.Unavailable.WasmExecutor, "Component is closed or busy");
+    if (!this.exports)
+      throw new TembraError(Errors.Unavailable.WasmExecutor, "Component is not instantiated");
     const newGroup = this.#callbacks.size === 0;
     let exited!: () => void;
     const exit = new Promise<void>((resolve) => (exited = resolve));
@@ -379,7 +439,7 @@ export class ComponentPort {
     let timeout: Error | undefined;
     const expired = () => {
       if (!timeout) {
-        timeout = new Error("Component callback exceeded its wall time limit");
+        timeout = fault(new Error("Component callback exceeded its wall time limit"));
         this.poison(timeout);
       }
       return timeout;
@@ -441,7 +501,10 @@ export class ComponentPort {
           revoke();
           release();
         }
-        const error = new Error("No generated export task was observed for this callback");
+        const error = new TembraError(
+          Errors.Unavailable.WasmExecutor,
+          "No generated export task was observed for this callback",
+        );
         this.poison(error);
         throw error;
       })();
@@ -464,7 +527,7 @@ export class ComponentPort {
       },
       (error: unknown) => {
         this.poison(error);
-        throw error;
+        throw fault(error);
       },
     );
     const finished = (async () => {
@@ -476,14 +539,11 @@ export class ComponentPort {
         while (callback.pending.size) await bounded(Promise.allSettled([...callback.pending]));
       } catch (error) {
         this.poison(error);
-        throw error;
+        throw fault(error);
       } finally {
         revoke();
       }
-      if (this.#poisoned)
-        throw new Error("The component revision is quarantined after a trap", {
-          cause: this.#cause,
-        });
+      if (this.#poisoned) throw this.#quarantined();
     })();
     result.catch(() => undefined);
     finished.catch(() => undefined);

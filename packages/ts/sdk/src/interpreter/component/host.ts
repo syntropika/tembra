@@ -12,7 +12,7 @@
  */
 import type { ResourceCapability, ByteStreamCapability } from "#tembra-adapters";
 import { receiveByteStream } from "./streams.ts";
-import type { ComponentPort } from "./port.ts";
+import { failureText, type ComponentPort } from "./port.ts";
 import type { Described } from "./revision.ts";
 import type { ReferenceBinding } from "../types.ts";
 import type { ReferenceClaim } from "./scope.ts";
@@ -42,6 +42,11 @@ export interface ImportedFunction {
   readonly values: FunctionValues;
 }
 
+/** A dependency's refusal traps its caller, worded as the native worker's trap names it. */
+function dependencyFailed(error: unknown): never {
+  throw new Error(`dependency call failed: ${failureText(error)}`, { cause: error });
+}
+
 /** The import object of one Orb dependency binding. */
 export function dependencyImport(
   port: ComponentPort,
@@ -56,7 +61,7 @@ export function dependencyImport(
         const input = values.hostArguments(args);
         return port
           .physical(callback, callback.scope.call(binding, spelling, input))
-          .then(values.toGuest);
+          .then(values.toGuest, dependencyFailed);
       },
     ]),
   );
@@ -193,7 +198,7 @@ export function referenceImport(
         const input = values.hostArguments(args);
         return port
           .physical(callback, callback.scope.invoke(claim, binding, name, input))
-          .then(values.toGuest);
+          .then(values.toGuest, dependencyFailed);
       },
     });
   }
@@ -282,20 +287,22 @@ export function resourceImport(
     const pending = port.physical(
       callback,
       (async () => {
-        const result = receiver
-          ? await callback.scope.resource!(
-              receiver,
-              binding,
-              fn.spelling,
-              input,
-              ...(fn.roles.arguments ? ([transfer] as const) : []),
-            )
-          : await callback.scope.call(
-              binding,
-              fn.spelling,
-              input,
-              ...(fn.roles.arguments ? ([transfer] as const) : []),
-            );
+        const result = await (
+          receiver
+            ? callback.scope.resource!(
+                receiver,
+                binding,
+                fn.spelling,
+                input,
+                ...(fn.roles.arguments ? ([transfer] as const) : []),
+              )
+            : callback.scope.call(
+                binding,
+                fn.spelling,
+                input,
+                ...(fn.roles.arguments ? ([transfer] as const) : []),
+              )
+        ).catch(dependencyFailed);
         if (fn.roles.result) {
           try {
             const value = fn.roles.result(result, (nominal, value) => {

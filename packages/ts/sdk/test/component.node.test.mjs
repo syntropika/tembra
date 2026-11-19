@@ -1,12 +1,16 @@
 import { spawn, spawnSync } from "node:child_process";
+import { missing } from "./skip-reason.mjs";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createHost, directoryFilesystem } from "../dist/node.js";
+import { signature } from "../dist/runtime/adapters.js";
+import { dependencies } from "./component-dependencies.mjs";
 
 // The no-std probe component imports WASI 0.3 through its generated WIT bindings.
 const probe = process.env.TEMBRA_WASM_PROBE;
@@ -53,7 +57,7 @@ async function scratch(operation) {
 
 test(
   "compiled component calls wait on their worker, not on Node's libuv pool",
-  { skip: !probe || process.platform === "win32", timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_PROBE") || process.platform === "win32", timeout: 60000 },
   () =>
     scratch(async (directory) => {
       const fifo = path.join(directory, "pipe");
@@ -120,7 +124,7 @@ test(
 
 test(
   "a terminal component failure settles every queued call with the quarantine",
-  { skip: !probe, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_PROBE"), timeout: 60000 },
   () =>
     scratch(async (directory) => {
       const host = createHost({
@@ -153,7 +157,7 @@ test(
 
 test(
   "the published Node host installs the compiled probe with a filesystem grant",
-  { skip: !probe, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_PROBE"), timeout: 60000 },
   () =>
     scratch(async (directory) => {
       const host = createHost({
@@ -180,6 +184,142 @@ test(
     }),
 );
 
+/** The structured fields of a call's error. */
+async function refused(call) {
+  try {
+    await call();
+  } catch ({ code, reason, message }) {
+    return { code, reason, message };
+  }
+  assert.fail("the call succeeded");
+}
+
+/**
+ * Run `script` on the JS component adapter with `bytes` prepared for it, and read the JSON line
+ * it prints per call. The prepared glue needs JSPI: a child Node enables it, and resolves the
+ * adapter's SDK import to this package.
+ */
+async function inAdapter(directory, bytes, script, ...args) {
+  const { prepareBrowserComponent } = await import("../dist/tooling/index.js");
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const adapter = await prepareBrowserComponent(bytes, digest, path.join(directory, "adapter"));
+  await mkdir(path.join(directory, "node_modules/@syntropika"), { recursive: true });
+  await symlink(
+    path.resolve(import.meta.dirname, ".."),
+    path.join(directory, "node_modules/@syntropika/tembra-sdk"),
+  );
+  const artifactFile = path.join(directory, "artifact.wasm");
+  await writeFile(artifactFile, bytes);
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--experimental-wasm-jspi",
+      path.join(import.meta.dirname, script),
+      adapter.module,
+      artifactFile,
+      ...args,
+    ],
+    { encoding: "utf8", timeout: 60000 },
+  );
+  assert.equal(child.status, 0, child.stderr);
+  return child.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+}
+
+test(
+  "a trap answers the same reasons in the native worker and in the JS component adapter",
+  { skip: missing("TEMBRA_WASM_PROBE"), timeout: 120000 },
+  () =>
+    scratch(async (directory) => {
+      const bytes = await probeArtifact("probe");
+      const grants = { filesystem: [{ provider: "data", mount: "/data", writable: false }] };
+      // The native worker runs the compiled probe in the Node host.
+      const host = createHost({
+        isolated: { providers: { filesystem: { data: directoryFilesystem(directory) } } },
+      });
+      let native;
+      try {
+        await host.install({ artifact: bytes, grants });
+        const reference = await host.get(`probe::${service}`, "main");
+        native = [await refused(() => reference.trap()), await refused(() => reference.spin(1))];
+        reference.release();
+      } finally {
+        await host.close();
+      }
+      const adapted = await inAdapter(directory, bytes, "component-trap-adapter.mjs");
+      for (const [trap, quarantined] of [native, adapted]) {
+        const answer = (reason) => ({ code: "unavailable", reason, message: trap.message });
+        assert.deepEqual(trap, answer("wasm_executor"));
+        assert.match(trap.message, /^component trap: /);
+        // Every later entry is refused with the trap that quarantined the revision.
+        assert.deepEqual(quarantined, answer("wasm_executor_quarantined"));
+      }
+    }),
+);
+
+test(
+  "a refused entry keeps the Node port's exchange active until its finish",
+  { skip: missing("TEMBRA_WASM_PROBE"), timeout: 60000 },
+  () =>
+    scratch(async (directory) => {
+      const artifact = new binding.NodeArtifact(await probeArtifact("probe"));
+      const grants = {
+        system: ["clocks"],
+        filesystem: [{ provider: "data", mount: "/data", writable: false }],
+      };
+      const plan = JSON.parse(
+        artifact.request(
+          JSON.stringify({
+            kind: "install",
+            name: "probe",
+            apiVersion: 1,
+            requires: {},
+            grants,
+            filesystem: ["data"],
+            network: [],
+          }),
+        ),
+      ).ok;
+      const interpreter = new binding.NodeInterpreter(
+        JSON.stringify({ filesystem: { data: directory } }),
+        () => {},
+      );
+      const port = interpreter.open(
+        artifact,
+        JSON.stringify(plan.bindings),
+        JSON.stringify(grants),
+      );
+      const created = port.declare(
+        JSON.stringify({ kind: "create", environment: 1, service: "probe" }),
+        () => '{"ok":null}',
+      );
+      assert.ok("ok" in JSON.parse(created), created);
+      /** Dispatch one call; resolves with its completion once the port finished it. */
+      const call = (method, args) =>
+        new Promise((resolve) => {
+          const fn = artifact.bind(service, method, true);
+          port.dispatch(
+            JSON.stringify({ kind: "invoke", environment: 1, function: fn, args }),
+            (raw) => {
+              const event = JSON.parse(raw);
+              if (event.event !== "complete") return;
+              port.finish();
+              resolve(event.result);
+            },
+          );
+        });
+      assert.equal((await call("trap", [])).error.reason, "wasm_executor");
+      // The quarantined revision refuses the entry; its completion is still queued here.
+      const refused = call("spin", [1]);
+      assert.throws(() => port.dispatch("{}", () => {}), /already active/);
+      assert.throws(() => port.close(), /settlement/);
+      assert.equal((await refused).error.reason, "wasm_executor_quarantined");
+      port.close();
+    }),
+);
+
 const pipeline = "example:pipeline/pipeline@1.0.0";
 const requires = {
   "example:pipeline/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 },
@@ -195,7 +335,7 @@ function delayedSource(world, name, alias) {
 
 test(
   "a compiled Orb imports delayed TypeScript Orbs through the Node host",
-  { skip: !consumer, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_CONSUMER"), timeout: 60000 },
   async () => {
     const host = createHost();
     try {
@@ -219,4 +359,58 @@ test(
       await host.close();
     }
   },
+);
+
+test(
+  "a TypeScript dependency's refusal traps its compiled caller alike in both hosts",
+  { skip: missing("TEMBRA_WASM_CONSUMER"), timeout: 120000 },
+  () =>
+    scratch(async (directory) => {
+      const bytes = await artifact("pipeline", "consumer", "pipeline", { component: consumer });
+      // The WIT digest the pipeline requires of each dependency.
+      const plan = JSON.parse(
+        new binding.NodeArtifact(bytes).request(
+          JSON.stringify({
+            kind: "install",
+            name: "pipeline",
+            apiVersion: 1,
+            requires,
+            grants: {},
+            filesystem: [],
+            network: [],
+          }),
+        ),
+      ).ok.plan;
+      const signatures = Object.fromEntries(
+        plan.orb.requires.map(({ orb, signatures }) => [orb, Object.values(signatures)[0]]),
+      );
+      const host = createHost();
+      let native;
+      try {
+        await host.install([...dependencies(signatures, signature), { artifact: bytes, requires }]);
+        const reference = await host.get(`pipeline::${pipeline}`, "main");
+        native = [
+          await refused(() => reference.quadruple(1)),
+          await refused(() => reference.quadruple(1)),
+        ];
+        reference.release();
+      } finally {
+        await host.close();
+      }
+      const adapted = await inAdapter(
+        directory,
+        bytes,
+        "component-dependency-adapter.mjs",
+        JSON.stringify(signatures),
+      );
+      // The native worker's trap text names the Wasm frame first; both end with the refusal.
+      const refusal = "dependency call failed: released/reference: The reference has been released";
+      for (const [trap, quarantined] of [native, adapted]) {
+        assert.equal(trap.reason, "wasm_executor", trap.message);
+        assert.match(trap.message, /^component trap: /);
+        assert.ok(trap.message.endsWith(refusal), trap.message);
+        assert.deepEqual(quarantined, { ...trap, reason: "wasm_executor_quarantined" });
+      }
+      assert.equal(adapted[0].message, `component trap: ${refusal}`);
+    }),
 );

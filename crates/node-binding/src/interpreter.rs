@@ -140,6 +140,7 @@ impl NodeInterpreter {
             port: Some(port),
             ingress: RefCell::new(None),
             ticket: RefCell::new(None),
+            refused: std::cell::Cell::new(false),
             replies: Arc::default(),
             bridge: RefCell::new(None),
             sequence: Arc::default(),
@@ -160,9 +161,19 @@ pub struct NodeInterpreterPort {
     /// The carrier of the active incoming HTTP exchange, if any.
     ingress: RefCell<Option<Arc<IngressPort>>>,
     ticket: RefCell<Option<PortTicket>>,
+    /// An entry refused before it began: its exchange stays active until `finish`, as one that
+    /// began does, while its `complete` is still queued for JavaScript.
+    refused: std::cell::Cell<bool>,
     replies: Arc<Mutex<BTreeMap<u32, PortReply>>>,
     bridge: RefCell<Option<std::thread::JoinHandle<()>>>,
     sequence: Arc<AtomicU32>,
+}
+
+impl NodeInterpreterPort {
+    /// Whether an exchange, begun or refused, waits for its `finish`.
+    fn active(&self) -> bool {
+        self.ticket.borrow().is_some() || self.refused.get()
+    }
 }
 
 #[napi]
@@ -205,7 +216,7 @@ impl NodeInterpreterPort {
         packet: String,
         callback: Function<'_, String, String>,
     ) -> napi::Result<String> {
-        if self.ticket.borrow().is_some() {
+        if self.active() {
             return Err(js_error("interpreter exchange is already active"));
         }
         let packet = serde_json::from_str(&packet).map_err(js_error)?;
@@ -228,26 +239,33 @@ impl NodeInterpreterPort {
     #[napi]
     pub fn dispatch(&self, packet: String, callback: EventCallback) -> napi::Result<()> {
         let port = self.port()?;
-        if self.ticket.borrow().is_some() {
+        if self.active() {
             return Err(js_error("interpreter exchange is already active"));
         }
         if let Some(thread) = self.bridge.borrow_mut().take() {
             let _ = thread.join();
         }
-        let (start, receive) = std::sync::mpsc::channel::<tembra_executor_wasm::PortEvents>();
+        let (start, receive) =
+            std::sync::mpsc::channel::<tembra::Result<tembra_executor_wasm::PortEvents>>();
         let replies = self.replies.clone();
         let sequence = self.sequence.clone();
         let bridge = events::spawn(callback, receive, replies, sequence).map_err(js_error)?;
         let (ticket, events) = match port.begin(packet) {
             Ok(exchange) => exchange,
-            Err(error) => {
-                drop(start);
-                let _ = bridge.join();
-                return Err(js_error(error));
+            // A refused entry, such as one into a quarantined revision, completes the exchange
+            // with its code and reason; `finish` then joins the bridge that delivered it.
+            Err(refused) => {
+                if let Err(unsent) = start.send(Err(refused)) {
+                    let _ = bridge.join();
+                    return Err(js_error(unsent.0.err().expect("the refusal")));
+                }
+                *self.bridge.borrow_mut() = Some(bridge);
+                self.refused.set(true);
+                return Ok(());
             }
         };
         *self.ticket.borrow_mut() = Some(ticket);
-        if start.send(events).is_err() {
+        if start.send(Ok(events)).is_err() {
             self.ticket.borrow_mut().take();
             let _ = bridge.join();
             return Err(js_error("interpreter event bridge stopped before dispatch"));
@@ -269,7 +287,7 @@ impl NodeInterpreterPort {
         callback: IngressCallback,
     ) -> napi::Result<()> {
         let port = self.port()?;
-        if self.ticket.borrow().is_some() {
+        if self.active() {
             return Err(js_error("interpreter exchange is already active"));
         }
         if let Some(thread) = self.bridge.borrow_mut().take() {
@@ -282,7 +300,18 @@ impl NodeInterpreterPort {
             path_with_query: head.path_with_query,
             fields: ingress_fields(head.fields),
         };
-        let (ticket, events, carrier) = port.begin_ingress(packet, head).map_err(js_error)?;
+        let (ticket, events, carrier) = match port.begin_ingress(packet, head) {
+            Ok(exchange) => exchange,
+            // A refused entry completes the exchange with its code and reason, as in `dispatch`.
+            Err(refused) => {
+                let refusal = events::ingress_complete(Err::<String, _>(refused));
+                if callback.call(refusal, ThreadsafeFunctionCallMode::NonBlocking) != Status::Ok {
+                    return Err(js_error("the Node callback is closing"));
+                }
+                self.refused.set(true);
+                return Ok(());
+            }
+        };
         let carrier = Arc::new(carrier);
         let bridge = events::spawn_ingress(
             callback,
@@ -351,7 +380,9 @@ impl NodeInterpreterPort {
         if let Some(ticket) = self.ticket.borrow_mut().take() {
             ticket.finish().map_err(js_error)?;
         }
-        // The exchange physically completed; its carrier owns nothing any more.
+        // The exchange physically completed, or its refusal was delivered; its carrier owns
+        // nothing any more.
+        self.refused.set(false);
         self.ingress.borrow_mut().take();
         if let Some(thread) = self.bridge.borrow_mut().take() {
             let _ = thread.join();
@@ -362,7 +393,7 @@ impl NodeInterpreterPort {
     /// Release an idle revision only after its host has cleaned up every owning scope.
     #[napi]
     pub fn close(&mut self) -> napi::Result<()> {
-        if self.ticket.borrow().is_some() {
+        if self.active() {
             return Err(js_error(
                 "wait for physical interpreter settlement before closing",
             ));
@@ -416,22 +447,51 @@ struct ReplyError {
     message: String,
 }
 
+/// The platform's refusal of a host request: its structured error, whose code and reason the
+/// request answers, or a bare text, which answers `invalid/platform_reply`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Refusal {
+    Structured {
+        code: String,
+        reason: String,
+        message: String,
+    },
+    Text(String),
+}
+
+impl From<Refusal> for tembra::Error {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Structured {
+                code,
+                reason,
+                message,
+            } => match tembra::core::Code::parse(&code) {
+                Some(code) => tembra::Error::new(code, reason, message),
+                None => tembra::Error::invalid("platform_reply", message),
+            },
+            Refusal::Text(message) => tembra::Error::invalid("platform_reply", message),
+        }
+    }
+}
+
 /// Decode one response supplied by the trusted platform scope adapter.
 fn decode(packet: &str) -> tembra::Result<Value> {
-    let value: Reply<Value, String> = serde_json::from_str(packet)
+    let value: Reply<Value, Refusal> = serde_json::from_str(packet)
         .map_err(|error| tembra::Error::invalid("platform_reply", error.to_string()))?;
     match value {
         Reply::Ok(value) => Ok(value),
-        Reply::Error(message) => Err(tembra::Error::invalid("platform_reply", message)),
+        Reply::Error(refusal) => Err(refusal.into()),
     }
 }
 /// Retain the checked payload verbatim; parsing through Value would rewrite its numbers.
 fn decode_raw(packet: &str) -> tembra::Result<String> {
-    let value: Reply<Box<serde_json::value::RawValue>, String> = serde_json::from_str(packet)
+    let value: Reply<Box<serde_json::value::RawValue>, Refusal> = serde_json::from_str(packet)
         .map_err(|error| tembra::Error::invalid("platform_reply", error.to_string()))?;
     match value {
         Reply::Ok(value) => Ok(value.get().to_owned()),
-        Reply::Error(message) => Err(tembra::Error::invalid("platform_reply", message)),
+        Reply::Error(refusal) => Err(refusal.into()),
     }
 }
 
@@ -451,5 +511,61 @@ mod tests {
         );
         assert!(super::decode_raw(r#"{"ok": invalid}"#).is_err());
         assert!(super::decode_raw(r#"{"error":"refused"}"#).is_err());
+    }
+
+    /// A structured refusal keeps its code and reason; a bare text or an unknown code answers
+    /// `invalid/platform_reply`.
+    #[test]
+    fn a_platform_refusal_keeps_its_code_and_reason() {
+        let refused = |packet: &str| {
+            let error = super::decode_raw(packet).unwrap_err();
+            (error.code.as_str(), error.reason, error.message)
+        };
+        let released = r#"{"error":{"code":"released","reason":"reference","message":"gone"}}"#;
+        assert_eq!(
+            refused(released),
+            ("released", "reference".into(), "gone".into())
+        );
+        let error = super::decode(released).unwrap_err();
+        assert_eq!(
+            (error.code.as_str(), error.reason.as_str()),
+            ("released", "reference")
+        );
+        assert_eq!(
+            refused(r#"{"error":"refused"}"#),
+            ("invalid", "platform_reply".into(), "refused".into())
+        );
+        assert_eq!(
+            refused(r#"{"error":{"code":"other","reason":"x","message":"m"}}"#),
+            ("invalid", "platform_reply".into(), "m".into())
+        );
+    }
+
+    /// A refused entry completes an ordinary or an incoming HTTP exchange with its code and reason,
+    /// in the envelope the SDK reads a callback's failure from.
+    #[test]
+    fn a_refused_entry_completes_with_its_code_and_reason() {
+        let refused = || {
+            Err::<String, _>(tembra::Error::new(
+                tembra::core::Code::Unavailable,
+                "wasm_executor_quarantined",
+                "component trap: unreachable",
+            ))
+        };
+        let error = serde_json::json!({
+            "code": "unavailable",
+            "reason": "wasm_executor_quarantined",
+            "message": "component trap: unreachable",
+        });
+        let event: serde_json::Value =
+            serde_json::from_str(&super::events::complete(refused())).unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({"event": "complete", "result": {"error": error}})
+        );
+        let ingress = super::events::ingress_complete(refused());
+        assert_eq!(ingress.kind, "complete");
+        let result: serde_json::Value = serde_json::from_str(&ingress.result.unwrap()).unwrap();
+        assert_eq!(result, serde_json::json!({"error": error}));
     }
 }

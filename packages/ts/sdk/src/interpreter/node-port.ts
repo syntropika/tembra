@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { reply } from "./codec.ts";
+import { refusal, reply } from "./codec.ts";
 import { failure as fault } from "../error.ts";
 import type {
   NodeField,
@@ -183,7 +183,7 @@ function respond(operation: () => unknown): string {
   try {
     return `{ "ok":${reply(operation())}}`;
   } catch (error) {
-    return JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+    return refusal(error);
   }
 }
 

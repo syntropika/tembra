@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { MobileDriver, type MobilePort } from "../src/interpreter/mobile.ts";
 import type { ExecutionScope } from "../src/interpreter/types.ts";
+import { TembraError } from "../src/error.ts";
+import { Errors } from "../src/errors.ts";
 
 /** Supply only the event seam; native execution has separate real-engine qualification. */
 function fixture(events: unknown[]) {
@@ -98,6 +100,29 @@ test("mobile factories refuse asynchronous I/O without admitting it", async () =
   expect(admitted).toBe(false);
   expect(f.replies).toEqual([
     [2, { error: "Factories cannot perform asynchronous host operations" }],
+  ]);
+});
+
+test("mobile host refusals reach the native worker with their code and reason", async () => {
+  const f = fixture([
+    { event: "host", id: 4, asynchronous: true, packet: '{"operation":"wait","milliseconds":1}' },
+    { event: "complete", result: { ok: "null" } },
+  ]);
+  f.scope.async = async () => {
+    throw new TembraError(Errors.Released.Reference);
+  };
+  expect(await f.driver.execute("{}", f.scope)).toBe("null");
+  expect(f.replies).toEqual([
+    [
+      4,
+      {
+        error: {
+          code: "released",
+          reason: "reference",
+          message: "The reference has been released",
+        },
+      },
+    ],
   ]);
 });
 

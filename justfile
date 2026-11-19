@@ -282,6 +282,33 @@ install-tools:
     cargo install --locked cargo-machete --version 0.9.2
     cargo install --locked wasm-bindgen-cli --version 0.2.129
     cargo install --locked wasm-component-ld --version 0.5.31
+    just _install-git-cliff
+
+# Install git-cliff 2.14.2 beside Cargo's tools: the release binary, checked by its sha256, on x86_64 Linux, as in CI; a build with Cargo elsewhere.
+_install-git-cliff:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version=2.14.2
+    bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+    if [ "$("$bin/git-cliff" --version 2>/dev/null || true)" = "git-cliff $version" ]; then
+        exit 0
+    fi
+    if [ "$(uname -s)-$(uname -m)" != Linux-x86_64 ]; then
+        cargo install --locked git-cliff --version "$version"
+        exit 0
+    fi
+    archive="git-cliff-$version-x86_64-unknown-linux-gnu.tar.gz"
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    curl -fsSL --retry 3 -o "$dir/$archive" "https://github.com/orhun/git-cliff/releases/download/v$version/$archive"
+    echo "24f397c733add5390fdceee3a2088588ab0d5f944ce00d34cb7029b888cf2db4  $dir/$archive" | sha256sum --check --quiet
+    tar -xzf "$dir/$archive" -C "$dir"
+    mkdir -p "$bin"
+    install -m 755 "$dir/git-cliff-$version/git-cliff" "$bin/git-cliff"
+
+# Render the changelog of the commits since the last release tag; arguments go to git-cliff, as `just changelog --output CHANGELOG.md`.
+changelog *args:
+    git-cliff --unreleased "$@"
 
 install-ts: install
 check-all: check

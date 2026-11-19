@@ -10,7 +10,7 @@
  * only a data encoder; the trusted Rust prepared contract remains the single WIT validator and
  * always checks these exact bytes.
  */
-import { failure } from "../error.ts";
+import { failure, isDescriptor } from "../error.ts";
 import type { ContractPort } from "./types.ts";
 import { isInteger, type IntegerKind, type Shape } from "./wit-shape.ts";
 
@@ -270,6 +270,18 @@ export function checkedResult(contract: ContractPort, slot: number, text: string
 /** Host replies preserve an already checked capture rather than decoding and serializing it. */
 export function reply(value: unknown): string {
   return value instanceof Encoded ? value.text : encode(value ?? null).text;
+}
+
+/**
+ * A host refusal as the native worker reads it: a structured error with its code and reason, which
+ * the guest's request answers; any other failure as its text, which the worker answers as
+ * `invalid/platform_reply`, the host refusing the request itself.
+ */
+export function refusal(error: unknown): string {
+  if (!isDescriptor(error))
+    return JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+  const { code, reason, message } = error;
+  return JSON.stringify({ error: { code, reason, message } });
 }
 
 /**

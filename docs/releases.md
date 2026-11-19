@@ -87,6 +87,13 @@ git tag -a v0.2.0 -m "release: 0.2.0"
 git push origin v0.2.0
 ```
 
+Run `mise exec -- just changelog` to render the changes since the last tag from
+[cliff.toml](../cliff.toml): commits grouped by Conventional Commit type, each
+`BREAKING CHANGE:` footer listed under its commit. Merge commits are skipped, and any other
+commit that is not conventional fails the render. Arguments go to git-cliff, as
+`just changelog --tag v0.2.0 --output CHANGELOG.md`. `just install-tools` installs the pinned
+git-cliff.
+
 The workflow does not modify versions or create tags. It rejects a mismatched tag
 before building or requesting publication credentials. The root npm manifest is a private workspace manifest; `@syntropika/tembra-sdk` itself is public.
 All registry packages use Apache-2.0.
