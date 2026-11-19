@@ -754,3 +754,76 @@ fn nothing_to_export_names_the_configuration() {
             .unwrap_or_else(|error| panic!("{error}"));
     }
 }
+
+/// A `#[resource]` in the module of a service whose `#[cfg]` sits on the service alone: the copy
+/// that leaves the service out refuses the resource, on it, naming the fix, rather than turning it
+/// into a resource of the root; the copy that keeps the service gives the resource to its objects.
+#[test]
+fn a_resource_beside_a_service_its_cfg_leaves_out_is_refused() {
+    let module = r#"mod dock {
+        #[resource]
+        pub struct Harbor {
+            pub berths: u32,
+        }
+
+        impl Harbor {
+            #[open]
+            pub fn open() -> Self {
+                Harbor { berths: 0 }
+            }
+        }
+
+        pub mod quay {
+            #[service]
+            pub struct Quay;
+
+            impl Quay {
+                pub fn length() -> u32 {
+                    0
+                }
+            }
+        }
+
+        pub mod ship {
+            #[cfg(feature = "ships")]
+            #[service]
+            pub struct Ship;
+
+            #[cfg(feature = "ships")]
+            impl Ship {
+                pub fn berth() -> u32 {
+                    0
+                }
+            }
+
+            #[resource(depends = [Harbor])]
+            pub struct Mooring {
+                pub berth: u32,
+            }
+
+            impl Mooring {
+                #[open]
+                pub fn open() -> Self {
+                    Mooring { berth: 0 }
+                }
+            }
+        }
+    }"#;
+    let Ok([(_, without), (_, with)]) = <[(String, ItemMod); 2]>::try_from(copies(module)) else {
+        unreachable!("one predicate, two copies");
+    };
+    let options = || options(attribute()).unwrap();
+    let error = expand(options(), without, Ok(Metadata::named("calculator")), None)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "the #[resource] `Mooring` is in `ship`, the module of the service `Ship`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod ship`, so that its resources go with it"
+    );
+    let expanded = expanded(&with);
+    let tokens = quote!(#expanded).to_string();
+    assert!(
+        tokens.contains("(\"example:notes/ship@1.0.0\" , \"mooring\") =>"),
+        "the resource belongs to the objects of `Ship`\n{tokens}"
+    );
+}

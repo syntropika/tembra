@@ -8039,7 +8039,7 @@ fn a_resource_in_a_service_module_belongs_to_each_object_of_the_service() {
     );
     assert_eq!(
         error,
-        "`Mooring` names two resources, one of the service `Ship` and one of the service `Tug`: the kernel and `depends` name a resource by its struct's name, so give each resource of the Orb a name of its own"
+        "`Mooring` names two resources, one of the service `Ship` and one of the service `Tug`: the kernel and `depends` name a resource by its struct's name, in kebab-case, so give each resource of the Orb a name of its own"
     );
 }
 

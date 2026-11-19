@@ -839,6 +839,9 @@ struct Scan {
     /// module writes resolves to one of them before a resource or a record of another module, and
     /// they tell the type an `impl` names apart from a namesake a `use` brings in.
     own_types: Vec<(usize, Ident)>,
+    /// The modules whose `#[service]` struct this copy of the module leaves out under its
+    /// `#[cfg]`, by scope, with the service's name (`cfg::gated`).
+    gated: Vec<(usize, Ident)>,
 }
 
 /// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
@@ -1008,7 +1011,8 @@ impl Scan {
                 self.own_types.push((scope, ident.clone()));
             }
             match item {
-                Item::Mod(module) => {
+                Item::Mod(mut module) => {
+                    let gated = cfg::gated(&mut module.attrs);
                     let Some((_, inner)) = module.content else {
                         return Err(syn::Error::new(
                             module.ident.span(),
@@ -1016,6 +1020,9 @@ impl Scan {
                         ));
                     };
                     let child = self.modules.len();
+                    if let Some(service) = gated {
+                        self.gated.push((child, service));
+                    }
                     let mut path = self.modules[scope].clone();
                     path.push(module.ident.clone());
                     self.modules.push(path);
@@ -1829,6 +1836,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         marked: Vec::new(),
         uses: vec![Uses::default()],
         own_types: Vec::new(),
+        gated: Vec::new(),
     };
     let (items, children) = scan.scan(items, 0)?;
     let mut tree = Module {
@@ -1858,6 +1866,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         marked,
         uses,
         own_types,
+        gated,
         ..
     } = scan;
     // Each service's module holds the service and what belongs to it; the Orb's items lie outside.
@@ -2100,6 +2109,26 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         if let Some(owner) = service_of(&services, resource.scope, &modules) {
             resource.identity = owner.identity(&package);
             resource.service = Some(owner.ident.clone());
+            continue;
+        }
+        // A service whose `#[cfg]` leaves it out of this configuration leaves its module's
+        // resource without an owner, which would turn it into a resource of the root.
+        let mut at = Some(resource.scope);
+        while let Some(scope) = at {
+            if let Some((_, service)) = gated.iter().find(|(gated, _)| *gated == scope) {
+                return Err(syn::Error::new(
+                    resource.ident.span(),
+                    format!(
+                        "the #[resource] `{}` is in {}, the module of the service `{service}`, which a #[cfg] on the service leaves out of this configuration: put the #[cfg] on the service's module instead, `#[cfg(..)] pub mod {}`, so that its resources go with it",
+                        resource.ident,
+                        describe(&modules[scope]),
+                        modules[scope]
+                            .last()
+                            .expect("a service's module is a sub-module"),
+                    ),
+                ));
+            }
+            at = parent(scope, &modules);
         }
     }
     let resources = in_dependency_order(resources)?;
@@ -6383,19 +6412,29 @@ fn opens_fallibly(output: &ReturnType, ident: &Ident) -> syn::Result<Option<Span
 /// in the attribute.
 fn in_dependency_order(resources: Vec<Resource>) -> syn::Result<Vec<Resource>> {
     for (index, resource) in resources.iter().enumerate() {
+        // The kernel, the component's statics and the native table name a resource by the kebab
+        // form of its struct's name, which two names may share, `DbPool` and `DBPool`.
+        let name = wit::kebab(&resource.ident);
         if let Some(first) = resources[..index]
             .iter()
-            .find(|other| other.ident == resource.ident)
+            .find(|other| wit::kebab(&other.ident) == name)
         {
             let owner = |resource: &Resource| match &resource.service {
                 Some(service) => format!("of the service `{service}`"),
                 None => "of the root".to_owned(),
             };
+            let names = if first.ident == resource.ident {
+                format!("`{}` names two resources", resource.ident)
+            } else {
+                format!(
+                    "`{}` and `{}` name the same resource `{name}`",
+                    first.ident, resource.ident
+                )
+            };
             return Err(syn::Error::new(
                 resource.ident.span(),
                 format!(
-                    "`{}` names two resources, one {} and one {}: the kernel and `depends` name a resource by its struct's name, so give each resource of the Orb a name of its own",
-                    resource.ident,
+                    "{names}, one {} and one {}: the kernel and `depends` name a resource by its struct's name, in kebab-case, so give each resource of the Orb a name of its own",
                     owner(first),
                     owner(resource)
                 ),

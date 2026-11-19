@@ -574,8 +574,8 @@ what the object already opened; the other objects and the root are unaffected. A
 depends on root resources alone, since it opens before any object; a service resource on root
 resources and on resources of its own service, never on another service's, whose objects come and
 go on their own: either dependency is an error on the name in `depends`, as is a second resource
-of a name, since `depends` and the kernel name a resource by its struct's name, wherever the
-struct sits. A native host opens the same resources per object, see
+of a name, since `depends` and the kernel name a resource by its struct's name in kebab-case,
+wherever the struct sits: `DbPool` and `DBPool` are both `db-pool`. A native host opens the same resources per object, see
 [using the Orb natively](#using-the-orb-natively); the
 [service resource example](../../examples/rust-orb-service-resource/README.md) runs one both ways.
 
@@ -1878,7 +1878,10 @@ takes whole, or on a sub-module holding no service, root or hook, such as `#[cfg
 it works as anywhere else; on another item the macro reads, such as a `#[state]`, a `#[resource]`
 or a type that enters the WIT, it is a compile error, since the macro would read the item in every
 configuration. A `#[cfg_attr(..)]` wrapping a `#[cfg(..)]` on an item of this section is a compile
-error too: the macro evaluates the plain form alone.
+error too: the macro evaluates the plain form alone. A `#[cfg]` on a `#[service]` struct leaves its
+module behind, so a `#[state]` or a `#[resource]` there is a compile error in the configuration
+that leaves the service out; put the `#[cfg]` on the service's module instead, as `shelf` above
+does, and the module's items go with the service.
 
 The contract the macro writes follows the last build that compiled the crate for itself, with its
 features: `cargo test --all-features` writes the contract of every feature, and a later
