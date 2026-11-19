@@ -1,4 +1,5 @@
 import { createServer } from "node:net";
+import { missing } from "./skip-reason.mjs";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { test } from "node:test";
@@ -23,23 +24,27 @@ import {
 
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 
-test("Node: source Orbs select keyed instances per request", { skip: !fixtures }, async () => {
-  const host = createHost();
-  try {
-    await verifyContextAcquireScenario(
-      host,
-      async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
-    );
-  } finally {
-    await host.close();
-  }
-  assert.equal(host.diagnostics().references, 0);
-  assert.equal(host.diagnostics().pendingJobs, 0);
-});
+test(
+  "Node: source Orbs select keyed instances per request",
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
+  async () => {
+    const host = createHost();
+    try {
+      await verifyContextAcquireScenario(
+        host,
+        async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
+      );
+    } finally {
+      await host.close();
+    }
+    assert.equal(host.diagnostics().references, 0);
+    assert.equal(host.diagnostics().pendingJobs, 0);
+  },
+);
 
 test(
   "Node: compiled Orbs select keyed objects through reference views",
-  { skip: !fixtures },
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
   async () => {
     const host = createHost({ isolated: { limits: { packetBytes: 8192 } } });
     try {
@@ -56,33 +61,38 @@ test(
   },
 );
 
-test("Node: exact 64-bit values cross source Orbs without loss", { skip: !fixtures }, async () => {
-  const host = createHost();
-  try {
-    const report = await verifyPrecisionScenario(
-      host,
-      async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
-    );
-    assert.match(report, /application -> source -> source/);
-  } finally {
-    await host.close();
-  }
-  for (const key of [
-    "objects",
-    "references",
-    "calls",
-    "roots",
-    "resources",
-    "tasks",
-    "values",
-    "pendingJobs",
-  ])
-    if (typeof host.diagnostics()[key] === "number") assert.equal(host.diagnostics()[key], 0, key);
-});
+test(
+  "Node: exact 64-bit values cross source Orbs without loss",
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
+  async () => {
+    const host = createHost();
+    try {
+      const report = await verifyPrecisionScenario(
+        host,
+        async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
+      );
+      assert.match(report, /application -> source -> source/);
+    } finally {
+      await host.close();
+    }
+    for (const key of [
+      "objects",
+      "references",
+      "calls",
+      "roots",
+      "resources",
+      "tasks",
+      "values",
+      "pendingJobs",
+    ])
+      if (typeof host.diagnostics()[key] === "number")
+        assert.equal(host.diagnostics()[key], 0, key);
+  },
+);
 
 test(
   "isolated TypeScript hooks compose waterfall, series and bail with a compiled contributor",
-  { skip: !fixtures },
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -131,7 +141,7 @@ test(
 test(
   "published Node host installs real TS and Rust Wasm artifacts with grants, reload and physical disposal",
   {
-    skip: !fixtures,
+    skip: missing("TEMBRA_WASM_FIXTURES"),
     timeout: 180000,
   },
   async () => {
@@ -351,7 +361,7 @@ test(
 
 test(
   "cancelling a caller interrupts a pending source HTTP send without quarantining the Orb",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -438,7 +448,7 @@ test(
 
 test(
   "standard WASI source Orbs read raw bytes, retain descriptors and refuse forged handles natively",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -536,7 +546,7 @@ test(
 
 test(
   "TypeScript uses the complete standard filesystem path for binary writes and directory operations",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const data = await mkdtemp(
       path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-filesystem-"),
@@ -586,7 +596,7 @@ test(
 
 test(
   "standard clocks, random, CLI and builtin authority run through actual source Wasm",
-  { skip: !fixtures },
+  { skip: missing("TEMBRA_WASM_FIXTURES") },
   async () => {
     const directory = await mkdtemp(
       path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-cli-"),
@@ -695,7 +705,7 @@ const ingressHost = async (limits) => {
 
 test(
   "Node: Host.handleHttp serves a source handler through the native typed carrier",
-  { skip: !fixtures, timeout: 120000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 120000 },
   async () => {
     const hosts = [];
     const { result, engines } = await countingStores(() =>
@@ -718,7 +728,7 @@ test(
 
 test(
   "Node: native ingress never waits on the application's body and fails broken bodies",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -830,7 +840,7 @@ test(
 
 test(
   "Node: a request body that cannot be opened never strands the native call (M-1, L-1)",
-  { skip: !fixtures, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_FIXTURES"), timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
@@ -940,7 +950,7 @@ const handlerWit = path.resolve(
 
 test(
   "Node: Host.handleHttp serves a compiled handler through the native typed carrier",
-  { skip: !httpHandler, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_HTTP_HANDLER"), timeout: 60000 },
   async () => {
     const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
     const artifact = new Uint8Array(

@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { missing } from "./skip-reason.mjs";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { test } from "node:test";
@@ -53,7 +54,7 @@ async function scratch(operation) {
 
 test(
   "compiled component calls wait on their worker, not on Node's libuv pool",
-  { skip: !probe || process.platform === "win32", timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_PROBE") || process.platform === "win32", timeout: 60000 },
   () =>
     scratch(async (directory) => {
       const fifo = path.join(directory, "pipe");
@@ -120,7 +121,7 @@ test(
 
 test(
   "a terminal component failure settles every queued call with the quarantine",
-  { skip: !probe, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_PROBE"), timeout: 60000 },
   () =>
     scratch(async (directory) => {
       const host = createHost({
@@ -153,7 +154,7 @@ test(
 
 test(
   "the published Node host installs the compiled probe with a filesystem grant",
-  { skip: !probe, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_PROBE"), timeout: 60000 },
   () =>
     scratch(async (directory) => {
       const host = createHost({
@@ -195,7 +196,7 @@ function delayedSource(world, name, alias) {
 
 test(
   "a compiled Orb imports delayed TypeScript Orbs through the Node host",
-  { skip: !consumer, timeout: 60000 },
+  { skip: missing("TEMBRA_WASM_CONSUMER"), timeout: 60000 },
   async () => {
     const host = createHost();
     try {

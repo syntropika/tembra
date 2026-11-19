@@ -266,6 +266,10 @@ Then run the recipe of the area. Each area below names its crates and its recipe
   bun run --cwd packages/ts/sdk test:node
   ```
 
+  `test:node` skips the compiled-Orb tests unless their `TEMBRA_WASM_*` variables are set, and says
+  so at the end. For a change under `packages/ts/sdk/src/interpreter/component`, also run
+  `just test-wasm-acceptance`, which sets them.
+
 ### The full verification
 
 `just ci` runs the full verification. It runs these parts in order:

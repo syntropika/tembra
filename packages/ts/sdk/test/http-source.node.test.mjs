@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { missing } from "./skip-reason.mjs";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -11,7 +12,7 @@ const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 test(
   "TypeScript HTTP streams uploads and trailers, refuses truncation, and retains responses",
   {
-    skip: !fixtures,
+    skip: missing("TEMBRA_WASM_FIXTURES"),
     timeout: 60000,
   },
   async () => {
