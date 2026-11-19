@@ -115,11 +115,9 @@ pub(crate) fn emit(
     let mut by_scope: BTreeMap<usize, Vec<TokenStream>> = BTreeMap::new();
     let mut calls = Vec::new();
     // The resources of the Orb's root, which `orb(..)` keeps for the Orb, for the methods of every
-    // service, and so are its imports.
-    let resources = analysis
-        .resources
-        .iter()
-        .any(|resource| resource.service.is_none());
+    // service and for the resources of their objects, which depend on the root's, and so are its
+    // imports.
+    let resources = !analysis.resources.is_empty();
     // Each registration is a function of the registry of the module it is written in.
     let registry = format_ident!("{REGISTRY}");
     for (service, items) in analysis.services.iter().zip(registrations) {
@@ -800,38 +798,18 @@ pub(crate) fn state_access(facade: &Ident) -> TokenStream {
 /// component. After a reload to another module whose resource keeps its name and version, the host
 /// keeps the old code's value, of another Rust type, which `with` could not reach: the scope
 /// answers each call with the runtime's refusal of it, `invalid/rust_type`, before the method runs.
-/// A resource of a service's objects, which the native side does not declare yet, gets a `with`
-/// that panics, naming it, so that the module compiles: `orb()` refuses such a module before any
-/// method runs (`covered`). The runtime's types are reached through the facade named `facade`.
+/// The resources of a service's objects have a table of their own per object, `<Service>Resources`,
+/// which the service's factory fills (`object_resources`), declaring each on the object's
+/// declaration after the root's resources and the object's earlier ones it depends on; the scope
+/// of a method of the service sets it around each poll beside the Orb's, and `with` on such a
+/// resource type reaches the value of the object running the method. The runtime's types are
+/// reached through the facade named `facade`.
 pub(crate) fn resource_access(
     resources: &[Resource],
     modules: &[Vec<Ident>],
     facade: &Ident,
 ) -> TokenStream {
-    let unsupported = resources
-        .iter()
-        .filter(|resource| resource.service.is_some())
-        .map(|resource| {
-            let path = crate::relative(1, &modules[resource.scope], &resource.ident);
-            let name = wit::kebab(&resource.ident);
-            let service = resource.service.as_ref().expect("a service resource");
-            let doc = format!(
-                " Use the resource `{name}` of the `{service}` object running the current call, which the native side does not open yet: `orb()` refuses the module, so this panics."
-            );
-            let message = format!(
-                "the resource `{name}` of each object of the service `{service}` is not supported natively yet"
-            );
-            quote! {
-                impl #path {
-                    #[doc = #doc]
-                    pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
-                        let _ = use_;
-                        ::core::panic!(#message)
-                    }
-                }
-            }
-        })
-        .collect::<Vec<_>>();
+    let objects = object_resources(resources, modules, facade);
     let resources: Vec<&Resource> = resources
         .iter()
         .filter(|resource| resource.service.is_none())
@@ -857,33 +835,7 @@ pub(crate) fn resource_access(
                     .depends
                     .iter()
                     .map(|dependency| rust_ident(&wit::kebab(dependency)));
-                let open = resource
-                    .open
-                    .as_ref()
-                    .expect("a resource has its #[open] function");
-                // A fallible `#[open]` fails the open with its error's text, as the worker words
-                // a component's.
-                let opened = if resource.fallible {
-                    let failed = format!("the resource `{name}` did not open: {{}}");
-                    // A missing `Display` falls on the error type the author wrote.
-                    let text = quote_spanned! {resource.failure=>
-                        ::std::string::ToString::to_string(&error)
-                    };
-                    quote! {
-                        match #path::#open() {
-                            ::core::result::Result::Ok(value) => value,
-                            ::core::result::Result::Err(error) => {
-                                return ::core::result::Result::Err(::#facade::Error::new(
-                                    ::#facade::core::Code::Unavailable,
-                                    ::#facade::core::Reason::Resource,
-                                    ::std::format!(#failed, #text),
-                                ));
-                            }
-                        }
-                    }
-                } else {
-                    quote! { #path::#open() }
-                };
+                let opened = opened(resource, path, facade);
                 let close = match &resource.close {
                     Some(close) => quote! {
                         if let ::core::option::Option::Some(value) = slot.close() {
@@ -1040,9 +992,252 @@ pub(crate) fn resource_access(
         }
 
         #(#accessors)*
-        #(#unsupported)*
+        #objects
     };
     wrapped(facade, items)
+}
+
+/// The table of the resources of one object of a service, `<Service>Resources`, for each service
+/// whose objects own resources, in the component's `__tembra_resource` beside the root's
+/// `Resources`: the service's factory builds one per object and fills it with `declare`, which
+/// declares each resource on the object's declaration with `Declaration::resource_async`, after the
+/// root's resources and the object's earlier ones it depends on, whose keys the root's table and
+/// the object's give; the host opens them once the factory returns, before the object answers a
+/// call, and closes them when the object goes. The openers and closers run with both tables
+/// entered, so that the `#[open]` and `#[close]` functions reach the root's resources and the
+/// object's earlier ones with `with`; a failed `#[open]` fails the object's creation with
+/// `unavailable/resource`, as the worker words a component's. `scoped` runs a method's future for
+/// its object, as the root's does for its Orb, and `with` on each resource type reaches the value
+/// of the object whose method is running.
+fn object_resources(resources: &[Resource], modules: &[Vec<Ident>], facade: &Ident) -> TokenStream {
+    let mut services: Vec<(&Ident, Vec<&Resource>)> = Vec::new();
+    for resource in resources {
+        let Some(service) = &resource.service else {
+            continue;
+        };
+        match services.iter_mut().find(|(owner, _)| *owner == service) {
+            Some((_, owned)) => owned.push(resource),
+            None => services.push((service, vec![resource])),
+        }
+    }
+    let tables = services.iter().map(|(service, owned)| {
+        let table = object_table(service);
+        let current = format_ident!("CURRENT_{}", service.to_string().to_shouty_snake_case());
+        let entered = format_ident!("{service}Entered");
+        let fields: Vec<Ident> = owned
+            .iter()
+            .map(|resource| rust_ident(&wit::kebab(&resource.ident)))
+            .collect();
+        let paths: Vec<TokenStream> = owned
+            .iter()
+            .map(|resource| crate::relative(1, &modules[resource.scope], &resource.ident))
+            .collect();
+        let declarations = owned.iter().zip(&fields).zip(&paths).map(|((resource, field), path)| {
+            let name = wit::kebab(&resource.ident);
+            let version = resource.version;
+            // A dependency is the root's, or an earlier resource of the same service.
+            let dependencies = resource.depends.iter().map(|dependency| {
+                let field = rust_ident(&wit::kebab(dependency));
+                let table = if owned.iter().any(|owned| owned.ident == *dependency) {
+                    quote! { self }
+                } else {
+                    quote! { root }
+                };
+                quote! {
+                    #table
+                        .#field
+                        .get()
+                        .expect("a resource's dependencies are declared before it")
+                        .key()
+                }
+            });
+            let opened = opened(resource, path, facade);
+            let close = match &resource.close {
+                Some(close) => quote! {
+                    if let ::core::option::Option::Some(value) = slot.close() {
+                        value.#close();
+                    }
+                },
+                None => quote! { slot.close(); },
+            };
+            quote! {
+                let dependencies = [#(#dependencies),*];
+                let table = ::std::rc::Rc::downgrade(root);
+                let object = ::std::rc::Rc::downgrade(self);
+                let closing = ::std::rc::Weak::clone(&table);
+                let closing_object = ::std::rc::Weak::clone(&object);
+                let resource = declaration.resource_async(
+                    #name,
+                    #version,
+                    &dependencies,
+                    move |_| {
+                        ::std::boxed::Box::pin(async move {
+                            // The `#[open]` function reads the root's resources and the
+                            // object's earlier ones with `with`.
+                            let _entered = table.upgrade().map(Entered::enter);
+                            let _object = object.upgrade().map(#entered::enter);
+                            let slot = Slot::new();
+                            slot.open(#opened);
+                            ::core::result::Result::Ok(slot)
+                        })
+                    },
+                    move |slot, _| {
+                        // The `#[close]` function reads them too, which the host closes after it.
+                        let _entered = closing.upgrade().map(Entered::enter);
+                        let _object = closing_object.upgrade().map(#entered::enter);
+                        #close
+                        ::std::boxed::Box::pin(async { ::core::result::Result::Ok(()) })
+                    },
+                )?;
+                let _ = self.#field.set(resource);
+            }
+        });
+        let accessors = owned.iter().zip(&fields).zip(&paths).map(|((resource, field), path)| {
+            let name = wit::kebab(&resource.ident);
+            let doc = format!(
+                " Use the resource `{name}` of the `{service}` object running the current call, which the host opened when it created the object: the closure gets the open value, which lives in the host."
+            );
+            let open = format!("the resource `{name}` of the `{service}` object running the call is open");
+            quote! {
+                impl #path {
+                    #[doc = #doc]
+                    pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
+                        let slot = #current
+                            .with(|current| current.borrow().clone())
+                            .expect("a resource of a service's objects is used inside a method of the service")
+                            .#field
+                            .get()
+                            .and_then(|resource| resource.value().ok())
+                            .expect(#open);
+                        slot.with(use_)
+                    }
+                }
+            }
+        });
+        let table_doc = format!(
+            " The resources of one object of the service `{service}`, which its factory declares."
+        );
+        quote! {
+            #[doc = #table_doc]
+            #[derive(Default)]
+            pub struct #table {
+                #(#fields: ::core::cell::OnceCell<::#facade::Resource<Slot<#paths>>>,)*
+            }
+
+            impl #table {
+                /// Declare each resource of the object, in its factory: the host opens it with
+                /// the `#[open]` function once the factory returns, after the root's resources
+                /// and the object's earlier ones it depends on, whose `with` the function
+                /// reaches, and closes it when the object goes.
+                pub(crate) fn declare(
+                    self: &::std::rc::Rc<Self>,
+                    root: &::std::rc::Rc<Resources>,
+                    declaration: &::#facade::Declaration,
+                ) -> ::#facade::Result<()> {
+                    #(#declarations)*
+                    ::core::result::Result::Ok(())
+                }
+
+                /// The runtime's refusal of a value the host keeps for a resource of the object as
+                /// another Rust type, `invalid/rust_type`, as `Resources::typed`.
+                fn typed(&self) -> ::#facade::Result<()> {
+                    #(
+                        if let ::core::option::Option::Some(error) = self
+                            .#fields
+                            .get()
+                            .and_then(|resource| resource.value().err())
+                            .filter(|error| error.reason == ::#facade::core::Reason::RustType.as_str())
+                        {
+                            return ::core::result::Result::Err(error);
+                        }
+                    )*
+                    ::core::result::Result::Ok(())
+                }
+
+                /// Run a method's future for its object: while it is polled, `with` reaches the
+                /// resources of that object, and an outer poll's come back after.
+                pub(crate) fn scoped<T, F: ::core::future::Future<Output = ::#facade::Result<T>>>(
+                    object: ::std::rc::Rc<Self>,
+                    future: F,
+                ) -> impl ::core::future::Future<Output = ::#facade::Result<T>> {
+                    let mut future = ::std::boxed::Box::pin(future);
+                    async move {
+                        object.typed()?;
+                        ::core::future::poll_fn(|cx| {
+                            let _entered = #entered::enter(object.clone());
+                            ::core::future::Future::poll(future.as_mut(), cx)
+                        })
+                        .await
+                    }
+                }
+            }
+
+            ::std::thread_local! {
+                static #current: ::core::cell::RefCell<
+                    ::core::option::Option<::std::rc::Rc<#table>>
+                > = const { ::core::cell::RefCell::new(::core::option::Option::None) };
+            }
+
+            /// The object's resources set for one poll, which puts the previous ones back when
+            /// dropped, also when the poll panics.
+            struct #entered(::core::option::Option<::std::rc::Rc<#table>>);
+
+            impl #entered {
+                fn enter(object: ::std::rc::Rc<#table>) -> Self {
+                    Self(#current.with(|current| {
+                        current.replace(::core::option::Option::Some(object))
+                    }))
+                }
+            }
+
+            impl ::core::ops::Drop for #entered {
+                fn drop(&mut self) {
+                    let previous = self.0.take();
+                    #current.with(|current| current.replace(previous));
+                }
+            }
+
+            #(#accessors)*
+        }
+    });
+    quote! { #(#tables)* }
+}
+
+/// The table of the resources of one object of a service, `ShipResources` for `Ship`.
+fn object_table(service: &Ident) -> Ident {
+    format_ident!("{service}Resources")
+}
+
+/// The value a resource's `#[open]` function, reached by `path`, gives its slot: a fallible one
+/// fails the open with the error's text and `unavailable/resource`, as the worker words a
+/// component's.
+fn opened(resource: &Resource, path: &TokenStream, facade: &Ident) -> TokenStream {
+    let name = wit::kebab(&resource.ident);
+    let open = resource
+        .open
+        .as_ref()
+        .expect("a resource has its #[open] function");
+    if resource.fallible {
+        let failed = format!("the resource `{name}` did not open: {{}}");
+        // A missing `Display` falls on the error type the author wrote.
+        let text = quote_spanned! {resource.failure=>
+            ::std::string::ToString::to_string(&error)
+        };
+        quote! {
+            match #path::#open() {
+                ::core::result::Result::Ok(value) => value,
+                ::core::result::Result::Err(error) => {
+                    return ::core::result::Result::Err(::#facade::Error::new(
+                        ::#facade::core::Code::Unavailable,
+                        ::#facade::core::Reason::Resource,
+                        ::std::format!(#failed, #text),
+                    ));
+                }
+            }
+        }
+    } else {
+        quote! { #path::#open() }
+    }
 }
 
 /// The trait of `boundary_trait`, as the module `scope` names it.
@@ -1109,27 +1304,15 @@ fn unsupported(
     }
 }
 
-/// Whether the native side covers the module's hook declarations and resources: a declared hook's
-/// `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the
-/// hook, so a declaration works in a component build only; and the native side declares the
-/// resources of the Orb's root alone, not yet those of a service's objects. `providers::imports`
-/// refuses the imports it does not cover first, and `providers::contributions` the contributions.
+/// Whether the native side covers the module's hook declarations: a declared hook's `run` is
+/// synchronous, and natively a method has no fiber to suspend while the kernel runs the hook, so a
+/// declaration works in a component build only. `providers::imports` refuses the imports it does
+/// not cover first, and `providers::contributions` the contributions.
 fn covered(analysis: &Analysis) -> Result<(), Refused> {
     if let Some(declaration) = analysis.declared.first() {
         return Err(refused(&format!(
             "the declaration of the hook {} works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook",
             declaration.hook
-        )));
-    }
-    if let Some(resource) = analysis
-        .resources
-        .iter()
-        .find(|resource| resource.service.is_some())
-    {
-        return Err(refused(&format!(
-            "the resource `{}` of each object of the service `{}` is not supported natively yet: the native side declares the resources of the Orb's root alone, so a service resource works in a component build only",
-            wit::kebab(&resource.ident),
-            resource.service.as_ref().expect("a service resource")
         )));
     }
     Ok(())
@@ -1201,8 +1384,20 @@ fn registration(
         .states
         .iter()
         .find(|state| state.identity == identity);
-    let (environment, factory) = match state {
-        None => (
+    // The table of the object's resources, for a service whose objects own some: the factory
+    // declares them on the object's declaration, after its state, and keeps the table beside the
+    // environment, after the state.
+    let object_table = analysis
+        .resources
+        .iter()
+        .any(|resource| resource.service.as_ref() == Some(&service.ident))
+        .then(|| {
+            let table = object_table(&service.ident);
+            quote! { self::#root __tembra_resource::#table }
+        });
+    let table_index = syn::Index::from(1 + usize::from(state.is_some()));
+    let (environment, factory) = match (state, &object_table) {
+        (None, None) => (
             environment,
             match (&service.create, guard) {
                 (Some(_), None) => quote! { move |declaration| #build },
@@ -1211,30 +1406,62 @@ fn registration(
                 (None, Some(guard)) => quote! { |declaration| { #guard #build } },
             },
         ),
-        Some(state) => {
-            let path = crate::relative(depth, &analysis.modules[state.scope], &state.ident);
-            let version = state.version;
-            let name = state.ident.to_string();
-            let rule = match &state.validator {
-                Some(validator) => quote! { |state: &#path| state.#validator() },
-                None => quote! { |_: &#path| ::core::result::Result::Ok(()) },
-            };
-            let (capture, built) = match &service.create {
-                Some(_) => (quote! { move }, quote! { #build? }),
-                None => (quote! {}, quote! { () }),
+        (state, object_table) => {
+            let declared_state = state.map(|state| {
+                let path = crate::relative(depth, &analysis.modules[state.scope], &state.ident);
+                let version = state.version;
+                let name = state.ident.to_string();
+                let rule = match &state.validator {
+                    Some(validator) => quote! { |state: &#path| state.#validator() },
+                    None => quote! { |_: &#path| ::core::result::Result::Ok(()) },
+                };
+                quote! {
+                    let state = self::#root __tembra_state::declare::<#path>(
+                        &declaration,
+                        #version,
+                        #name,
+                        #rule,
+                    )?;
+                }
+            });
+            let state_type =
+                state.map(|_| quote! { , ::#facade::State<::#facade::serde_json::Value> });
+            let kept_state = state.map(|_| quote! { , state });
+            let shared_table = object_table
+                .as_ref()
+                .map(|_| quote! { let __tembra_root_resources = ::std::rc::Rc::clone(resources); });
+            let declared_table = object_table.as_ref().map(|table| {
+                quote! {
+                    let __tembra_object_resources = ::std::rc::Rc::new(
+                        <#table as ::core::default::Default>::default(),
+                    );
+                    __tembra_object_resources.declare(&__tembra_root_resources, &declaration)?;
+                }
+            });
+            let table_type = object_table
+                .as_ref()
+                .map(|table| quote! { , ::std::rc::Rc<#table> });
+            let kept_table = object_table
+                .as_ref()
+                .map(|_| quote! { , __tembra_object_resources });
+            // The factory moves what it captures: the inputs of a create, the root's table.
+            let capture =
+                (service.create.is_some() || object_table.is_some()).then(|| quote! { move });
+            let built = match &service.create {
+                Some(_) => quote! { #build? },
+                None => quote! { () },
             };
             (
-                quote! { (#environment, ::#facade::State<::#facade::serde_json::Value>) },
+                quote! { (#environment #state_type #table_type) },
                 quote! {
-                    #capture |declaration| {
-                        #guard
-                        let state = self::#root __tembra_state::declare::<#path>(
-                            &declaration,
-                            #version,
-                            #name,
-                            #rule,
-                        )?;
-                        ::core::result::Result::Ok((#built, state))
+                    {
+                        #shared_table
+                        #capture |declaration| {
+                            #guard
+                            #declared_state
+                            #declared_table
+                            ::core::result::Result::Ok((#built #kept_state #kept_table))
+                        }
                     }
                 },
             )
@@ -1268,12 +1495,17 @@ fn registration(
             object: environment.clone(),
             state: quote! { __tembra_object.1.clone() },
         }),
+        object_resources: object_table.as_ref().map(|table| ObjectResources {
+            scoped: quote! { #table::scoped },
+            object: environment.clone(),
+            resources: quote! { ::std::rc::Rc::clone(&__tembra_object.#table_index) },
+        }),
         resources: (!analysis.resources.is_empty())
             .then(|| quote! { self::#root __tembra_resource::scoped }),
         imports: imported.then(|| quote! { self::#root __tembra_import::scoped }),
     };
-    // With root resources, the service takes the table of its Orb's, which each method's scope
-    // sets, and so with imports.
+    // With resources, the service takes the table of its Orb's root's, which each method's scope
+    // sets and the resources of its objects depend on, and so with imports.
     let table = scopes.resources.is_some().then(|| {
         quote! { , resources: &::std::rc::Rc<self::#root __tembra_resource::Resources> }
     });
@@ -1305,9 +1537,12 @@ fn registration(
         #(#methods)*
     };
     // The functions of each WIT resource of the service's interface, registered from the
-    // resource's module, which reach the object's state through the function given them, and the
-    // Orb's resources through its table.
+    // resource's module, which reach the object's state and resources through the functions given
+    // them, and the Orb's resources through its table.
     let state_of = state.map(|_| quote! { , |object: &#environment| object.1.clone() });
+    let resources_of = object_table.as_ref().map(|_| {
+        quote! { , |object: &#environment| ::std::rc::Rc::clone(&object.#table_index) }
+    });
     let resources = scopes.resources.is_some().then(|| quote! { , resources });
     let imported = imported.then(|| quote! { , imports });
     let built = owned_resources(service, analysis).fold(built, |built, resource| {
@@ -1316,7 +1551,7 @@ fn registration(
             &analysis.modules[resource.scope],
             &glue_ident(resource),
         );
-        quote! { #glue(#built #state_of #resources #imported) }
+        quote! { #glue(#built #state_of #resources_of #resources #imported) }
     });
     let registry = format_ident!("{REGISTRY}");
     let registered = Literal::usize_unsuffixed(service.scope);
@@ -1594,6 +1829,14 @@ fn resource_glue(
         .states
         .iter()
         .any(|state| state.identity == identity);
+    let object_table = analysis
+        .resources
+        .iter()
+        .any(|owned| owned.service.as_ref() == Some(&service.ident))
+        .then(|| {
+            let table = object_table(&service.ident);
+            quote! { self::#root __tembra_resource::#table }
+        });
     let scopes = Scopes {
         context: analysis
             .options
@@ -1603,6 +1846,11 @@ fn resource_glue(
             scoped: quote! { self::#root __tembra_state::scoped },
             object: quote! { E },
             state: quote! { __tembra_state_of(&__tembra_object) },
+        }),
+        object_resources: object_table.as_ref().map(|table| ObjectResources {
+            scoped: quote! { #table::scoped },
+            object: quote! { E },
+            resources: quote! { __tembra_resources_of(&__tembra_object) },
         }),
         resources: (!analysis.resources.is_empty())
             .then(|| quote! { self::#root __tembra_resource::scoped }),
@@ -1701,7 +1949,12 @@ fn resource_glue(
             , __tembra_state_of: fn(&E) -> ::#facade::State<::#facade::serde_json::Value>
         }
     });
-    // With root resources, the table of the Orb's, which each function's scope sets.
+    // The object of a service whose objects own resources holds their table, which the service's
+    // registration gives the way to reach too.
+    let resources_of = object_table.as_ref().map(|table| {
+        quote! { , __tembra_resources_of: fn(&E) -> ::std::rc::Rc<#table> }
+    });
+    // With resources, the table of the Orb's root's, which each function's scope sets.
     let resources = scopes.resources.is_some().then(|| {
         quote! { , resources: &::std::rc::Rc<self::#root __tembra_resource::Resources> }
     });
@@ -1724,6 +1977,7 @@ fn resource_glue(
         pub(crate) fn #glue<E: 'static>(
             service: ::#facade::Service<E>
             #state_of
+            #resources_of
             #resources
             #imports
         ) -> ::#facade::Service<E> {
@@ -1966,6 +2220,9 @@ struct Scopes {
     /// The object's, whose state the native `read` and `update` reach, for a service whose objects
     /// own one.
     state: Option<ObjectState>,
+    /// The object's, whose resources the native `with` reaches, for a service whose objects own
+    /// some.
+    object_resources: Option<ObjectResources>,
     /// The Orb's, whose root resources the native `with` reaches, for an Orb with some: the path of
     /// `__tembra_resource::scoped`, which takes the table of the Orb's resources, `resources`, which
     /// the function registering the handle takes.
@@ -1985,27 +2242,37 @@ struct ObjectState {
     state: TokenStream,
 }
 
+/// How a handle reaches the resources of its object: the path of the `scoped` of the service's
+/// table, the type of the object, which holds the table beside the environment and the state, if
+/// any, and the expression of the object's table over `__tembra_object`.
+struct ObjectResources {
+    scoped: TokenStream,
+    object: TokenStream,
+    resources: TokenStream,
+}
+
 impl Scopes {
     /// How a handle takes the object's environment, and the reference to it a function borrowing
     /// `&self` takes, if it does: the service's environment, or the object of a service whose
-    /// objects own a state, which holds the environment beside the state.
+    /// objects own a state or resources, which holds the environment beside them.
     fn environment(&self, target: &Ident, receiver: bool) -> (TokenStream, Option<TokenStream>) {
         // The index is a token of its own: `0.` written before an interpolation would lex as a
         // float.
         let environment_field = syn::Index::from(0);
-        match (&self.state, receiver) {
+        let object = self.state.as_ref().map(|state| &state.object).or(self
+            .object_resources
+            .as_ref()
+            .map(|resources| &resources.object));
+        match (object, receiver) {
             (None, true) => (
                 quote! { __tembra_self: ::std::rc::Rc<#target> },
                 Some(quote! { &*__tembra_self }),
             ),
             (None, false) => (quote! { _ }, None),
-            (Some(state), receiver) => {
-                let object = &state.object;
-                (
-                    quote! { __tembra_object: ::std::rc::Rc<#object> },
-                    receiver.then(|| quote! { &__tembra_object.#environment_field }),
-                )
-            }
+            (Some(object), receiver) => (
+                quote! { __tembra_object: ::std::rc::Rc<#object> },
+                receiver.then(|| quote! { &__tembra_object.#environment_field }),
+            ),
         }
     }
 
@@ -2026,6 +2293,12 @@ impl Scopes {
             Some(ObjectState { scoped, state, .. }) => {
                 quote! { #scoped(__tembra_context.clone(), #state, #future) }
             }
+            None => future,
+        };
+        let future = match &self.object_resources {
+            Some(ObjectResources {
+                scoped, resources, ..
+            }) => quote! { #scoped(#resources, #future) },
             None => future,
         };
         let future = match &self.resources {

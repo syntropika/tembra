@@ -15,6 +15,7 @@ tembra-example-import-greeter = { path = "../../../../../examples/rust-orb-impor
 tembra-example-welcomer = { path = "../../../../../examples/rust-orb-import/welcomer" }
 tembra-example-greeter = { path = "../../../../../examples/rust-orb-service/greeter" }
 tembra-example-ledger = { path = "../../../../../examples/rust-orb-service-lifetime/ledger" }
+tembra-example-harbor = { path = "../../../../../examples/rust-orb-service-resource/harbor" }
 tembra-example-book = { path = "../../../../../examples/rust-orb-shared-interface/book" }
 tembra-example-counter = { path = "../../../../../examples/rust-orb-state/counter" }
 tembra-example-speller = { path = "../../../../../examples/rust-orb-wit-resource/speller" }

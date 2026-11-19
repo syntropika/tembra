@@ -7877,9 +7877,11 @@ fn an_open_returning_a_result_fails_with_its_error_both_ways() {
 /// exports `service-resources-init`, whose `declare` lists the service's resources, after the root's
 /// ones they depend on, by the service's interface, and whose `open` keeps the object's value in a
 /// table under the handle it answers, which `with` reads back through the kernel; a root resource
-/// keeps its slot. Natively, `orb()` refuses the module, naming the service resource, and the type's
-/// `with` panics, so that the module compiles. A root resource depending on a service's, a service's
-/// depending on another service's, and two resources of one name are errors on the name.
+/// keeps its slot. Natively, the service's factory declares the object's resources on its
+/// declaration, after the root's and the object's earlier ones they depend on, and keeps their
+/// table beside the environment, which each method's scope sets for `with`. A root resource
+/// depending on a service's, a service's depending on another service's, and two resources of one
+/// name are errors on the name.
 #[test]
 fn a_resource_in_a_service_module_belongs_to_each_object_of_the_service() {
     let dock = |mooring: &str, berth: &str| {
@@ -7957,16 +7959,27 @@ fn a_resource_in_a_service_module_belongs_to_each_object_of_the_service() {
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
-    let root = native(&module, &[]);
-    assert!(
-        root.contains("\"the resource `mooring` of each object of the service `Ship` is not supported natively yet: the native side declares the resources of the Orb's root alone, so a service resource works in a component build only\""),
-        "{root}"
-    );
+    // Natively, the factory of the service declares the object's resources on its declaration,
+    // after the root's and the object's earlier ones they depend on, and keeps their table beside
+    // the environment, which the scope of each method sets for `with`.
+    let ship = native(&module, &["ship"]);
+    for expected in [
+        ") -> :: tembra :: Service < (() , :: std :: rc :: Rc < self :: super :: __tembra_resource :: ShipResources >) >",
+        "let __tembra_root_resources = :: std :: rc :: Rc :: clone (resources) ; move | declaration | { let __tembra_object_resources = :: std :: rc :: Rc :: new (< self :: super :: __tembra_resource :: ShipResources as :: core :: default :: Default > :: default () ,) ; __tembra_object_resources . declare (& __tembra_root_resources , & declaration) ? ; :: core :: result :: Result :: Ok ((() , __tembra_object_resources)) }",
+        "| __tembra_object : :: std :: rc :: Rc < (() , :: std :: rc :: Rc < self :: super :: __tembra_resource :: ShipResources >) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , self :: super :: __tembra_resource :: ShipResources :: scoped (:: std :: rc :: Rc :: clone (& __tembra_object . 1) , async move {",
+    ] {
+        assert!(ship.contains(expected), "{expected}\n{ship}");
+    }
     let resources = native(&module, &["__tembra_resource"]);
     for expected in [
         "pub struct Resources { harbor : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: Harbor >> > , }",
-        "impl super :: ship :: Mooring {",
-        ":: core :: panic ! (\"the resource `mooring` of each object of the service `Ship` is not supported natively yet\")",
+        "pub struct ShipResources { mooring : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: ship :: Mooring >> > , line : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: ship :: Line >> > , }",
+        "pub struct TugResources { berth : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: tug :: Berth >> > , }",
+        // The mooring depends on the root's harbor, the line on the object's mooring.
+        "let dependencies = [root . harbor . get () . expect (\"a resource's dependencies are declared before it\") . key ()] ; let table = :: std :: rc :: Rc :: downgrade (root) ; let object = :: std :: rc :: Rc :: downgrade (self) ;",
+        "let resource = declaration . resource_async (\"mooring\" , 1u32 , & dependencies , move | _ | { :: std :: boxed :: Box :: pin (async move { let _entered = table . upgrade () . map (Entered :: enter) ; let _object = object . upgrade () . map (ShipEntered :: enter) ; let slot = Slot :: new () ; slot . open (match super :: ship :: Mooring :: open () { :: core :: result :: Result :: Ok (value) => value , :: core :: result :: Result :: Err (error) => { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: core :: Code :: Unavailable , :: tembra :: core :: Reason :: Resource , :: std :: format ! (\"the resource `mooring` did not open: {}\" , :: std :: string :: ToString :: to_string (& error)) ,)) ; } }) ; :: core :: result :: Result :: Ok (slot) }) } , move | slot , _ | { let _entered = closing . upgrade () . map (Entered :: enter) ; let _object = closing_object . upgrade () . map (ShipEntered :: enter) ; if let :: core :: option :: Option :: Some (value) = slot . close () { value . close () ; } :: std :: boxed :: Box :: pin (async { :: core :: result :: Result :: Ok (()) }) } ,) ? ; let _ = self . mooring . set (resource) ;",
+        "let dependencies = [self . mooring . get () . expect (\"a resource's dependencies are declared before it\") . key ()] ;",
+        "impl super :: ship :: Mooring { # [doc = \" Use the resource `mooring` of the `Ship` object running the current call, which the host opened when it created the object: the closure gets the open value, which lives in the host.\"] pub fn with < R > (use_ : impl :: core :: ops :: FnOnce (& mut Self) -> R) -> R { let slot = CURRENT_SHIP . with (| current | current . borrow () . clone ()) . expect (\"a resource of a service's objects is used inside a method of the service\") . mooring . get () . and_then (| resource | resource . value () . ok ()) . expect (\"the resource `mooring` of the `Ship` object running the call is open\") ; slot . with (use_) } }",
     ] {
         assert!(resources.contains(expected), "{expected}\n{resources}");
     }

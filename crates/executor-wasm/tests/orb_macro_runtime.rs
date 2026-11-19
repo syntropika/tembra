@@ -2562,18 +2562,21 @@ fn an_open_that_answers_an_error_fails_the_activation_both_ways() {
     module_natively("kiln");
 }
 
-/// A resource of a service's objects, in a component build, std and freestanding: in the `dock`
-/// feature each `Ship` object owns a mooring, `#[resource(depends = [Harbor])]` in the service's
-/// module, which the kernel opens when it creates the ship, after the root's harbor, whose next
-/// berth the `#[open]` function takes, and closes when the ship goes, before the harbor. Each ship
-/// reads its own mooring, so two ships moor at two berths, in the order the kernel created them;
-/// the harbor's two berths taken, the third ship's mooring answers `Err`, which fails that ship's
-/// creation with `unavailable/resource` and the opener's text, as a failed root open fails the
-/// activation. Natively, `orb()`
-/// answers an error naming the service resource, which the module's native test checks.
+/// The resources of a service's objects, in a component build, std and freestanding, and natively:
+/// in the `dock` feature each `Ship` object owns a mooring, `#[resource(depends = [Harbor])]` in the
+/// service's module, and a line, `#[resource(depends = [Mooring])]`. The kernel opens them when it
+/// creates the ship, after the root's harbor, the mooring's `#[open]` function taking the harbor's
+/// next berth and the line's reading the mooring's berth, both with `with`, and closes them in
+/// reverse when the ship goes, the mooring's `#[close]` function giving the berth back to the
+/// harbor. Each ship reads its own, so two ships moor at two berths and tie their own lines; the
+/// third ship's mooring takes berth 3, where no line reaches, so its line answers `Err`, which
+/// fails that ship's creation with `unavailable/resource` and the opener's text, and the kernel
+/// closes the mooring it opened. A ship owns a state beside its resources, which `sail` updates,
+/// and hands out a WIT resource, its manifest, whose method reads the ship's mooring. Natively the
+/// module's own test checks the same.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
-fn a_service_resource_opens_per_object_as_a_component() {
+fn a_service_resource_opens_and_closes_per_object_both_ways() {
     let records = std::sync::Arc::new(Mutex::new(Vec::new()));
     let sink = records.clone();
     let engine = Engine::new(Limits::default())
@@ -2597,23 +2600,77 @@ fn a_service_resource_opens_per_object_as_a_component() {
         pool.run_until(two.ready()).unwrap();
         assert_eq!(
             logged(),
-            ["open harbor", "open mooring 1", "open mooring 2"],
+            [
+                "open harbor",
+                "open mooring 1",
+                "open line at berth 1",
+                "open mooring 2",
+                "open line at berth 2",
+            ],
             "{features}"
         );
+        let answer = |pool: &mut LocalPool, ship: &Rc<Reference>, method, arguments| {
+            counting_call(pool, &host, ship, "alice", method, arguments)
+        };
         assert_eq!(
-            counting_call(&mut pool, &host, &one, "alice", "berth", json!([])),
+            answer(&mut pool, &one, "berth", json!([])),
             json!(1),
             "{features}"
         );
         assert_eq!(
-            counting_call(&mut pool, &host, &two, "alice", "berth", json!([])),
+            answer(&mut pool, &two, "berth", json!([])),
             json!(2),
             "{features}"
         );
+        assert_eq!(
+            answer(&mut pool, &one, "tie", json!([3])),
+            json!(3),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &one, "tie", json!([2])),
+            json!(5),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &two, "tie", json!([1])),
+            json!(1),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &one, "sail", json!([])),
+            json!([1, 5]),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &one, "sail", json!([])),
+            json!([2, 5]),
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &two, "sail", json!([])),
+            json!([1, 1]),
+            "{features}"
+        );
+        let manifest = two.clone();
+        let described: String = pool
+            .run_until(host.root("alice", move |context| {
+                async move {
+                    let manifest: Owned = manifest
+                        .call_portable(&context, "[constructor]manifest", ("cargo".to_owned(),))
+                        .await?;
+                    manifest
+                        .call_portable(&context, "[method]manifest.describe", json!([]))
+                        .await
+                }
+                .boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(described, "cargo at berth 2", "{features}");
         let three = ship("three");
         let refused = pool
             .run_until(three.ready())
-            .expect_err("the third ship finds no berth");
+            .expect_err("the third ship's line reaches no berth");
         assert_eq!(
             (
                 refused.code,
@@ -2623,16 +2680,24 @@ fn a_service_resource_opens_per_object_as_a_component() {
             (
                 Code::Unavailable,
                 "resource",
-                "the resource `mooring` did not open: no berth is free"
+                "the resource `line` did not open: no line reaches berth 3"
             ),
             "{features}: {refused}"
         );
-        assert!(logged().is_empty(), "{features}");
+        assert_eq!(
+            logged(),
+            ["open mooring 3", "close mooring 3, 2 moored"],
+            "{features}"
+        );
         one.release().unwrap();
         pool.run_until(host.settled());
-        assert_eq!(logged(), ["close mooring 1"], "{features}");
         assert_eq!(
-            counting_call(&mut pool, &host, &two, "alice", "berth", json!([])),
+            logged(),
+            ["close line at berth 1", "close mooring 1, 1 moored"],
+            "{features}"
+        );
+        assert_eq!(
+            answer(&mut pool, &two, "tie", json!([1])),
             json!(2),
             "{features}"
         );
@@ -2640,13 +2705,70 @@ fn a_service_resource_opens_per_object_as_a_component() {
         pool.run_until(host.close()).unwrap();
         assert_eq!(
             logged(),
-            ["close mooring 2", "close harbor, 2 taken"],
+            [
+                "close line at berth 2",
+                "close mooring 2, 0 moored",
+                "close harbor, 3 issued",
+            ],
             "{features}"
         );
         assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
     }
     assert_eq!(engine.instances(), 0);
     module_natively("dock");
+}
+
+/// The resources of a service's objects in an Orb whose root owns none, in a component build, std
+/// and freestanding, and natively: in the `quay` feature each `Barge` object owns a fender, which
+/// the kernel opens when it creates the barge and closes when the barge goes, and each barge
+/// counts its own bumps in it. The world exports `service-resources-init` without
+/// `resources-init`.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_service_resource_opens_without_a_root_resource_both_ways() {
+    let records = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    let logged = || std::mem::take(&mut *records.lock().unwrap());
+    for features in ["quay", "quay,no-std"] {
+        let (module, orb) = module_orb(&engine, &module_component(features), "quay");
+        assert!(
+            words(&module).contains("worldquay{importtembra:guest/resources@1.0.0;exporttembra:guest/service-resources-init@1.0.0;importtembra:guest/context@1.0.0;exportbarge;}"),
+            "{features}: {}",
+            module.text()
+        );
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![orb]).unwrap();
+        let barge = |pool: &mut LocalPool, key: &str| {
+            let barge = Rc::new(
+                host.get("quay::example:quay/barge@1.0.0", vec![key.into()], "alice")
+                    .unwrap(),
+            );
+            pool.run_until(barge.ready()).unwrap();
+            barge
+        };
+        let one = barge(&mut pool, "one");
+        let two = barge(&mut pool, "two");
+        assert_eq!(logged(), ["open fender", "open fender"], "{features}");
+        let bump = |pool: &mut LocalPool, barge: &Rc<Reference>| {
+            counting_call(pool, &host, barge, "alice", "bump", json!([]))
+        };
+        assert_eq!(bump(&mut pool, &one), json!(1), "{features}");
+        assert_eq!(bump(&mut pool, &one), json!(2), "{features}");
+        assert_eq!(bump(&mut pool, &two), json!(1), "{features}");
+        one.release().unwrap();
+        pool.run_until(host.settled());
+        assert_eq!(logged(), ["close fender, 2 bumps"], "{features}");
+        two.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(logged(), ["close fender, 1 bumps"], "{features}");
+        assert!(host.errors().is_empty(), "{features}: {:?}", host.errors());
+    }
+    assert_eq!(engine.instances(), 0);
+    module_natively("quay");
 }
 
 /// An interface with `flags` consumed by a guest that depends on the facade alone, in a component

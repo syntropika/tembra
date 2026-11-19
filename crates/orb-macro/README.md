@@ -575,8 +575,9 @@ depends on root resources alone, since it opens before any object; a service res
 resources and on resources of its own service, never on another service's, whose objects come and
 go on their own: either dependency is an error on the name in `depends`, as is a second resource
 of a name, since `depends` and the kernel name a resource by its struct's name, wherever the
-struct sits. The native side does not open a service's resources yet: the module compiles, and its
-`orb()` answers an error naming the resource, see [using the Orb natively](#using-the-orb-natively).
+struct sits. A native host opens the same resources per object, see
+[using the Orb natively](#using-the-orb-natively); the
+[service resource example](../../examples/rust-orb-service-resource/README.md) runs one both ways.
 
 ## The call's context
 
@@ -1174,10 +1175,10 @@ A service's methods are the `pub fn` of the `impl` blocks of its own module, and
 goes in the module of its struct. The bridges the macro generates for an item go in the item's
 module, so the author's types and functions resolve where they were written: a WIT resource's
 bridge, for a derived or an implemented interface, sits next to its struct and calls its
-`#[constructor]` whatever its visibility. What the Orb module itself reaches, a state, a root
-resource, a WIT resource, the `#[inputs]` struct, a state's `#[validate]` function and a root
-resource's `#[open]` and `#[close]` functions, is visible to the Orb module: `pub` or `pub(crate)`
-at any depth, `pub(super)` one level down only. The macro names such an item through every module
+`#[constructor]` whatever its visibility. What the Orb module itself reaches, a state, a
+resource, of the root or of a service's objects, a WIT resource, the `#[inputs]` struct, a state's
+`#[validate]` function and a resource's `#[open]` and `#[close]` functions, is visible to the Orb
+module: `pub` or `pub(crate)` at any depth, `pub(super)` one level down only. The macro names such an item through every module
 of its path, from the Orb module, and a WIT resource from its service's module, so each of those
 modules is visible there too: a WIT resource may sit below a private module that also holds its
 service. A `pub use` re-exporting the item past a module hidden there does not help. The compiler
@@ -1565,6 +1566,20 @@ wait for its answer: an import of an interface with a synchronous function, plai
 the module's `orb()` answer an error naming it where the runtime is linked, and works in a
 component build of the same module.
 
+The resources of a service's objects serve a native host too: the factory of the service declares
+each on the object's declaration, in the order the component lists them, after the root's resources
+and the object's earlier ones it depends on, so the host opens them with the object and closes them
+when the object goes. `with` on such a resource gives the value of the object running the call in
+the service's methods and in the functions of its WIT resources, and in the `#[open]` and `#[close]`
+functions of the object's later resources; elsewhere, in a contribution, a method of another service
+or a root resource's functions, it panics, as it traps a component. An `#[open]` that answers `Err`
+fails the creation of that object alone, with `unavailable/resource` and the error's text, as a
+component's does. An `#[open]` or `#[close]` function cannot use the `context` natively, of a root
+or a service resource: the native `context` reads the call of the method being polled, and the host
+runs the openers and closers outside any call, so a `context::log` there panics, where a component
+logs. Log from a method, or note what a resource goes through in a field of the resource, as the
+[service resource example](../../examples/rust-orb-service-resource/README.md) does.
+
 A [contribution to a hook](#contributing-to-a-hook) serves a native host too. `Providers` names the
 Orb that declares each hook the module contributes to, under the name of the hook's module,
 `guard`, and the Orb requires the hook of it, with the signature of its callback, as the plan of a
@@ -1588,11 +1603,11 @@ facade there: such a module names the facade `::tembra`, as in `::tembra::Result
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, newtypes, `Result`s, and `Vec`, `Option` and
 tuples of them, the types of an implemented or imported interface or of a hook among them, WIT
-resources as above, states, the resources of the Orb's root, the imports of interfaces of
-`async func`s and contributions to hooks. What it does not cover yet, such as a type of a consumed
-interface that holds a resource, an import of an interface with a resource, a WASI import, a
-resource of a service's objects or an `Option` of an `Option`, which the boundary's JSON cannot
-tell from `None`, and the other cases
+resources as above, states, the resources of the Orb's root and of a service's objects, the
+imports of interfaces of `async func`s and contributions to hooks. What it does not cover yet, such
+as a type of a consumed interface that holds a resource, an import of an interface with a resource,
+a WASI import or an `Option` of an `Option`, which the boundary's JSON cannot tell from `None`, and
+the other cases
 above, leaves the module compiling where the runtime is linked: its `orb()` and `orb_named(..)`,
 which take the inputs if the module has an `#[inputs]` struct and no providers, answer an error
 with the code `unsupported` and the reason `native`, naming the item, so only a host that installs
@@ -1961,7 +1976,9 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    object's value under the handle its open answered, and the `with` function on each resource
    type, which reaches the slot, or the running object's value in the table, in a component build,
    inside `tembra::__guest!`, and natively, inside `tembra::__host!`, the resource of the Orb whose
-   method runs, from a hidden table of the Orb's root resources that the Orb's create fills;
+   method runs, from a hidden table of the Orb's root resources that the Orb's create fills, or of
+   the object whose method runs, from a table per object that the service's factory fills,
+   declaring each resource after the root's and the object's earlier ones it depends on;
 10. inside `tembra::__host!`, so only in a native build that links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
     `pub fn orb_named(name, api_version, ..)`, whose Orb's create declares the root's resources and

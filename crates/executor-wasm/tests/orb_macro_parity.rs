@@ -50,6 +50,9 @@ enum Feature {
     ErrorCodes,
     /// The resources of the Orb's root, opened after the resources they depend on.
     RootResources,
+    /// The resources of a service's objects, opened for each object after the root's resources and
+    /// the object's earlier ones they depend on.
+    ServiceResources,
 }
 
 /// One step of a scenario. A step names a service by its interface, `dialing` for
@@ -372,6 +375,15 @@ fn scenarios() -> Vec<Scenario> {
             vec![
                 Call("stock", "add", json!([2])),
                 Call("stock", "add", json!([4])),
+            ],
+        ),
+        row(
+            ServiceResources,
+            "an object's resources open after the root's and the object's earlier ones, whose values their openings read, and keep their values from call to call",
+            vec![
+                Call("ship", "berth", json!([])),
+                Call("ship", "tie", json!([3])),
+                Call("ship", "tie", json!([2])),
             ],
         ),
         row(

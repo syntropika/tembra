@@ -1,0 +1,18 @@
+package example:harbor@1.0.0;
+
+/// A ship, which moors at a berth of the harbor.
+interface ship {
+  /// The berth this ship moors at: the mooring of the object running the call.
+  berth: func() -> u32;
+  /// Load `crates` more onto this ship, and answer how many it carries.
+  load: func(crates: u32) -> u32;
+  /// What the moorings of the harbor went through since the host last asked.
+  log: func() -> list<string>;
+}
+
+world port {
+  import tembra:guest/resources@1.0.0;
+  export tembra:guest/resources-init@1.0.0;
+  export tembra:guest/service-resources-init@1.0.0;
+  export ship;
+}

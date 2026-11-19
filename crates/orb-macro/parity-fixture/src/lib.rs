@@ -9,8 +9,9 @@
 //! internally tagged enum; `tallies` issues WIT resources, and `vault`, a private service's module,
 //! a WIT resource and a state each in a module below it; `checks` takes and returns what the
 //! boundary checks; `names` names the types of `checks` through a `use` with `as` and an alias;
-//! and `cellar` holds root resources, one depending on the other. A new scenario is a module here,
-//! or a function of one, and a row of the test's list. The Orb holds nothing a native host
+//! `cellar` holds root resources, one depending on the other; and `dock` gives each object of a
+//! service resources of its own, one depending on a root resource and one on the other. A new
+//! scenario is a module here, or a function of one, and a row of the test's list. The Orb holds nothing a native host
 //! refuses by design, a hook declaration, a synchronous import or a WASI import, and nothing
 //! native only.
 
@@ -541,6 +542,84 @@ pub mod parity {
                         db.rows.get()
                     });
                     (Cache::with(|cache| cache.seen), now)
+                }
+            }
+        }
+    }
+
+    /// A resource of the root, the harbor, and two of each `Ship` object: its mooring, whose
+    /// `#[open]` function takes the harbor's next berth, and its line, whose `#[open]` function
+    /// reads the mooring's berth and whose value each call changes.
+    pub mod dock {
+        use core::cell::Cell;
+
+        /// The berths issued so far.
+        #[resource]
+        pub struct Harbor {
+            pub issued: Cell<u32>,
+        }
+
+        impl Harbor {
+            #[open]
+            pub fn open() -> Harbor {
+                Harbor {
+                    issued: Cell::new(0),
+                }
+            }
+        }
+
+        pub mod ship {
+            use super::Harbor;
+
+            #[service]
+            pub struct Ship;
+
+            impl Ship {
+                /// The berth this ship moors at.
+                pub fn berth() -> u32 {
+                    Mooring::with(|mooring| mooring.berth)
+                }
+
+                /// Tie `knots` more in this ship's line, and answer how many it has.
+                pub fn tie(knots: u32) -> u32 {
+                    Line::with(|line| {
+                        line.knots += knots;
+                        line.knots
+                    })
+                }
+            }
+
+            /// The berth of one ship, the next the harbor issues.
+            #[resource(depends = [Harbor])]
+            pub struct Mooring {
+                pub berth: u32,
+            }
+
+            impl Mooring {
+                #[open]
+                pub fn open() -> Mooring {
+                    let berth = Harbor::with(|harbor| {
+                        harbor.issued.set(harbor.issued.get() + 1);
+                        harbor.issued.get()
+                    });
+                    Mooring { berth }
+                }
+            }
+
+            /// The line of one ship, tied at its berth.
+            #[resource(depends = [Mooring])]
+            pub struct Line {
+                pub berth: u32,
+                pub knots: u32,
+            }
+
+            impl Line {
+                #[open]
+                pub fn open() -> Line {
+                    Line {
+                        berth: Mooring::with(|mooring| mooring.berth),
+                        knots: 0,
+                    }
                 }
             }
         }

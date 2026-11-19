@@ -5,7 +5,8 @@
 //! object's state and the resources of the Orb's root, as a component's do. The module `keeper`
 //! implements an interface of the package in `wit/`, whose types are the bindings'. The module
 //! `notebook` takes host values, which only a native host can lend, `library` shares its root's
-//! value among its objects, and `worker` only runs its root and a resource of it. The module
+//! value among its objects, `worker` only runs its root and a resource of it, and `pier` gives the
+//! objects a create builds a resource each. The module
 //! `metering` imports the meter interface of the package in `wit/deps/`, which `meters` implements,
 //! and its `orb(..)` takes the provider of each import; `exchange` imports an interface of types
 //! only, which needs none; `filter` contributes to the hook of a gate in `wit/deps/`, and its
@@ -2117,6 +2118,64 @@ pub mod hollow {
             /// How many tokens this object issued.
             pub fn issued() -> u32 {
                 kept::Issued::read().count
+            }
+        }
+    }
+}
+
+/// Bollards for the boats a create builds, with what the host lends the Orb: the argument of
+/// `pier::orb(..)`. Each `Boat` object is built by its create from the host's inputs and owns a
+/// bollard, a resource of the service's module, which the factory declares after the create ran
+/// and the host opens with the object; a method borrowing `&self` reaches both.
+#[cfg(not(target_arch = "wasm32"))]
+#[tembra::orb(package = "example:pier@1.0.0")]
+pub mod pier {
+    /// What the host lends every service of the Orb.
+    #[inputs]
+    pub struct Inputs {
+        /// The port the boats are named after.
+        pub port: String,
+    }
+
+    pub mod boat {
+        use super::Inputs;
+        use tembra::Declaration;
+
+        /// A boat, named by its create after the port and its key.
+        #[service]
+        pub struct Boat {
+            name: String,
+        }
+
+        impl Boat {
+            #[create]
+            fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                Ok(Boat {
+                    name: format!("{} {}", inputs.port, declaration.address()?.key.join("/")),
+                })
+            }
+
+            /// Tie `ropes` more to this boat's bollard, and answer the boat's name with how many
+            /// ropes its bollard holds.
+            pub fn tie(&self, ropes: u32) -> String {
+                let ropes = Bollard::with(|bollard| {
+                    bollard.ropes += ropes;
+                    bollard.ropes
+                });
+                format!("{}: {ropes} ropes", self.name)
+            }
+        }
+
+        /// The bollard of one boat, holding its ropes.
+        #[resource]
+        pub struct Bollard {
+            pub ropes: u32,
+        }
+
+        impl Bollard {
+            #[open]
+            pub fn open() -> Bollard {
+                Bollard { ropes: 0 }
             }
         }
     }

@@ -8,6 +8,7 @@ use tembra_example_book as _;
 use tembra_example_counter as _;
 use tembra_example_gate as _;
 use tembra_example_greeter as _;
+use tembra_example_harbor as _;
 use tembra_example_import_greeter as _;
 use tembra_example_ledger as _;
 use tembra_example_speller as _;

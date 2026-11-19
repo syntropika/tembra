@@ -407,6 +407,7 @@ dependencies = [
  "tembra-example-counter",
  "tembra-example-gate",
  "tembra-example-greeter",
+ "tembra-example-harbor",
  "tembra-example-import-greeter",
  "tembra-example-ledger",
  "tembra-example-speller",
@@ -488,6 +489,16 @@ dependencies = [
 name = "tembra-example-greeter"
 version = "0.1.0"
 dependencies = [
+ "tembra",
+]
+
+[[package]]
+name = "tembra-example-harbor"
+version = "0.1.0"
+dependencies = [
+ "dlmalloc",
+ "serde",
+ "serde_json",
  "tembra",
 ]
 

@@ -27,6 +27,8 @@ mod keywords;
 mod kiln;
 #[cfg(feature = "lamps")]
 mod lamps;
+#[cfg(feature = "quay")]
+mod quay;
 #[cfg(all(test, any(feature = "native", feature = "native-sdk")))]
 mod native;
 #[cfg(feature = "renamed")]

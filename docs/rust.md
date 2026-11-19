@@ -161,7 +161,9 @@ for other orbs to contribute to; see
 can read the call's principal, the object's address and write to the host's log through the
 kernel's context interface, see [the Rust context example](../examples/rust-orb-context/README.md),
 and each service can choose the lifetime of its objects, see
-[the Rust service lifetime example](../examples/rust-orb-service-lifetime/README.md). A service
+[the Rust service lifetime example](../examples/rust-orb-service-lifetime/README.md), and give each
+of them resources of their own, opened and closed with the object, see
+[the Rust service resource example](../examples/rust-orb-service-resource/README.md). A service
 can implement an interface of a shared WIT package instead of deriving one, see
 [the Rust shared interface example](../examples/rust-orb-shared-interface/README.md), import
 another orb's interface and call it, see
