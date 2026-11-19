@@ -481,7 +481,11 @@ type, even with the same fields, so a reload to another module whose resource ke
 needs a new version: otherwise each call of the new code answers `invalid/rust_type` before it
 runs, as the runtime answers a hand-written Orb that reads the value as another type. At a new
 version, `#[resource(version = 2)]`, the host opens the new code's resource with its `#[open]`
-function, then closes the old value, once, through the old code's `#[close]` function. A resource
+function, then closes the old value, once, through the old code's `#[close]` function. A native
+host keeps a resource only while the resources it [depends on](#resources-of-the-orbs-root) are
+the ones it opened after, so a resource whose dependency opens again opens again too, whatever its
+own version: when `Db` moves to version 2, a `Cache` with `depends = [Db]` that stays at version 1
+opens with the new `Db` and its old value closes. A resource
 struct enters the WIT only when a service method uses it; a resource may hold types the WIT has no
 spelling for, such as a client of some granted I/O. A native host opens the same resources, see
 [using the Orb natively](#using-the-orb-natively).
@@ -579,9 +583,14 @@ depends on root resources alone, since it opens before any object; a service res
 resources and on resources of its own service, never on another service's, whose objects come and
 go on their own: either dependency is an error on the name in `depends`, as is a second resource
 of a name, since `depends` and the kernel name a resource by its struct's name in kebab-case,
-wherever the struct sits: `DbPool` and `DBPool` are both `db-pool`. A native host opens the same resources per object, see
-[using the Orb natively](#using-the-orb-natively); the
+wherever the struct sits: `DbPool` and `DBPool` are both `db-pool`. A native host opens the same
+resources per object, see [using the Orb natively](#using-the-orb-natively); the
 [service resource example](../../examples/rust-orb-service-resource/README.md) runs one both ways.
+
+A service resource's `with` belongs to the code of its service's objects. Called anywhere else,
+from another service's method, from a contribution to a hook, or from the `#[open]` of a root
+resource, it finds no object of the service: a component traps, which retires the revision for
+every object, and natively it panics, which the call answers as an error.
 
 ## The call's context
 
@@ -1523,8 +1532,8 @@ fills, declaring each with `Declaration::resource_async` before the `#[root]`, i
 host opens each with its `#[open]` function once the create returns, after the resources it
 [depends on](#resources-of-the-orbs-root), once for the Orb and before any object of it is built,
 and closes it, through its `#[close]` function, when it removes the Orb, before the resources it
-depends on. A reload keeps it while its version stays the same, and replaces it at a new version, as
-[above](#resources-of-the-orbs-root). The value lives in the host, one per Orb, so a crate
+depends on. A reload keeps it while its version and its dependencies stay the same, and replaces it
+at a new version or with a dependency it replaces, as [above](#resources-of-the-orbs-root). The value lives in the host, one per Orb, so a crate
 installed twice under two names has two of each.
 `with` gives the open value to the methods of every service of the Orb and the functions of their
 WIT resources, which the native side runs with their Orb's table around each poll of their future,

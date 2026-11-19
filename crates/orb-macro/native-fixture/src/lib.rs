@@ -13,7 +13,8 @@
 //! `orb(..)` takes the gate. The module `counters` rewrites with the macro a native Orb its test
 //! also writes by hand against the runtime's API. `abacus` and `restrung` are one Orb before and
 //! after a reload that gives its root's resource a new version, and `reframed` that Orb after a
-//! reload that gives only its package a new version. `dice`, `turnstile`, `checkpoint` and `desk`
+//! reload that gives only its package a new version. `cistern` and `refilled` are one Orb before
+//! and after a reload that gives a resource's dependency a new version. `dice`, `turnstile`, `checkpoint` and `desk`
 //! hold what the native side does not cover yet, a WASI import, a synchronous import, a hook
 //! declaration and a record holding a resource: they compile here all the same, and their `orb()`
 //! answers an error naming it. `trail` holds its root two private modules down, with a service in a
@@ -1743,6 +1744,127 @@ pub mod restrung {
                     beads.slid += by;
                     beads.slid
                 })
+            }
+        }
+    }
+}
+
+/// A cistern whose tank and gauge are resources of the Orb's root, both at version 1, the gauge
+/// depending on the tank, whose level its `#[open]` reads. `refilled` is the same Orb a revision
+/// later, whose tank is at version 2 and whose gauge stays at version 1.
+#[tembra::orb(package = "example:cistern@1.0.0")]
+pub mod cistern {
+    /// The tank, at the default version, 1.
+    #[resource]
+    pub struct Tank {
+        level: i64,
+    }
+
+    impl Tank {
+        #[open]
+        fn open() -> Self {
+            super::note("tank 1 open".to_owned());
+            Tank { level: 1 }
+        }
+
+        #[close]
+        fn close(self) {
+            super::note("tank 1 closed".to_owned());
+        }
+    }
+
+    /// The gauge, at version 1: the tank's level when it opened.
+    #[resource(depends = [Tank])]
+    pub struct Gauge {
+        read: i64,
+    }
+
+    impl Gauge {
+        #[open]
+        fn open() -> Self {
+            let read = Tank::with(|tank| tank.level);
+            super::note(format!("gauge 1 open at {read}"));
+            Gauge { read }
+        }
+
+        #[close]
+        fn close(self) {
+            super::note(format!("gauge 1 closed at {}", self.read));
+        }
+    }
+
+    pub mod meter {
+        use super::Gauge;
+
+        /// Reads the gauge.
+        #[service]
+        pub struct Meter;
+
+        impl Meter {
+            /// The tank's level the gauge read when it opened.
+            pub fn read() -> i64 {
+                Gauge::with(|gauge| gauge.read)
+            }
+        }
+    }
+}
+
+/// The cistern a revision later, refilled: its tank is at version 2, and its gauge, which depends
+/// on the tank, stays at version 1. A native host's reload from `cistern` opens the new tank and
+/// the new gauge too, since the kernel keeps a resource only when its dependencies are the ones it
+/// opened after. Its package is at 2.0.0, as `restrung`'s is.
+#[tembra::orb(package = "example:cistern@2.0.0")]
+pub mod refilled {
+    /// The tank, at version 2.
+    #[resource(version = 2)]
+    pub struct Tank {
+        level: i64,
+    }
+
+    impl Tank {
+        #[open]
+        fn open() -> Self {
+            super::note("tank 2 open".to_owned());
+            Tank { level: 2 }
+        }
+
+        #[close]
+        fn close(self) {
+            super::note("tank 2 closed".to_owned());
+        }
+    }
+
+    /// The gauge, still at version 1: the tank's level when it opened.
+    #[resource(depends = [Tank])]
+    pub struct Gauge {
+        read: i64,
+    }
+
+    impl Gauge {
+        #[open]
+        fn open() -> Self {
+            let read = Tank::with(|tank| tank.level);
+            super::note(format!("gauge 1 open at {read}"));
+            Gauge { read }
+        }
+
+        #[close]
+        fn close(self) {
+            super::note(format!("gauge 1 closed at {}", self.read));
+        }
+    }
+
+    pub mod meter {
+        use super::Gauge;
+
+        /// Reads the gauge.
+        #[service]
+        pub struct Meter;
+
+        impl Meter {
+            /// The tank's level the gauge read when it opened.
+            pub fn read() -> i64 {
+                Gauge::with(|gauge| gauge.read)
             }
         }
     }

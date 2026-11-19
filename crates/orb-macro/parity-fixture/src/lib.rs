@@ -10,7 +10,8 @@
 //! a WIT resource and a state each in a module below it; `checks` takes and returns what the
 //! boundary checks; `names` names the types of `checks` through a `use` with `as` and an alias;
 //! `cellar` holds root resources, one depending on the other; and `dock` gives each object of a
-//! service resources of its own, one depending on a root resource and one on the other. A new
+//! service resources of its own, one depending on a root resource and one on the other, and each
+//! raft a buoy whose `#[open]` fails once the root's one buoy is taken. A new
 //! scenario is a module here, or a function of one, and a row of the test's list. The Orb holds nothing a native host
 //! refuses by design, a hook declaration, a synchronous import or a WASI import, and nothing
 //! native only.
@@ -620,6 +621,53 @@ pub mod parity {
                         berth: Mooring::with(|mooring| mooring.berth),
                         knots: 0,
                     }
+                }
+            }
+        }
+
+        /// The one buoy of the root, which the first raft takes.
+        #[resource]
+        pub struct Buoys {
+            pub free: Cell<u32>,
+        }
+
+        impl Buoys {
+            #[open]
+            pub fn open() -> Buoys {
+                Buoys { free: Cell::new(1) }
+            }
+        }
+
+        pub mod raft {
+            use super::Buoys;
+
+            #[service]
+            pub struct Raft;
+
+            impl Raft {
+                /// The buoy this raft is tied to.
+                pub fn buoy() -> u32 {
+                    Buoy::with(|buoy| buoy.number)
+                }
+            }
+
+            /// The buoy of one raft, which the root's buoys hand out while one is free: the open
+            /// of every raft after the first answers `Err`, which fails the raft's creation.
+            #[resource(depends = [Buoys])]
+            pub struct Buoy {
+                pub number: u32,
+            }
+
+            impl Buoy {
+                #[open]
+                pub fn open() -> Result<Buoy, String> {
+                    Buoys::with(|buoys| match buoys.free.get() {
+                        0 => Err(String::from("no buoy is free")),
+                        free => {
+                            buoys.free.set(free - 1);
+                            Ok(Buoy { number: free })
+                        }
+                    })
                 }
             }
         }

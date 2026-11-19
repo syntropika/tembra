@@ -6758,7 +6758,7 @@ fn resource_code(
             let name = wit::kebab(&resource.ident);
             let slot = slot(resource);
             let opened = opened(resource, &|value| {
-                quote! { ::core::result::Result::Ok(#slot.open(#value)), }
+                quote! { #slot.open(#value), }
             });
             quote! { (#identity, #name) => #opened }
         });
@@ -6858,6 +6858,7 @@ fn resource_code(
         pub mod __tembra_resource {
             extern crate alloc;
             pub use alloc::{
+                collections::BTreeMap,
                 string::{String, ToString},
                 vec::Vec,
             };
@@ -6895,38 +6896,38 @@ fn resource_code(
 
             /// The values of one resource of a service's objects, each under the handle its open
             /// answered the kernel: the handles count up from 1, and never come back.
-            pub struct Table<T>(::core::cell::RefCell<(u32, Vec<(u32, T)>)>);
+            pub struct Table<T>(::core::cell::RefCell<(u32, BTreeMap<u32, T>)>);
 
             // SAFETY: as for `Slot`.
             unsafe impl<T> ::core::marker::Sync for Table<T> {}
 
             impl<T> Table<T> {
                 pub const fn new() -> Self {
-                    Self(::core::cell::RefCell::new((0, Vec::new())))
+                    Self(::core::cell::RefCell::new((0, BTreeMap::new())))
                 }
 
-                /// Keep an object's value and answer its handle.
-                pub fn open(&self, value: T) -> u32 {
+                /// Keep an object's value and answer its handle. Once every handle has been
+                /// answered, the open fails rather than answer a handle again, which could be
+                /// another object's; the value is dropped without its `#[close]`.
+                pub fn open(&self, value: T) -> ::core::result::Result<u32, String> {
                     let mut table = self.0.borrow_mut();
-                    table.0 += 1;
-                    let handle = table.0;
-                    table.1.push((handle, value));
-                    handle
+                    let ::core::option::Option::Some(handle) = table.0.checked_add(1) else {
+                        return ::core::result::Result::Err(::core::convert::From::from(
+                            "every handle of the resource was answered once, and none comes back",
+                        ));
+                    };
+                    table.0 = handle;
+                    table.1.insert(handle, value);
+                    ::core::result::Result::Ok(handle)
                 }
 
                 pub fn close(&self, handle: u32) -> ::core::option::Option<T> {
-                    let mut table = self.0.borrow_mut();
-                    let index = table.1.iter().position(|(kept, _)| *kept == handle)?;
-                    ::core::option::Option::Some(table.1.remove(index).1)
+                    self.0.borrow_mut().1.remove(&handle)
                 }
 
                 pub fn with<R>(&self, handle: u32, use_: impl ::core::ops::FnOnce(&mut T) -> R) -> R {
                     let mut table = self.0.borrow_mut();
-                    let (_, value) = table
-                        .1
-                        .iter_mut()
-                        .find(|(kept, _)| *kept == handle)
-                        .expect("the resource is not open");
+                    let value = table.1.get_mut(&handle).expect("the resource is not open");
                     use_(value)
                 }
             }

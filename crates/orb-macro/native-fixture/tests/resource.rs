@@ -4,16 +4,22 @@
 //! function, when it removes the Orb. The beads of `abacus::orb()`, a resource of its root too,
 //! across a reload: the host keeps them while their version stays the same, also for the beads of
 //! `reframed`, of another package version and another Rust type, whose calls it refuses, and
-//! closes and opens them again for the beads of `restrung`, at a new version.
+//! closes and opens them again for the beads of `restrung`, at a new version. The gauge of
+//! `cistern::orb()`, which depends on its tank, opens again with the tank of `refilled`, at a new
+//! version, though its own version stays.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::{Code, Host, Reference};
-use tembra_orb_native_fixture::{abacus, calculator, journal, reframed, restrung};
+use tembra_orb_native_fixture::{
+    abacus, calculator, cistern, journal, refilled, reframed, restrung,
+};
 
 const ROD: &str = "calculator::example:abacus/rod@1.0.0";
 const RESTRUNG_ROD: &str = "calculator::example:abacus/rod@2.0.0";
 const REFRAMED_ROD: &str = "calculator::example:abacus/rod@1.1.0";
+const METER: &str = "calculator::example:cistern/meter@1.0.0";
+const REFILLED_METER: &str = "calculator::example:cistern/meter@2.0.0";
 
 /// Collect what the Orbs of `host` log through their `context`, as the Orb's name and the message:
 /// the closure takes what was logged since it was last called.
@@ -281,4 +287,51 @@ fn a_call_reaching_a_kept_root_resource_of_another_type_answers_rust_type() {
     pool.run_until(host.close()).unwrap();
     assert_eq!(journal(), ["beads 1 open", "beads 1 closed at 5"]);
     assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// A reload to code whose tank is at a new version reopens the gauge too, though the gauge's own
+/// version stays 1: the kernel keeps a resource only when its dependencies are the ones it opened
+/// after, and the new tank is another. The new gauge reads the new tank; the old gauge closes
+/// before the old tank.
+#[test]
+fn a_reload_reopens_a_resource_whose_dependency_reopens() {
+    journal();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![cistern::orb().unwrap()]).unwrap();
+    let meter = Rc::new(host.get(METER, vec!["main".into()], "host").unwrap());
+    assert_eq!(read(&mut pool, &host, &meter), 1);
+    meter.release().unwrap();
+    pool.run_until_stalled();
+    assert_eq!(journal(), ["tank 1 open", "gauge 1 open at 1"]);
+    pool.run_until(host.reload(vec![refilled::orb().unwrap()], 5_000))
+        .unwrap();
+    pool.run_until(host.settled());
+    assert_eq!(
+        journal(),
+        [
+            "tank 2 open",
+            "gauge 1 open at 2",
+            "gauge 1 closed at 1",
+            "tank 1 closed"
+        ]
+    );
+    let meter = Rc::new(
+        host.get(REFILLED_METER, vec!["main".into()], "host")
+            .unwrap(),
+    );
+    assert_eq!(read(&mut pool, &host, &meter), 2);
+    meter.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(journal(), ["gauge 1 closed at 2", "tank 2 closed"]);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// Read the gauge through the meter, under a root of `host`.
+fn read(pool: &mut LocalPool, host: &Host, meter: &Rc<Reference>) -> i64 {
+    let meter = meter.clone();
+    pool.run_until(host.root("host", move |context| {
+        async move { meter.call::<_, i64>(&context, "read", ()).await }.boxed_local()
+    }))
+    .unwrap()
 }

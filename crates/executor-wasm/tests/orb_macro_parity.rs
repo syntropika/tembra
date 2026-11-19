@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tembra::{
-    Context, Host, Orb, Provider, Reference, Service,
+    AcquisitionOptions, Context, Host, Orb, Provider, Reference, Service,
     core::Code,
     portable::{Delivered, Owned},
 };
@@ -63,6 +63,9 @@ enum Step {
     /// answers the result, whose resources are numbered in it, or the error. The scenario keeps the
     /// handles of the resources a result holds, in order, after those it kept before.
     Call(&'static str, &'static str, Value),
+    /// Call a function of the object of a key of a service, once it is ready, as `Call` does: a
+    /// creation that fails answers its error.
+    At(&'static str, &'static str, &'static str, Value),
     /// Call a function through the handle the scenario kept at a position, as `Call` does.
     Method(usize, &'static str, Value),
     /// Drop the handle the scenario kept at a position, which drops the resource: it answers `null`.
@@ -387,6 +390,25 @@ fn scenarios() -> Vec<Scenario> {
             ],
         ),
         row(
+            ServiceResources,
+            "each object has resources of its own: a second ship takes the next berth and ties a line of its own, which the first ship's line does not see",
+            vec![
+                At("second", "ship", "berth", json!([])),
+                At("second", "ship", "tie", json!([4])),
+                Call("ship", "tie", json!([1])),
+                At("second", "ship", "tie", json!([1])),
+            ],
+        ),
+        row(
+            ServiceResources,
+            "an object whose resource's open answers an error is not created, and a call of it answers unavailable/resource",
+            vec![
+                Call("raft", "buoy", json!([])),
+                At("second", "raft", "buoy", json!([])),
+                Call("raft", "buoy", json!([])),
+            ],
+        ),
+        row(
             ErrorCodes,
             "a call of a function the interface does not have fails",
             vec![Call("checks", "subtract", json!([2, 1]))],
@@ -584,6 +606,8 @@ struct Build {
     host: Host,
     watch: Watch,
     services: BTreeMap<String, Rc<Reference>>,
+    /// The name of each service, `<orb>::<identity>`, by its identity.
+    names: BTreeMap<String, String>,
 }
 
 impl Build {
@@ -600,6 +624,7 @@ impl Build {
             .collect();
         host.install(vec![dials(watch.clone()), orb]).unwrap();
         let mut services = BTreeMap::new();
+        let mut names = BTreeMap::new();
         for service in declared {
             let reference = Rc::new(host.get(&service, vec!["main".into()], "alice").unwrap());
             pool.run_until(reference.ready()).unwrap();
@@ -608,6 +633,7 @@ impl Build {
                 .split_once("::")
                 .map_or(service.as_str(), |(_, identity)| identity);
             services.insert(identity.to_owned(), reference);
+            names.insert(identity.to_owned(), service.clone());
         }
         Self {
             name,
@@ -615,6 +641,7 @@ impl Build {
             host,
             watch,
             services,
+            names,
         }
     }
 
@@ -624,6 +651,7 @@ impl Build {
     fn run(&mut self, steps: Vec<Step>) -> Vec<Answer> {
         let kernel = self.host.kernel();
         let services = self.services.clone();
+        let names = self.names.clone();
         let watch = self.watch.clone();
         self.pool
             .run_until(self.host.root("alice", move |context| {
@@ -653,6 +681,31 @@ impl Build {
                                     kept(result, &mut handles)
                                 }
                                 Err(missing) => missing,
+                            },
+                            Step::At(key, wanted, function, arguments) => match names
+                                .iter()
+                                .find(|(identity, _)| interface(identity) == wanted)
+                            {
+                                Some((_, name)) => {
+                                    let result = async {
+                                        let reference = context.get(
+                                            name,
+                                            vec![key.into()],
+                                            AcquisitionOptions::default(),
+                                        )?;
+                                        reference.ready().await?;
+                                        reference
+                                            .call_portable::<_, Delivered>(
+                                                &context, function, arguments,
+                                            )
+                                            .await
+                                    }
+                                    .await;
+                                    kept(result, &mut handles)
+                                }
+                                None => Outcome::Missing(format!(
+                                    "no service of the interface `{wanted}`"
+                                )),
                             },
                             Step::Method(handle, function, arguments) => {
                                 let result = match handles.get(handle).and_then(Option::as_ref) {

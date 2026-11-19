@@ -2523,7 +2523,10 @@ fn a_root_resource_opens_and_closes_both_ways() {
 /// natively: the cache of the `cellar` feature, `#[resource(depends = [Db])]`, comes first in its
 /// module, yet the component declares it after the database with the database as its dependency,
 /// so the kernel opens the database first, whose rows the cache's `#[open]` function reads, and
-/// closes the cache first, whose `#[close]` function writes them back to the database.
+/// closes the cache first, whose `#[close]` function writes them back to the database. A reload
+/// gives the component a fresh instance, whose database and cache open in the same order before
+/// the old ones close; natively, `a_reload_reopens_a_resource_whose_dependency_reopens` in the
+/// native fixture's `tests/resource.rs` reopens a resource whose dependency moves to a new version.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
 fn a_root_resource_opens_after_its_dependency_both_ways() {
@@ -2534,7 +2537,8 @@ fn a_root_resource_opens_after_its_dependency_both_ways() {
         .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
     let logged = || std::mem::take(&mut *records.lock().unwrap());
     for features in ["cellar", "cellar,no-std"] {
-        let (_, orb) = module_orb(&engine, &module_component(features), "cellar");
+        let component = module_component(features);
+        let (_, orb) = module_orb(&engine, &component, "cellar");
         let mut pool = LocalPool::new();
         let host = Host::new(pool.spawner());
         host.install(vec![orb]).unwrap();
@@ -2550,6 +2554,19 @@ fn a_root_resource_opens_after_its_dependency_both_ways() {
             "{features}"
         );
         shelf.release().unwrap();
+        let (_, orb) = module_orb(&engine, &component, "cellar");
+        pool.run_until(host.reload(vec![orb], 5_000)).unwrap();
+        pool.run_until(host.settled());
+        assert_eq!(
+            logged(),
+            [
+                "open db at [] of host",
+                "open cache, 3 rows",
+                "close cache, 6 rows",
+                "close db, 6 rows"
+            ],
+            "{features}"
+        );
         pool.run_until(host.close()).unwrap();
         assert_eq!(
             logged(),
