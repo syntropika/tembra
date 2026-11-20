@@ -1,0 +1,9 @@
+package example:protocol@1.0.0;
+
+interface borrowed {
+  resource token;
+  inspect: func(value: borrow<token>) -> u64;
+}
+interface future-values {
+  pending: func() -> future<u64>;
+}

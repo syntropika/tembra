@@ -3,7 +3,7 @@ import type { ReferenceRecord } from "../../runtime/records.ts";
 import type { Session } from "../../runtime/session.ts";
 import type { ResourceCapability, ResourceLoan } from "#tembra-adapters";
 import type { GraphFunction, TypeGraph } from "./values.ts";
-import { bindingName } from "./host.ts";
+import { bindingName } from "./names.ts";
 
 export interface Nominal {
   readonly interface: string;

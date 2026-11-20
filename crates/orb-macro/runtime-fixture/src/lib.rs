@@ -9,6 +9,12 @@ extern crate alloc;
 mod authored;
 #[cfg(feature = "cellar")]
 mod cellar;
+#[cfg(feature = "codec-consumer")]
+#[path = "../../native-fixture/src/codec/consumer.rs"]
+mod codec_consumer;
+#[cfg(feature = "codec-provider")]
+#[path = "../../native-fixture/src/codec/provider.rs"]
+mod codec_provider;
 #[cfg(feature = "configured")]
 mod configured;
 #[cfg(feature = "contributor")]

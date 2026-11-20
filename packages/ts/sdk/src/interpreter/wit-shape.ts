@@ -78,7 +78,10 @@ interface WitKind {
 /** The parts of the contract's `describe` answer this module reads. */
 export interface WitTypes {
   readonly javascriptNames: Readonly<Record<string, string>>;
-  readonly types: readonly { readonly id: number; readonly definition: { kind: WitKind } }[];
+  readonly types: readonly {
+    readonly id: number;
+    readonly definition: { kind: WitKind | string };
+  }[];
 }
 export interface WitFunction {
   readonly params: readonly { readonly name: string; readonly type: WitType }[];
@@ -104,6 +107,7 @@ export function shapes(graph: WitTypes): (fn: WitFunction) => Signature {
     if (compiled.has(type)) return compiled.get(type);
     const kind = kinds.get(type);
     if (!kind) throw new Error("Unknown WIT type reference");
+    if (typeof kind === "string") return undefined;
     let shape: Shape | undefined;
     if (kind.type !== undefined) shape = compile(kind.type);
     else if (kind.list !== undefined) {

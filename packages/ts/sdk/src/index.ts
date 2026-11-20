@@ -21,3 +21,5 @@ export { Errors, type ErrorDescriptor } from "./errors.ts";
 
 export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./context-key.ts";
 export type { WitMethods } from "./authoring/wit.ts";
+
+export { witClient, type WitResource, type WitClientSchema } from "./runtime/wit-client.ts";

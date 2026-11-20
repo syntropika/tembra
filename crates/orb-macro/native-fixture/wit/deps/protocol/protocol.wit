@@ -1,0 +1,30 @@
+package example:protocol@1.0.0;
+interface codec {
+  resource decoder {
+    constructor(seed: u64);
+    zero: static func() -> decoder;
+    total: func() -> u64;
+    next: async func() -> option<u64>;
+  }
+  normalize: func(value: u64) -> u64;
+  open: func(seed: u64) -> decoder;
+  pair: func(seed: u64) -> tuple<decoder, list<option<decoder>>>;
+  dropped: func() -> u32;
+}
+world provider { export codec; }
+
+interface packets {
+  resource ticket { value: async func() -> u64; }
+  type ticket-alias = ticket;
+  record envelope { ticket: ticket-alias, amount: u64 }
+  type packet = envelope;
+  variant event { ok, created(packet) }
+  type event-alias = event;
+  type batch = list<option<event-alias>>;
+  receive: func() -> result<tuple<batch, ticket>, string>;
+}
+
+interface sink {
+  use codec.{decoder as imported-decoder};
+  accept: func(value: imported-decoder) -> u64;
+}

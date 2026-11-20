@@ -30,7 +30,12 @@ const ROUTER: &str = "mod router {
         pub struct Routing;
         impl Routing {
             pub async fn route(key: String) -> Result<u32, String> {
-                Ok(super::counter_ref::get(vec![key]).await?.add(1))
+                let counter = super::counter_ref::get(vec![key]).await?;
+                #[cfg(target_arch = \"wasm32\")]
+                let total = counter.add(1);
+                #[cfg(not(target_arch = \"wasm32\"))]
+                let total = counter.add(1).await;
+                Ok(total)
             }
         }
     }
@@ -201,14 +206,11 @@ fn the_attribute_writes_a_keyed_import_in_parentheses() {
         syn::parse_str(ROUTER).unwrap(),
     )
     .to_string();
-    // The macro accepts the module; its native side alone, inside the facade's wrapper, refuses
-    // the keyed import, whose interface has a synchronous function: it works in a component build
-    // only, so the native `orb()` answers that error.
+    // The WIT view stays synchronous, while its native reference methods are awaitable.
     assert!(!accepted.contains("compile_error"), "{accepted}");
+    assert!(accepted.contains("pub struct Providers"), "{accepted}");
     assert!(
-        accepted.contains(
-            ":: tembra :: Error :: new (:: tembra :: core :: Code :: Unsupported , \"native\" , \"the import of example:counters/counter@1.0.0 by key works in a component build only: its function `add` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`\")"
-        ),
+        accepted.contains("pub async fn add (& self , amount : u32)"),
         "{accepted}"
     );
     assert!(accepted.contains("import counter-ref;"), "{accepted}");

@@ -1,9 +1,9 @@
+import { bindingName } from "../src/interpreter/component/names.ts";
 // Browser reference views: generated spellings, the host resource class and the scope guards.
 // Real JCO glue and Chrome execution are qualified by `prepared-component-browser.ts`.
 import { describe, expect, test } from "bun:test";
 import type { Declaration } from "../src/authoring/declaration.ts";
 import {
-  bindingName,
   referenceImport,
   referenceView,
   type ReferenceView,

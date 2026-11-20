@@ -5,7 +5,7 @@
 //! cover, so only a host that installs such an Orb fails.
 use futures::executor::LocalPool;
 use tembra::{Host, Orb, core::Code};
-use tembra_orb_native_fixture::{checkpoint, desk, dice, turnstile};
+use tembra_orb_native_fixture::{checkpoint, desk, dice};
 
 /// Install the Orb `orb()` answers in a host, as a native host does, and return the error the host
 /// gets: `unsupported/native`.
@@ -28,14 +28,6 @@ fn a_wasi_import_fails_the_installation() {
     assert_eq!(
         install(dice::orb),
         "the import of wasi:random/random@0.3.0 is not supported natively yet"
-    );
-}
-
-#[test]
-fn a_synchronous_import_fails_the_installation() {
-    assert_eq!(
-        install(turnstile::orb),
-        "the import of example:gate/admissions@1.0.0 works in a component build only: its function `admit` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`"
     );
 }
 

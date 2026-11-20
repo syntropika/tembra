@@ -1273,6 +1273,58 @@ impl ConsumedTypes {
         quote::quote! { #module::#ident }
     }
 
+    /// Select the native declaration of a type, using a visible alias if its owner is not imported.
+    pub(crate) fn native_alias(&self, id: wit_parser::TypeId) -> wit_parser::TypeId {
+        let definition = &self.resolve.types[id];
+        if let wit_parser::TypeOwner::Interface(owner) = definition.owner
+            && self
+                .resolve
+                .id_of(owner)
+                .is_some_and(|identity| self.interfaces.contains_key(&identity))
+        {
+            return id;
+        }
+        self.interfaces
+            .values()
+            .flat_map(|owner| self.resolve.interfaces[*owner].types.values())
+            .copied()
+            .find(|alias| {
+                self.definition(wit_parser::Type::Id(*alias))
+                    .is_ok_and(|(target, _)| target == id)
+            })
+            .unwrap_or(id)
+    }
+
+    /// The original nominal identity, independent of a local resource alias's spelling.
+    pub(crate) fn resource_nominal(&self, id: wit_parser::TypeId) -> (String, String) {
+        let definition = &self.resolve.types[id];
+        let wit_parser::TypeOwner::Interface(owner) = definition.owner else {
+            unreachable!("a named resource owner")
+        };
+        (
+            self.resolve.id_of(owner).expect("a named interface"),
+            definition.name.clone().expect("a named resource"),
+        )
+    }
+
+    /// The native import module's type, which owns portable resources instead of guest handles.
+    pub(crate) fn native_path(
+        &self,
+        id: wit_parser::TypeId,
+        depth: usize,
+    ) -> proc_macro2::TokenStream {
+        let definition = &self.resolve.types[self.native_alias(id)];
+        let identity = match definition.owner {
+            wit_parser::TypeOwner::Interface(owner) => self.resolve.id_of(owner),
+            _ => None,
+        }
+        .expect("an imported resource has a defining interface");
+        let root = crate::supers(depth);
+        let [_, _, module] = crate::hook_path(&identity);
+        let name = crate::type_ident(definition.name.as_deref().expect("a named import type"));
+        quote::quote! { #root #module::#name }
+    }
+
     /// Every record, variant, enum and flags the interfaces read define or `use`, and every one
     /// those hold, each once, in the order the interfaces list them.
     pub(crate) fn data_types(&self) -> Vec<wit_parser::TypeId> {

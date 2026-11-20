@@ -32,8 +32,15 @@ mod welcomer {
 
         impl Welcoming {
             /// Greet each name through the imported interface and return the greetings.
-            pub fn welcome(names: Vec<String>) -> Vec<String> {
-                names.iter().map(|name| greeting::hello(name)).collect()
+            pub async fn welcome(names: Vec<String>) -> Vec<String> {
+                let mut greetings = Vec::new();
+                for name in names {
+                    #[cfg(target_arch = "wasm32")]
+                    greetings.push(greeting::hello(&name));
+                    #[cfg(not(target_arch = "wasm32"))]
+                    greetings.push(greeting::hello(name).await);
+                }
+                greetings
             }
         }
     }
@@ -109,3 +116,8 @@ WASI interface is imported with `import = "wasi:..."` and granted instead of bou
 [importing WASI interfaces](../../crates/orb-macro/README.md#importing-wasi-interfaces).
 Handing out an object for the caller to keep and call repeatedly is
 a WIT resource; see [rust-orb-wit-resource](../rust-orb-wit-resource/README.md).
+
+The consumer method is asynchronous so the same source can await its native imports. The provider
+WIT functions remain synchronous. Component builds use their synchronous bindings; native builds
+await the generated imported functions and resource methods with owned arguments. The source
+shows the platform branches, as described in [native WIT composition](../../docs/native-imports.md).

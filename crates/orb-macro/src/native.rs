@@ -24,7 +24,7 @@
 //! the scope of their object, whose state the state's `read` and `update` reach natively. The Orb's
 //! create declares each `#[resource]` of its root, into a table `orb()` builds for the Orb, and
 //! every method runs in the scope of its Orb, whose resources their `with` reaches natively. An
-//! import of another Orb's interface whose functions are all `async func` calls the provider the
+//! import of another Orb's interface calls awaitably, preserving WIT calling conventions, the provider the
 //! host names through the kernel, and a contribution joins the plan of the hook of the Orb the
 //! host names, see `providers`. What the native side does not cover yet leaves the module
 //! compiling, with an `orb()` that answers an error naming the item, so only a host that builds

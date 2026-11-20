@@ -1,0 +1,11 @@
+error: this type has no spelling the macro knows; use records, enums, variants, resources, scalars, strings, lists, options, results and tuples
+ --> tests/ui/native_import_future.rs:1:1
+  |
+1 | / #[tembra::orb(
+2 | |     package = "example:reader@1.0.0",
+3 | |     wit = "consumed/protocol",
+4 | |     import = "example:protocol/future-values@1.0.0"
+5 | | )]
+  | |__^
+  |
+  = note: this error originates in the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)

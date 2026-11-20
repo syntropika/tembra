@@ -23,6 +23,13 @@ const finalizer =
         held.session.deref()?.handles.release(held.id),
       );
 
+/** Resolve an SDK-issued handle for the existing portable WIT client lane. */
+export function referenceOrigin(value: object): { session: Session; record: ReferenceRecord } {
+  const issued = references.get(value);
+  if (!issued) refuse(Errors.Invalid.Reference, "An issued local reference is required");
+  return issued;
+}
+
 /** JS reference handles and per-object visibility. */
 export class References {
   /** Retain handle metadata and index references by object. */

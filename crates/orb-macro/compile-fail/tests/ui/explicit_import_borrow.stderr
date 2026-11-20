@@ -1,0 +1,11 @@
+error: a borrowed resource in a signature is not expressed by the macro; a resource is handed out owned and borrowed only as a method's self
+ --> tests/ui/explicit_import_borrow.rs:1:1
+  |
+1 | / #[tembra::orb(
+2 | |     package = "example:reader@1.0.0",
+3 | |     wit = "consumed/protocol",
+4 | |     import = "example:protocol/borrowed@1.0.0"
+5 | | )]
+  | |__^
+  |
+  = note: this error originates in the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)
