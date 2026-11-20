@@ -17,6 +17,7 @@ export function checkArtifacts(root: string, version: string): void {
     ...nodePlatforms.map((platform) => `engine-node/dist/tembra-${platform}.node`),
     "engine-node/dist/interpreter.wasm",
     "engine-wasm/dist/interpreter/interpreter.wasm",
+    "react-native/native/interpreter/tembra/interpreter.wasm",
     "engine-wasm/dist/assets.js",
     "engine-wasm/dist/assets.d.ts",
     "engine-wasm/dist/contracts.js",
@@ -34,6 +35,16 @@ export function checkArtifacts(root: string, version: string): void {
   for (const file of required) {
     if (!existsSync(path.join(root, "packages/ts", file)))
       throw new Error(`Missing release artifact: ${file}`);
+  }
+  const interpreter = readFileSync(
+    path.join(root, "packages/ts/engine-node/dist/interpreter.wasm"),
+  );
+  for (const file of [
+    "engine-wasm/dist/interpreter/interpreter.wasm",
+    "react-native/native/interpreter/tembra/interpreter.wasm",
+  ]) {
+    if (!interpreter.equals(readFileSync(path.join(root, "packages/ts", file))))
+      throw new Error(`Release interpreter differs: ${file}`);
   }
   const aar = path.join(
     root,

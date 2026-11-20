@@ -24,6 +24,8 @@ from `tembra-runtime`, the optional contracts module, the Orb macro and the Wasm
 before the facade can resolve from the registry. All local dependencies of publishable Rust
 crates have exact registry versions as well as local paths.
 
+The workflow builds one verified interpreter and shares its Node, browser and React Native assets with the mobile and packaging jobs. Mobile builds download it before packaging; every distributed copy has the same bytes.
+
 Every platform builds its Node addon and loads it with Node. The workflow also runs
 the repository quality checks, isolated orb acceptance, Swift tests and Android unit
 tests. Packaging requires all six Node binaries, the Swift distribution and every
@@ -39,8 +41,7 @@ Rust provider. The Node host executes both through the packaged interpreter.
 Publication starts only after every build and packaging check passes.
 
 Select **Actions → Release → Run workflow** for a build rehearsal on the chosen ref.
-Manual build runs use the checked-in version and upload artifacts. They do not publish or
-request registry credentials. Select `check_npm_auth` to check each npm trusted publisher
+With `release_tag` empty, manual runs use the checked-in version and upload artifacts without publishing or requesting registry credentials. Select `check_npm_auth` to check each npm trusted publisher
 instead of building. This check requests short-lived registry credentials and discards
 them. It does not publish packages or print credentials. The workflow must first exist on the default branch
 to appear in the Actions interface.
@@ -104,8 +105,9 @@ need to be committed.
 ## Partial publication and retries
 
 The registries do not provide a transaction spanning all packages. A failure can leave
-some versions published. Rerun the failed workflow rather than moving or recreating the
-tag. An existing npm version is skipped only when its integrity matches the prepared
+some versions published. Retry transient failures in the same workflow run. If the workflow itself needs a correction, merge that correction into `main`, then run **Actions → Release → Run workflow** from `main` with `release_tag` set to the existing tag. This explicitly enables publication after all gates pass. Leave `check_npm_auth` disabled. Do not move or recreate the tag.
+
+A recovery run uses the corrected workflow but checks out the tag's exact commit in every build, quality and publication job. The tag must exist, match the version manifests and remain reachable from `main`. The same candidate is rebuilt and all acceptance and archive-integrity checks run again. A manual run without `release_tag` remains a build rehearsal. An existing npm version is skipped only when its integrity matches the prepared
 archive; crates.io versions must match the verified archive checksum. Publication also
 checks that repackaged crate bytes match the verified build artifacts. Conflicting
 contents stop the workflow instead of silently treating an unrelated version as success.
