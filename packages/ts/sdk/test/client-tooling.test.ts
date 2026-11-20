@@ -515,6 +515,8 @@ test.skipIf(!fixtures)(
         world: "provider",
         out: root,
       });
+      await mkdir(path.join(root, "node_modules/@syntropika"), { recursive: true });
+      await symlink(sdk, path.join(root, "node_modules/@syntropika/tembra-sdk"), "dir");
       const numbers = (await import(file!)) as {
         get: (scope: unknown, address: { orb: string; key: string }) => Promise<any>;
       };

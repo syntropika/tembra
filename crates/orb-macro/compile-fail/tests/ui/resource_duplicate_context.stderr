@@ -1,5 +1,5 @@
 error: a method takes the call's `&Context` once
- --> tests/ui/resource_duplicate_context.rs:7:53
+ --> tests/ui/resource_duplicate_context.rs:8:57
   |
-7 |         pub fn read(&self, first: &tembra::Context, second: &tembra::Context) {}
-  |                                                     ^^^^^^
+8 |             pub fn read(&self, first: &tembra::Context, second: &tembra::Context) {}
+  |                                                         ^^^^^^

@@ -26,7 +26,8 @@ pub(crate) struct Implementation {
     pub local: BTreeMap<String, LocalMethod>,
     pub portable: BTreeMap<String, PortableMethod>,
     pub before_create: Option<BeforeCreate>,
-    pub contract: Option<(String, Rc<[u8]>)>,
+    #[cfg(feature = "rpc")]
+    pub contract: Option<Result<(String, tembra_contracts::PreparedContract, String)>>,
     #[cfg(feature = "views")]
     pub access: Option<Access>,
 }
@@ -62,6 +63,7 @@ impl<E: 'static> Service<E> {
                 local: BTreeMap::new(),
                 portable: BTreeMap::new(),
                 before_create: None,
+                #[cfg(feature = "rpc")]
                 contract: None,
                 #[cfg(feature = "views")]
                 access: None,
@@ -90,10 +92,29 @@ impl<E: 'static> Service<E> {
         self
     }
 
-    /// Attach the prepared WIT used to check portable resource transport before execution.
-    pub fn contract(mut self, binding: impl Into<String>, prepared: &[u8]) -> Self {
-        self.implementation.contract = Some((binding.into(), Rc::from(prepared)));
-        self
+    /// Decode the service's immutable WIT once for RPC validation before provider execution.
+    pub fn contract(self, binding: impl Into<String>, prepared: &[u8]) -> Self {
+        let binding = binding.into();
+        #[cfg(feature = "rpc")]
+        {
+            let mut service = self;
+            service.implementation.contract = Some((|| {
+                let contract = tembra_contracts::PreparedContract::decode(prepared)
+                    .map_err(|error| Error::invalid("contract", error.to_string()))?;
+                let signature = contract
+                    .service_signatures()
+                    .map_err(|error| Error::invalid("contract", error.to_string()))?
+                    .remove(&binding)
+                    .ok_or_else(|| Error::invalid("contract", "missing service signature"))?;
+                Ok((binding, contract, signature))
+            })());
+            service
+        }
+        #[cfg(not(feature = "rpc"))]
+        {
+            let _ = (binding, prepared);
+            self
+        }
     }
 
     /// Set the ownership policy and optional idle retention period.

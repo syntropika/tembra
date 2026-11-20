@@ -10,30 +10,37 @@ mod lifecycle;
 
 #[tembra::orb(package = "example:contextual-probe@1.0.0", wit = "wit")]
 mod fixed {
-    /// A fixed-WIT resource whose host build also checks its component bridge.
-    #[wit_resource]
-    pub struct Probe;
+    pub mod implementation {
 
-    impl Probe {
-        /// Read the actual context outside the fixed-WIT signature.
-        pub fn inspect(&self, prefix: String, context: &tembra::Context) -> tembra::Result<String> {
-            Ok(format!("{prefix}:{}", context.principal()?))
+        /// A fixed-WIT resource whose host build also checks its component bridge.
+        #[wit_resource]
+        pub struct Probe;
+
+        impl Probe {
+            /// Read the actual context outside the fixed-WIT signature.
+            pub fn inspect(
+                &self,
+                prefix: String,
+                context: &tembra::Context,
+            ) -> tembra::Result<String> {
+                Ok(format!("{prefix}:{}", context.principal()?))
+            }
+
+            /// Keep transport errors outside the fixed-WIT value.
+            pub fn fail(&self) -> tembra::Result<u32> {
+                Err(tembra::Error::invalid("probe", "fixed transport error"))
+            }
         }
 
-        /// Keep transport errors outside the fixed-WIT value.
-        pub fn fail(&self) -> tembra::Result<u32> {
-            Err(tembra::Error::invalid("probe", "fixed transport error"))
-        }
-    }
+        /// The fixed-WIT provider, without a native service factory.
+        #[service("example:contextual/probes@1.0.0")]
+        pub struct Probes;
 
-    /// The fixed-WIT provider, without a native service factory.
-    #[service("example:contextual/probes@1.0.0")]
-    pub struct Probes;
-
-    impl Probes {
-        /// Return one provider-owned probe.
-        pub fn open() -> Probe {
-            Probe
+        impl Probes {
+            /// Return one provider-owned probe.
+            pub fn open() -> Probe {
+                Probe
+            }
         }
     }
 }
@@ -52,7 +59,7 @@ fn fixed_wit_resource_bridges_preserve_context_and_transport_errors() {
         )
         .unwrap(),
     );
-    let client = fixed::ProbesClient::new(reference.clone());
+    let client = fixed::implementation::ProbesClient::new(reference.clone());
     pool.run_until(host.root("alice", move |context| {
         async move {
             let probe = client.open(&context).await?;
@@ -77,65 +84,68 @@ fn fixed_wit_resource_bridges_preserve_context_and_transport_errors() {
 
 #[tembra::orb(package = "example:resource-context@1.0.0")]
 mod contextual {
-    /// A session that reports its current invocation.
-    #[wit_resource]
-    pub struct Session;
+    pub mod implementation {
 
-    impl Session {
-        /// Open a session through a fallible synchronous factory.
-        pub fn open(context: &tembra::Context) -> tembra::Result<Session> {
-            context.check()?;
-            Ok(Session)
-        }
+        /// A session that reports its current invocation.
+        #[wit_resource]
+        pub struct Session;
 
-        /// Refuse asynchronous acquisition without issuing an owner.
-        pub async fn try_open() -> tembra::Result<Session> {
-            Err(tembra::Error::new(
-                tembra::Code::Forbidden,
-                "factory",
-                "creation refused",
-            ))
-        }
-
-        /// Read a synchronous value through the transport result alone.
-        pub fn number(&self) -> tembra::Result<u32> {
-            Ok(7)
-        }
-
-        /// Return the domain error separately from a refused transport invocation.
-        pub async fn inspect(
-            &self,
-            prefix: String,
-            context: &tembra::Context,
-            transport_failure: bool,
-        ) -> tembra::Result<std::result::Result<String, String>> {
-            if transport_failure {
-                return Err(tembra::Error::invalid("session", "transport refused"));
+        impl Session {
+            /// Open a session through a fallible synchronous factory.
+            pub fn open(context: &tembra::Context) -> tembra::Result<Session> {
+                context.check()?;
+                Ok(Session)
             }
-            let address = context.address()?;
-            let inspected = format!(
-                "{prefix}:{}:{}:{}:{}",
-                context.principal()?,
-                address.key.join("/"),
-                address.principal,
-                context.value(&super::TRACE)?.unwrap_or_default(),
-            );
-            Ok(if prefix == "success" {
-                Ok(inspected)
-            } else {
-                Err(inspected)
-            })
+
+            /// Refuse asynchronous acquisition without issuing an owner.
+            pub async fn try_open() -> tembra::Result<Session> {
+                Err(tembra::Error::new(
+                    tembra::Code::Forbidden,
+                    "factory",
+                    "creation refused",
+                ))
+            }
+
+            /// Read a synchronous value through the transport result alone.
+            pub fn number(&self) -> tembra::Result<u32> {
+                Ok(7)
+            }
+
+            /// Return the domain error separately from a refused transport invocation.
+            pub async fn inspect(
+                &self,
+                prefix: String,
+                context: &tembra::Context,
+                transport_failure: bool,
+            ) -> tembra::Result<std::result::Result<String, String>> {
+                if transport_failure {
+                    return Err(tembra::Error::invalid("session", "transport refused"));
+                }
+                let address = context.address()?;
+                let inspected = format!(
+                    "{prefix}:{}:{}:{}:{}",
+                    context.principal()?,
+                    address.key.join("/"),
+                    address.principal,
+                    context.value(&super::super::TRACE)?.unwrap_or_default(),
+                );
+                Ok(if prefix == "success" {
+                    Ok(inspected)
+                } else {
+                    Err(inspected)
+                })
+            }
         }
-    }
 
-    /// The service owning sessions.
-    #[service]
-    pub struct Sessions;
+        /// The service owning sessions.
+        #[service]
+        pub struct Sessions;
 
-    impl Sessions {
-        /// Identify this interface independently of its resource functions.
-        pub fn available() -> bool {
-            true
+        impl Sessions {
+            /// Identify this interface independently of its resource functions.
+            pub fn available() -> bool {
+                true
+            }
         }
     }
 }
@@ -158,7 +168,7 @@ fn resource_methods_receive_the_invocation_and_keep_domain_errors_inside_transpo
         )
         .unwrap(),
     );
-    let client = contextual::SessionsClient::new(reference.clone());
+    let client = contextual::implementation::SessionsClient::new(reference.clone());
     pool.run_until(reference.ready()).unwrap();
     let claims = host.kernel().diagnostics().references;
     pool.run_until(host.root("alice", move |context| {

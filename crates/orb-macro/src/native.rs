@@ -3096,7 +3096,7 @@ fn named<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>
         // it contributes to, is the bindings' type, which the codec reads from the interface's WIT.
         let defined = matches!(
             named.interface.role,
-            Role::Implemented | Role::Imported | Role::Keyed | Role::Contributed
+            Role::Implemented | Role::Imported | Role::Keyed | Role::Contributed | Role::Declared
         )
         .then(|| analysis.consumed_types.named(identity, &named.ident))
         .flatten();
@@ -3105,7 +3105,7 @@ fn named<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>
                 let depth = analysis.modules[scope].len();
                 let interface = match named.interface.role {
                     Role::Implemented => "the implemented interface",
-                    Role::Contributed => "the hook",
+                    Role::Contributed | Role::Declared => "the hook",
                     _ => "the imported interface",
                 };
                 match wit_kind(defined, &analysis.consumed_types, depth) {

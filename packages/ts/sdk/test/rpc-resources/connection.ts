@@ -90,10 +90,10 @@ export function connect(
       reader.releaseLock();
     }
   })();
-  const remote = new RemoteHost(
-    transport,
-    limits.maxPending === undefined ? {} : { maxPending: limits.maxPending },
-  );
+  const remote = new RemoteHost(transport, {
+    ...(limits.maxPending === undefined ? {} : { maxPending: limits.maxPending }),
+    ...(limits.maxFrame === undefined ? {} : { maxFrame: limits.maxFrame }),
+  });
   return {
     remote,
     child,

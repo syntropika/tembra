@@ -39,16 +39,10 @@ impl Host {
                 .get(&orb.id)
                 .and_then(|services| services.get(&address.service))
                 .and_then(|implementation| implementation.contract.clone());
-            let Some((binding, bytes)) = source else {
+            let Some(prepared) = source else {
                 return Ok(None);
             };
-            let contract = tembra_contracts::PreparedContract::decode(&bytes)
-                .map_err(|error| Error::invalid("contract", error.to_string()))?;
-            let signature = contract
-                .service_signatures()
-                .map_err(|error| Error::invalid("contract", error.to_string()))?
-                .remove(&binding)
-                .ok_or_else(|| Error::invalid("contract", "missing service signature"))?;
+            let (binding, contract, signature) = prepared?;
             if service.signature.as_ref() != Some(&signature) {
                 return Err(Error::invalid(
                     "contract",

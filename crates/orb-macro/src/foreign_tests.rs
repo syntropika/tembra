@@ -921,7 +921,7 @@ fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
     let generated = tokens(&module);
     for reexport in [
         "pub use exports :: example :: ledger :: gate ;",
-        "pub use self :: example :: keeper :: gate_ref ;",
+        "pub mod gate_ref {",
     ] {
         assert!(generated.contains(reexport), "{reexport}\n{generated}");
     }

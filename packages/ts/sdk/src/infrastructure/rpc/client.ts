@@ -28,6 +28,14 @@ export class RemoteHost {
     }
   >();
   #states = new Map<number, RemoteState>();
+  #releases: {
+    payload: unknown;
+    bytes: number;
+    signal: AbortSignal | undefined;
+    resolve(value: unknown): void;
+    reject(error: unknown): void;
+  }[] = [];
+  #releaseBytes = 0;
 
   /** Attach response routing and revoke state on disconnect. */
   constructor(transport: Transport, options: Limits = {}) {
@@ -44,10 +52,14 @@ export class RemoteHost {
         this.#pending.delete(message.id!);
         if (message.error) pending.reject(new TembraError(message.error));
         else pending.resolve(message.ok);
+        this.#drainReleases();
       },
       (error) => {
         for (const pending of this.#pending.values()) pending.reject(error);
         this.#pending.clear();
+        for (const queued of this.#releases) queued.reject(error);
+        this.#releases = [];
+        this.#releaseBytes = 0;
         this.#states.clear();
       },
     );
@@ -55,7 +67,38 @@ export class RemoteHost {
 
   /** Correlate one bounded remote request with optional cancellation. */
   request(op: RpcOp, payload: unknown, signal?: AbortSignal): Promise<any> {
-    return this.#request(op, payload, signal);
+    return op === RpcOp.Release
+      ? this.#queueRelease(payload, signal)
+      : this.#request(op, payload, signal);
+  }
+
+  /** Buffer release bursts within one frame's byte budget while control replies are pending. */
+  async #queueRelease(payload: unknown, signal?: AbortSignal): Promise<unknown> {
+    if (signal) checkSignal(signal);
+    if (this.channel.closed) throw new TembraError(Errors.Gone.Connection);
+    const bytes = this.channel.codec.serialize({ op: RpcOp.Release, payload }).length;
+    if (this.#releaseBytes + bytes > this.channel.maxFrame)
+      throw new TembraError(Errors.Exhausted.FrameSize);
+    return new Promise((resolve, reject) => {
+      this.#releases.push({ payload, bytes, signal, resolve, reject });
+      this.#releaseBytes += bytes;
+      this.#drainReleases();
+    });
+  }
+
+  /** Send queued releases as control slots become free without consuming ordinary capacity. */
+  #drainReleases(): void {
+    if (this.channel.closed) return;
+    let pending = 0;
+    for (const item of this.#pending.values()) if (item.control) pending++;
+    while (pending < this.channel.maxPending && this.#releases.length) {
+      const item = this.#releases.shift()!;
+      this.#releaseBytes -= item.bytes;
+      pending++;
+      void this.#request(RpcOp.Release, item.payload, item.signal)
+        .then(item.resolve, item.reject)
+        .finally(() => this.#drainReleases());
+    }
   }
 
   /** Apply a response before resolving its caller so following frames see acquired state. */
@@ -85,7 +128,9 @@ export class RemoteHost {
               op === RpcOp.Call &&
               typeof payload === "object" &&
               payload !== null &&
-              "capabilities" in payload
+              "capabilities" in payload &&
+              Array.isArray(value?.owned) &&
+              value.owned.length > 0
             ) {
               void this.channel
                 .send({ op: RpcOp.Accept, payload: { id } })

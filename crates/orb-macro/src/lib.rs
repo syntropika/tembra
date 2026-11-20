@@ -2756,7 +2756,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     // a contributed hook, so the bindings generate their types under `exports`, and imports the
     // others, whose types they generate at the root, an interface imported by key too, whose view
     // `use`s them.
-    let consumed_types = match parsed.dir() {
+    let mut consumed_types = match parsed.dir() {
         Some(dir)
             if !implemented.is_empty()
                 || !imported.is_empty()
@@ -2774,7 +2774,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                         declared
                             .iter()
                             .filter(|hook| hook.input.is_none())
-                            .map(|hook| (hook.hook.as_str(), false)),
+                            .map(|hook| (hook.hook.as_str(), true)),
                     )
                     .chain(imported.iter().map(|identity| (identity.as_str(), false)))
                     .chain(views.iter().map(|view| (view.target.as_str(), false))),
@@ -2782,6 +2782,12 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         }
         _ => wit::ConsumedTypes::default(),
     };
+    consumed_types.share_imports(
+        declared
+            .iter()
+            .filter(|hook| hook.input.is_none())
+            .map(|hook| hook.hook.clone()),
+    );
     let consumed_modules = consumed_modules.with_imported_resources(&consumed_types);
     // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
     // of its resources is a #[wit_resource] struct of the same name with the resource's functions.

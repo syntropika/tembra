@@ -78,7 +78,9 @@ for (const mode of ["native", "wasm"]) {
         const codec = await source.get(connection.remote, { orb: "codec", key: "main" });
         const decoder = await codec.newDecoder(9007199254740993n);
         expect(await decoder.total()).toBe(9007199254740993n);
+        const accepted = connection.sent.filter((frame) => frame.op === "accept").length;
         expect(await codec.float(2 ** 80)).toBe(2 ** 80);
+        expect(connection.sent.filter((frame) => frame.op === "accept")).toHaveLength(accepted);
         expect(await decoder.push(2n)).toBe(9007199254740995n);
         const zero = await codec.decoderZero();
         expect(await zero.total()).toBe(0n);
@@ -816,19 +818,20 @@ for (const mode of ["native", "wasm"]) {
   test.skipIf(
     !process.env.TEMBRA_RPC_HOST || (mode === "wasm" && !process.env.TEMBRA_RPC_COMPONENT),
   )(
-    `${mode} RPC resources: a stalled control budget closes with bounded cleanup`,
+    `${mode} RPC resources: a stalled release byte queue closes with bounded cleanup`,
     async () => {
       const source = await generated();
-      const connection = connect(mode, { maxPending: 1 });
+      const connection = connect(mode, { maxPending: 1, maxFrame: 1024 });
       try {
         const codec = await source.get(connection.remote, { orb: "codec", key: "main" });
         const first = await codec.open(1n);
-        const second = await codec.open(2n);
+        const queued = [];
+        for (let index = 0; index < 12; index++) queued.push(await codec.open(2n));
         const retained = await codec.open(3n);
         connection.hold((frame) => frame.ok === null);
         first.release();
         await until(async () => connection.received.some((frame) => frame.ok === null));
-        second.release();
+        for (const resource of queued) resource.release();
         await until(async () => connection.remote.channel.closed);
         await expect(retained.total()).rejects.toMatchObject({
           code: "gone",
@@ -837,6 +840,56 @@ for (const mode of ["native", "wasm"]) {
         expect(connection.sent.filter((frame) => frame.op === "release")).toHaveLength(1);
         retained.release();
         codec.reference.release();
+      } finally {
+        connection.flush();
+        await connection.close();
+        await source.close();
+      }
+    },
+    30_000,
+  );
+}
+
+for (const mode of ["native", "wasm"]) {
+  test.skipIf(
+    !process.env.TEMBRA_RPC_HOST || (mode === "wasm" && !process.env.TEMBRA_RPC_COMPONENT),
+  )(
+    `${mode} RPC resources: a release burst drains while an unrelated method stays pending`,
+    async () => {
+      const source = await generated();
+      const connection = connect(mode, { maxPending: 2, maxReferences: 64 });
+      try {
+        const codec = await source.get(connection.remote, { orb: "codec", key: "main" });
+        const control = (await connection.remote.get("control", "main")) as unknown as Control;
+        const owners = [];
+        for (let index = 0; index < 24; index++) owners.push(await codec.open(BigInt(index)));
+        const before = await codec.stats();
+        let settled = false;
+        const pending = owners[0]!.wait().then((value) => {
+          settled = true;
+          return value;
+        });
+        await until(async () => (await control.stats()).started === 1);
+        connection.hold((frame) => frame.ok === null);
+        for (const owner of owners) owner.release();
+        await until(
+          async () => connection.received.filter((frame) => frame.ok === null).length >= 2,
+        );
+        expect(connection.sent.filter((frame) => frame.op === "release")).toHaveLength(2);
+        expect(connection.remote.channel.closed).toBe(false);
+        expect(settled).toBe(false);
+        connection.flush();
+        await until(
+          async () => connection.received.filter((frame) => frame.ok === null).length >= 24,
+        );
+        expect(connection.sent.filter((frame) => frame.op === "release")).toHaveLength(24);
+        expect((await control.stats()).started).toBe(1);
+        expect(settled).toBe(false);
+        await control.open();
+        expect(await pending).toBe(0n);
+        expect((await codec.stats())[0]).toBe(before[0] + 24);
+        codec.reference.release();
+        control.release();
       } finally {
         connection.flush();
         await connection.close();

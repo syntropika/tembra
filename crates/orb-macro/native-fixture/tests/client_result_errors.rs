@@ -9,45 +9,49 @@ thread_local! {
 
 #[tembra::orb(package = "example:checked-client@1.0.0")]
 mod checked {
-    /// A native caller may validate a canonical string more strictly than the WIT does.
-    #[derive(Debug)]
-    pub struct Label(String);
+    pub mod service {
+        /// A native caller may validate a canonical string more strictly than the WIT does.
+        #[derive(Debug)]
+        pub struct Label(String);
 
-    impl TryFrom<String> for Label {
-        type Error = &'static str;
+        impl TryFrom<String> for Label {
+            type Error = &'static str;
 
-        fn try_from(value: String) -> Result<Self, Self::Error> {
-            if value.is_empty() {
-                Err("empty label")
-            } else {
-                Ok(Self(value))
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                if value.is_empty() {
+                    Err("empty label")
+                } else {
+                    Ok(Self(value))
+                }
             }
         }
-    }
 
-    /// The same WIT interface as the separately generated implementation below.
-    #[service]
-    pub struct Labels;
+        /// The same WIT interface as the separately generated implementation below.
+        #[service]
+        pub struct Labels;
 
-    impl Labels {
-        /// Return a label whose native representation validates the string.
-        pub fn read(empty: bool) -> Label {
-            Label(if empty { String::new() } else { "valid".into() })
+        impl Labels {
+            /// Return a label whose native representation validates the string.
+            pub fn read(empty: bool) -> Label {
+                Label(if empty { String::new() } else { "valid".into() })
+            }
         }
     }
 }
 
 #[tembra::orb(package = "example:checked-client@1.0.0")]
 mod implementation {
-    /// A provider with exactly the same canonical WIT signature.
-    #[service]
-    pub struct Labels;
+    pub mod service {
+        /// A provider with exactly the same canonical WIT signature.
+        #[service]
+        pub struct Labels;
 
-    impl Labels {
-        /// Count provider entry before returning a canonical string.
-        pub fn read(empty: bool) -> String {
-            super::CALLS.with(|calls| calls.set(calls.get() + 1));
-            if empty { String::new() } else { "valid".into() }
+        impl Labels {
+            /// Count provider entry before returning a canonical string.
+            pub fn read(empty: bool) -> String {
+                super::super::CALLS.with(|calls| calls.set(calls.get() + 1));
+                if empty { String::new() } else { "valid".into() }
+            }
         }
     }
 }
@@ -69,8 +73,8 @@ fn a_client_result_conversion_error_never_retries_an_executed_call() {
         )
         .unwrap(),
     );
-    let client = checked::LabelsClient::new(reference.clone());
-    let _provider_client = implementation::LabelsClient::new(reference.clone());
+    let client = checked::service::LabelsClient::new(reference.clone());
+    let _provider_client = implementation::service::LabelsClient::new(reference.clone());
     CALLS.with(|calls| calls.set(0));
     pool.run_until(host.root("alice", move |context| {
         async move {

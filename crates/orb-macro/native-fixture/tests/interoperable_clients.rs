@@ -17,74 +17,77 @@ macro_rules! implementation {
     ($module:ident) => {
         #[tembra::orb(package = "example:client-fixture@1.0.0", wit = "wit")]
         mod $module {
-            use std::rc::Rc;
+            pub mod implementation {
+                use super::values;
+                use std::rc::Rc;
 
-            /// The shared WIT interface with an additional native-only method.
-            #[service("example:interoperable/values@1.0.0")]
-            pub struct Values;
+                /// The shared WIT interface with an additional native-only method.
+                #[service("example:interoperable/values@1.0.0")]
+                pub struct Values;
 
-            impl Values {
-                /// Return independently generated record types through the canonical codec.
-                pub fn echo(value: values::Item) -> values::Item {
-                    super::entered(stringify!($module), "echo");
-                    value
-                }
+                impl Values {
+                    /// Return independently generated record types through the canonical codec.
+                    pub fn echo(value: values::Item) -> values::Item {
+                        super::super::entered(stringify!($module), "echo");
+                        value
+                    }
 
-                /// Preserve domain success and failure inside the transport result.
-                pub async fn choose(value: values::Choice) -> Result<values::Item, String> {
-                    super::entered(stringify!($module), "choose");
-                    match value {
-                        values::Choice::Accept(item) => Ok(item),
-                        values::Choice::Reject(reason) => Err(reason),
+                    /// Preserve domain success and failure inside the transport result.
+                    pub async fn choose(value: values::Choice) -> Result<values::Item, String> {
+                        super::super::entered(stringify!($module), "choose");
+                        match value {
+                            values::Choice::Accept(item) => Ok(item),
+                            values::Choice::Reject(reason) => Err(reason),
+                        }
+                    }
+
+                    /// Return an outer transport error without re-executing the provider.
+                    pub fn fail() -> tembra::Result<u32> {
+                        super::super::entered(stringify!($module), "fail");
+                        Err(tembra::Error::new(
+                            tembra::Code::Forbidden,
+                            "fixture",
+                            "refused",
+                        ))
+                    }
+
+                    /// Exercise conversion refusals before and after provider entry.
+                    pub fn floating(value: f64) -> f64 {
+                        super::super::entered(stringify!($module), "floating");
+                        if value == 0.0 { f64::NAN } else { value }
+                    }
+
+                    /// Consume the original owner at its issuing provider.
+                    pub fn consume(value: Cursor) -> values::Item {
+                        super::super::entered(stringify!($module), "consume");
+                        value.0
+                    }
+
+                    /// Keep native-only values on the direct Rust entrypoint.
+                    #[local]
+                    pub fn apply(value: u32, operation: Rc<dyn Fn(u32) -> u32>) -> u32 {
+                        super::super::entered(stringify!($module), "apply");
+                        operation(value)
                     }
                 }
 
-                /// Return an outer transport error without re-executing the provider.
-                pub fn fail() -> tembra::Result<u32> {
-                    super::entered(stringify!($module), "fail");
-                    Err(tembra::Error::new(
-                        tembra::Code::Forbidden,
-                        "fixture",
-                        "refused",
-                    ))
-                }
+                /// A resource whose client wrapper is independent of its provider's Rust type.
+                #[wit_resource]
+                pub struct Cursor(values::Item);
 
-                /// Exercise conversion refusals before and after provider entry.
-                pub fn floating(value: f64) -> f64 {
-                    super::entered(stringify!($module), "floating");
-                    if value == 0.0 { f64::NAN } else { value }
-                }
+                impl Cursor {
+                    /// Issue one owner with the shared nominal WIT identity.
+                    #[constructor]
+                    pub fn new(value: values::Item) -> Self {
+                        super::super::entered(stringify!($module), "new");
+                        Self(value)
+                    }
 
-                /// Consume the original owner at its issuing provider.
-                pub fn consume(value: Cursor) -> values::Item {
-                    super::entered(stringify!($module), "consume");
-                    value.0
-                }
-
-                /// Keep native-only values on the direct Rust entrypoint.
-                #[local]
-                pub fn apply(value: u32, operation: Rc<dyn Fn(u32) -> u32>) -> u32 {
-                    super::entered(stringify!($module), "apply");
-                    operation(value)
-                }
-            }
-
-            /// A resource whose client wrapper is independent of its provider's Rust type.
-            #[wit_resource(service = Values)]
-            pub struct Cursor(values::Item);
-
-            impl Cursor {
-                /// Issue one owner with the shared nominal WIT identity.
-                #[constructor]
-                pub fn new(value: values::Item) -> Self {
-                    super::entered(stringify!($module), "new");
-                    Self(value)
-                }
-
-                /// Read through the portable receiver loan.
-                pub async fn read(&self) -> values::Item {
-                    super::entered(stringify!($module), "read");
-                    self.0.clone()
+                    /// Read through the portable receiver loan.
+                    pub async fn read(&self) -> values::Item {
+                        super::super::entered(stringify!($module), "read");
+                        self.0.clone()
+                    }
                 }
             }
         }
@@ -121,8 +124,8 @@ fn one_client_interoperates_with_independently_generated_implementations() {
             )
             .unwrap(),
         );
-        let client = first::ValuesClient::new(reference.clone());
-        let _independent_client = second::ValuesClient::new(reference.clone());
+        let client = first::implementation::ValuesClient::new(reference.clone());
+        let _independent_client = second::implementation::ValuesClient::new(reference.clone());
         CALLS.with(|calls| calls.borrow_mut().clear());
         pool.run_until(host.root("alice", move |context| {
             async move {

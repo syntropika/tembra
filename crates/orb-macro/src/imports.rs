@@ -89,7 +89,7 @@ pub(crate) fn modules(analysis: &Analysis, served: &BTreeSet<String>) -> TokenSt
         let raw = import_module(1, &hook_path(&crate::identity(&analysis.package, &view.name)));
         let interface = analysis.consumed_types.interface(&view.target).expect("a keyed interface");
         let resource = type_ident(interface.name.as_deref().unwrap_or_default());
-        let defining = import_module(1, &hook_path(&view.target));
+        let defining = analysis.consumed_types.imported_module(&view.target, 1);
         let values = Values { types: &analysis.consumed_types };
         let declarations = interface.types.keys().filter(|name| view.types.contains(*name)).map(|name| {
             let name = type_ident(name);

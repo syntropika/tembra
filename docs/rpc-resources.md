@@ -46,13 +46,14 @@ Method receivers borrow the resource. The host processes release in frame order,
 pending callbacks fill its admission budget. Releasing a resource prevents later frames from
 reserving it while the admitted physical callback keeps its existing pin until it settles.
 
-The SDK reserves a separate release budget of `maxPending` requests alongside the same-sized
-ordinary request budget. Ordinary saturation does not prevent explicit release, failed-move
-cleanup or disposal of late replies. Release responses free only release slots. Cleanup retains
-no unbounded queue: if release responses themselves stall and exhaust that separate budget,
-the SDK closes the connection with the exhaustion error, letting the host drain its claims.
-A failed release write also closes with its original transport error because delivery is
-uncertain. Calls are not replayed.
+The SDK reserves a separate release window of `maxPending` requests alongside the ordinary
+request window. Additional releases wait in a byte-bounded queue, so releasing more owners than
+`maxPending` in one burst does not close the connection. The queue holds at most `maxFrame` bytes
+of encoded release envelopes; replies free control slots and drain that queue in order. Ordinary
+saturation does not prevent explicit release, failed-move cleanup or disposal of late replies.
+If stalled release responses exhaust the byte budget, cleanup closes the connection with the
+size error and the host drains its claims. Failed release writes close with the original transport
+error because delivery is uncertain. Calls are not replayed.
 
 An `own<T>` argument consumes its wrapper. Validate and cancel a call before starting it when
 ownership must remain with the caller. Once the SDK submits the move, failure, cancellation,

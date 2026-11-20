@@ -1190,6 +1190,7 @@ pub(crate) struct ConsumedTypes {
     resolve: Resolve,
     interfaces: BTreeMap<String, wit_parser::InterfaceId>,
     exported: BTreeSet<String>,
+    shared_imports: BTreeSet<String>,
 }
 
 impl ConsumedTypes {
@@ -1223,7 +1224,23 @@ impl ConsumedTypes {
             resolve,
             interfaces: read,
             exported,
+            shared_imports: BTreeSet::new(),
         })
+    }
+
+    /// Reuse the exported types of hooks whose imports the component bindings map to exports.
+    pub(crate) fn share_imports(&mut self, interfaces: impl IntoIterator<Item = String>) {
+        self.shared_imports.extend(interfaces);
+    }
+
+    /// The defining module of an imported interface, including a declared hook's shared types.
+    pub(crate) fn imported_module(&self, identity: &str, depth: usize) -> proc_macro2::TokenStream {
+        let path = crate::hook_path(identity);
+        if self.shared_imports.contains(identity) {
+            crate::export_module(depth, &path)
+        } else {
+            crate::import_module(depth, &path)
+        }
     }
 
     /// The interface `identity`, when it was read.
@@ -1332,7 +1349,7 @@ impl ConsumedTypes {
         self.binding_path(id, depth, false)
     }
 
-    /// The raw import copy, including when the same interface is also exported.
+    /// The import copy, shared with exports only for declared hooks mapped by the bindings.
     pub(crate) fn imported_path(
         &self,
         id: wit_parser::TypeId,
@@ -1356,7 +1373,9 @@ impl ConsumedTypes {
         .unwrap_or_default();
         let ident = crate::type_ident(definition.name.as_deref().unwrap_or_default());
         let path = crate::hook_path(&identity);
-        let module = if !imported && self.exported.contains(&identity) {
+        let module = if self.shared_imports.contains(&identity)
+            || (!imported && self.exported.contains(&identity))
+        {
             crate::export_module(depth, &path)
         } else {
             crate::import_module(depth, &path)

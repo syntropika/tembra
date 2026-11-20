@@ -460,14 +460,13 @@ impl Inner {
             ));
         }
         self.check_references()?;
-        let next = self.allocate()?;
         let methods = reference.rpc_methods()?;
+        let next = self.next_reference()?;
         let readable = reference.rpc_state()?;
         let mut result = json!({"reference":next,"methods":methods});
         if let Some(readable) = &readable {
             result["state"] = (*readable.value()?).clone();
         }
-        self.encode(&json!({"id":id,"ok":result}))?;
         let profile = self.host.rpc_contract(&reference)?;
         let resources = input.resources == Some(1) && profile.is_some();
         if resources {
@@ -475,6 +474,7 @@ impl Inner {
             result["signature"] = json!(profile.as_ref().expect("a profile").signature);
         }
         self.encode(&json!({"id":id,"ok":result}))?;
+        self.next.set(next);
         self.claims.borrow_mut().insert(
             next,
             Claim {
@@ -528,8 +528,14 @@ impl Inner {
 
     /// Allocate once from the existing connection-local reference identity space.
     fn allocate(&self) -> Result<u64> {
-        let next = self
-            .next
+        let next = self.next_reference()?;
+        self.next.set(next);
+        Ok(next)
+    }
+
+    /// Validate the next reference identity without publishing or consuming it.
+    fn next_reference(&self) -> Result<u64> {
+        self.next
             .get()
             .checked_add(1)
             .filter(|id| *id <= MAX_ID)
@@ -539,8 +545,6 @@ impl Inner {
                     "remote_references",
                     "reference ids exhausted",
                 )
-            })?;
-        self.next.set(next);
-        Ok(next)
+            })
     }
 }

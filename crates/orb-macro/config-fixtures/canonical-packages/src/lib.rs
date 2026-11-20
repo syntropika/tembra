@@ -6,18 +6,21 @@
     import = "example:model-agent/agent@1.0.0"
 )]
 pub mod composed {
-    /// A record derived from a canonical imported type.
-    pub struct Session {
-        pub model: agent::Model,
-    }
-    /// Inspect the imported model.
-    #[service]
-    pub struct Api;
-    impl Api {
-        /// Preserve the canonical package identity inside a derived record.
-        pub async fn describe() -> Session {
-            Session {
-                model: agent::describe().await,
+    pub mod implementation {
+        use super::agent;
+        /// A record derived from a canonical imported type.
+        pub struct Session {
+            pub model: agent::Model,
+        }
+        /// Inspect the imported model.
+        #[service]
+        pub struct Api;
+        impl Api {
+            /// Preserve the canonical package identity inside a derived record.
+            pub async fn describe() -> Session {
+                Session {
+                    model: agent::describe().await,
+                }
             }
         }
     }

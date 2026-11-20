@@ -13,7 +13,6 @@ mod provider {
         cell::{Cell, RefCell},
         rc::Rc,
     };
-
     /// Physical execution controls lent by the host.
     #[inputs]
     pub struct Inputs {
@@ -22,77 +21,90 @@ mod provider {
         pub gate: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
     }
 
-    /// The service implementing the existing fixed contract.
-    #[service("example:contextual/sessions@1.0.0")]
-    pub struct Sessions {
-        dropped: Rc<Cell<u32>>,
-        cancelled: Rc<Cell<bool>>,
-        gate: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
-    }
+    pub mod implementation {
+        use super::Inputs;
+        use futures::channel::oneshot;
+        use std::{
+            cell::{Cell, RefCell},
+            rc::Rc,
+        };
 
-    impl Sessions {
-        /// Bind execution controls to this service object.
-        #[create]
-        fn create(inputs: &Inputs, _declaration: &tembra::Declaration) -> tembra::Result<Self> {
-            Ok(Self {
-                dropped: inputs.dropped.clone(),
-                cancelled: inputs.cancelled.clone(),
-                gate: inputs.gate.clone(),
-            })
+        /// The service implementing the existing fixed contract.
+        #[service("example:contextual/sessions@1.0.0")]
+        pub struct Sessions {
+            dropped: Rc<Cell<u32>>,
+            cancelled: Rc<Cell<bool>>,
+            gate: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
         }
 
-        /// Open a session owned by this object.
-        pub fn open(&self) -> Session {
-            Session {
-                dropped: self.dropped.clone(),
-                cancelled: self.cancelled.clone(),
-                gate: self.gate.clone(),
+        impl Sessions {
+            /// Bind execution controls to this service object.
+            #[create]
+            fn create(inputs: &Inputs, _declaration: &tembra::Declaration) -> tembra::Result<Self> {
+                Ok(Self {
+                    dropped: inputs.dropped.clone(),
+                    cancelled: inputs.cancelled.clone(),
+                    gate: inputs.gate.clone(),
+                })
+            }
+
+            /// Open a session owned by this object.
+            pub fn open(&self) -> Session {
+                Session {
+                    dropped: self.dropped.clone(),
+                    cancelled: self.cancelled.clone(),
+                    gate: self.gate.clone(),
+                }
             }
         }
-    }
 
-    /// A session whose borrowed receiver stays alive until its method settles.
-    #[wit_resource(service = Sessions)]
-    pub struct Session {
-        dropped: Rc<Cell<u32>>,
-        cancelled: Rc<Cell<bool>>,
-        gate: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
-    }
-
-    impl Session {
-        /// Read the actual invocation on a synchronous fixed-WIT method.
-        pub fn inspect(&self, prefix: String, context: &tembra::Context) -> tembra::Result<String> {
-            Ok(format!(
-                "{prefix}:{}:{}",
-                context.principal()?,
-                context.address()?.key.join("/")
-            ))
+        /// A session whose borrowed receiver stays alive until its method settles.
+        #[wit_resource]
+        pub struct Session {
+            dropped: Rc<Cell<u32>>,
+            cancelled: Rc<Cell<bool>>,
+            gate: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
         }
 
-        /// Observe cancellation and retain the receiver until physical work finishes.
-        pub async fn wait(&self, context: &tembra::Context) -> tembra::Result<()> {
-            let gate = self.gate.borrow_mut().take().expect("one pending call");
-            context.signal().cancelled().await;
-            self.cancelled.set(true);
-            let _ = gate.await;
-            Err(tembra::Error::new(
-                tembra::Code::Cancelled,
-                "session",
-                "physical work ended",
-            ))
+        impl Session {
+            /// Read the actual invocation on a synchronous fixed-WIT method.
+            pub fn inspect(
+                &self,
+                prefix: String,
+                context: &tembra::Context,
+            ) -> tembra::Result<String> {
+                Ok(format!(
+                    "{prefix}:{}:{}",
+                    context.principal()?,
+                    context.address()?.key.join("/")
+                ))
+            }
+
+            /// Observe cancellation and retain the receiver until physical work finishes.
+            pub async fn wait(&self, context: &tembra::Context) -> tembra::Result<()> {
+                let gate = self.gate.borrow_mut().take().expect("one pending call");
+                context.signal().cancelled().await;
+                self.cancelled.set(true);
+                let _ = gate.await;
+                Err(tembra::Error::new(
+                    tembra::Code::Cancelled,
+                    "session",
+                    "physical work ended",
+                ))
+            }
+
+            /// Consume the owned argument even when this call refuses its operation.
+            pub fn refuse(other: Session, context: &tembra::Context) -> tembra::Result<()> {
+                context.check()?;
+                drop(other);
+                Err(tembra::Error::invalid("session", "owned argument refused"))
+            }
         }
 
-        /// Consume the owned argument even when this call refuses its operation.
-        pub fn refuse(other: Session, context: &tembra::Context) -> tembra::Result<()> {
-            context.check()?;
-            drop(other);
-            Err(tembra::Error::invalid("session", "owned argument refused"))
-        }
-    }
-
-    impl Drop for Session {
-        fn drop(&mut self) {
-            self.dropped.set(self.dropped.get() + 1);
+        impl Drop for Session {
+            fn drop(&mut self) {
+                self.dropped.set(self.dropped.get() + 1);
+            }
         }
     }
 }
@@ -128,7 +140,7 @@ fn cancellation_and_release_keep_a_fixed_wit_receiver_until_physical_settlement(
     let saved = Rc::new(RefCell::new(None));
     let captured = saved.clone();
     let (release, released) = oneshot::channel();
-    let client = provider::SessionsClient::new(reference.clone());
+    let client = provider::implementation::SessionsClient::new(reference.clone());
     let result = host
         .spawn_root("alice", move |context| {
             async move {
@@ -198,7 +210,7 @@ fn failed_owned_submissions_and_retired_resource_calls_release_their_owners() {
         )
         .unwrap(),
     );
-    let client = provider::SessionsClient::new(reference.clone());
+    let client = provider::implementation::SessionsClient::new(reference.clone());
     let session = pool
         .run_until(host.root("alice", move |context| {
             async move {

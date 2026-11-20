@@ -190,12 +190,19 @@ pub mod gatehouse {
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
+    /// Bind the keyed view whose types the desk shares with its declared hook.
+    fn providers() -> super::gatehouse::Providers {
+        super::gatehouse::Providers {
+            guard_ref: crate::native::facade::Provider::new("guards", 1),
+        }
+    }
+
     /// A host without hooks can compile this authoring crate and refuses installation explicitly.
     #[cfg(not(feature = "native-hooks"))]
     #[test]
     fn a_hook_declaration_without_hooks_is_refused_natively() {
         assert_eq!(
-            crate::native::refused(super::gatehouse::orb()),
+            crate::native::refused(super::gatehouse::orb(providers())),
             "native hook declarations need the runtime's `hooks`: enable the facade's `hooks` feature in the host that installs this Orb"
         );
     }
@@ -206,7 +213,7 @@ mod tests {
     fn native_declarations_compose_series_bail_and_waterfall_in_plan_order() {
         use crate::native::{
             ORB, call,
-            facade::{Hook, Host, Orb, contracts::Contract, core::Requirement},
+            facade::{Hook, Host, Orb, Service, contracts::Contract, core::Requirement},
             ready,
         };
         use futures::executor::LocalPool;
@@ -263,7 +270,17 @@ mod tests {
         });
         let mut pool = LocalPool::new();
         let host = Host::new(pool.spawner());
-        host.install(vec![super::gatehouse::orb().unwrap(), contributor])
+        let provider_contract = Contract::from_source(
+            "admission.wit",
+            &format!("{}\nworld provider {{ export guard; }}", include_str!("../admission/admission.wit")),
+            Some("provider"),
+        ).unwrap();
+        let guards = Orb::new("guards", 1).service(
+            Service::new("guards::example:admission/guard@1.0.0", |_| Ok(()))
+                .signature(provider_contract.service_signatures().unwrap().remove("example:admission/guard@1.0.0"))
+                .method("apply", |_, _, (admission,): (Value,)| async move { Ok(admission) }),
+        );
+        host.install(vec![super::gatehouse::orb(providers()).unwrap(), contributor, guards])
             .unwrap();
         let desk = ready(&mut pool, &host, "example:gatehouse/desk@1.0.0");
         assert_eq!(

@@ -29,7 +29,7 @@ use super::{
     HookScope, Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode,
     kind, refused, spelled,
 };
-use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident};
+use crate::{Analysis, Contribution, hook_path, keyed, rust_ident, type_ident};
 use heck::ToSnakeCase;
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
@@ -971,7 +971,7 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
             .expect("an imported interface is read");
         let functions = functions::functions(import, analysis);
         let values = values::Values { types, facade };
-        let defining = import_module(1, &hook_path(import.interface));
+        let defining = types.imported_module(import.interface, 1);
         let data_types = interface.types.iter().filter(|(name, ty)| import.view.is_none_or(|view| view.types.contains(*name)) && super::wit_kind(wit_parser::Type::Id(**ty), types, 1).is_ok()).map(|(name, _)| {
             let name = type_ident(name);
             quote! { pub use #defining::#name; }

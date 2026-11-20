@@ -27,7 +27,7 @@ fn generated_service_clients_call_native_and_compiled_providers() {
             host.get(&format!("codec::{CODEC}"), vec!["main".into()], "host")
                 .unwrap(),
         );
-        let client = exporter::CodecClient::new(reference.clone());
+        let client = exporter::implementation::CodecClient::new(reference.clone());
         pool.run_until(host.root("host", move |context| {
             async move {
                 assert_eq!(client.normalize(&context, 41).await?, 42);

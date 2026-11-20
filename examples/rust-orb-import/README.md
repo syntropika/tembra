@@ -35,9 +35,6 @@ mod welcomer {
             pub async fn welcome(names: Vec<String>) -> Vec<String> {
                 let mut greetings = Vec::new();
                 for name in names {
-                    #[cfg(target_arch = "wasm32")]
-                    greetings.push(greeting::hello(&name));
-                    #[cfg(not(target_arch = "wasm32"))]
                     greetings.push(greeting::hello(name).await);
                 }
                 greetings
@@ -50,9 +47,9 @@ mod welcomer {
 `import` names an interface by its identity and `wit` the directory holding its package, here the
 contract the greeter's own build wrote, so the greeter is built first. The macro adds
 `import example:greeter/greeting@1.0.0` to the world and re-exports the generated module as
-`greeting`: `greeting::hello(name)` is an ordinary Rust function for the author, with the signature
-`wit-bindgen` gives the WIT, `&str` in and `String` out, and a call through the kernel at run time,
-under the principal of the call running `welcome`. Nothing in the welcomer names the Orb that
+`greeting`: `greeting::hello(name).await` takes an owned `String` and returns a `String` in
+both builds. The macro preserves the provider's synchronous WIT calling convention and invokes it
+through the kernel under the principal of the call running `welcome`. Nothing in the welcomer names the Orb that
 answers.
 
 ```wit

@@ -10,26 +10,29 @@
     import = "example:context/context@1.0.0"
 )]
 pub mod provider {
-    /// Serve the canonical model protocol.
-    #[service("example:model-agent/agent@1.0.0")]
-    pub struct ModelAgent;
+    pub mod implementation {
+        use super::{agent, context};
+        /// Serve the canonical model protocol.
+        #[service("example:model-agent/agent@1.0.0")]
+        pub struct ModelAgent;
 
-    impl ModelAgent {
-        /// Return a value spanning the entire canonical package closure.
-        pub fn describe() -> agent::Model {
-            agent::Model {
-                metadata: agent::Metadata {
-                    context: context::Context {
-                        principal: "alice".into(),
+        impl ModelAgent {
+            /// Return a value spanning the entire canonical package closure.
+            pub fn describe() -> agent::Model {
+                agent::Model {
+                    metadata: agent::Metadata {
+                        context: context::Context {
+                            principal: "alice".into(),
+                        },
+                        name: "model".into(),
                     },
-                    name: "model".into(),
-                },
-                tools: vec![agent::Tool {
-                    context: context::Context {
-                        principal: "alice".into(),
-                    },
-                    name: "browser".into(),
-                }],
+                    tools: vec![agent::Tool {
+                        context: context::Context {
+                            principal: "alice".into(),
+                        },
+                        name: "browser".into(),
+                    }],
+                }
             }
         }
     }
@@ -46,18 +49,21 @@ pub mod provider {
     import = "example:model-agent/agent@1.0.0"
 )]
 pub mod consumer {
-    /// A derived schema preserves the canonical record's nominal package.
-    pub struct Session {
-        pub model: agent::Model,
-    }
-    /// Compose the separate capability packages through the actual import transport.
-    #[service]
-    pub struct Api;
-    impl Api {
-        /// Return the imported model in a derived record.
-        pub async fn describe() -> Session {
-            Session {
-                model: agent::describe().await,
+    pub mod implementation {
+        use super::agent;
+        /// A derived schema preserves the canonical record's nominal package.
+        pub struct Session {
+            pub model: agent::Model,
+        }
+        /// Compose the separate capability packages through the actual import transport.
+        #[service]
+        pub struct Api;
+        impl Api {
+            /// Return the imported model in a derived record.
+            pub async fn describe() -> Session {
+                Session {
+                    model: agent::describe().await,
+                }
             }
         }
     }

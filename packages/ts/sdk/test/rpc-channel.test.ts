@@ -321,14 +321,13 @@ test("release has a bounded control budget independent of ordinary requests", as
     remote.request("release", { reference: 1 }),
     remote.request("release", { reference: 2 }),
   ];
-  await expect(remote.request("release", { reference: 3 })).rejects.toMatchObject({
-    code: "exhausted",
-    reason: "pending_requests",
-  });
+  const queued = remote.request("release", { reference: 3 });
   await expect(remote.installedOrbs()).rejects.toMatchObject({ code: "exhausted" });
   expect(connection.sent).toHaveLength(4);
   connection.receive({ id: 3, ok: null });
   connection.receive({ id: 4, ok: null });
+  connection.receive({ id: 5, ok: null });
+  expect(await queued).toBeNull();
   expect(await Promise.all(releases)).toEqual([null, null]);
   expect(remote.channel.closed).toBe(false);
   connection.receive({ id: 1, ok: ["first"] });
@@ -337,19 +336,41 @@ test("release has a bounded control budget independent of ordinary requests", as
   remote.close();
 });
 
-test("automatic cleanup fails closed when the bounded control budget is exhausted", async () => {
+test("automatic cleanup queues a burst without closing unrelated work", async () => {
   const connection = transport();
   const remote = new RemoteHost(connection.endpoint, { maxPending: 1 });
-  const first = remote.get("counter", "first");
-  connection.receive({ id: 1, ok: { reference: 1, methods: [] } });
-  const second = remote.get("counter", "second");
-  connection.receive({ id: 2, ok: { reference: 2, methods: [] } });
-  (await first).release();
-  (await second).release();
+  const references = [];
+  for (let id = 1; id <= 8; id++) {
+    const acquiring = remote.get("counter", String(id));
+    connection.receive({ id, ok: { reference: id, methods: [] } });
+    references.push(await acquiring);
+  }
+  const ordinary = remote.installedOrbs();
+  for (const reference of references) reference.release();
+  expect(connection.sent.filter((frame) => frame.op === "release")).toHaveLength(1);
+  expect(remote.channel.closed).toBe(false);
+  for (let id = 10; id < 18; id++) connection.receive({ id, ok: null });
+  expect(connection.sent.filter((frame) => frame.op === "release")).toHaveLength(8);
+  connection.receive({ id: 9, ok: [] });
+  expect(await ordinary).toEqual([]);
+  expect(remote.channel.closed).toBe(false);
+  remote.close();
+});
+
+test("stalled release cleanup has a bounded byte queue", async () => {
+  const connection = transport();
+  const remote = new RemoteHost(connection.endpoint, { maxPending: 1, maxFrame: 128 });
+  const references = [];
+  for (let id = 1; id <= 8; id++) {
+    const acquiring = remote.get("counter", String(id));
+    connection.receive({ id, ok: { reference: id, methods: [] } });
+    references.push(await acquiring);
+  }
+  for (const reference of references) reference.release();
   await Promise.resolve();
   expect(remote.channel.closed).toBe(true);
   expect(connection.causes).toEqual([
-    expect.objectContaining({ code: "exhausted", reason: "pending_requests" }),
+    expect.objectContaining({ code: "exhausted", reason: "frame_size" }),
   ]);
   expect(connection.sent.filter((frame) => frame.op === "release")).toHaveLength(1);
 });

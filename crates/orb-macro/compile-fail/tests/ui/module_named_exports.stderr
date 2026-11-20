@@ -4,6 +4,8 @@ error[E0433]: cannot find `example` in `exports`
 1 | #[tembra::orb(package = "example:keeping@1.0.0")]
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ could not find `example` in `exports`
   |
-  = help: consider importing this module:
-          crate::keeping::__tembra_bindings::exports::example::keeping::report
   = note: this error originates in the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider importing this module
+  |
+5 +         use crate::keeping::__tembra_bindings::exports::example::keeping::report;
+  |

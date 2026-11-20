@@ -83,25 +83,13 @@ mod speller {
             /// Spell `word` letter by letter, a dash between the letters, through one builder: as many
             /// `push` calls as letters and dashes, all on the same handle.
             pub async fn spell(word: String) -> String {
-                #[cfg(target_arch = "wasm32")]
-                let builder = texts::start();
-                #[cfg(not(target_arch = "wasm32"))]
                 let builder = texts::start().await;
                 for (index, letter) in word.chars().enumerate() {
                     if index > 0 {
-                        #[cfg(target_arch = "wasm32")]
-                        builder.push('-');
-                        #[cfg(not(target_arch = "wasm32"))]
                         builder.push('-').await;
                     }
-                    #[cfg(target_arch = "wasm32")]
-                    builder.push(letter);
-                    #[cfg(not(target_arch = "wasm32"))]
                     builder.push(letter).await;
                 }
-                #[cfg(target_arch = "wasm32")]
-                let text = builder.text();
-                #[cfg(not(target_arch = "wasm32"))]
                 let text = builder.text().await;
                 text
             }

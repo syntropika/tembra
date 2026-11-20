@@ -1,29 +1,5 @@
-error[E0053]: method `relayed` has an incompatible type for trait
-  --> tests/ui/import_copy_of_an_implemented_type.rs:30:34
-   |
-30 |             pub fn relayed(last: counter_ref::Tally) -> u32 {
-   |                                  ^^^^^^^^^^^^^^^^^^ expected `Tally`, found `proxy::example::counters::counter::Tally`
-   |
-note: type in trait
-  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
-   |
- 1 | / #[tembra::orb(
- 2 | |     package = "example:router@1.0.0",
- 3 | |     wit = "consumed/counters",
- 4 | |     import("example:counters/counter@1.0.0", keyed)
- 5 | | )]
-   | |__^
-   = note: expected signature `fn(__tembra_bindings::exports::example::counters::counter::Tally) -> u32`
-              found signature `fn(__tembra_bindings::example::counters::counter::Tally) -> u32`
-   = note: this error originates in the macro `::tembra::__wit_bindgen::generate` (in Nightly builds, run with -Z macro-backtrace for more info)
-help: change the parameter type to match the trait
-   |
-30 -             pub fn relayed(last: counter_ref::Tally) -> u32 {
-30 +             pub fn relayed(last: exports::example::counters::counter::Tally) -> u32 {
-   |
-
 error[E0308]: mismatched types
-  --> tests/ui/import_copy_of_an_implemented_type.rs:23:24
+  --> tests/ui/import_copy_of_an_implemented_type.rs:30:28
    |
  1 | / #[tembra::orb(
  2 | |     package = "example:router@1.0.0",
@@ -32,8 +8,8 @@ error[E0308]: mismatched types
  5 | | )]
    | |__- arguments to this function are incorrect
 ...
-23 |           pub fn relayed(last: counter_ref::Tally) -> u32 {
-   |                          ^^^^ expected `Tally`, found a different `Tally`
+30 |               pub fn relayed(last: counter_ref::Tally) -> u32 {
+   |                              ^^^^ expected `Tally`, found a different `Tally`
    |
    = note: `Tally` and `Tally` have similar names, but are actually distinct types
 note: `Tally` is defined in module `crate::proxy::__tembra_bindings::example::counters::counter` of the current crate
@@ -64,6 +40,30 @@ note: method defined here
  5 | | )]
    | |__^
    = note: this error originates in the macro `::tembra::__wit_bindgen::generate` which comes from the expansion of the attribute macro `tembra::orb` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0053]: method `relayed` has an incompatible type for trait
+  --> tests/ui/import_copy_of_an_implemented_type.rs:30:34
+   |
+30 |             pub fn relayed(last: counter_ref::Tally) -> u32 {
+   |                                  ^^^^^^^^^^^^^^^^^^ expected `Tally`, found a different `Tally`
+   |
+note: type in trait
+  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1
+   |
+ 1 | / #[tembra::orb(
+ 2 | |     package = "example:router@1.0.0",
+ 3 | |     wit = "consumed/counters",
+ 4 | |     import("example:counters/counter@1.0.0", keyed)
+ 5 | | )]
+   | |__^
+   = note: expected signature `fn(__tembra_bindings::exports::example::counters::counter::Tally) -> u32`
+              found signature `fn(__tembra_bindings::example::counters::counter::Tally) -> u32`
+   = note: this error originates in the macro `::tembra::__wit_bindgen::generate` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: change the parameter type to match the trait
+   |
+30 -             pub fn relayed(last: counter_ref::Tally) -> u32 {
+30 +             pub fn relayed(last: __tembra_bindings::exports::example::counters::counter::Tally) -> u32 {
+   |
 
 error[E0308]: `?` operator has incompatible types
  --> tests/ui/import_copy_of_an_implemented_type.rs:1:1

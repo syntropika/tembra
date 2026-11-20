@@ -11,6 +11,9 @@ use tembra::{
     rpc::{Connection, Options, serve},
 };
 
+#[path = "rpc/resources.rs"]
+mod resources;
+
 type Frames = Rc<RefCell<Vec<Value>>>;
 
 fn connection(host: &Host, options: Options) -> (Rc<Connection>, Frames) {

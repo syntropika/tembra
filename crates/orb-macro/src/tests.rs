@@ -2477,10 +2477,10 @@ fn a_derived_function_takes_an_imported_handle() {
         .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
     let generated = tokens(&module);
     for expected in [
-        "fn finish (builder : self :: example :: text :: texts :: Builder) -> String { Spelling :: finish (:: core :: convert :: Into :: into (builder)) }",
-        "fn count (builders : Vec < self :: example :: text :: texts :: Builder > , odd : self :: example :: text :: texts :: AB) -> u32 { Spelling :: count (builders . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , :: core :: convert :: Into :: into (odd)) }",
-        "fn new (builder : self :: example :: text :: texts :: Builder) -> Self { Note :: new (:: core :: convert :: Into :: into (builder)) }",
-        "fn append (& self , more : Option < self :: example :: text :: texts :: Builder >) -> u32 { Note :: append (self , more . map (| item | :: core :: convert :: Into :: into (item))) }",
+        "fn finish (builder : super :: example :: text :: texts :: Builder) -> String { Spelling :: finish (:: core :: convert :: Into :: into (builder)) }",
+        "fn count (builders : Vec < super :: example :: text :: texts :: Builder > , odd : super :: example :: text :: texts :: AB) -> u32 { Spelling :: count (builders . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , :: core :: convert :: Into :: into (odd)) }",
+        "fn new (builder : super :: example :: text :: texts :: Builder) -> Self { Note :: new (:: core :: convert :: Into :: into (builder)) }",
+        "fn append (& self , more : Option < super :: example :: text :: texts :: Builder >) -> u32 { Note :: append (self , more . map (| item | :: core :: convert :: Into :: into (item))) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -2551,7 +2551,7 @@ fn a_derived_function_takes_an_imported_handle() {
     .unwrap_or_else(|error| panic!("{error}"));
     let generated = tokens(&module);
     for expected in [
-        "fn finish (builder : self :: example :: text :: texts :: Builder) -> u32 { Spelling :: finish (:: core :: convert :: Into :: into (builder)) }",
+        "fn finish (builder : super :: example :: text :: texts :: Builder) -> u32 { Spelling :: finish (:: core :: convert :: Into :: into (builder)) }",
         "fn draft () -> super :: exports :: example :: speller :: drafts :: Builder { super :: exports :: example :: speller :: drafts :: Builder :: new (Drafts :: draft ()) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
@@ -6740,7 +6740,7 @@ fn the_native_side_generates_orb_from_the_manifest_and_the_services() {
     }
     for expected in [
         "impl super :: __TembraRegistry < 1 > { # [doc = \" The service `Ledger` of the native Orb named `orb`, as `orb()` registers it.\"] pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < () > { const __TEMBRA_CODEC_COUNT : :: tembra :: Codec < () , u32 > = :: tembra :: Codec { decode : | value | {",
-        "} ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) }) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_LEDGER))) . method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) } , __TEMBRA_CODEC_COUNT ,) }",
+        "} ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) }) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_LEDGER))) . contract (\"example:book/ledger@1.0.0\" , super :: __TEMBRA_CONTRACT) . method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) } , __TEMBRA_CODEC_COUNT ,) }",
     ] {
         assert!(ledger.contains(expected), "{expected}\n{ledger}");
     }
@@ -7607,7 +7607,7 @@ fn native_functions_consume_owned_resources() {
         ),
     ] {
         let module = expanded("example:desk@1.0.0", &DESK.replace(from, to));
-        let generated = native(&module, &[]);
+        let generated = native(&module, &["sessions"]);
         assert!(
             generated.contains(&format!(". payload_method (\"{method}\"")),
             "{generated}"
@@ -10091,7 +10091,7 @@ fn canonical_package_roots_refuse_duplicate_package_identities() {
             wit_roots: vec![first.display().to_string(), second.display().to_string()],
             ..options("example:consumer@1.0.0", None)
         },
-        "mod consumer { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } }",
+        "mod consumer { pub mod api { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } } }",
     );
     assert!(
         problem.contains("WIT package example:duplicate@1.0.0 is defined by both"),
@@ -10115,7 +10115,7 @@ fn canonical_package_roots_refuse_dependency_cycles() {
             wit_roots: vec![first.display().to_string(), second.display().to_string()],
             ..options("example:consumer@1.0.0", None)
         },
-        "mod consumer { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } }",
+        "mod consumer { pub mod api { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } } }",
     );
     assert!(problem.contains("cycle"), "{problem}");
 }
@@ -10132,7 +10132,7 @@ fn canonical_package_roots_refuse_missing_dependencies() {
             wit_roots: vec![first.display().to_string()],
             ..options("example:consumer@1.0.0", None)
         },
-        "mod consumer { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } }",
+        "mod consumer { pub mod api { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } } }",
     );
     assert!(problem.contains("example:absent@1.0.0"), "{problem}");
 }
@@ -10142,7 +10142,7 @@ fn canonical_package_roots_refuse_missing_dependencies() {
 fn resource_context_and_transport_results_are_explicitly_native_only() {
     let module = expanded(
         PACKAGE,
-        "mod book {
+        "mod book { pub mod sessions {
             #[wit_resource] pub struct Session;
             impl Session {
                 pub fn read(&self, context: &tembra::Context) -> String { todo!() }
@@ -10150,7 +10150,7 @@ fn resource_context_and_transport_results_are_explicitly_native_only() {
             }
             #[service] pub struct Sessions;
             impl Sessions { pub fn open() -> Session { Session } }
-        }",
+        } }",
     );
     let contract = wit(&module);
     assert!(contract.contains("read: func() -> string;"), "{contract}");

@@ -7,8 +7,8 @@
 //! trybuild builds each case in a project of its own, `tests/trybuild/<this crate>` in the target
 //! directory, whose `CARGO_MANIFEST_DIR` the macro reads a `wit = ".."` directory from. The test
 //! copies this crate's `wit/` there first, as `consumed/`, so a case consuming a WIT package names
-//! it `wit = "consumed/<package>"`, wherever the target directory is. Not as `wit/`: the bindings
-//! of a case without the option read the project's `wit/` when there is one.
+//! it `wit = "consumed/<package>"`, wherever the target directory is. Complete inline WIT
+//! disables implicit loading of the project's `wit/` directory.
 
 use std::fs;
 use std::path::{Path, PathBuf};
