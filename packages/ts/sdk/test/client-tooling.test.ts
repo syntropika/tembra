@@ -550,6 +550,7 @@ interface codec {
     constructor(seed: u64);
     zero: static func() -> decoder;
     total: func() -> u64;
+    get-HTTP: func() -> u64;
     next: async func() -> option<u64>;
   }
   record bundle { decoder: decoder, wide: u64 }
@@ -596,6 +597,7 @@ export async function check(scope: Parameters<typeof get>[0]) {
   const codec = await get(scope, { orb: "codec", key: "main" });
   const decoder: Decoder = await codec.newDecoder(1n);
   const total: bigint = await decoder.total();
+  const http: bigint = await decoder.getHttp();
   const next: bigint | null = await decoder.next();
   const other: Decoder = await codec.decoderZero();
   const alias: DecoderAlias = await codec.open(3n);
@@ -732,6 +734,7 @@ export async function check(scope: Parameters<typeof get>[0]) {
       });
       interface Decoder {
         total(context?: import("../src/runtime/context.ts").Context): Promise<bigint>;
+        getHttp(): Promise<bigint>;
         next(): Promise<bigint | null>;
         release(): void;
       }
@@ -764,6 +767,7 @@ export async function check(scope: Parameters<typeof get>[0]) {
       const codec = await get(host, { orb: "codec", key: "main" });
       const decoder = await codec.newDecoder(9007199254740993n);
       expect(await decoder.total()).toBe(9007199254740993n);
+      expect(await decoder.getHttp()).toBe(9007199254740993n);
       expect(await decoder.next()).toBe(9007199254740994n);
       const zero = await codec.decoderZero();
       expect(await zero.total(undefined)).toBe(0n);

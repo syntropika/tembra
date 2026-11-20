@@ -4,12 +4,14 @@
     import = "example:protocol/borrowed@1.0.0"
 )]
 mod reader {
-    #[service]
-    pub struct Probe;
+    pub mod probe {
+        #[service]
+        pub struct Probe;
 
-    impl Probe {
-        pub fn value() -> u64 {
-            0
+        impl Probe {
+            pub fn value() -> u64 {
+                0
+            }
         }
     }
 }

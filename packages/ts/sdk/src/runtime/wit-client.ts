@@ -1,6 +1,7 @@
 /** Generated clients use the SDK's existing captured delivery and resource ownership lane. */
 import type { CapturedInvocation, ResourceCapability } from "#tembra-adapters";
 import type { DynamicReference } from "../authoring/types.ts";
+import { bindingName } from "../interpreter/component/names.ts";
 import { resourceRoles, resourceDataFunction } from "../interpreter/component/resources.ts";
 import type { GraphFunction, TypeGraph } from "../interpreter/component/values.ts";
 import { encode, VALUE_LIMIT } from "../interpreter/codec.ts";
@@ -59,9 +60,7 @@ export function witClient(reference: DynamicReference, schema: WitClientSchema):
     finalizer?.register(value, owner, value);
     for (const [name, { roles }] of functions) {
       if (roles.receiver?.name === owner.nominal.name && roles.member) {
-        const method =
-          schema.javascriptNames[roles.member] ??
-          roles.member.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+        const method = schema.javascriptNames[roles.member] ?? bindingName(roles.member, false);
         value[method] = (...args: unknown[]) => invoke(name, args, owner);
       }
     }

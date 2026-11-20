@@ -76,7 +76,7 @@ fn generated_consumers_and_fixed_wit_providers_compose_both_ways() {
             pool.run_until(reference.ready()).unwrap();
             let claims = host.kernel().diagnostics().references;
             let called = reference.clone();
-            let before = exporter::Codec::dropped();
+            let before = exporter::implementation::Codec::dropped();
             let result = pool
                 .run_until(host.root("host", move |context| {
                     async move {

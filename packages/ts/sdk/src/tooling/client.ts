@@ -13,6 +13,7 @@
  * its WIT name, in its JavaScript spelling (`Point` for `point`), which the contract read from WIT
  * answers to its `type-names` query: the describe graph keeps no type names.
  */
+import { bindingName } from "../interpreter/component/names.ts";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NodeContract } from "@syntropika/tembra-engine-node";
@@ -177,15 +178,6 @@ const OWN = new Set([
   "WitClientSchema",
 ]);
 
-/** The default JavaScript spelling of a WIT name, as the contract derives it for members. */
-function camel(name: string): string {
-  return name
-    .replace(/^%/, "")
-    .split("-")
-    .map((word, index) => (index ? word.charAt(0).toUpperCase() + word.slice(1) : word))
-    .join("");
-}
-
 /** Write one typed client module per exported interface; returns every module's path. */
 export async function client(options: ClientOptions): Promise<readonly string[]> {
   const wit = path.resolve(options.wit);
@@ -234,7 +226,7 @@ function clientModule(
 ): string {
   const interfaceName = /\/([^@/]+)(?:@[^@]*)?$/.exec(identity)?.[1];
   if (!interfaceName) throw new Error(`${identity} is not a versioned interface identity`);
-  const spelled = graph.javascriptNames[interfaceName] ?? camel(interfaceName);
+  const spelled = graph.javascriptNames[interfaceName] ?? bindingName(interfaceName, false);
   const pascal = spelled.charAt(0).toUpperCase() + spelled.slice(1);
   const service = OWN.has(pascal) ? `${pascal}_` : pascal;
   const functions = Object.values(entry.functions ?? {});
@@ -267,9 +259,9 @@ function clientModule(
         ? `new${resource}`
         : kind
           ? receiver
-            ? camel(member)
-            : `${resource!.charAt(0).toLowerCase()}${resource!.slice(1)}${camel(member).charAt(0).toUpperCase()}${camel(member).slice(1)}`
-          : (graph.javascriptNames[fn.name] ?? camel(fn.name));
+            ? bindingName(member, false)
+            : `${resource!.charAt(0).toLowerCase()}${resource!.slice(1)}${bindingName(member, false).charAt(0).toUpperCase()}${bindingName(member, false).slice(1)}`
+          : (graph.javascriptNames[fn.name] ?? bindingName(fn.name, false));
     if (kind && !resource)
       throw new Error(`${identity}: resource function has no defining resource`);
     if (
@@ -289,7 +281,7 @@ function clientModule(
     const taken = new Set<string>();
     const params = receiver ? fn.params.slice(1) : fn.params;
     const parameters = params.map((parameter) => {
-      let name = camel(parameter.name);
+      let name = bindingName(parameter.name, false);
       while (RESERVED.has(name) || taken.has(name)) name += "_";
       taken.add(name);
       return `${name}: ${render(parameter.type)}`;
