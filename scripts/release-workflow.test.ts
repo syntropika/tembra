@@ -11,7 +11,7 @@ interface Step {
   id?: string;
   uses?: string;
   run?: string;
-  with?: Record<string, string>;
+  with?: Record<string, string | boolean>;
 }
 
 interface Job {
@@ -60,6 +60,16 @@ test("release builds and quality checks use the candidate commit resolved by val
     expect(checkout.with!.ref).toBe("${{ needs.validate.outputs.ref }}");
   }
   expect(workflow.jobs.quality!.with!.source_ref).toBe("${{ needs.validate.outputs.ref }}");
+});
+
+test("SDK declaration generation receives the native engine before it executes", () => {
+  const steps = workflow.jobs.package!.steps!;
+  const download = steps.findIndex((step) => step.with?.pattern === "node-*");
+  const build = steps.findIndex((step) => step.run === "bun run --cwd packages/ts/sdk build");
+  expect(download).toBeGreaterThanOrEqual(0);
+  expect(build).toBeGreaterThan(download);
+  expect(steps[download]!.with!.path).toBe("packages/ts/engine-node/dist");
+  expect(steps[download]!.with!["merge-multiple"]).toBe(true);
 });
 
 test("tag recovery checks the exact tag and main ancestry before version validation", () => {

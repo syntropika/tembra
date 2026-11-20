@@ -299,12 +299,12 @@ jobs:
           rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip3 --target wasm32-unknown-unknown
           just build-provider "$RUNNER_TEMP/provider"
           just build-contributor "$RUNNER_TEMP/provider"
-      - run: bun run --cwd packages/ts/sdk build
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: node-*
           merge-multiple: true
           path: packages/ts/engine-node/dist
+      - run: bun run --cwd packages/ts/sdk build
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: react-native-ios
