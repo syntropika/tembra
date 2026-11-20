@@ -573,3 +573,29 @@ fn a_file_another_build_removed_first_is_no_error() {
         assert_eq!(names(&deps), ["tembra-guest.wit"]);
     }
 }
+
+/// A selected Cargo output is exact and cleanup remains confined to the writing package.
+#[test]
+fn writing_into_a_selected_directory_preserves_other_packages() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("relocated/build/out");
+    let first = ModuleContract::new(&contract("example:first@1.0.0", "first"), None).unwrap();
+    let written = first.write_to(&output).unwrap();
+    assert_eq!(written.contract, output.join("first.wit"));
+    Contract::from_dir(&output, Some("first")).unwrap();
+    let second = ModuleContract::new(&contract("example:second@1.0.0", "second"), None).unwrap();
+    second.write_to(&output).unwrap();
+    std::fs::write(output.join("notes.txt"), "retained").unwrap();
+    let renamed = ModuleContract::new(&contract("example:first@1.0.0", "renamed"), None).unwrap();
+    let written = renamed.write_to(&output).unwrap();
+    assert_eq!(written.former_contracts, [output.join("first.wit")]);
+    assert_eq!(
+        std::fs::read_to_string(output.join("second.wit")).unwrap(),
+        second.text()
+    );
+    assert_eq!(
+        std::fs::read_to_string(output.join("notes.txt")).unwrap(),
+        "retained"
+    );
+    assert!(!output.join("contract").exists());
+}

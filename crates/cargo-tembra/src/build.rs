@@ -76,8 +76,16 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .unwrap_or_else(|| orb_name.to_kebab_case());
     let target_dir = target_directory(&manifest_path)?;
     let profile = if release { "release" } else { "debug" };
-    // What contract/ holds before the compilation, in which the macro writes it too.
-    let contract_dir = manifest_dir.join("contract");
+    // The macro and packager publish into the same directory, including relocated Cargo outputs.
+    let contract_dir = out
+        .clone()
+        .or_else(|| std::env::var_os("TEMBRA_CONTRACT_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| manifest_dir.join("contract"));
+    let contract_dir = if contract_dir.is_absolute() {
+        contract_dir
+    } else {
+        std::env::current_dir()?.join(contract_dir)
+    };
     let before = contract_files(&contract_dir)?;
 
     // 1. Compile the component on stable: a core module linked by the component linker. The
@@ -91,6 +99,7 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .canonicalize()
         .with_context(|| format!("reading {}", manifest_path.display()))?;
     let mut cargo = Command::new("cargo");
+    cargo.env("TEMBRA_CONTRACT_DIR", &contract_dir);
     cargo
         .arg("rustc")
         .arg("--lib")
@@ -129,12 +138,12 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
 
     // 2. The contract is an output: the WIT the macro embedded in the component, with the
     //    packages the module consumes nested whole from the directory the macro named, or the one
-    //    derived from the component's types, written to contract/<world>.wit with the standard
-    //    packages it depends on in contract/deps/. The macro writes the same files when the crate
+    //    derived from the component's types, written into the selected output directory with
+    //    its standard packages in deps/. The macro writes the same files when the crate
     //    is compiled for itself; `ModuleContract` is the one writer of both. The world takes the
     //    module's name, so renaming the module leaves the former contract behind, a file of the
     //    same package, which the write removes. The macro's write, during the compilation, removes
-    //    it first, so the build names what went from the files contract/ held before.
+    //    it first, so the build names what disappeared from the selected directory.
     let consumed = EmbeddedManifest::read(&component)
         .map_err(|error| anyhow::anyhow!("{error}"))?
         .wit
@@ -149,7 +158,7 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     };
     let world = module.world().to_owned();
     let written = module
-        .write(&manifest_dir)
+        .write_to(&contract_dir)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     for notice in removed(&contract_dir, &before)? {
         eprintln!("{notice}");
@@ -171,8 +180,7 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .component_artifact(&component, &orb_name, api_version, &roles)
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("the component does not satisfy its contract")?;
-    //    The outputs stay inside the crate, next to contract/; with --out they are collected
-    //    elsewhere together with a copy of the contract, so one directory can hold every Orb:
+    //    With --out the macro has written the contract directly beside these artifacts.
     //    checksums.txt keeps the lines of the files this build does not write.
     let collected = out.is_some();
     let artifacts = out.unwrap_or_else(|| manifest_dir.join("artifacts"));
@@ -185,7 +193,6 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     ];
     if collected {
         let name = format!("{world}.wit");
-        std::fs::copy(&wit_file, artifacts.join(&name))?;
         files.push((name, std::fs::read(&wit_file)?));
     }
     let checksums = artifacts.join("checksums.txt");
@@ -210,7 +217,7 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         artifact.len()
     );
     if collected {
-        println!("  {world}.wit         the contract, copied from contract/");
+        println!("  {world}.wit         the contract");
     }
     println!("  checksums.txt");
     summary(

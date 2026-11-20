@@ -105,7 +105,16 @@ impl Host {
                 .insert(info.id, orb.factory);
             self.0.orbs.borrow_mut().insert(info.id, orb.services);
             #[cfg(feature = "hooks")]
-            hooks.push((info.id, orb.hooks, orb.contributions));
+            {
+                // Factories bind candidate handles before publication. Failed candidates use
+                // the existing physical cleanup, which removes their declarations too.
+                self.0
+                    .hooks
+                    .declarations
+                    .borrow_mut()
+                    .insert(info.id, orb.hooks.clone());
+                hooks.push((info.id, orb.hooks, orb.contributions));
+            }
         }
         let capture = (|| {
             for id in &ids {

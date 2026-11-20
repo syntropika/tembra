@@ -357,21 +357,19 @@ export class ComponentScope {
       encode(args, VALUE_LIMIT, shape?.params),
     );
     const signature = this.owner.importSignatures.get(binding);
+    const resources = Boolean(
+      bound.roles?.owned || bound.roles?.receiver || bound.roles?.stream || bound.roles?.arguments,
+    );
     const capture: CapturedInvocation | undefined = signature
       ? {
           signature,
           input,
+          ...(!resources ? { dataResult: true as const } : {}),
           ...(receiver ? { receiver } : {}),
           ...(arguments_ ? { arguments: arguments_ } : {}),
         }
       : undefined;
-    if (
-      (bound.roles?.owned ||
-        bound.roles?.receiver ||
-        bound.roles?.stream ||
-        bound.roles?.arguments) &&
-      !capture
-    )
+    if (resources && !capture)
       throw new Error("Resource transport requires an exact prepared signature");
     const session = this.declaration.session;
     const record = receiver ? receiver.reference : session.handles.reference(reference);

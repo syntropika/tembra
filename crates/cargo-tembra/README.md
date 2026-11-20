@@ -121,8 +121,11 @@ same roles whichever tool packages it.
 
 Both directories sit inside the Orb's crate, like `schema/` and `artifacts/` of a CosmWasm contract:
 the first is committed, the second is a build output to ignore. With `--out <dir>` the component,
-the artifact, a copy of the contract and the checksums go to that directory instead, so a
-repository with several Orbs can collect them in one place. A build replaces the lines of its own
+the artifact, the contract and the checksums go to that directory instead, so a
+repository with several Orbs can collect them in one place. The macro writes the contract directly
+there through `TEMBRA_CONTRACT_DIR`; no source `contract/` mirror is created. Ordinary Cargo builds
+can instead choose `contract = env!("OUT_DIR")` or a literal output directory on `#[orb]`. The
+output path stays a build-time choice and is absent from the component manifest. A build replaces the lines of its own
 files in `checksums.txt` and keeps the others, sorted by file name.
 
 The compilation goes where Cargo builds the crate, the `target_directory` of `cargo metadata`: the

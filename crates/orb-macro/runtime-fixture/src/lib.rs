@@ -5,6 +5,20 @@
 #![cfg_attr(all(target_arch = "wasm32", feature = "no-std"), no_std)]
 extern crate alloc;
 
+#[cfg(feature = "rpc-provider")]
+#[path = "../../native-fixture/src/rpc_provider.rs"]
+mod rpc_provider;
+#[cfg(feature = "rpc-consumer")]
+#[path = "../../native-fixture/src/rpc_consumer.rs"]
+mod rpc_consumer;
+
+#[cfg(feature = "hook-gate")]
+#[path = "../../native-fixture/src/hook_gate.rs"]
+mod hook_gate;
+#[cfg(feature = "hook-watch")]
+#[path = "../../native-fixture/src/hook_watch.rs"]
+mod hook_watch;
+
 #[cfg(feature = "authored")]
 mod authored;
 #[cfg(feature = "cellar")]
@@ -12,6 +26,9 @@ mod cellar;
 #[cfg(feature = "codec-consumer")]
 #[path = "../../native-fixture/src/codec/consumer.rs"]
 mod codec_consumer;
+#[cfg(feature = "packet-reader")]
+#[path = "../../native-fixture/src/codec/packets.rs"]
+mod packet_reader;
 #[cfg(feature = "codec-provider")]
 #[path = "../../native-fixture/src/codec/provider.rs"]
 mod codec_provider;
@@ -237,7 +254,7 @@ mod guest {
                 let first = counter_ref::get(vec![key.clone()]).await?;
                 let again = counter_ref::get(vec![key]).await?;
                 let second = counter_ref::get(vec![other]).await?;
-                let added = [first.add(amount), again.add(amount), second.add(amount)];
+                let added = [first.add(amount).await, again.add(amount).await, second.add(amount).await];
                 let (one, two) = (first.read().await, second.read().await);
                 Ok(format!("{added:?} {} {}", tally(&one), tally(&two)))
             }
@@ -293,7 +310,7 @@ mod guest {
         impl Readings {
             /// Add `amount` to the provider's count, read its tally and keep it.
             pub async fn read(amount: u32, note: String) -> Reading {
-                counter::add(amount);
+                counter::add(amount).await;
                 let tally = counter::read().await;
                 Recorded::update(|recorded| {
                     recorded.last = Some(tally.clone());
@@ -344,14 +361,14 @@ mod guest {
         impl Speller {
             /// Append the job's word to its builder and return the length of the text; the
             /// builder is consumed.
-            pub fn spell_job(job: Job) -> u32 {
-                job.builder.append(&job.word)
+            pub async fn spell_job(job: Job) -> u32 {
+                job.builder.append(job.word).await
             }
 
             /// Spell `word` into a builder of the Orb's own, started through the import and
             /// dropped with the call, and return the length of its text.
-            pub fn spell(word: String) -> u32 {
-                texts::Builder::new("").append(&word)
+            pub async fn spell(word: String) -> u32 {
+                texts::Builder::new(String::new()).await.append(word).await
             }
         }
     }
@@ -430,7 +447,7 @@ mod guest {
                     let shelf = shelf_ref::get(vec![key]).await?;
                     let mut held = 0;
                     for book in books {
-                        held = shelf.shelve(&lent(book));
+                        held = shelf.shelve(lent(book)).await;
                     }
                     Ok(held)
                 }

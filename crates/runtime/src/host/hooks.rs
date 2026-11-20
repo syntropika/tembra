@@ -231,7 +231,7 @@ impl Declaration {
         Ok(crate::HookHandle {
             host: self.host.clone(),
             orb: self.orb,
-            target: self.host.kernel().orb(self.orb)?.declaration.name,
+            target: self.host.orb_info(self.orb)?.declaration.name,
             object: if self.object == 0 {
                 None
             } else {

@@ -1,5 +1,6 @@
 #[tembra::orb(package = "example:keeping@1.0.0")]
 mod keeping {
+    #[allow(unused_imports)]
     use crate::util::tembra::{self};
 
     pub mod report {

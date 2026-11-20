@@ -15,7 +15,7 @@ interface guard {
 interface admissions {
   use guard.{admission};
   /// Run the guard hook over a fresh admission and report what the contributors decided.
-  admit: func(value: s32) -> admission;
+  admit: async func(value: s32) -> admission;
 }
 
 world gate {

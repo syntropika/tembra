@@ -1,0 +1,2 @@
+package example:tools@1.0.0;
+interface tools { use example:context/context@1.0.0.{context}; record tool { context: context, name: string } }

@@ -8,8 +8,6 @@
 //! it after the provider interface followed by `-ref`, imports it in the world, re-exports its
 //! generated module under that name and writes the role in the manifest's `references`.
 use crate::wit::{anywhere, escaped, unsupported};
-use proc_macro2::TokenStream;
-use quote::quote;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -34,6 +32,8 @@ pub(crate) struct View {
     pub name: String,
     /// The view's WIT: an interface of the Orb's package, with its documentation.
     pub text: String,
+    /// The provider types referenced by the view's method signatures.
+    pub types: BTreeSet<String>,
 }
 
 /// Read the parenthesized form of the attribute's `import` option,
@@ -118,9 +118,14 @@ pub(crate) fn views(
         if let Some(clash) = clash {
             return Err(syn::Error::new(literal.span(), clash));
         }
-        let text = view_text(resolve, dir.path(), &target, &name)
+        let (text, types) = view_text(resolve, dir.path(), &target, &name)
             .map_err(|message| syn::Error::new(literal.span(), message))?;
-        views.push(View { target, name, text });
+        views.push(View {
+            target,
+            name,
+            text,
+            types,
+        });
     }
     Ok(views)
 }
@@ -135,7 +140,12 @@ pub(crate) fn view_name(target: &str) -> String {
 /// of the provider interface's name whose methods are the interface's functions, each `async`
 /// exactly when the function is, with its documentation; and `get`, the acquisition the kernel
 /// answers with the object of a key or the reason it refused it.
-fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<String, String> {
+fn view_text(
+    resolve: &Resolve,
+    dir: &Path,
+    target: &str,
+    name: &str,
+) -> Result<(String, BTreeSet<String>), String> {
     let interface =
         crate::wit::interface(resolve, dir, target).map_err(|error| error.to_string())?;
     let resource = interface.name.clone().unwrap_or_default();
@@ -265,7 +275,7 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
         escaped(&resource)
     ));
     text.push_str("}\n");
-    Ok(text)
+    Ok((text, spelling.used))
 }
 
 /// Whether a type of an interface is a resource, defined there or `use`d from another interface.
@@ -428,17 +438,5 @@ pub(crate) fn manifest(package: &str, views: &[View]) -> BTreeMap<String, String
     views
         .iter()
         .map(|view| (binding(package, view), view.target.clone()))
-        .collect()
-}
-
-/// The re-export of each view's generated module in the Orb module, under the view's interface
-/// name: `counter_ref::get(key)` and the methods of the `counter_ref::Counter` it returns.
-pub(crate) fn reexports(package: &str, views: &[View]) -> Vec<TokenStream> {
-    views
-        .iter()
-        .map(|view| {
-            let [namespace, package, interface] = crate::hook_path(&binding(package, view));
-            quote! { pub use self::#namespace::#package::#interface; }
-        })
         .collect()
 }

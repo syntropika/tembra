@@ -4,9 +4,11 @@ interface codec {
     constructor(seed: u64);
     zero: static func() -> decoder;
     total: func() -> u64;
+    label: func(value: string) -> string;
     next: async func() -> option<u64>;
   }
   normalize: func(value: u64) -> u64;
+  echo: func(value: tuple<option<string>, result<list<string>, string>>) -> tuple<option<string>, result<list<string>, string>>;
   open: func(seed: u64) -> decoder;
   pair: func(seed: u64) -> tuple<decoder, list<option<decoder>>>;
   dropped: func() -> u32;
@@ -18,7 +20,7 @@ interface packets {
   type ticket-alias = ticket;
   record envelope { ticket: ticket-alias, amount: u64 }
   type packet = envelope;
-  variant event { ok, created(packet) }
+  variant event { ok, created(packet), guest(packet) }
   type event-alias = event;
   type batch = list<option<event-alias>>;
   receive: func() -> result<tuple<batch, ticket>, string>;

@@ -112,8 +112,8 @@ fn a_wasi_import_needs_no_consumed_directory() {
         generated.contains("pub use self :: wasi :: random :: random ;"),
         "{generated}"
     );
-    // No `path` option, which would open the bindings' options with a consumed directory.
-    assert!(!generated.contains("({ path :"), "{generated}");
+    // The complete inline document disables implicit loading of the crate's `wit/` directory.
+    assert!(generated.contains("({ path : [] ,"), "{generated}");
     // Nothing for the manifest: no hook, no policy, no consumed directory.
     assert!(!generated.contains("tembra:manifest"), "{generated}");
     let inline = inline(&generated);
@@ -418,7 +418,7 @@ fn a_consumed_contract_may_bring_the_wasi_packages() {
         );
         assert!(
             generated.contains("pub use self :: wasi :: clocks :: monotonic_clock ;")
-                && generated.contains("pub use self :: example :: timer :: timer ;"),
+                && generated.contains("pub mod timer {"),
             "{generated}"
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -613,10 +613,7 @@ fn an_encoded_copy_of_a_bundled_package_is_merged_as_from_dir_merges_it() {
             !inline.contains("package wasi:clocks@0.3.0"),
             "{imports:?}: {inline}"
         );
-        assert!(
-            generated.contains("pub use self :: example :: timer :: timer ;"),
-            "{generated}"
-        );
+        assert!(generated.contains("pub mod timer {"), "{generated}");
         let mut consumed = wit_parser::Resolve::default();
         consumed.push_dir(&dir).unwrap();
         super::tests::resolved_with(consumed, &inline);

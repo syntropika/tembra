@@ -375,6 +375,41 @@ impl Payload {
         Ok(receiver)
     }
 
+    /// Receive a moved native value only in its exact issuing object and resource type.
+    /// Outstanding method guards keep their value alive and prevent exclusive extraction.
+    pub fn receive<T: Issuable>(&self, moved: Moved) -> Result<T> {
+        if moved.nominal() != &T::nominal() {
+            return Err(mistyped());
+        }
+        let backend = (&*moved.capability as &dyn Any)
+            .downcast_ref::<Backend>()
+            .ok_or_else(another_issuer)?;
+        let (issuer, key) = match &*backend.place.borrow() {
+            Place::Issued { issuer, key } => (issuer.clone(), *key),
+            Place::Pending(_) => return Err(another_issuer()),
+        };
+        if !self
+            .issuer
+            .as_ref()
+            .is_some_and(|current| Weak::ptr_eq(current, &issuer))
+        {
+            return Err(another_issuer());
+        }
+        let issuer = issuer.upgrade().ok_or_else(resource_closed)?;
+        let value = issuer
+            .values
+            .borrow_mut()
+            .remove(&key)
+            .ok_or_else(resource_closed)?;
+        let value = value.downcast::<T>().map_err(|_| mistyped())?;
+        Rc::try_unwrap(value).map_err(|_| {
+            Error::invalid(
+                Reason::Resource,
+                "a physically borrowed resource cannot move into a native value",
+            )
+        })
+    }
+
     /// Whether the payload carries no capability at all.
     pub fn is_data(&self) -> bool {
         self.receiver.is_none()
@@ -619,6 +654,7 @@ pub struct Origin {
     reference: core::Id,
     object: core::Id,
     foreign: bool,
+    revision: core::Id,
     root: core::Id,
 }
 
@@ -628,6 +664,7 @@ impl Origin {
         reference: core::Id,
         object: core::Id,
         foreign: bool,
+        revision: core::Id,
         root: core::Id,
     ) -> Self {
         Self {
@@ -635,6 +672,7 @@ impl Origin {
             reference,
             object,
             foreign,
+            revision,
             root,
         }
     }
@@ -663,6 +701,7 @@ pub struct Owned {
     capability: RefCell<Option<Rc<dyn Capability>>>,
     anchor: RefCell<Option<Rc<Reference>>>,
     nominal: Nominal,
+    revision: core::Id,
 }
 
 /// One linear move of an existing owner. It retains the exact original admission claim;
@@ -671,6 +710,7 @@ pub struct Owned {
 pub struct Moved {
     capability: Rc<dyn Capability>,
     anchor: Rc<Reference>,
+    revision: core::Id,
 }
 
 impl Moved {
@@ -687,7 +727,11 @@ impl Moved {
             .borrow_mut()
             .take()
             .expect("a live owner has its claim");
-        Ok(Self { capability, anchor })
+        Ok(Self {
+            capability,
+            anchor,
+            revision: owner.revision,
+        })
     }
 
     pub fn nominal(&self) -> &Nominal {
@@ -708,6 +752,7 @@ impl Moved {
             capability: RefCell::new(Some(self.capability)),
             anchor: RefCell::new(Some(self.anchor)),
             nominal,
+            revision: self.revision,
         }
     }
 }
@@ -722,6 +767,7 @@ impl Owned {
             capability: RefCell::new(Some(issued.0)),
             anchor: RefCell::new(Some(Rc::new(anchor))),
             nominal,
+            revision: origin.revision,
         })
     }
 
@@ -733,6 +779,17 @@ impl Owned {
 
     pub fn nominal(&self) -> &Nominal {
         &self.nominal
+    }
+
+    /// Read the issuing provider revision retained through ownership transfers.
+    pub fn revision(&self) -> core::Id {
+        self.revision
+    }
+
+    /// Inspect the resource's own admission claim without duplicating ownership.
+    #[cfg(feature = "rpc")]
+    pub(crate) fn reference(&self) -> Result<Rc<Reference>> {
+        self.claim().map(|(_, anchor)| anchor)
     }
 
     /// Call a method of this resource. The call is admitted on this handle's own claim with

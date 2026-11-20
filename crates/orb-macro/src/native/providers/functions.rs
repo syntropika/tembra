@@ -37,32 +37,48 @@ pub(super) fn resources(import: &Import<'_>, analysis: &Analysis) -> TokenStream
         }
         let ident = type_ident(name);
         let (identity, nominal_name) = types.resource_nominal(canonical);
-        let methods = interface.functions.values().filter(|f| match f.kind {
-            FunctionKind::Constructor(resource) | FunctionKind::Static(resource) | FunctionKind::AsyncStatic(resource) | FunctionKind::Method(resource) | FunctionKind::AsyncMethod(resource) => resource == *id,
-            _ => false,
-        }).map(|f| function(import, f, analysis));
+        let methods = interface.functions.values()
+            .filter(|function| match function.kind {
+                FunctionKind::Constructor(resource)
+                | FunctionKind::Static(resource)
+                | FunctionKind::AsyncStatic(resource)
+                | FunctionKind::Method(resource)
+                | FunctionKind::AsyncMethod(resource) => resource == *id,
+                _ => false,
+            })
+            .map(|function_| function(import, function_, analysis));
         let doc = format!(" An owned `{identity}#{name}` handle. Dropping it releases its existing SDK ownership claim.");
         ::core::option::Option::Some(quote! {
             #[doc = #doc]
-            pub struct #ident { owned: ::core::option::Option<::#facade::portable::Owned> }
-            impl #ident { #(#methods)* }
+            pub struct #ident {
+                owned: ::core::option::Option<::#facade::portable::Owned>,
+            }
+            impl #ident {
+                #(#methods)*
+            }
             impl ::core::convert::TryFrom<::#facade::portable::Owned> for #ident {
                 type Error = ::#facade::portable::Owned;
                 /// Wrap only a handle of this exact nominal WIT resource type.
                 fn try_from(owned: ::#facade::portable::Owned) -> ::core::result::Result<Self, Self::Error> {
-                    if owned.nominal().interface != #identity || owned.nominal().name != #nominal_name { return ::core::result::Result::Err(owned); }
+                    if owned.nominal().interface != #identity || owned.nominal().name != #nominal_name {
+                        return ::core::result::Result::Err(owned);
+                    }
                     ::core::result::Result::Ok(Self { owned: ::core::option::Option::Some(owned) })
                 }
             }
             impl ::core::ops::Drop for #ident {
                 /// Queue this WIT drop at its importing callback's settlement checkpoint.
                 fn drop(&mut self) {
-                    if let ::core::option::Option::Some(owned) = self.owned.take() { super::__tembra_import::drop_resource(owned); }
+                    if let ::core::option::Option::Some(owned) = self.owned.take() {
+                        super::__tembra_import::drop_resource(owned);
+                    }
                 }
             }
             impl ::core::convert::From<#ident> for ::#facade::portable::Owned {
                 /// Move the existing owner without duplicating its claim.
-                fn from(mut value: #ident) -> Self { value.owned.take().expect("a live owner") }
+                fn from(mut value: #ident) -> Self {
+                    value.owned.take().expect("a live owner")
+                }
             }
         })
     });

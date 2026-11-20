@@ -1,5 +1,5 @@
 //! `calculator::orb()` in a native host: the declaration the kernel sees, local calls with Rust
-//! values, through the generated clients too, portable calls with the boundary's JSON through the
+//! values, generated clients and portable calls with the boundary's JSON through the
 //! generated codecs, which write what the module's contract accepts, a cancelled context, the
 //! services of the sub-modules, and the kernel's `context` read in a method.
 use futures::{FutureExt, executor::LocalPool, future::LocalBoxFuture};
@@ -260,7 +260,7 @@ fn local_calls_move_rust_values() {
 
 /// The typed client of a service calls each of its methods with the parameters the function takes,
 /// after the call's context, and returns what it returns: the compiler checks both, and the call
-/// takes the local entrypoint, with the arguments as a tuple. The function `new` is the client's
+/// uses the canonical portable entrypoint. The function `new` is the client's
 /// `new_`, and a parameter named `context` is the function's, beside the call's context. A service
 /// of a sub-module has its client in its module.
 #[test]

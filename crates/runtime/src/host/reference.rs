@@ -198,7 +198,14 @@ impl Reference {
         };
         let route = self.route(&call, method, boundary.is_some());
         let foreign = matches!(route, Route::Foreign);
-        let origin = Origin::new(self.host.clone(), self.id, self.object, foreign, call.root);
+        let origin = Origin::new(
+            self.host.clone(),
+            self.id,
+            self.object,
+            foreign,
+            call.orb,
+            call.root,
+        );
         let method_name = method.to_owned();
         let host = self.host.clone();
         let entered = host.context(call.root, Some(call.clone()))?;

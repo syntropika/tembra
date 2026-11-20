@@ -73,6 +73,51 @@ the name as the guest's code writes it, a Rust identifier: `my_sdk` for a depend
 The crate of a native-only module, see [using the Orb natively](#using-the-orb-natively), also
 depends on `tembra` with `host` on native targets: its own code names the runtime.
 
+## Canonical package inputs and build outputs
+
+`wit = "path"` reads one package directory and its `deps/`. When capabilities own their
+packages separately, pass their canonical paths together:
+
+```rust,ignore
+#[tembra::orb(
+    package = "example:session@1.0.0",
+    wit = ["../models/wit", "../metadata/wit", "../tools/wit", "../context/wit"],
+    contract = env!("OUT_DIR"),
+    import = "example:model-agent/agent@1.0.0"
+)]
+mod session {
+    // Services use the imported interface's types directly.
+}
+```
+
+Each list entry names a text `.wit` file or a package directory. Directory entries also read
+one local `deps/` level. Paths are relative to `Cargo.toml`; absolute paths work too. The
+resolver orders dependencies by package identity and version, independently of list order.
+The same canonical file reached twice is read once. Two different sources defining one package,
+missing dependencies and dependency cycles fail expansion. Standard packages come from Tembra;
+a local standard file must match its bundled contract. Encoded WIT dependencies remain supported
+by the single-directory form; the canonical input list accepts text packages.
+
+The macro resolves and embeds the canonical closure in memory. It does not create schema copies
+or a staged `deps/` tree. Both native bindings and component bindings use that closure, and Cargo
+tracks the canonical source files. The emitted contract includes the complete consumed interfaces,
+including functions this consumer does not call.
+
+`contract = "path"` selects an exact output directory relative to the manifest. Alternatively,
+`contract = env!("OUT_DIR")` uses Cargo's build output directory; the package must have a build
+script so Cargo supplies `OUT_DIR`. An empty build script is sufficient. Any other named build
+environment variable is supported with the same `env!` syntax. An unset variable is a compile
+error. This follows relocated Cargo target directories without embedding their paths in the
+component manifest. Without `contract`, ordinary Cargo builds write `contract/` beside the
+manifest. Only the primary package's library writes a contract; dependencies and other targets
+keep the existing emission rules.
+
+Build tooling can set `TEMBRA_CONTRACT_DIR` to override the attribute and the source default.
+`cargo tembra build --out <dir>` uses that override and writes the macro contract directly beside
+the packaged artifacts. It does not create a source contract mirror. Output environment values
+participate in Cargo's dependency tracking. The standard `client({ wit, world, out })` generator
+can consume the emitted `.wit` file directly, including a path under Cargo's output directory.
+
 ## Standard library and freestanding guests
 
 A guest uses Rust's standard library by default. The macro leaves its allocator and panic handler
@@ -273,8 +318,8 @@ mod gate {
 
         impl Admissions {
             /// Run the hook over a fresh admission and report what the contributors decided.
-            pub fn admit(value: i32) -> Admission {
-                Guard::run(Admission { value, blocked: false })
+            pub async fn admit(value: i32) -> Admission {
+                Guard::run(Admission { value, blocked: false }).await
             }
         }
     }
@@ -284,8 +329,13 @@ mod gate {
 The interface `guard` holds the callback `apply`, whose result follows the composition, nothing
 for a series hook, the input type for a waterfall, an option for a bail, and the types the input
 reaches; the services borrow them with `use`, so `Admission` is one type for the whole module. The
-macro gives the struct `Guard::run(input)`, which hands the input to the kernel: the kernel calls
-the contributions of other Orbs in plan order and returns the composed result. In the world the
+macro gives the struct `Guard::run(input).await`, which hands the input to the kernel: the kernel calls
+the contributions of other Orbs in plan order and returns the composed result. The Rust entry
+is awaitable in native and component builds. Its domain output is the same in both builds; a
+transport failure ends the enclosing callback through the existing call mechanism. The hook's
+WIT callback remains synchronous. A component wrapper directly calls that synchronous binding
+when polled and adds no suspension point. A service method that awaits a hook becomes `async fn`
+and exports `async func`; update fixed consumer contracts to that calling convention. In the world the
 hook interface is imported and exported, as for a contribution: the export is what the portable
 hook contract requires of a provider, and the macro answers it with a callback that traps, because
 the contributions answer the hook; the import is the typed entry to the plan. The bindings spell the
@@ -677,7 +727,7 @@ keeps the entries.
 ## Importing another Orb's interface
 
 `import = "ns:name/interface@version"` on the attribute, repeatable, adds `import` of that
-interface to the world and re-exports its generated module under the interface's name:
+interface to the world and generates its awaitable Rust module under the interface's name:
 
 ```rust
 #[tembra::orb(
@@ -693,8 +743,12 @@ mod welcomer {
         pub struct Welcoming;
 
         impl Welcoming {
-            pub fn welcome(names: Vec<String>) -> Vec<String> {
-                names.iter().map(|name| greeting::hello(name)).collect()
+            pub async fn welcome(names: Vec<String>) -> Vec<String> {
+                let mut greetings = Vec::new();
+                for name in names {
+                    greetings.push(greeting::hello(name).await);
+                }
+                greetings
             }
         }
     }
@@ -702,7 +756,7 @@ mod welcomer {
 ```
 
 The package comes from the directory `wit` names, here the contract the provider's own build wrote.
-`greeting::hello` is an ordinary function here and a call through the kernel at run time, under
+`greeting::hello(name).await` calls through the kernel at run time, under
 the caller's principal; a resource an imported function returns is an owned handle with the
 resource's methods, destroyed in the provider when the handle drops. Which Orb answers is the
 installer's choice: it binds the import to a provider Orb with `Install::requires`, as for any
@@ -1237,8 +1291,17 @@ call's `&Context` first and then the function's parameters, which the compiler c
 named `new` is `new_` on the client, since `new` builds the client; its WIT name stays `new`. The
 client of a service in a private module is as unreachable as the module: make the module `pub` for
 a host to use it, or re-export the client where the runtime is linked, since a component build has
-none. A portable caller's JSON array of arguments goes through a codec the macro writes from the
-WIT, so the author's types need no serde. The Orb's name and API version
+none. The client encodes every WIT call with the canonical codec and invokes the existing portable
+entrypoint once, then decodes its result. Its Rust types can therefore differ from a compatible
+implementation's independently generated types, including records and variants. `#[local]`
+methods keep direct native dispatch with the provider's Rust types. This conversion allocates and
+traverses a value tree and reconstructs strings and containers; it is not a zero-copy native fast
+path. Argument conversion failures occur before execution; result conversion failures can occur
+after execution, and are never retried. The portable representation excludes nested nullable
+options, non-finite floats and negative zero. Resource ownership stays in the existing portable
+attachments. See [native WIT composition](../../docs/native-imports.md#generated-rust-clients) for
+the calling and ownership rules. A portable caller's JSON array of arguments goes through a codec
+the macro writes from the WIT, so the author's types need no serde. The Orb's name and API version
 come from `[package.metadata.tembra]` of the crate manifest, with the defaults of
 `cargo tembra build`: the crate name and 1. Only the native side reads the manifest: one the macro
 cannot read fails a native build with an error naming it, and a component build does without it.
@@ -1477,15 +1540,30 @@ The value belongs to the object that issued it, as a compiled exporter's belongs
 closes, running its `Drop`, with its last owner, or when that object is reloaded or released or the
 host closes. A method may be `async`: its call holds the value until it ends, through the guard of
 `Receiver::guard`, so `&self` stays valid across its awaits, as in a component, also when the Orb is
-reloaded meanwhile, after which the value closes once the call has ended. Natively a resource is
-only returned, or borrowed as a method's `self`: where the runtime is linked, a function taking one
-makes the module's `orb()` answer an error naming it.
+reloaded meanwhile, after which the value closes once the call has ended. An owned resource
+argument consumes the original value at its issuing object. The native client takes its generated
+handle by value, including handles nested in lists, options, results and tuples; the provider still
+takes its authored resource struct. The implicit method receiver remains borrowed. Explicit borrows
+and authored resource records or variants retain their existing restrictions.
+
+Native resource methods and static functions may take the invocation's `&Context`, once and at
+any position among their parameters. The contract and the transported arguments leave it out.
+The method receives the actual invocation, including its address, principal, context values and
+cancellation signal. A return spelled `tembra::Result<T>` supplies the transport error channel;
+the WIT result is `T`. For example, `tembra::Result<Result<Option<Update>, String>>` returns a
+WIT `result<option<update>, string>` while keeping transport failures outside that domain result.
+These signatures make the module native only, just as they do for service methods. Compile the
+module under `#[cfg(not(target_arch = "wasm32"))]`; a component build rejects these markers.
+WIT constructors remain synchronous and return the resource itself. Use a static factory when
+creation needs a transport result or asynchronous execution.
 
 These functions have no local entrypoint, so the service's client calls them portably, through the
 codec, and answers each resource as its handle type, `<Resource>Handle`, `BuilderHandle` for
 `Builder`, public in the resource's module. A handle owns the resource's `Owned` handle, whose drop
 drops the resource, and has one async method per method of the resource, which takes the call's
-`&Context` first, as the client's do. The client offers the resource's constructor as
+`&Context` first, as the client's do. Every host handle call returns `tembra::Result<WitValue>`,
+including a nested result when the WIT declares `result`; this existing client interface applies
+to both native and compiled providers. The client offers the resource's constructor as
 `new_<resource>` and each static function as `<resource>_<function>`, and a function whose result
 holds the resource answers a handle in its place, alone or nested in a list, an option, a result or
 a tuple, each handle naming its own value:
@@ -1562,8 +1640,8 @@ The Orb requires each provider, with the signature of the interface, as the plan
 requires the provider an installation selects, so the host refuses the Orb without it. An import of
 an interface of types only needs no provider, as `cargo tembra build` binds a component's to
 nothing: `Providers` leaves it out. In place of the bindings' import module, the Orb module names a
-module of the same name, with the interface's types and functions, all `async` natively and
-taking their parameters owned: each writes its arguments as the boundary's JSON, calls the provider
+module of the same name, with the interface's types and functions, all `async` in both builds and
+taking their parameters owned. Natively each writes its arguments as the boundary's JSON, calls the provider
 through the kernel, under the context of the method running, and reads the result back. A call the
 method stops awaiting, a future it drops before the answer, is cancelled, and the method ends once
 that call has ended, unless its own call is cancelled, as a component's executor cancels and joins
@@ -1575,12 +1653,22 @@ it at once, as in a component. A call that fails, or whose arguments or result t
 ends the method that made it with that error, where it traps a component. As the `context`
 functions, the imported functions serve the methods and the contributions of the Orb and the
 futures they await, and panic elsewhere. Synchronous WIT providers keep their synchronous
-signatures and implementations. The generated native import is awaitable because reference
-admission and delivery can suspend. Shared source uses a platform branch at synchronous import
-calls: the component calls its synchronous binding, while native code awaits its owned arguments.
-The importing method must itself be able to await; the provider contract does not change.
+signatures and implementations. Authors always await imported Orb calls, including constructors,
+statics and resource methods, and use owned strings and lists in both builds. The component's raw
+bindings stay private. A component wrapper for `func` directly calls its synchronous binding when
+polled; it does not yield. An `async func` import uses the actual asynchronous binding and retains
+its suspension and cancellation. Native reference admission can suspend even for a synchronous
+provider, so matching Rust syntax does not promise matching interleaving.
 
-Imported resources are non-cloneable native wrappers backed by `portable::Owned`. Constructors
+An importing method is `async fn`, deriving an `async func` export in both builds. A fixed-WIT
+export must explicitly declare `async func` when its implementation awaits an import. The macro
+rejects a calling-convention mismatch and does not rewrite that contract. Rust checks that awaits
+occur in an asynchronous function; the macro does not infer indirect calls through helpers or
+traits. For other component work to advance during an import, the pinned bindings require the
+import itself to be `async func` too. Keep synchronous pure providers synchronous.
+
+Imported resources are non-cloneable wrappers backed by `portable::Owned` natively and the existing
+component handles in Wasm. Constructors
 are awaitable `iface::Resource::new(..)` calls, static functions are awaitable associated functions,
 and methods, synchronous or asynchronous in WIT, are awaitable `&self` methods. Results preserve
 nominal identity through lists, options, tuples, results, records and variants. Records and variants
@@ -1619,10 +1707,15 @@ It runs in the Orb's root, as a component's contribution does: with the root's r
 imports and the call's `context`, whose `object()` is an empty key and the principal `host`, and
 with no state. The runtime's contributions come with the facade's `hooks` feature, which a host
 that installs such an Orb enables. Without it the module still compiles, and its `orb(..)`
-answers an error with the code `unsupported`, naming the feature. A [hook declaration](#declaring-a-hook) makes the module's
-`orb()` answer an error naming it where the runtime is linked: its `run` is synchronous, and
-natively a method has no fiber to suspend while the kernel runs the hook's contributions, so the
-declaration works in a component build of the module only.
+answers an error with the code `unsupported`, naming the feature. A
+[hook declaration](#declaring-a-hook) serves native hosts through the same prepared signatures
+and existing `Hook` compositions. Each service object binds handles in its own `Declaration`,
+and `Hook::run(input).await` uses the actual invocation context and caller's plan. Encoding uses
+the generated WIT codecs, so author types acquire no `Clone` or serde requirements. Participant
+errors end the caller with their transport error. Cancellation, release, reload and closure use
+the runtime's existing admission and physical settlement. A host without `hooks` can compile the
+same source; `orb()` explicitly refuses installation with `unsupported/native`. Generated hooks
+expose `run`; terminal observation remains available through the runtime's `HookHandle` API.
 
 The bindings of the kernel's `tembra:guest` package, which a module with a state, a root resource
 or the `context` option imports, are a module named `tembra` inside the Orb module, which hides the
@@ -1976,11 +2069,14 @@ the configuration that leaves the service out; put the `#[cfg]` on the service's
 `shelf` above does, and the module's items go with the service.
 
 The contract the macro writes follows the last build that compiled the crate for itself, with its
-features: `cargo test --all-features` writes the contract of every feature, and a later
+features. `cargo test --all-features` writes the contract of every feature, and a later
 `cargo tembra build`, which compiles the component with the crate's default features, writes that
-configuration's back. Commit the contract of the configuration consumers build against: for a
-component, the one `cargo tembra build` writes, so run it last before committing `contract/`; for
-a crate used only natively, the one a build with the default features writes.
+configuration's back. When consumers use a committed source contract, commit the configuration
+they build against: for a component, run `cargo tembra build` last before committing the source
+default `contract/`; for a native-only crate, use its default-feature build. Contracts written to
+Cargo's output directory are build artifacts. Consume them through the supported
+[output directory](#canonical-package-inputs-and-build-outputs) and official tooling without
+committing a source mirror.
 
 ## What it generates
 
@@ -1988,22 +2084,17 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
 [items under `#[cfg]`](#items-under-cfg), with:
 
 1. `pub const WIT: &str`, the derived WIT text. When Cargo compiles the crate's library for
-   itself, as the primary package, the macro also writes it to the crate's `contract/<world>.wit`,
-   the consumed packages nested whole after it and the standard packages it depends on in
-   `contract/deps/`: the files `cargo tembra build` writes, rewritten only when their content
-   changes, so a crate used natively has the contract a compiled consumer reads, and a
-   dependency's is never written. The Orb modules of an integration test, a bench, a binary or an
-   example built as one are not the library's and write nothing. An example built as a library,
-   with `crate-type = ["lib"]`, still writes into the crate's `contract/`: the macro does not tell
-   it from the library today. Writing the contract, the macro removes
-   any other `.wit` of `contract/` whose package, name and version, is the module's, as the
-   contract of a former name of its world, so each Orb module of a crate needs a package of its
-   own: two modules of one package remove each other's contract, silently, and `contract/` keeps
-   the one expanded last. A crate whose `contract/` other crates read holds one Orb module:
-   wit-parser reads a directory as one package, so a consumer's `wit = "../provider/contract"`
-   does not resolve a `contract/` that holds the worlds of several modules, and two modules of one
-   name under different parent modules write the same `<world>.wit`. The `contract/` of a crate
-   with several, such as the native fixture, is read by no one;
+   itself, as the primary package, the macro also writes `<world>.wit` and its standard packages
+   under `deps/` in the [selected output directory](#canonical-package-inputs-and-build-outputs).
+   The source default is `<crate>/contract/`; a Cargo output or build-tool override writes
+   directly to its selected directory. The consumed packages are nested whole, and files change
+   only when their content changes. Dependencies and the Orb modules of integration tests,
+   benches, binaries and binary examples write nothing. An example built as a library with
+   `crate-type = ["lib"]` still writes there, since the macro does not distinguish it from the
+   primary library. The writer removes a former world of the same nominal package and version,
+   preserving other packages and unrelated files. Each Orb module therefore needs its own
+   package and a distinct world name. Consumers that read a directory through WIT tooling need
+   one root package in that directory; use distinct output directories for distinct packages.
 2. the same text as a `tembra:wit` custom section of the Wasm module, and the manifest, the
    declared hooks with their composition, the contributions with their priorities, the
    services that chose a lifetime or a linger, the views of the interfaces imported by key with
@@ -2023,7 +2114,8 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
 4. `generate!({ inline: WIT, world, generate_all, runtime_path })`, the official `wit-bindgen`
    macro, called through the facade's re-export of the version whose rules the macro follows,
    with the bindings' runtime reached there too, and the WIT
-   as a string, plus `path` when the Orb consumes other packages and, with a state, a resource or
+   as a string, plus `path` for a single consumed directory. Canonical path lists are embedded
+   directly in that string. With a state, a resource or
    the context, the kernel's `tembra:guest` package nested in the inline text, unless the consumed
    directory holds it already, as a contract `cargo tembra build` wrote does in its `deps/`; that
    copy, as every copy of a bundled package the directory holds, used or not, must be a file of
@@ -2049,8 +2141,12 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    options, results and tuples too, a resource of the module wrapped into its handle type or taken
    back from it. The bindings name a field or a case from its WIT name, `type_` for `r#type`, so
    each side keeps its own names;
-   `pub use exports::...::guard;` for each contributed hook, each hook declared from a consumed
-   package and each implemented interface, `pub use ...::counter;`, the import module, for each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
+   `pub use exports::...::guard;` for each contributed hook, each hook declared from a consumed package and each
+   implemented interface, and `pub use ...::guard;`, the import module, for each hook declared from
+   a consumed package. Orb imports get public modules with owned, awaitable functions and resource
+   wrappers; keyed imports get the same API through their view. Raw component bindings live in a
+   private module. `pub use ...::context;` appears with the `context` option, inside
+   `tembra::__guest!`, so only in a component build;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    but that of a service its `#[create]` builds, by forwarding to the author's functions, hook

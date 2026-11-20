@@ -1,6 +1,6 @@
 //! The consumer: a compiled Orb calling another Orb. `import` on the attribute names the greeter's
 //! interface, read from the contract the greeter's build wrote; the macro re-exports its generated
-//! module as `greeting`, so `greeting::hello(name)` is an ordinary function call here and a call
+//! module as `greeting`, so `greeting::hello(name).await` uses the same Rust API in both builds and calls
 //! through the kernel at run time. Which Orb answers is decided by the installer, not by this code.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
@@ -25,9 +25,6 @@ mod welcomer {
             pub async fn welcome(names: Vec<String>) -> Vec<String> {
                 let mut greetings = Vec::new();
                 for name in names {
-                    #[cfg(target_arch = "wasm32")]
-                    greetings.push(greeting::hello(&name));
-                    #[cfg(not(target_arch = "wasm32"))]
                     greetings.push(greeting::hello(name).await);
                 }
                 greetings

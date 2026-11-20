@@ -65,6 +65,8 @@ export interface CapturedDelivery {
 export interface CapturedInvocation {
   readonly signature: string;
   readonly input: Encoded;
+  /** Permit checked ordinary data results when this caller does not require captured delivery. */
+  readonly dataResult?: true;
   output?: Encoded;
   receiver?: ResourceCapability;
   capabilities?: readonly (ResourceCapability | ByteStreamCapability)[];

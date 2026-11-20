@@ -1,0 +1,106 @@
+//! Public awaitability stays independent of the actual component ABI calling convention.
+use crate::{Options, analyze, tests::literal};
+use quote::quote;
+
+#[test]
+fn component_imports_wrap_sync_bindings_without_adding_an_await_or_a_yield() {
+    let analysis = analyze(
+        Options {
+            package: Some(literal("example:consumer@1.0.0")),
+            wit: Some(format!("{}/native-fixture/wit", env!("CARGO_MANIFEST_DIR"))),
+            imports: vec![literal("example:protocol/codec@1.0.0")],
+            ..Options::default()
+        },
+        syn::parse_quote! { mod consumer { pub mod pipeline { use super::codec;
+            #[service]
+            pub struct Pipeline;
+            impl Pipeline {
+                pub async fn normalize(value: u64) -> u64 { codec::normalize(value).await }
+            }
+        } } },
+    )
+    .unwrap();
+    let generated = super::modules(&analysis, &Default::default());
+    let source = syn::parse2::<syn::File>(generated).unwrap();
+    let syn::Item::Mod(module) = &source.items[0] else {
+        panic!("an import module")
+    };
+    let functions = &module.content.as_ref().unwrap().1;
+    let normalize = functions
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "normalize" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    assert!(normalize.sig.asyncness.is_some());
+    let body = &normalize.block;
+    assert_eq!(
+        quote!(#body).to_string(),
+        "{ super :: example :: protocol :: codec :: normalize (value) }"
+    );
+    let generated = quote!(#source).to_string();
+    assert!(generated.contains("pub async fn new"));
+    assert!(generated.contains("pub async fn zero"));
+    assert!(generated.contains("self . inner . next () . await"));
+    assert!(generated.contains("value : __tembra_alloc :: string :: String"));
+    assert!(!generated.contains("pub use super :: example :: protocol :: codec :: *"));
+    assert!(!generated.contains("yield"));
+}
+
+#[test]
+fn resource_variant_cases_do_not_use_the_guest_type_escape() {
+    let analysis = analyze(
+        Options {
+            package: Some(literal("example:consumer@1.0.0")),
+            wit: Some(format!("{}/native-fixture/wit", env!("CARGO_MANIFEST_DIR"))),
+            imports: vec![literal("example:protocol/packets@1.0.0")],
+            ..Options::default()
+        },
+        syn::parse_quote! { mod consumer { pub mod pipeline { use super::packets;
+            #[service]
+            pub struct Pipeline;
+            impl Pipeline { pub fn available() -> bool { true } }
+        } } },
+    )
+    .unwrap();
+    let generated = super::modules(&analysis, &Default::default()).to_string();
+    assert!(generated.contains("Guest ("), "{generated}");
+    assert!(!generated.contains("Guest_"), "{generated}");
+}
+
+#[test]
+fn keyed_declared_hooks_share_the_exported_types_in_both_builds() {
+    let analysis = analyze(
+        Options {
+            package: Some(literal("example:consumer@1.0.0")),
+            wit: Some(format!(
+                "{}/runtime-fixture/admission",
+                env!("CARGO_MANIFEST_DIR")
+            )),
+            keyed: vec![literal("example:admission/guard@1.0.0")],
+            ..Options::default()
+        },
+        syn::parse_quote! { mod consumer {
+            #[hook("example:admission/guard@1.0.0", composition = waterfall)]
+            pub struct Guard;
+            pub mod desk {
+                #[service]
+                pub struct Desk;
+                impl Desk { pub fn available() -> bool { true } }
+            }
+        } },
+    )
+    .unwrap();
+    let generated = super::modules(&analysis, &Default::default()).to_string();
+    assert!(
+        generated
+            .contains("pub use super :: exports :: example :: admission :: guard :: Admission"),
+        "{generated}"
+    );
+    assert!(
+        generated
+            .contains("input : super :: exports :: example :: admission :: guard :: Admission"),
+        "{generated}"
+    );
+}

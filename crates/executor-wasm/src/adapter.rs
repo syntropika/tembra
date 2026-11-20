@@ -176,6 +176,7 @@ pub(crate) fn orb(
             )
         })
         .signature(service.signature)
+        .contract(&service.interface, &contract.encode())
         .lifetime(service.lifetime.into(), service.linger)
         .before_create(move || {
             let session = gate_session.clone();

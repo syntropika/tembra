@@ -90,6 +90,8 @@ impl Reexported {
 /// reaches through to its field.
 pub(crate) struct Modules {
     reexported: BTreeMap<String, Reexported>,
+    /// Imported resource names whose public wrappers differ from the component handle types.
+    imported_resources: BTreeSet<(String, String)>,
     /// The path of each module of the Orb from the Orb module, by scope; scope 0 is the Orb module.
     paths: Vec<Vec<Ident>>,
     /// The newtypes of the module.
@@ -281,10 +283,48 @@ impl Modules {
         }
         Ok(Self {
             reexported: modules,
+            imported_resources: BTreeSet::new(),
             paths: paths.to_vec(),
             newtypes: Vec::new(),
             uses: uses.to_vec(),
         })
+    }
+
+    /// Remember which imported names need an ownership-preserving component conversion.
+    pub(crate) fn with_imported_resources(mut self, types: &wit::ConsumedTypes) -> Self {
+        for interface in self
+            .reexported
+            .values()
+            .filter(|interface| interface.role == Role::Imported)
+        {
+            if let Some(imported) = types.interface(&interface.identity) {
+                for (name, id) in &imported.types {
+                    if matches!(
+                        types.definition(wit_parser::Type::Id(*id)),
+                        Ok((_, wit_parser::TypeDefKind::Resource))
+                    ) {
+                        self.imported_resources.insert((
+                            interface.identity.clone(),
+                            crate::type_ident(name).to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    /// Whether this named value is an owned resource wrapper of a plain Orb import.
+    pub(crate) fn imported_resource(&self, named: &Named<'_, '_>) -> bool {
+        self.imported_resources
+            .contains(&(named.interface.identity.clone(), named.ident.to_string()))
+    }
+
+    /// Whether an author parameter holds an imported resource, alone or in a container.
+    pub(crate) fn holds_imported_resource(&self, ty: &Type, scope: usize) -> bool {
+        let mut named = Vec::new();
+        self.named_in(ty, scope, &mut named);
+        named.iter().any(|named| self.imported_resource(named))
     }
 
     /// The same modules, with the newtypes of the module.

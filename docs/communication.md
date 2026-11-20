@@ -51,7 +51,9 @@ Server infrastructure supplies the trusted principal and acquisition policy.
 A connection owns its remote references and state mirrors.
 Disconnect invalidates them. Reconnect with a new peer and acquire current state again.
 A disconnected call can have an unknown outcome; it is not retried automatically.
-RPC does not copy a local context or opaque storage reference to another host.
+RPC does not copy a local context or opaque storage reference to another host. Generated clients
+can exchange owned WIT resources with native and compiled providers on the Rust server; see
+[WIT resources over RPC](rpc-resources.md) for the API and ownership behavior.
 
 ## Native Rust server
 

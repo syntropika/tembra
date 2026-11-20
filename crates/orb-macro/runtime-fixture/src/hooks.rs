@@ -118,41 +118,41 @@ pub mod gatehouse {
 
         impl Desk {
             /// Tell every contributor of a visit.
-            pub fn visit(who: String, hour: u32) {
+            pub async fn visit(who: String, hour: u32) {
                 Visits::run(Visit {
                     who,
                     hour: Hour(hour),
-                })
+                }).await
             }
 
             /// Tell every contributor where a guest goes.
-            pub fn go(floor: u32, door: String) {
-                Spots::run(places::Spot::from(places::Place { floor, door }))
+            pub async fn go(floor: u32, door: String) {
+                Spots::run(places::Spot::from(places::Place { floor, door })).await
             }
 
             /// Tell every contributor which door a guest knocks at.
-            pub fn knock(door: String) {
-                lobby::Doors::run(keys::Door::from(door))
+            pub async fn knock(door: String) {
+                lobby::Doors::run(keys::Door::from(door)).await
             }
 
             /// The room the first contributor with an answer gives the floor, if any.
-            pub fn room(floor: u32) -> Option<u32> {
-                Rooms::run(floor)
+            pub async fn room(floor: u32) -> Option<u32> {
+                Rooms::run(floor).await
             }
 
             /// The value the contributions admit, and whether they blocked it.
-            pub fn admit(value: i32) -> (i32, bool) {
+            pub async fn admit(value: i32) -> (i32, bool) {
                 let admission = Guard::run(guard::Admission {
                     value,
                     blocked: false,
-                });
+                }).await;
                 (admission.value, admission.blocked)
             }
 
             /// The admission the contributions answer, in the hook's own type: the desk's
             /// interface and `Guard::run` name one `guard::Admission`.
-            pub fn admitted(admission: guard::Admission) -> guard::Admission {
-                let verdict = Guard::run(admission);
+            pub async fn admitted(admission: guard::Admission) -> guard::Admission {
+                let verdict = Guard::run(admission).await;
                 let admission = guard::Admission {
                     value: verdict.value,
                     blocked: verdict.blocked,
@@ -167,11 +167,11 @@ pub mod gatehouse {
             }
 
             /// The verdict the contributions answer, in the type the hook uses from `types`.
-            pub fn judged(value: i32) -> guard::Verdict {
+            pub async fn judged(value: i32) -> guard::Verdict {
                 Guard::run(guard::Admission {
                     value,
                     blocked: false,
-                })
+                }).await
             }
 
             /// The last admission `admitted` answered, which the state holds.
@@ -190,12 +190,136 @@ pub mod gatehouse {
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    /// Native installation refuses the hook declaration; synchronous imports are supported.
+    /// Bind the keyed view whose types the desk shares with its declared hook.
+    fn providers() -> super::gatehouse::Providers {
+        super::gatehouse::Providers {
+            guard_ref: crate::native::facade::Provider::new("guards", 1),
+        }
+    }
+
+    /// A host without hooks can compile this authoring crate and refuses installation explicitly.
+    #[cfg(not(feature = "native-hooks"))]
     #[test]
-    fn a_hook_declaration_is_refused_natively() {
+    fn a_hook_declaration_without_hooks_is_refused_natively() {
         assert_eq!(
-            crate::native::refused(super::gatehouse::orb()),
-            "the declaration of the hook example:gatehouse/visits@1.0.0 works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook"
+            crate::native::refused(super::gatehouse::orb(providers())),
+            "native hook declarations need the runtime's `hooks`: enable the facade's `hooks` feature in the host that installs this Orb"
         );
+    }
+
+    /// Native declarations compose the same data as the component, without serde on author types.
+    #[cfg(feature = "native-hooks")]
+    #[test]
+    fn native_declarations_compose_series_bail_and_waterfall_in_plan_order() {
+        use crate::native::{
+            ORB, call,
+            facade::{Hook, Host, Orb, Service, contracts::Contract, core::Requirement},
+            ready,
+        };
+        use futures::executor::LocalPool;
+        use serde_json::{Value, json};
+        use std::{cell::RefCell, rc::Rc};
+        let contract = Contract::from_source_in(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/admission"),
+            "gatehouse.wit",
+            super::gatehouse::WIT,
+            None,
+        )
+        .unwrap();
+        let identity = |name| format!("example:gatehouse/{name}@1.0.0");
+        let signature = |hook: &str| contract.function_signature(hook, "apply", true).unwrap();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut contributor = Orb::new("watch", 1).requires(Requirement {
+            orb: ORB.into(),
+            api_version: 1,
+            hooks: [
+                identity("visits"),
+                identity("spots"),
+                identity("doors"),
+                identity("rooms"),
+                "example:admission/guard@1.0.0".into(),
+            ]
+            .into(),
+            methods: Default::default(),
+            signatures: Default::default(),
+            hook_signatures: Default::default(),
+        });
+        for name in ["visits", "spots", "doors"] {
+            let name = identity(name);
+            let hook = Hook::<Value, ()>::series(&name).signature(signature(&name));
+            for priority in [-1, 1] {
+                let seen = seen.clone();
+                contributor =
+                    contributor.contribute(ORB, &hook, priority, move |_, input: Value| {
+                        seen.borrow_mut().push((priority, input));
+                        async { Ok(()) }
+                    });
+            }
+        }
+        let rooms = identity("rooms");
+        let rooms = Hook::<Value, Option<Value>>::bail(&rooms).signature(signature(&rooms));
+        contributor = contributor
+            .contribute(ORB, &rooms, -1, |_, input: Value| async move {
+                Ok((input.as_u64().unwrap() > 0).then_some(json!(300)))
+            })
+            .contribute(ORB, &rooms, 1, |_, _| async { Ok(Some(json!(0))) });
+        let guard = "example:admission/guard@1.0.0";
+        let guard = Hook::<Value, Value>::waterfall(guard).signature(signature(guard));
+        contributor = contributor.contribute(ORB, &guard, 0, |_, input: Value| async move {
+            Ok(json!({"value": input["value"].as_i64().unwrap() + 1, "blocked": true}))
+        });
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let provider_contract = Contract::from_source(
+            "admission.wit",
+            &format!("{}\nworld provider {{ export guard; }}", include_str!("../admission/admission.wit")),
+            Some("provider"),
+        ).unwrap();
+        let guards = Orb::new("guards", 1).service(
+            Service::new("guards::example:admission/guard@1.0.0", |_| Ok(()))
+                .signature(provider_contract.service_signatures().unwrap().remove("example:admission/guard@1.0.0"))
+                .method("apply", |_, _, (admission,): (Value,)| async move { Ok(admission) }),
+        );
+        host.install(vec![super::gatehouse::orb(providers()).unwrap(), contributor, guards])
+            .unwrap();
+        let desk = ready(&mut pool, &host, "example:gatehouse/desk@1.0.0");
+        assert_eq!(
+            call(&mut pool, &host, &desk, "alice", "visit", json!(["ada", 9])),
+            Value::Null
+        );
+        assert_eq!(
+            call(&mut pool, &host, &desk, "alice", "go", json!([3, "east"])),
+            Value::Null
+        );
+        assert_eq!(
+            call(&mut pool, &host, &desk, "alice", "knock", json!(["east"])),
+            Value::Null
+        );
+        assert_eq!(
+            *seen.borrow(),
+            [
+                (-1, json!({"who":"ada","hour":9})),
+                (1, json!({"who":"ada","hour":9})),
+                (-1, json!({"floor":3,"door":"east"})),
+                (1, json!({"floor":3,"door":"east"})),
+                (-1, json!("east")),
+                (1, json!("east"))
+            ]
+        );
+        assert_eq!(
+            call(&mut pool, &host, &desk, "alice", "room", json!([3])),
+            json!(300)
+        );
+        assert_eq!(
+            call(&mut pool, &host, &desk, "alice", "room", json!([0])),
+            json!(0)
+        );
+        assert_eq!(
+            call(&mut pool, &host, &desk, "alice", "admit", json!([7])),
+            json!([8, true])
+        );
+        desk.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert!(host.errors().is_empty());
     }
 }

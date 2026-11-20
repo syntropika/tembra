@@ -135,10 +135,26 @@ test-wasm-acceptance *args:
 test-hook-lifecycle: build-node build-wasm build-sdk
     cargo test --locked -p tembra-core -p tembra-runtime -p tembra -p tembra-executor-wasm --all-features
 
-# Exchange actual SDK RPC frames with a native Rust provider over application-owned bytes.
+# Exchange actual SDK RPC frames with native and compiled Rust-hosted providers.
 test-native-rpc:
     cargo build --locked -p tembra --features rpc,views --example rpc
     TEMBRA_NATIVE_RPC="$(realpath "${CARGO_TARGET_DIR:-target}")/debug/examples/rpc" bun test packages/ts/sdk/test/rpc-native.test.ts
+    just test-rpc-resources
+
+# Build both providers for the same generated RPC client without a browser component.
+build-rpc-resources:
+    cargo build --locked -p tembra-executor-wasm --example rpc_resources
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features rpc-provider --target-dir "${CARGO_TARGET_DIR:-target}/orb-macro" -- -Clinker=wasm-component-ld
+    cp "${CARGO_TARGET_DIR:-target}/orb-macro/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "${CARGO_TARGET_DIR:-target}/orb-macro/rpc-provider.wasm"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-resource-provider/Cargo.toml --target-dir "${CARGO_TARGET_DIR:-target}/orb-macro" -- -Clinker=wasm-component-ld
+
+# Exercise owned resources over real RPC bytes with both executor types.
+test-rpc-resources: build-rpc-resources
+    TEMBRA_RPC_HOST="$(realpath "${CARGO_TARGET_DIR:-target}")/debug/examples/rpc_resources" TEMBRA_RPC_COMPONENT="$(realpath "${CARGO_TARGET_DIR:-target}")/orb-macro/rpc-provider.wasm" TEMBRA_RPC_SHAPES_COMPONENT="$(realpath "${CARGO_TARGET_DIR:-target}")/orb-macro/wasm32-unknown-unknown/release/tembra_wasm_resource_provider.wasm" bun test packages/ts/sdk/test/rpc-resources.test.ts packages/ts/sdk/test/rpc-data.test.ts
+
+# Use the generated client in Chrome over WebSocket RPC to the real Rust host.
+test-rpc-browser: build-rpc-resources
+    TEMBRA_RPC_HOST="$(realpath "${CARGO_TARGET_DIR:-target}")/debug/examples/rpc_resources" TEMBRA_RPC_COMPONENT="$(realpath "${CARGO_TARGET_DIR:-target}")/orb-macro/rpc-provider.wasm" TEMBRA_RPC_SHAPES_COMPONENT="$(realpath "${CARGO_TARGET_DIR:-target}")/orb-macro/wasm32-unknown-unknown/release/tembra_wasm_resource_provider.wasm" bun packages/ts/test/rpc-resources.ts
 
 check-wasm:
     cargo check --locked -p tembra-core -p tembra-browser-wasm --target wasm32-unknown-unknown --all-features
@@ -180,6 +196,12 @@ build-import-resources target-dir:
     cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/codec-provider.wasm"
     cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features codec-consumer --target-dir "$1" -- -Clinker=wasm-component-ld
     cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/codec-consumer.wasm"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features rpc-provider --target-dir "$1" -- -Clinker=wasm-component-ld
+    cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/import-provider.wasm"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features rpc-consumer --target-dir "$1" -- -Clinker=wasm-component-ld
+    cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/import-consumer.wasm"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --no-default-features --features packet-reader --target-dir "$1" -- -Clinker=wasm-component-ld
+    cp "$1/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$1/packet-reader.wasm"
 
 # Execute real macro component boundaries; acceptance uses the same fixture builder.
 test-orb-macro:
@@ -191,6 +213,9 @@ test-orb-macro:
     fixture_target="$(cd "$fixture_target" && pwd)"
     TEMBRA_WASM_CODEC_PROVIDER="$fixture_target/codec-provider.wasm" \
     TEMBRA_WASM_CODEC_CONSUMER="$fixture_target/codec-consumer.wasm" \
+    TEMBRA_WASM_IMPORT_PROVIDER="$fixture_target/import-provider.wasm" \
+    TEMBRA_WASM_IMPORT_CONSUMER="$fixture_target/import-consumer.wasm" \
+    TEMBRA_WASM_PACKET_READER="$fixture_target/packet-reader.wasm" \
     TEMBRA_WASM_ORB_MACRO_ASYNC="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm" \
     TEMBRA_WASM_ORB_MACRO_STD="$fixture_target/std.wasm" \
     TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \

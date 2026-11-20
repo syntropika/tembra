@@ -112,10 +112,7 @@ fn a_keyed_import_derives_a_view_of_the_provider_interface() {
         )
     );
     let tokens = quote::quote!(#module).to_string();
-    assert!(
-        tokens.contains("pub use self :: example :: router :: counter_ref ;"),
-        "{tokens}"
-    );
+    assert!(tokens.contains("pub mod counter_ref {"), "{tokens}");
 }
 
 /// The plain import of the same interface stays as it was: it reaches the provider's `main`
@@ -138,10 +135,7 @@ fn a_plain_import_stays_next_to_a_keyed_one() {
     );
     resolved(&dir, &text);
     let tokens = quote::quote!(#both).to_string();
-    for reexport in [
-        "pub use self :: example :: counters :: counter ;",
-        "pub use self :: example :: router :: counter_ref ;",
-    ] {
+    for reexport in ["pub mod counter {", "pub mod counter_ref {"] {
         assert!(tokens.contains(reexport), "{reexport}\n{tokens}");
     }
     assert!(
@@ -452,7 +446,7 @@ fn an_implemented_interface_is_imported_by_key() {
     let tokens = quote::quote!(#module).to_string();
     for reexport in [
         "pub use exports :: example :: counters :: counter ;",
-        "pub use self :: example :: router :: counter_ref ;",
+        "pub mod counter_ref {",
     ] {
         assert!(tokens.contains(reexport), "{reexport}\n{tokens}");
     }

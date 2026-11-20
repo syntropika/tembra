@@ -104,6 +104,7 @@ function diagnostics(files: readonly string[]): Map<string, string[]> {
     paths: {
       "@syntropika/tembra-sdk": [path.join(sdk, "src/index.ts")],
       "@syntropika/tembra-sdk/runtime": [path.join(sdk, "src/host.ts")],
+      "@syntropika/tembra-sdk/rpc": [path.join(sdk, "src/rpc.ts")],
     },
   });
   const reported = new Map(files.map((file) => [file, [] as string[]]));
@@ -163,7 +164,7 @@ test(
         "kebabName(firstValue: number, delete_: boolean, context_: Shape[], context?: Context): Promise<boolean>;",
       );
       expect(generated).toContain(
-        'kebabName: (...args) => reference["kebab-name"](...sent(args, 3)),',
+        'kebabName: (...args) => calls.call<boolean>("kebab-name", sent(args, 3)),',
       );
       expect(generated).toContain(
         "check(public_: boolean, static_: number, let_: string, arguments_: number[], eval_: number, implements_: number, await_: boolean, context?: Context): Promise<boolean>;",
@@ -204,6 +205,12 @@ test("a generated client acquires the kebab-case service and forwards each call 
       world: "provider",
       out: root,
     });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "tembra-data-client-check", type: "module" }),
+    );
+    await mkdir(path.join(root, "node_modules/@syntropika"), { recursive: true });
+    await symlink(sdk, path.join(root, "node_modules/@syntropika/tembra-sdk"), "dir");
     const { get, IDENTITY } = (await import(file!)) as {
       IDENTITY: string;
       get: (scope: unknown, address: unknown, options?: unknown) => Promise<any>;
@@ -508,6 +515,8 @@ test.skipIf(!fixtures)(
         world: "provider",
         out: root,
       });
+      await mkdir(path.join(root, "node_modules/@syntropika"), { recursive: true });
+      await symlink(sdk, path.join(root, "node_modules/@syntropika/tembra-sdk"), "dir");
       const numbers = (await import(file!)) as {
         get: (scope: unknown, address: { orb: string; key: string }) => Promise<any>;
       };
@@ -556,6 +565,7 @@ interface codec {
   record bundle { decoder: decoder, wide: u64 }
   variant selection { missing, found(bundle) }
   type decoder-alias = decoder;
+  ping: func() -> u32;
   open: func(seed: u64) -> decoder-alias;
   containers: func() -> tuple<list<option<decoder>>, result<selection, string>>;
   consume: func(value: decoder) -> u64;
@@ -586,6 +596,10 @@ test(
     try {
       const wit = path.join(root, "contract.wit");
       await writeFile(wit, RESOURCES);
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({ name: "tembra-local-resource-client-check", type: "module" }),
+      );
       const files = await client({ wit, out: root });
       const [file, sinkFile] = files;
       const site = path.join(root, "site.ts");
@@ -593,6 +607,8 @@ test(
         site,
         `import { get, type Decoder, type DecoderAlias } from "./example-decoders-codec.ts";
 import { get as getSink, type ImportedDecoder } from "./example-decoders-sink.ts";
+import type { RemoteHost } from "@syntropika/tembra-sdk/rpc";
+export const remote = (connection: RemoteHost) => get(connection, { orb: "codec", key: "main" });
 export async function check(scope: Parameters<typeof get>[0]) {
   const codec = await get(scope, { orb: "codec", key: "main" });
   const decoder: Decoder = await codec.newDecoder(1n);
@@ -640,6 +656,7 @@ export async function check(scope: Parameters<typeof get>[0]) {
             signature,
             async (_environment, _context, input, receiver, _retain, arguments_) => {
               const args = JSON.parse(input.text) as unknown[];
+              if (name === "ping") return encode(7);
               if (
                 name === "[constructor]decoder" ||
                 name === "open" ||
@@ -740,6 +757,7 @@ export async function check(scope: Parameters<typeof get>[0]) {
       }
       interface Codec {
         reference: { release(): void };
+        ping(): Promise<number>;
         newDecoder(seed: bigint): Promise<Decoder>;
         decoderZero(): Promise<Decoder>;
         open(seed: bigint): Promise<Decoder>;
@@ -765,6 +783,7 @@ export async function check(scope: Parameters<typeof get>[0]) {
         get(scope: typeof host, address: { orb: string; key: string }): Promise<Codec>;
       };
       const codec = await get(host, { orb: "codec", key: "main" });
+      expect(await codec.ping()).toBe(7);
       const decoder = await codec.newDecoder(9007199254740993n);
       expect(await decoder.total()).toBe(9007199254740993n);
       expect(await decoder.getHttp()).toBe(9007199254740993n);
@@ -810,3 +829,87 @@ export async function check(scope: Parameters<typeof get>[0]) {
   },
   CHECKER,
 );
+
+test("generated local resource clients refuse unmatched delivery before provider execution", async () => {
+  const { bindCaptured } = await import("../src/runtime/adapters.ts");
+  const { encode } = await import("../src/interpreter/codec.ts");
+  const root = await mkdtemp(
+    path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-refused-client-"),
+  );
+  let entered = 0;
+  try {
+    const wit = path.join(root, "contract.wit");
+    await writeFile(wit, RESOURCES);
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "tembra-local-resource-client-check", type: "module" }),
+    );
+    const [file] = await client({ wit, out: root });
+    await mkdir(path.join(root, "node_modules/@syntropika"), { recursive: true });
+    await symlink(sdk, path.join(root, "node_modules/@syntropika/tembra-sdk"), "dir");
+    const { get } = await import(file!);
+    for (const mode of ["data", "mismatched", "native"]) {
+      const host = createHost(
+        mode === "native"
+          ? {
+              native: {
+                hasOrb: () => true,
+                async activate() {},
+                async invoke() {
+                  entered++;
+                  return 0;
+                },
+                async dispose() {},
+                async effect() {},
+                value() {
+                  throw new Error("No native values are used");
+                },
+              },
+            }
+          : {},
+      );
+      try {
+        const methods = Object.fromEntries(
+          ["ping", "[constructor]decoder", "open"].map((name) => {
+            const data = () => {
+              entered++;
+              return 0;
+            };
+            return [
+              name,
+              mode === "mismatched"
+                ? bindCaptured(data, "another-signature", async () => {
+                    entered++;
+                    return encode(0);
+                  })
+                : data,
+            ];
+          }),
+        );
+        await host.install({
+          name: mode,
+          apiVersion: 1,
+          services: { [`${mode}::example:decoders/codec@1.0.0`]: { methods } },
+        });
+        const codec = await get(host, { orb: mode, key: "main" });
+        try {
+          for (const call of [
+            () => codec.ping(),
+            () => codec.newDecoder(1n),
+            () => codec.open(2n),
+          ]) {
+            await expect(call()).rejects.toThrow("matching WIT capability signature");
+            expect(entered).toBe(0);
+          }
+        } finally {
+          codec.reference.release();
+        }
+      } finally {
+        await host.close();
+      }
+      expect(host.diagnostics().references).toBe(0);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

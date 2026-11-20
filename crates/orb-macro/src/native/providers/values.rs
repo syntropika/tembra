@@ -1,6 +1,6 @@
 //! Native import types and codecs for the existing portable capability containers.
 use super::super::{Kind, boundary_at, decode, encode, wit_kind};
-use crate::{rust_ident, type_ident, wit::ConsumedTypes};
+use crate::{camel_ident, rust_ident, type_ident, wit::ConsumedTypes};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Ident;
@@ -117,7 +117,7 @@ impl Values<'_> {
             }
             TypeDefKind::Variant(variant) => {
                 let cases = variant.cases.iter().map(|c| {
-                    let name = type_ident(&c.name);
+                    let name = camel_ident(&c.name);
                     let payload = c.ty.map(|ty| {
                         let ty = self.ty(ty);
                         quote! { (#ty) }
@@ -171,7 +171,12 @@ impl Values<'_> {
             TypeDefKind::List(inner) => {
                 let item = mapped(*inner, quote! { item });
                 if read {
-                    quote! { match value { #json::Array(items) => items.into_iter().map(|item| #item).collect(), _ => ::core::result::Result::Err(#error) } }
+                    quote! {
+                        match value {
+                            #json::Array(items) => items.into_iter().map(|item| #item).collect(),
+                            _ => ::core::result::Result::Err(#error),
+                        }
+                    }
                 } else {
                     quote! { value.into_iter().map(|item| #item).collect::<::core::result::Result<::std::vec::Vec<_>, ::std::string::String>>().map(#json::Array) }
                 }
@@ -179,9 +184,19 @@ impl Values<'_> {
             TypeDefKind::Option(inner) => {
                 let item = mapped(*inner, quote! { item });
                 if read {
-                    quote! { match value { #json::Null => ::core::result::Result::Ok(::core::option::Option::None), item => #item.map(::core::option::Option::Some) } }
+                    quote! {
+                        match value {
+                            #json::Null => ::core::result::Result::Ok(::core::option::Option::None),
+                            item => #item.map(::core::option::Option::Some),
+                        }
+                    }
                 } else {
-                    quote! { match value { ::core::option::Option::None => ::core::result::Result::Ok(#json::Null), ::core::option::Option::Some(item) => #item } }
+                    quote! {
+                        match value {
+                            ::core::option::Option::None => ::core::result::Result::Ok(#json::Null),
+                            ::core::option::Option::Some(item) => #item,
+                        }
+                    }
                 }
             }
             TypeDefKind::Tuple(tuple) => {
@@ -227,7 +242,7 @@ impl Values<'_> {
                     .iter()
                     .map(|c| {
                         (c.name.as_str(), c.ty, {
-                            let name = type_ident(&c.name);
+                            let name = camel_ident(&c.name);
                             quote! { #result::#name }
                         })
                     })
@@ -264,19 +279,44 @@ impl Values<'_> {
         let arms = cases.iter().map(|(tag, ty, case)| {
             if read {
                 let item = ty.map(|ty| self.convert(ty, quote! { object.remove("val").ok_or("missing payload")? }, true));
-                let item = match item { ::core::option::Option::Some(item) => quote! { #case(#item?) }, ::core::option::Option::None if result => quote! { #case(()) }, ::core::option::Option::None => quote! { #case } };
+                let item = match item {
+                    ::core::option::Option::Some(item) => quote! { #case(#item?) },
+                    ::core::option::Option::None if result => quote! { #case(()) },
+                    ::core::option::Option::None => quote! { #case },
+                };
                 quote! { #tag => ::core::result::Result::Ok(#item) }
             } else {
                 let (pattern, val) = match ty {
-                    ::core::option::Option::Some(ty) => { let item = self.convert(*ty, quote! { item }, false); (quote! { #case(item) }, ::core::option::Option::Some(quote! { object.insert(::std::string::String::from("val"), #item?); })) }
+                    ::core::option::Option::Some(ty) => {
+                        let item = self.convert(*ty, quote! { item }, false);
+                        (quote! { #case(item) }, ::core::option::Option::Some(quote! {
+                            object.insert(::std::string::String::from("val"), #item?);
+                        }))
+                    }
                     ::core::option::Option::None if result => (quote! { #case(()) }, ::core::option::Option::None),
                     ::core::option::Option::None => (quote! { #case }, ::core::option::Option::None),
                 };
-                quote! { #pattern => { let mut object = ::#facade::serde_json::Map::new(); object.insert(::std::string::String::from("tag"), ::#facade::serde_json::Value::from(#tag)); #val ::core::result::Result::Ok(::#facade::serde_json::Value::Object(object)) } }
+                quote! {
+                    #pattern => {
+                        let mut object = ::#facade::serde_json::Map::new();
+                        object.insert(::std::string::String::from("tag"), ::#facade::serde_json::Value::from(#tag));
+                        #val
+                        ::core::result::Result::Ok(::#facade::serde_json::Value::Object(object))
+                    }
+                }
             }
         });
         if read {
-            quote! { let mut object = match value { ::#facade::serde_json::Value::Object(object) => object, _ => return ::core::result::Result::Err(::std::string::String::from("expected a tagged value")) }; match object.get("tag").and_then(|v| v.as_str()).ok_or("missing tag")?.to_owned().as_str() { #(#arms,)* _ => ::core::result::Result::Err(::std::string::String::from("unknown tag")) } }
+            quote! {
+                let mut object = match value {
+                    ::#facade::serde_json::Value::Object(object) => object,
+                    _ => return ::core::result::Result::Err(::std::string::String::from("expected a tagged value")),
+                };
+                match object.get("tag").and_then(|value| value.as_str()).ok_or("missing tag")?.to_owned().as_str() {
+                    #(#arms,)*
+                    _ => ::core::result::Result::Err(::std::string::String::from("unknown tag")),
+                }
+            }
         } else {
             quote! { match value { #(#arms,)* } }
         }

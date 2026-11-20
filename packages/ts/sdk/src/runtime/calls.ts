@@ -175,8 +175,11 @@ export class Calls {
             unlend = loan;
             const native = session.options.native;
             if (native && (admission?.native ?? native.hasOrb(invocation.orb))) {
-              if (capture?.receiver || capture?.arguments?.owners.length)
-                throw new Error("A data-only handler cannot accept resource capabilities");
+              if (
+                capture &&
+                (!capture.dataResult || capture.receiver || capture.arguments?.owners.length)
+              )
+                throw new Error("Provider does not support the matching WIT capability signature");
               return await native.invoke(invocation, arguments_, entered);
             }
             const object = session.objects.get(invocation.object);
@@ -237,8 +240,11 @@ export class Calls {
               }
               return undefined;
             }
-            if (capture?.receiver || capture?.arguments?.owners.length)
-              throw new Error("A data-only handler cannot accept resource capabilities");
+            if (
+              capture &&
+              (!capture.dataResult || capture.receiver || capture.arguments?.owners.length)
+            )
+              throw new Error("Provider does not support the matching WIT capability signature");
             const data = capturedDataMethod(handle);
             return await this.execute(() =>
               data

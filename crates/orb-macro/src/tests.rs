@@ -20,6 +20,8 @@ fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
     Options {
         package: Some(literal(package)),
         wit: wit.map(|dir| dir.display().to_string()),
+        wit_roots: Vec::new(),
+        contract: None,
         context: false,
         no_std: false,
         facade: None,
@@ -1418,7 +1420,7 @@ fn an_import_enters_the_world_and_is_reexported() {
         "{}",
         wit(&module)
     );
-    assert!(tokens(&module).contains("pub use self :: example :: ledger :: book ;"));
+    assert!(tokens(&module).contains("pub mod book {"));
 }
 
 /// A Rust name whose WIT name is a keyword of WIT, `list`, `record` or `interface`, is written with
@@ -1751,7 +1753,7 @@ fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
                 use super::{Guard, guard};
                 #[service]
                 pub struct Admissions;
-                impl Admissions { pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value }).value } }
+                impl Admissions { pub async fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value }).await.value } }
             }
         }",
     )
@@ -2475,10 +2477,10 @@ fn a_derived_function_takes_an_imported_handle() {
         .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
     let generated = tokens(&module);
     for expected in [
-        "fn finish (builder : texts :: Builder) -> String { Spelling :: finish (builder) }",
-        "fn count (builders : Vec < texts :: Builder > , odd : texts :: AB) -> u32 { Spelling :: count (builders , odd) }",
-        "fn new (builder : texts :: Builder) -> Self { Note :: new (builder) }",
-        "fn append (& self , more : Option < texts :: Builder >) -> u32 { Note :: append (self , more) }",
+        "fn finish (builder : super :: example :: text :: texts :: Builder) -> String { Spelling :: finish (:: core :: convert :: Into :: into (builder)) }",
+        "fn count (builders : Vec < super :: example :: text :: texts :: Builder > , odd : super :: example :: text :: texts :: AB) -> u32 { Spelling :: count (builders . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect () , :: core :: convert :: Into :: into (odd)) }",
+        "fn new (builder : super :: example :: text :: texts :: Builder) -> Self { Note :: new (:: core :: convert :: Into :: into (builder)) }",
+        "fn append (& self , more : Option < super :: example :: text :: texts :: Builder >) -> u32 { Note :: append (self , more . map (| item | :: core :: convert :: Into :: into (item))) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -2549,7 +2551,7 @@ fn a_derived_function_takes_an_imported_handle() {
     .unwrap_or_else(|error| panic!("{error}"));
     let generated = tokens(&module);
     for expected in [
-        "fn finish (builder : texts :: Builder) -> u32 { Spelling :: finish (builder) }",
+        "fn finish (builder : super :: example :: text :: texts :: Builder) -> u32 { Spelling :: finish (:: core :: convert :: Into :: into (builder)) }",
         "fn draft () -> super :: exports :: example :: speller :: drafts :: Builder { super :: exports :: example :: speller :: drafts :: Builder :: new (Drafts :: draft ()) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
@@ -3692,7 +3694,7 @@ fn a_parameter_under_cfg_is_refused() {
             "impl Permits { fn helper(level: u32, #[cfg(test)] extra: u32) -> u32 { level } }
             #[cfg(test)]
             mod tests {
-                use super::*;
+use super::*;
                 impl Permits { pub fn probe(#[cfg(test)] extra: u32) -> u32 { extra } }
                 #[test]
                 fn one() {}
@@ -4284,7 +4286,7 @@ fn a_converted_type_carries_its_resources_and_reaches_a_derived_hook() {
         ),
         format!("fn apply (_input : {export} :: Decision) -> {export} :: Decision {{"),
         format!(
-            "pub fn run (input : Decision) -> Decision {{ let input : {import} :: Decision = {into} (input) ; let answer = {import} :: apply (& input) ; {into} (answer) }}"
+            "pub async fn run (input : Decision) -> Decision {{ let input : {import} :: Decision = {into} (input) ; let answer = {import} :: apply (& input) ; {into} (answer) }}"
         ),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
@@ -4692,7 +4694,7 @@ const GATE: &str = "mod gate {
         #[service]
         pub struct Admissions;
         impl Admissions {
-            pub fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }) }
+            pub async fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }).await }
         }
     }
 }";
@@ -4706,7 +4708,7 @@ fn a_declared_hook_is_derived_from_its_input() {
     let module = expanded("example:gate@1.0.0", GATE);
     assert_eq!(
         wit(&module),
-        "package example:gate@1.0.0;\n\n/// Each contributor may change the admission or block it.\ninterface guard {\n  /// One admission.\n  record admission {\n    value: s32,\n    blocked: bool,\n  }\n  apply: func(input: admission) -> admission;\n}\n\ninterface admissions {\n  use guard.{admission};\n  admit: func(value: s32) -> admission;\n}\n\nworld gate {\n  import guard;\n  export guard;\n  export admissions;\n}\n"
+        "package example:gate@1.0.0;\n\n/// Each contributor may change the admission or block it.\ninterface guard {\n  /// One admission.\n  record admission {\n    value: s32,\n    blocked: bool,\n  }\n  apply: func(input: admission) -> admission;\n}\n\ninterface admissions {\n  use guard.{admission};\n  admit: async func(value: s32) -> admission;\n}\n\nworld gate {\n  import guard;\n  export guard;\n  export admissions;\n}\n"
     );
     assert_eq!(
         manifest(&module).as_deref(),
@@ -4717,7 +4719,7 @@ fn a_declared_hook_is_derived_from_its_input() {
     let generated = tokens(&module);
     for expected in [
         "pub struct Admission { pub value : i32 , pub blocked : bool }",
-        "pub fn run (input : Admission) -> Admission",
+        "pub async fn run (input : Admission) -> Admission",
         "let input : self :: example :: gate :: guard :: Admission = :: core :: convert :: Into :: into (input) ;",
         "let answer = self :: example :: gate :: guard :: apply (input) ;",
         "impl :: core :: convert :: From < Admission > for exports :: example :: gate :: guard :: Admission",
@@ -4726,7 +4728,7 @@ fn a_declared_hook_is_derived_from_its_input() {
         "impl :: core :: convert :: From < self :: example :: gate :: guard :: Admission > for Admission",
         "Self { value : :: core :: convert :: Into :: into (value . value) , blocked : :: core :: convert :: Into :: into (value . blocked) }",
         "fn apply (_input : exports :: example :: gate :: guard :: Admission) -> exports :: example :: gate :: guard :: Admission",
-        "fn admit (value : i32) -> super :: exports :: example :: gate :: admissions :: Admission { :: core :: convert :: Into :: into (Admissions :: admit (value)) }",
+        "async fn admit (value : i32) -> super :: exports :: example :: gate :: admissions :: Admission { :: core :: convert :: Into :: into (Admissions :: admit (value) . await) }",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -4841,7 +4843,7 @@ fn a_derived_hook_follows_its_composition() {
         wit(&series)
     );
     assert!(
-        tokens(&series).contains("pub fn run (input : Admission) {"),
+        tokens(&series).contains("pub async fn run (input : Admission) {"),
         "{}",
         tokens(&series)
     );
@@ -4856,7 +4858,7 @@ fn a_derived_hook_follows_its_composition() {
     );
     assert!(
         tokens(&bail).contains(
-            "pub fn run (input : Admission) -> :: core :: option :: Option < Admission >"
+            "pub async fn run (input : Admission) -> :: core :: option :: Option < Admission >"
         ),
         "{}",
         tokens(&bail)
@@ -4878,8 +4880,8 @@ fn a_derived_hook_converts_what_its_input_reaches() {
         &GATE
             .replace("input = Admission", "input = i32")
             .replace(
-                "pub fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }) }",
-                "pub fn admit(value: i32) -> i32 { Guard::run(value) }",
+                "pub async fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }).await }",
+                "pub async fn admit(value: i32) -> i32 { Guard::run(value).await }",
             ),
     );
     assert!(
@@ -5019,7 +5021,7 @@ const SHARED_GATE: &str = "mod gate {
         #[service]
         pub struct Admissions;
         impl Admissions {
-            pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value, blocked: false }).value }
+            pub async fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value, blocked: false }).await.value }
         }
     }
 }";
@@ -5046,7 +5048,7 @@ fn a_declared_hook_may_name_a_consumed_interface() {
         "{generated}"
     );
     assert!(
-        generated.contains("pub fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Admission"),
+        generated.contains("pub async fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Admission"),
         "{generated}"
     );
     for expected in [
@@ -5247,7 +5249,7 @@ fn a_waterfall_result_is_its_input_type_through_aliases() {
     )
     .unwrap_or_else(|error| panic!("{error}"));
     assert!(
-        tokens(&module).contains("pub fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Out"),
+        tokens(&module).contains("pub async fn run (input : exports :: example :: admission :: guard :: Admission) -> exports :: example :: admission :: guard :: Out"),
         "{}",
         tokens(&module)
     );
@@ -6738,7 +6740,7 @@ fn the_native_side_generates_orb_from_the_manifest_and_the_services() {
     }
     for expected in [
         "impl super :: __TembraRegistry < 1 > { # [doc = \" The service `Ledger` of the native Orb named `orb`, as `orb()` registers it.\"] pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < () > { const __TEMBRA_CODEC_COUNT : :: tembra :: Codec < () , u32 > = :: tembra :: Codec { decode : | value | {",
-        "} ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) }) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_LEDGER))) . method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) } , __TEMBRA_CODEC_COUNT ,) }",
+        "} ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) }) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_LEDGER))) . contract (\"example:book/ledger@1.0.0\" , super :: __TEMBRA_CONTRACT) . method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) } , __TEMBRA_CODEC_COUNT ,) }",
     ] {
         assert!(ledger.contains(expected), "{expected}\n{ledger}");
     }
@@ -6871,8 +6873,8 @@ fn a_native_service_of_a_sub_module_is_built_in_its_module() {
 /// Each service gets a typed client in its module, `MathClient` for `Math`, as visible as the
 /// service's struct: `new` wraps a reference to one of its objects, and each function of the
 /// interface is an async method, with the function's documentation, that takes the call's
-/// `&Context` first and then the function's parameters, and calls the method locally with them as
-/// a tuple in WIT order, `()` without parameters, for its result, `()` without one. A function
+/// `&Context` first and then the function's parameters. WIT functions use canonical codecs and
+/// one portable invocation, including data-only and result-less functions. A function
 /// named `new` is `new_` on the client, and keeps its WIT name.
 #[test]
 fn a_native_service_gets_a_typed_client() {
@@ -6903,21 +6905,28 @@ fn a_native_service_gets_a_typed_client() {
         "pub struct MathClient { pub (crate) reference : :: std :: rc :: Rc < :: tembra :: Reference > , }",
         "impl MathClient {",
         "pub fn new (reference : :: std :: rc :: Rc < :: tembra :: Reference >) -> Self { Self { reference } }",
-        "# [doc = \" The sum of two numbers.\"] pub async fn add (& self , context : & :: tembra :: Context , a : u32 , b : u32) -> :: tembra :: Result < u32 > { self . reference . call :: < (u32 , u32 ,) , u32 > (context , \"add\" , (a , b ,)) . await }",
-        "pub async fn total (& self , context : & :: tembra :: Context , values : Vec < u32 >) -> :: tembra :: Result < u64 > { self . reference . call :: < (Vec < u32 > ,) , u64 > (context , \"total\" , (values ,)) . await }",
-        "pub async fn count_words (& self , context : & :: tembra :: Context , text : String) -> :: tembra :: Result < Option < u32 > > { self . reference . call :: < (String ,) , Option < u32 > > (context , \"count-words\" , (text ,)) . await }",
-        "pub async fn ping (& self , context : & :: tembra :: Context) -> :: tembra :: Result < () > { self . reference . call :: < () , () > (context , \"ping\" , ()) . await }",
-        "pub async fn new_ (& self , context : & :: tembra :: Context) -> :: tembra :: Result < u32 > { self . reference . call :: < () , u32 > (context , \"new\" , ()) . await }",
+        "# [doc = \" The sum of two numbers.\"] pub async fn add (& self , context : & :: tembra :: Context , a : u32 , b : u32) -> :: tembra :: Result < u32 > {",
+        "pub async fn total (& self , context : & :: tembra :: Context , values : Vec < u32 >) -> :: tembra :: Result < u64 > {",
+        "pub async fn count_words (& self , context : & :: tembra :: Context , text : String) -> :: tembra :: Result < Option < u32 > > {",
+        "pub async fn ping (& self , context : & :: tembra :: Context) -> :: tembra :: Result < () > {",
+        "pub async fn new_ (& self , context : & :: tembra :: Context) -> :: tembra :: Result < u32 > {",
         ". method_with (\"new\" ,",
     ] {
         assert!(math.contains(expected), "{expected}\n{math}");
     }
     assert!(!math.contains("pub async fn new ("), "{math}");
     assert!(!math.contains("MemoClient"), "{math}");
+    assert!(!math.contains("self . reference . call ::"), "{math}");
+    for method in ["add", "total", "count-words", "ping", "new"] {
+        let expected = format!(
+            ". call_portable :: < _ , :: tembra :: serde_json :: Value > (context , \"{method}\" , __tembra_arguments) . await ?"
+        );
+        assert!(math.contains(&expected), "{expected}\n{math}");
+    }
     let memo = native(&module, &["memo"]);
     for expected in [
         "pub (crate) struct MemoClient {",
-        "pub async fn echo (& self , context : & :: tembra :: Context , context : String) -> :: tembra :: Result < String > { self . reference . call :: < (String ,) , String > (context , \"echo\" , (context ,)) . await }",
+        "pub async fn echo (& self , context : & :: tembra :: Context , context : String) -> :: tembra :: Result < String > {",
     ] {
         assert!(memo.contains(expected), "{expected}\n{memo}");
     }
@@ -7332,7 +7341,7 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
         "__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\")",
         "pub (crate) fn __tembra_resource_session < E : 'static > (service : :: tembra :: Service < E >) -> :: tembra :: Service < E > { service . payload_method (\"[constructor]session\" ,",
         &format!(
-            "let (n ,) : (u32 ,) = decode (__tembra_payload . into_data () ?) . map_err (| message | {{ :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }}) ? ; let value = Session :: new (n) ; let encode = | value : Session , {issuing}"
+            "let (n ,) : (u32 ,) = decode (__tembra_payload . value () . clone ()) . map_err (| message | {{ :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }}) ? ; if __tembra_arguments . iter () . any (:: core :: option :: Option :: is_some) {{ return :: core :: result :: Result :: Err (:: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , \"unused owned argument\")) ; }} __tembra_payload . into_data () ? ; let value = Session :: new (n) ; let encode = | value : Session , {issuing}"
         ),
         &format!(
             "{issued} (value)))) }} ; let mut __tembra_result = :: tembra :: portable :: Payload :: data (:: tembra :: serde_json :: Value :: Null ,) ; let written = encode (value , & mut __tembra_result) . map_err (| message | :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Result , message)) ? ; __tembra_result . map_value (| _ | :: core :: result :: Result :: Ok (written))"
@@ -7346,7 +7355,7 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
         ),
         ". payload_method (\"[static]session.make\" ,",
         &format!("let value = Session :: make () ; let encode = | value : Session , {issuing}"),
-        ". payload_method (\"open\" , | _ , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | async move {",
+        ". payload_method (\"open\" , | _ , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | async move {",
         &format!("let value = Sessions :: open (n) ; let encode = | value : Session , {issuing}"),
         &format!(
             "let value = Sessions :: many (n) ; let encode = | value : Vec < Session > , {issuing}"
@@ -7376,11 +7385,7 @@ fn a_wit_resource_is_issued_natively_and_read_as_self() {
     let in_context = self::native(&module, &["sessions"]);
     let scoped = "| self :: super :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ;";
     for function in ["open", "[constructor]session", "[method]session.get"] {
-        let receiver = if function.starts_with("[method]") {
-            "mut __tembra_payload"
-        } else {
-            "__tembra_payload"
-        };
+        let receiver = "mut __tembra_payload";
         let expected = format!(
             ". payload_method (\"{function}\" , | _ , __tembra_context : :: tembra :: Context , {receiver} : :: tembra :: portable :: Payload {scoped}"
         );
@@ -7571,58 +7576,65 @@ fn a_service_with_only_a_resource_has_a_signature() {
     );
     let native = native(&module, &["sessions"]);
     assert!(
-        native.contains("__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\") , move | declaration | Sessions :: create (& inputs , & declaration)) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_SESSIONS))))"),
+        native.contains("__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\") , move | declaration | Sessions :: create (& inputs , & declaration)) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_SESSIONS))) . contract (\"example:desk/sessions@1.0.0\" , super :: __TEMBRA_CONTRACT))"),
         "{native}"
     );
 }
 
-/// Natively a resource is only returned, or borrowed as a method's `self`: a function of a service
-/// or of a resource taking one, itself or inside a container, is refused, and so is a record or a
-/// variant holding one, which the bindings replace with a type holding their handle, which only a
-/// component creates, so it is component-only and the refusal points to a tuple.
+/// Owned native arguments use the same linear payload slots for functions and resource members.
 #[test]
-fn the_native_side_refuses_a_resource_it_cannot_carry() {
-    let taken =
-        "a resource; natively a resource is only returned, or borrowed as a method's `self`";
-    for (from, to, message) in [
+fn native_functions_consume_owned_resources() {
+    for (from, to, method) in [
         (
             "pub fn open(n: u32) -> Session { Session::new(n) }",
-            "pub fn open(n: u32) -> Session { Session::new(n) }
-            pub fn close(session: Session) -> u32 { session.n }",
-            format!("`Sessions::close` takes `Session`, {taken}"),
+            "pub fn open(n: u32) -> Session { Session::new(n) } pub fn close(session: Session) -> u32 { session.n }",
+            "close",
         ),
         (
             "pub fn open(n: u32) -> Session { Session::new(n) }",
-            "pub fn open(n: u32) -> Session { Session::new(n) }
-            pub fn close_all(sessions: Vec<Session>) {}",
-            format!("`Sessions::close_all` takes `Vec<Session>`, which holds `Session`, {taken}"),
+            "pub fn open(n: u32) -> Session { Session::new(n) } pub fn close_all(sessions: Vec<Session>) {}",
+            "close-all",
         ),
         (
             "pub fn get(&self) -> u32 { self.n }",
-            "pub fn get(&self) -> u32 { self.n }
-            pub fn merge(&self, other: Session) -> u32 { self.n + other.n }",
-            format!("`Session::merge` takes `Session`, {taken}"),
+            "pub fn get(&self) -> u32 { self.n } pub fn merge(&self, other: Session) -> u32 { self.n + other.n }",
+            "[method]session.merge",
         ),
         (
             "pub fn new(n: u32) -> Session { Session { n } }",
             "pub fn new(n: u32, from: Option<Session>) -> Session { Session { n } }",
-            format!("`Session::new` takes `Option<Session>`, which holds `Session`, {taken}"),
-        ),
-        (
-            "pub fn open(n: u32) -> Session { Session::new(n) }",
-            "pub fn open(n: u32) -> Session { Session::new(n) }
-            pub fn lend(n: u32) -> Lease { todo!() }
-        }
-        pub struct Lease { pub session: Session, pub count: u32 }
-        impl Sessions {",
-            "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the native boundary carries a resource beside the data, as a handle, never inside the JSON of a record: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`".to_owned(),
+            "[constructor]session",
         ),
     ] {
-        let module = orb_with(options("example:desk@1.0.0", None), &DESK.replace(from, to))
-            .unwrap_or_else(|error| panic!("{message}: {error}"));
-        assert_eq!(native(&module, &[]), unsupported(&message), "{message}");
-        assert!(wit(&module).starts_with("package "), "{message}");
+        let module = expanded("example:desk@1.0.0", &DESK.replace(from, to));
+        let generated = native(&module, &["sessions"]);
+        assert!(
+            generated.contains(&format!(". payload_method (\"{method}\"")),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("__tembra_payload . receive :: < Session > (moved)"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("__tembra_input . attach_argument"),
+            "{generated}"
+        );
+        assert!(!generated.contains("\"native\""), "{generated}");
     }
+}
+
+/// Authored resource records still require generated component handle types.
+#[test]
+fn the_native_side_refuses_a_resource_it_cannot_carry() {
+    let source = DESK.replace(
+        "pub fn open(n: u32) -> Session { Session::new(n) }",
+        "pub fn open(n: u32) -> Session { Session::new(n) } pub fn lend(n: u32) -> Lease { todo!() } } pub struct Lease { pub session: Session, pub count: u32 } impl Sessions {",
+    );
+    let module = expanded("example:desk@1.0.0", &source);
+    let message = "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding a resource is component-only, since the native boundary carries a resource beside the data, as a handle, never inside the JSON of a record: to return the resource natively too, return it in a tuple beside the data, such as `-> (Session, String)`";
+    assert_eq!(native(&module, &[]), unsupported(message));
+    assert!(wit(&module).starts_with("package "));
 }
 
 /// An `async` method of a WIT resource borrows its `self` natively from the guard its call's
@@ -7722,10 +7734,10 @@ fn the_factory_of_its_service_declares_a_state_natively() {
         format!("pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < (() , {stated}) >"),
         "| declaration | { let state = self :: super :: __tembra_state :: declare :: < super :: ledger :: Total > (& declaration , 1u32 , \"Total\" , | _ : & super :: ledger :: Total | :: core :: result :: Result :: Ok (()) ,) ? ; :: core :: result :: Result :: Ok ((() , state)) }".to_owned(),
         format!(". method_with (\"count\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }}) , __TEMBRA_CODEC_COUNT ,)"),
-        format!(". payload_method (\"issue\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{"),
+        format!(". payload_method (\"issue\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{"),
         format!(", | object : & (() , {stated}) | object . 1 . clone ())"),
         format!("pub (crate) fn __tembra_resource_ticket < E : 'static > (service : :: tembra :: Service < E > , __tembra_state_of : fn (& E) -> {stated}) -> :: tembra :: Service < E >"),
-        ". payload_method (\"[constructor]ticket\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
+        ". payload_method (\"[constructor]ticket\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
         ". payload_method (\"[method]ticket.sum\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
     ] {
         assert!(ledger.contains(&expected), "{expected}\n{ledger}");
@@ -8094,34 +8106,17 @@ fn a_resource_in_a_service_module_belongs_to_each_object_of_the_service() {
     );
 }
 
-/// What the native side does not cover yet leaves the module compiling inside the facade's wrapper,
-/// with an `orb()` that answers an error naming it, and a component build of the module unaffected:
-/// a WASI import and a native hook declaration, whose `run` needs the component's suspension.
+/// A WASI import still leaves the module compiling and refuses native installation explicitly.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
-    let service = "pub mod ledger { #[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } } }";
-    for (options, module, message) in [
-        (
-            Options {
-                imports: vec![literal("wasi:random/random@0.3.0")],
-                ..options(PACKAGE, None)
-            },
-            ledger("#[service]"),
-            "the import of wasi:random/random@0.3.0 is not supported natively yet".to_owned(),
-        ),
-        (
-            options(PACKAGE, None),
-            format!(
-                "mod book {{ #[hook(composition = series, input = Admission)] pub struct Guard; pub struct Admission {{ pub value: i32 }} {service} }}"
-            ),
-            "the declaration of the hook example:book/guard@1.0.0 works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook".to_owned(),
-        ),
-    ] {
-        let module =
-            orb_with(options, &module).unwrap_or_else(|error| panic!("{message}: {error}"));
-        assert_eq!(native(&module, &[]), unsupported(&message), "{message}");
-        assert!(wit(&module).starts_with("package "), "{message}");
-    }
+    let message = "the import of wasi:random/random@0.3.0 is not supported natively yet";
+    let configured = Options {
+        imports: vec![literal("wasi:random/random@0.3.0")],
+        ..options(PACKAGE, None)
+    };
+    let module = orb_with(configured, &ledger("#[service]")).unwrap();
+    assert_eq!(native(&module, &[]), unsupported(message));
+    assert!(wit(&module).starts_with("package "));
 }
 
 /// A synchronous WIT function keeps its calling convention, with an awaitable native import.
@@ -8266,7 +8261,7 @@ fn an_import_of_async_functions_is_served_natively() {
         ". service (self :: __TembraRegistry :: < 1 > :: __tembra_service_ledger (name , & imports))",
         "pub struct Providers { # [doc = \" The Orb answering the import of `example:pace/clock@1.0.0`, at its `main` object.\"] pub clock : :: tembra :: Provider , }",
         "let requirement = entry (& mut requirements , & providers . clock) ? ; let service = :: std :: format ! (\"{}::{}\" , providers . clock . name , \"example:pace/clock@1.0.0\") ;",
-        "pub mod clock { # [allow (unused_imports)] pub use super :: example :: pace :: clock :: * ;",
+        "pub mod clock { pub use super :: example :: pace :: clock :: Tick ;",
         "# [doc = \" Wait until `value` and return it.\"] pub async fn wait (value : u64) -> u64 { let __tembra_call = super :: __tembra_import :: current () ;",
         "pub async fn last (labels : :: std :: vec :: Vec < :: std :: string :: String >) -> :: core :: option :: Option < super :: example :: pace :: clock :: Tick > {",
         ". issue (__tembra_call . imports . clock . reference () . issue_portable :: < _ , :: tembra :: portable :: Delivered > (& __tembra_call . context , \"last\" , __tembra_input))",
@@ -8283,8 +8278,7 @@ fn an_import_of_async_functions_is_served_natively() {
         assert!(ledger.contains(expected), "{expected}\n{ledger}");
     }
     assert!(
-        tokens(&module)
-            .contains(":: tembra :: __guest ! { pub use self :: example :: pace :: clock ; }"),
+        tokens(&module).contains("pub mod clock { extern crate alloc as __tembra_alloc ;"),
         "{}",
         tokens(&module)
     );
@@ -8560,7 +8554,7 @@ fn a_nested_option_in_a_derived_hooks_input_is_refused() {
                     use super::{{Order, Ordered}};
                     #[service]
                     pub struct Ledger;
-                    impl Ledger {{ pub fn order() {{ Ordered::run(Order {{ at: None }}) }} }}
+                    impl Ledger {{ pub async fn order() {{ Ordered::run(Order {{ at: None }}).await }} }}
                 }}
             }}"
         )
@@ -8871,9 +8865,9 @@ fn free_json_and_a_newtype_cross_beside_a_resource_and_into_a_derived_hook() {
         "impl __TembraImportNewtype for Code { type Import = String ;".to_owned(),
         "fn __tembra_into_import (self) -> Self :: Import { :: core :: convert :: Into :: into (self . 0) } }".to_owned(),
         "fn apply (_input : exports :: example :: book :: audit :: Event) -> :: core :: option :: Option < exports :: example :: book :: audit :: Event > {".to_owned(),
-        format!("pub fn run (input : Event) -> :: core :: option :: Option < Event > {{ let input : {import} :: Event = {into} (input) ; let answer = {import} :: apply (& input) ; answer . map (| item | {into} (item)) }}"),
+        format!("pub async fn run (input : Event) -> :: core :: option :: Option < Event > {{ let input : {import} :: Event = {into} (input) ; let answer = {import} :: apply (& input) ; answer . map (| item | {into} (item)) }}"),
         "fn apply (_input : < Code as __TembraNewtype > :: Bindings) -> < Code as __TembraNewtype > :: Bindings {".to_owned(),
-        "pub fn run (input : Code) -> Code { let input : < Code as __TembraImportNewtype > :: Import = < Code as __TembraImportNewtype > :: __tembra_into_import (input) ; let answer = self :: example :: book :: coded :: apply (& input) ; < Code as __TembraImportNewtype > :: __tembra_from_import (answer) }".to_owned(),
+        "pub async fn run (input : Code) -> Code { let input : < Code as __TembraImportNewtype > :: Import = < Code as __TembraImportNewtype > :: __tembra_into_import (input) ; let answer = self :: example :: book :: coded :: apply (& input) ; < Code as __TembraImportNewtype > :: __tembra_from_import (answer) }".to_owned(),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
@@ -10079,4 +10073,99 @@ fn every_reader_of_the_bundled_packages_takes_them_parsed_once() {
         1,
         "the bundled WASI packages are parsed once"
     );
+}
+
+/// Canonical roots reject a package identity with two different defining owners.
+#[test]
+fn canonical_package_roots_refuse_duplicate_package_identities() {
+    let first = consumed(
+        "canonical-first",
+        "package example:duplicate@1.0.0; interface types { type name = string; }",
+    );
+    let second = consumed(
+        "canonical-second",
+        "package example:duplicate@1.0.0; interface types { type name = u32; }",
+    );
+    let problem = refused_with(
+        Options {
+            wit_roots: vec![first.display().to_string(), second.display().to_string()],
+            ..options("example:consumer@1.0.0", None)
+        },
+        "mod consumer { pub mod api { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } } }",
+    );
+    assert!(
+        problem.contains("WIT package example:duplicate@1.0.0 is defined by both"),
+        "{problem}"
+    );
+}
+
+/// Cycles are resolved by the official WIT dependency resolver, before generating either target.
+#[test]
+fn canonical_package_roots_refuse_dependency_cycles() {
+    let first = consumed(
+        "canonical-cycle-first",
+        "package example:first@1.0.0; interface types { use example:second/types@1.0.0.{second}; type first = second; }",
+    );
+    let second = consumed(
+        "canonical-cycle-second",
+        "package example:second@1.0.0; interface types { use example:first/types@1.0.0.{first}; type second = first; }",
+    );
+    let problem = refused_with(
+        Options {
+            wit_roots: vec![first.display().to_string(), second.display().to_string()],
+            ..options("example:consumer@1.0.0", None)
+        },
+        "mod consumer { pub mod api { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } } }",
+    );
+    assert!(problem.contains("cycle"), "{problem}");
+}
+
+/// A missing package is not acquired or replaced by a local schema copy.
+#[test]
+fn canonical_package_roots_refuse_missing_dependencies() {
+    let first = consumed(
+        "canonical-missing",
+        "package example:first@1.0.0; interface types { use example:absent/types@1.0.0.{second}; type first = second; }",
+    );
+    let problem = refused_with(
+        Options {
+            wit_roots: vec![first.display().to_string()],
+            ..options("example:consumer@1.0.0", None)
+        },
+        "mod consumer { pub mod api { #[service] pub struct Api; impl Api { pub fn count() -> u32 { 1 } } } }",
+    );
+    assert!(problem.contains("example:absent@1.0.0"), "{problem}");
+}
+
+/// Context and transport error authoring on resources retain the service's native-only rule.
+#[test]
+fn resource_context_and_transport_results_are_explicitly_native_only() {
+    let module = expanded(
+        PACKAGE,
+        "mod book { pub mod sessions {
+            #[wit_resource] pub struct Session;
+            impl Session {
+                pub fn read(&self, context: &tembra::Context) -> String { todo!() }
+                pub async fn next(&self) -> tembra::Result<Result<Option<String>, String>> { todo!() }
+            }
+            #[service] pub struct Sessions;
+            impl Sessions { pub fn open() -> Session { Session } }
+        } }",
+    );
+    let contract = wit(&module);
+    assert!(contract.contains("read: func() -> string;"), "{contract}");
+    assert!(
+        contract.contains("next: async func() -> result<option<string>, string>;"),
+        "{contract}"
+    );
+    let generated = tokens(&module);
+    for marker in ["&Context", "tembra::Result"] {
+        let message = format!(
+            "`{marker}` makes this module native only, which a component build refuses: leave it out of a component, or compile the module for native targets only, under `#[cfg(not(target_arch = \"wasm32\"))]`"
+        );
+        let refused =
+            quote::quote!(#[cfg(target_arch = "wasm32")] ::core::compile_error!(#message);)
+                .to_string();
+        assert!(generated.contains(&refused), "{generated}");
+    }
 }

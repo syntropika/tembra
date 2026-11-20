@@ -26,11 +26,11 @@ mod gate {
 
         impl Admissions {
             /// Run the guard hook over a fresh admission and report what the contributors decided.
-            pub fn admit(value: i32) -> Admission {
+            pub async fn admit(value: i32) -> Admission {
                 Guard::run(Admission {
                     value,
                     blocked: false,
-                })
+                }).await
             }
         }
     }

@@ -1,0 +1,38 @@
+package example:rpc-resources@1.0.0;
+
+interface gate {
+  wait: async func() -> u32;
+}
+
+interface codec {
+  resource decoder {
+    constructor(seed: u64);
+    zero: static func() -> decoder;
+    total: func() -> u64;
+    push: func(frame: u64) -> u64;
+    next: async func() -> option<u64>;
+    wait: async func() -> u64;
+    merge: func(other: decoder) -> u64;
+  }
+  type decoder-alias = decoder;
+  open: func(seed: u64) -> decoder-alias;
+  consume: func(value: decoder-alias) -> u64;
+  consume-many: func(values: tuple<list<option<decoder>>, result<decoder, string>>) -> u64;
+  pair: func(seed: u64) -> tuple<decoder, list<option<decoder>>>;
+  float: func(value: f64) -> f64;
+  stats: func() -> tuple<u32, u32>;
+}
+
+interface values {
+  record limits { unsigned-max: u64, signed-min: s64, signed-max: s64 }
+  variant choice { empty, limits(limits) }
+  echo: func(value: limits) -> limits;
+  wait: async func(value: limits) -> limits;
+  nested: async func(values: list<option<tuple<u64, s64>>>, selected: choice, outcome: result<limits, s64>) -> tuple<list<option<tuple<u64, s64>>>, choice, result<limits, s64>>;
+}
+
+world provider {
+  import gate;
+  export codec;
+  export values;
+}

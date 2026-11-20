@@ -251,7 +251,8 @@ Expiry rejects the observed operation and revokes its authority immediately. It 
 that the guest exited: invocation and resource pins remain until the actual task and its host
 operations settle. If a quarantined task never acknowledges exit, shutdown keeps waiting.
 
-These capabilities travel only through the private component transport. Ordinary data-only
+These capabilities travel through the private component transport and the Rust server's
+[resource-aware RPC delivery](rpc-resources.md). Ordinary data-only
 host calls refuse a resource or stream result and close the complete batch. Result attachments
 are checked against their nominal WIT identities and consumed exactly once; malformed data,
 duplicate or unused attachments and failed delivery close every owner.
@@ -396,10 +397,12 @@ asynchronous WIT methods return promises. `decoder.release()` closes its existin
 resource, and stale aliases cannot call it again. All supported containers keep their resource
 wrappers, bigint positions, tagged results and nullable options.
 
-Resource clients require the SDK's matched prepared capability delivery, currently provided by
-prepared browser components. Data-only Node/mobile transports, RPC and ordinary application
-handlers cannot carry WIT owners and are explicitly refused. This generator does not add a
-cross-process handle protocol. Explicit borrows, streams and futures remain unsupported. See
+Resource clients require the SDK's matched capability delivery, provided by prepared browser
+components and Rust-hosted RPC. Pass a `RemoteHost` to the same generated `get` function to call
+native or compiled providers from a browser or Tauri webview. See [WIT resources over RPC](rpc-resources.md)
+for ownership, cancellation and protocol compatibility. Data-only Node/mobile transports and
+ordinary application handlers remain unsupported. Explicit borrows, streams and futures remain
+unsupported. See
 [native WIT composition](native-imports.md) for the Rust interface and verification fixtures.
 
 ## Install an artifact

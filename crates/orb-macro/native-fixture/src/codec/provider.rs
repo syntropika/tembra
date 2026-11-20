@@ -18,6 +18,12 @@ pub mod provider {
             pub fn normalize(value: u64) -> u64 {
                 value + 1
             }
+            /// Retain owned strings and lists inside synchronous WIT containers.
+            pub fn echo(
+                value: (Option<String>, Result<Vec<String>, String>),
+            ) -> (Option<String>, Result<Vec<String>, String>) {
+                value
+            }
             /// Return a decoder owned by this provider.
             pub fn open(seed: u64) -> Decoder {
                 Decoder::new(seed)
@@ -53,6 +59,10 @@ pub mod provider {
             /// Read the decoder's state synchronously.
             pub fn total(&self) -> u64 {
                 self.total.get()
+            }
+            /// Borrow the decoder while accepting an owned string in the common import API.
+            pub fn label(&self, value: String) -> String {
+                format!("{}:{value}", self.total.get())
             }
             /// Suspend for one scheduler turn and resume with the same decoder.
             pub async fn next(&self) -> Option<u64> {

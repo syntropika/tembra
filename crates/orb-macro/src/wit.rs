@@ -1,4 +1,5 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
+mod inputs;
 use crate::foreign::{Foreign, Modules};
 use crate::resource_params::{self, Derived};
 use crate::{
@@ -672,6 +673,9 @@ pub(crate) fn bundled_copies(parsed: &Parsed, kernel: bool) -> syn::Result<Copie
     let Some(dir) = parsed.dir() else {
         return Ok(Copies::new());
     };
+    if dir.composed.is_some() {
+        return Ok(Copies::new());
+    }
     let (consumed, sources) = (dir.packages()?, dir.sources()?);
     // The bundled packages by the names their sources declare: resolved together with the
     // consumed ones, each would be found as its own copy.
@@ -948,19 +952,64 @@ pub(crate) struct Parsed {
 pub(crate) struct Directory {
     path: PathBuf,
     packages: OnceCell<syn::Result<(Resolve, PackageSourceMap)>>,
+    composed: Option<inputs::Composed>,
 }
 
 impl Parsed {
     /// Nothing parsed yet, of the consumed directory `dir`, if the attribute names one.
-    pub(crate) fn new(dir: Option<PathBuf>) -> Self {
-        Parsed {
-            dir: dir.map(|path| Directory {
+    pub(crate) fn new(dir: Option<PathBuf>, roots: Vec<PathBuf>) -> syn::Result<Self> {
+        let directory = match (dir, roots.is_empty()) {
+            (Some(_), false) => {
+                return Err(error(
+                    "use one `wit` option, with a directory or a list of canonical package paths",
+                ));
+            }
+            (Some(path), true) => Some(Directory {
                 path,
                 packages: OnceCell::new(),
+                composed: None,
             }),
+            (None, false) => Some(Directory {
+                path: roots[0].clone(),
+                packages: OnceCell::new(),
+                composed: Some(inputs::compose(&roots)?),
+            }),
+            (None, true) => None,
+        };
+        Ok(Parsed {
+            dir: directory,
             bundled: OnceCell::new(),
             guest: OnceCell::new(),
-        }
+        })
+    }
+
+    /// The on-disk dependency directory, absent when canonical roots are embedded in memory.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.dir
+            .as_ref()
+            .filter(|dir| dir.composed.is_none())
+            .map(Directory::path)
+    }
+
+    /// Canonical packages embedded as part of the derived contract instead of staged on disk.
+    pub(crate) fn inline(&self) -> Option<&str> {
+        self.dir
+            .as_ref()?
+            .composed
+            .as_ref()
+            .map(|composed| composed.inline.as_str())
+    }
+
+    /// Track canonical source files through Rust's ordinary dependency tracking.
+    pub(crate) fn tracking(&self) -> proc_macro2::TokenStream {
+        let files = self
+            .dir
+            .as_ref()
+            .and_then(|dir| dir.composed.as_ref())
+            .into_iter()
+            .flat_map(|composed| &composed.files)
+            .map(|path| LitStr::new(&path.display().to_string(), Span::call_site()));
+        quote::quote! { #(const _: &[u8] = ::core::include_bytes!(#files);)* }
     }
 
     /// The consumed directory, if the attribute names one.
@@ -999,7 +1048,10 @@ impl Directory {
 
     /// The directory's packages, parsed the first time.
     pub(crate) fn packages(&self) -> syn::Result<&Resolve> {
-        self.parsed().map(|(packages, _)| packages)
+        match &self.composed {
+            Some(composed) => Ok(&composed.resolve),
+            None => self.parsed().map(|(packages, _)| packages),
+        }
     }
 
     /// The files each of the directory's packages was read from, parsed the first time: the files
@@ -1138,6 +1190,7 @@ pub(crate) struct ConsumedTypes {
     resolve: Resolve,
     interfaces: BTreeMap<String, wit_parser::InterfaceId>,
     exported: BTreeSet<String>,
+    shared_imports: BTreeSet<String>,
 }
 
 impl ConsumedTypes {
@@ -1171,7 +1224,23 @@ impl ConsumedTypes {
             resolve,
             interfaces: read,
             exported,
+            shared_imports: BTreeSet::new(),
         })
+    }
+
+    /// Reuse the exported types of hooks whose imports the component bindings map to exports.
+    pub(crate) fn share_imports(&mut self, interfaces: impl IntoIterator<Item = String>) {
+        self.shared_imports.extend(interfaces);
+    }
+
+    /// The defining module of an imported interface, including a declared hook's shared types.
+    pub(crate) fn imported_module(&self, identity: &str, depth: usize) -> proc_macro2::TokenStream {
+        let path = crate::hook_path(identity);
+        if self.shared_imports.contains(identity) {
+            crate::export_module(depth, &path)
+        } else {
+            crate::import_module(depth, &path)
+        }
     }
 
     /// The interface `identity`, when it was read.
@@ -1253,10 +1322,49 @@ impl ConsumedTypes {
         }
     }
 
+    /// Whether the value contains an owned capability or is a resource declaration itself.
+    pub(crate) fn carries_resource(&self, ty: wit_parser::Type) -> bool {
+        anywhere(&self.resolve, ty, |ty| {
+            matches!(
+                self.definition(ty),
+                Ok((
+                    _,
+                    TypeDefKind::Resource | TypeDefKind::Handle(wit_parser::Handle::Own(_))
+                ))
+            )
+            .then_some(())
+        })
+        .is_some()
+    }
+
+    /// How the pinned component bindings borrow a synchronous import parameter.
+    pub(crate) fn passed(&self, ty: wit_parser::Type) -> Passed {
+        passed(&self.resolve, ty)
+    }
+
     /// The bindings' type of a record, a variant, an enum or a flags, as a module `depth` levels
     /// below the Orb module names it: the module of the interface that defines it, under `exports`
     /// when the world exports that interface and at the root when it imports it, then its name.
     pub(crate) fn path(&self, id: wit_parser::TypeId, depth: usize) -> proc_macro2::TokenStream {
+        self.binding_path(id, depth, false)
+    }
+
+    /// The import copy, shared with exports only for declared hooks mapped by the bindings.
+    pub(crate) fn imported_path(
+        &self,
+        id: wit_parser::TypeId,
+        depth: usize,
+    ) -> proc_macro2::TokenStream {
+        self.binding_path(id, depth, true)
+    }
+
+    /// Resolve a bindings path without conflating an import with its exported copy.
+    fn binding_path(
+        &self,
+        id: wit_parser::TypeId,
+        depth: usize,
+        imported: bool,
+    ) -> proc_macro2::TokenStream {
         let definition = &self.resolve.types[id];
         let identity = match definition.owner {
             wit_parser::TypeOwner::Interface(owner) => self.resolve.id_of(owner),
@@ -1265,7 +1373,9 @@ impl ConsumedTypes {
         .unwrap_or_default();
         let ident = crate::type_ident(definition.name.as_deref().unwrap_or_default());
         let path = crate::hook_path(&identity);
-        let module = if self.exported.contains(&identity) {
+        let module = if self.shared_imports.contains(&identity)
+            || (!imported && self.exported.contains(&identity))
+        {
             crate::export_module(depth, &path)
         } else {
             crate::import_module(depth, &path)

@@ -65,7 +65,9 @@ No general structured task tree, cross-host finalization or forced callback term
 ## Native RPC byte adapter
 
 The `rpc` feature exposes `tembra::rpc::{serve, Options, Connection}` for the
-SDK JSON `describe`, `get`, `call`, `release`, `cancel` and State envelopes. Native serde methods use
+SDK JSON `describe`, `get`, `call`, `release`, `cancel`, `accept` and State envelopes.
+Negotiated owned-resource delivery uses these same operations and the portable owner abstraction
+for both native and compiled providers; see [WIT resources over RPC](rpc-resources.md). Native serde methods use
 tuple arguments and `()` for no arguments. Tagged BigInt/byte values use their portable JSON representation. A newly acquired claim advertises the kernel's effective method intersection;
 forged requests remain subject to normal core invocation checks.
 

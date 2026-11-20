@@ -41,7 +41,9 @@
 //! `cargo tembra build` compiles the crate, reads the same WIT and the hook priorities from the
 //! component and packages the artifact.
 mod cfg;
+mod contract_output;
 mod foreign;
+mod imports;
 mod keyed;
 mod metadata;
 mod native;
@@ -130,7 +132,23 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
         if meta.path.is_ident("package") {
             options.package = Some(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("wit") {
-            options.wit = Some(meta.value()?.parse::<LitStr>()?.value());
+            let value = meta.value()?;
+            if value.peek(syn::token::Bracket) {
+                let content;
+                syn::bracketed!(content in value);
+                options.wit_roots = content
+                    .parse_terminated(|input| input.parse::<LitStr>(), Token![,])?
+                    .into_iter()
+                    .map(|path| path.value())
+                    .collect();
+                if options.wit_roots.is_empty() {
+                    return Err(meta.error("`wit` needs at least one canonical package path"));
+                }
+            } else {
+                options.wit = Some(value.parse::<LitStr>()?.value());
+            }
+        } else if meta.path.is_ident("contract") {
+            options.contract = Some(contract_output::parse(meta.value()?.parse()?)?);
         } else if meta.path.is_ident("import") && meta.input.peek(syn::token::Paren) {
             options.keyed.push(keyed::option(&meta)?);
         } else if meta.path.is_ident("import") {
@@ -149,7 +167,7 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
             })?);
         } else {
             return Err(meta.error(
-                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", import(\"ns:name/interface@version\", keyed), context, no_std, crate = \"name\")]",
+                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", contract = env!(\"OUT_DIR\"), import = \"ns:name/interface@version\", import(\"ns:name/interface@version\", keyed), context, no_std, crate = \"name\")]",
             ));
         }
         Ok(())
@@ -220,6 +238,10 @@ struct Options {
     package: Option<LitStr>,
     /// A directory with the WIT packages this Orb consumes, relative to the crate manifest.
     wit: Option<String>,
+    /// Canonical package roots resolved together without a staged dependency directory.
+    wit_roots: Vec<String>,
+    /// The explicit contract output directory, literal or named by Cargo's environment.
+    contract: Option<contract_output::Output>,
     /// The module imports the kernel's `tembra:guest/context` interface.
     context: bool,
     /// Supply the allocator and panic handler for a freestanding Wasm guest.
@@ -768,6 +790,16 @@ struct Module {
 }
 
 impl Module {
+    /// Compile component bridges only where component handles and import wrappers exist.
+    fn guest_generated(&mut self, facade: &Ident) {
+        for generated in &mut self.generated {
+            *generated = quote! { ::#facade::__guest! { #generated } };
+        }
+        for child in &mut self.children {
+            child.guest_generated(facade);
+        }
+    }
+
     /// The module of scope `scope`, which the scan registered below this one.
     fn at(&mut self, scope: usize) -> &mut Module {
         let mut module = self;
@@ -1811,15 +1843,13 @@ fn expand(
     // and `contract/deps/` with the standard packages, the files `cargo tembra build` writes,
     // rewritten only when their content changes. A compile error names what went wrong.
     if let Some(crate_dir) = crate_dir {
+        let output = contract_output::directory(analysis.options.contract.as_ref(), crate_dir)?;
         tembra_contracts::ModuleContract::new(&analysis.wit, analysis.wit_dir.as_deref())
-            .and_then(|contract| contract.write(crate_dir))
+            .and_then(|contract| contract.write_to(&output))
             .map_err(|error| {
                 syn::Error::new(
                     analysis.ident.span(),
-                    format!(
-                        "writing the contract into {}: {error}",
-                        crate_dir.join("contract").display()
-                    ),
+                    format!("writing the contract into {}: {error}", output.display()),
                 )
             })?;
     }
@@ -1827,10 +1857,14 @@ fn expand(
     let vis = &analysis.vis;
     let ident = &analysis.ident;
     let wit_literal = LitStr::new(&analysis.wit, Span::call_site());
+    let output_tracking = contract_output::tracking(analysis.options.contract.as_ref());
+    let source_tracking = analysis.parsed.tracking();
     Ok(quote! {
         #(#outer_attrs)*
         #vis mod #ident {
             #(#inner_attrs)*
+            #output_tracking
+            #source_tracking
 
             /// The WIT derived from this module.
             pub const WIT: &str = #wit_literal;
@@ -2119,7 +2153,36 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             if constructor.is_some_and(|marked| marked.function.sig.ident == function.sig.ident) {
                 continue;
             }
-            match resource_function(function)? {
+            let read = resource_function(function, &facade)?;
+            let (ResourceFunction::Method(member) | ResourceFunction::Static(member)) = &read;
+            if member.context.is_some()
+                && declares(&mut tree, &candidates, resource.scope, "Context")
+            {
+                return Err(syn::Error::new(
+                    member.ident.span(),
+                    format!(
+                        "`{}::{}` takes `&Context`, and this module declares a `Context` of its own: pass that type owned, as WIT parameters are, or rename it for the method to take the call's `&Context`",
+                        resource.ident, member.ident
+                    ),
+                ));
+            }
+            for input in &function.sig.inputs {
+                if let FnArg::Typed(typed) = input
+                    && is_context(&typed.ty)
+                {
+                    native_only.push(NativeOnly {
+                        name: "&Context".to_owned(),
+                        span: typed.ty.span(),
+                    });
+                }
+            }
+            if let (true, ReturnType::Type(_, ty)) = (member.fallible, &function.sig.output) {
+                native_only.push(NativeOnly {
+                    name: format!("{facade}::Result"),
+                    span: ty.span(),
+                });
+            }
+            match read {
                 ResourceFunction::Method(method) => resource.methods.push(method),
                 ResourceFunction::Static(function) => resource.statics.push(function),
             }
@@ -2484,8 +2547,15 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     }
     // Consumed packages, parsed once for the expansion: the callback of every hook, contributed or
     // declared, and every interface implemented or imported are read from their WIT packages.
-    let parsed = wit::Parsed::new(options.wit.as_deref().map(wit::absolute).transpose()?);
-    let wit_dir = parsed.dir().map(|dir| dir.path().to_path_buf());
+    let parsed = wit::Parsed::new(
+        options.wit.as_deref().map(wit::absolute).transpose()?,
+        options
+            .wit_roots
+            .iter()
+            .map(|path| wit::absolute(path))
+            .collect::<syn::Result<_>>()?,
+    )?;
+    let wit_dir = parsed.path().map(Path::to_path_buf);
     let implemented: Vec<String> = services
         .iter()
         .filter_map(|service| service.implements.clone())
@@ -2686,12 +2756,13 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
     // a contributed hook, so the bindings generate their types under `exports`, and imports the
     // others, whose types they generate at the root, an interface imported by key too, whose view
     // `use`s them.
-    let consumed_types = match parsed.dir() {
+    let mut consumed_types = match parsed.dir() {
         Some(dir)
             if !implemented.is_empty()
                 || !imported.is_empty()
                 || !views.is_empty()
-                || !hooks.is_empty() =>
+                || !hooks.is_empty()
+                || declared.iter().any(|hook| hook.input.is_none()) =>
         {
             wit::ConsumedTypes::read(
                 dir,
@@ -2699,12 +2770,25 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                     .iter()
                     .map(|identity| (identity.as_str(), true))
                     .chain(hooks.keys().map(|hook| (hook.as_str(), true)))
+                    .chain(
+                        declared
+                            .iter()
+                            .filter(|hook| hook.input.is_none())
+                            .map(|hook| (hook.hook.as_str(), true)),
+                    )
                     .chain(imported.iter().map(|identity| (identity.as_str(), false)))
                     .chain(views.iter().map(|view| (view.target.as_str(), false))),
             )?
         }
         _ => wit::ConsumedTypes::default(),
     };
+    consumed_types.share_imports(
+        declared
+            .iter()
+            .filter(|hook| hook.input.is_none())
+            .map(|hook| hook.hook.clone()),
+    );
+    let consumed_modules = consumed_modules.with_imported_resources(&consumed_types);
     // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
     // of its resources is a #[wit_resource] struct of the same name with the resource's functions.
     for service in services
@@ -2810,7 +2894,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             *spelling = consumed_modules.spelled(ty, resource.scope)?;
         }
     }
-    let wit = wit::render(
+    let mut wit = wit::render(
         &package,
         &world,
         wit::Items {
@@ -2832,6 +2916,9 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             context: options.context,
         },
     )?;
+    if let Some(inline) = parsed.inline() {
+        wit.push_str(inline);
+    }
     Ok(Analysis {
         options,
         package,
@@ -2895,7 +2982,6 @@ fn component(
         callbacks,
         consumed,
         consumed_modules,
-        views,
         parsed,
         serialized,
         shapes,
@@ -3066,6 +3152,7 @@ fn component(
             &consumed[identity],
             wit_resources,
             modules,
+            consumed_modules,
         )?;
         tree.at(service.scope).generated.push(bridge);
         for (scope, implementation) in implementations {
@@ -3089,19 +3176,19 @@ fn component(
             let [ns, package, interface] = hook_path(identity);
             quote! { pub use exports::#ns::#package::#interface; }
         })
-        .chain(imports.iter().map(|identity| {
-            let [ns, package, interface] = hook_path(identity);
-            guest_only(
-                &interface,
-                quote! { pub use self::#ns::#package::#interface; },
-            )
-        }))
         .chain(
-            views
+            imports
                 .iter()
-                .zip(keyed::reexports(package, views))
-                .map(|(view, reexport)| guest_only(&rust_ident(&view.name), reexport)),
+                .filter(|identity| wasi::is_wasi(identity))
+                .map(|identity| {
+                    let [ns, package, interface] = hook_path(identity);
+                    guest_only(
+                        &interface,
+                        quote! { pub use self::#ns::#package::#interface; },
+                    )
+                }),
         );
+    let import_modules = imports::modules(analysis, served);
     // The kernel's context interface is re-exported as `context`, so the author writes
     // `context::principal()`; only in a component build, as a native host gets the native side's
     // `context` instead.
@@ -3228,6 +3315,23 @@ fn component(
                 .map(|(newtype, _)| newtype.scope),
         )
         .collect();
+    if !served.is_empty()
+        && analysis.imports.iter().any(|identity| {
+            analysis
+                .consumed_types
+                .interface(identity)
+                .is_some_and(|interface| {
+                    interface.types.values().any(|id| {
+                        analysis
+                            .consumed_types
+                            .carries_resource(wit_parser::Type::Id(*id))
+                    })
+                })
+        })
+    {
+        // Native resource wrappers own portable claims, while these bridges own guest handles.
+        tree.guest_generated(&facade);
+    }
     for scope in &alloc_scopes {
         tree.at(*scope)
             .generated
@@ -3244,7 +3348,7 @@ fn component(
             &holding,
             defining.as_ref(),
             converting,
-            depth,
+            (depth, &facade),
         )?;
         tree.at(declaration.scope).generated.push(code);
     }
@@ -3278,10 +3382,14 @@ fn component(
         standard.clone()
     };
     let inline = LitStr::new(&format!("{wit}{beside}"), Span::call_site());
-    let path = parsed.dir().map(|dir| {
-        let dir = LitStr::new(&dir.path().display().to_string(), Span::call_site());
-        quote! { path: #dir, }
-    });
+    // Complete inline documents must not load the author's implicit `wit/` directory.
+    let path = parsed.path().map_or_else(
+        || quote! { path: [], },
+        |dir| {
+            let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
+            quote! { path: #dir, }
+        },
+    );
     // A state's JSON holds the consumed types it reaches as the bindings generate them: those
     // types alone, and the types they hold, take serde's derives, each selected by its full name.
     let serialized = serialized
@@ -3363,6 +3471,7 @@ fn component(
         _ => (quote! {}, quote! {}),
     };
     let generate = quote! {
+        mod __tembra_bindings {
         ::#facade::__wit_bindgen::generate!({
             #path
             inline: #inline,
@@ -3373,6 +3482,8 @@ fn component(
             #derives
             #with
         });
+        }
+        use self::__tembra_bindings::*;
         #declared_imports
     };
     let runtime_prelude = options.no_std.then(|| prelude(Some(&options.facade())));
@@ -3423,6 +3534,7 @@ fn component(
 
         #context_module
         #(#consumed_modules)*
+        #import_modules
         #(#hook_modules)*
 
         #body
@@ -3435,10 +3547,10 @@ fn component(
         #state_code
         #resource_code
         // The exports are symbols, which two Orb crates linked into one native binary would
-        // both define. A host build keeps the bridges above, so `cargo check` still checks
-        // them.
+        // both define. Bridges involving portable imported resources are component-only;
+        // the native side checks its codecs and the component build checks these handle bridges.
         #[cfg(target_arch = "wasm32")]
-        export!(__TembraExports);
+        export!(__TembraExports with_types_in self::__tembra_bindings);
     })
 }
 
@@ -3662,7 +3774,7 @@ fn signatures(
             format!("the derived WIT does not resolve as a contract: {error}"),
         )
     })?;
-    services
+    let mut declarations: Vec<_> = services
         .iter()
         .filter(|service| service.planned(wit_resources))
         .map(|service| {
@@ -3679,7 +3791,13 @@ fn signatures(
                 pub const #ident: &str = #digest;
             })
         })
-        .collect()
+        .collect::<syn::Result<_>>()?;
+    let prepared = proc_macro2::Literal::byte_string(&contract.prepared().encode());
+    declarations.push(quote! {
+        #[doc(hidden)]
+        pub const __TEMBRA_CONTRACT: &[u8] = #prepared;
+    });
+    Ok(declarations)
 }
 
 /// The constant holding a service's signature, `__TEMBRA_SIGNATURE_LEDGER` for `Ledger`: written
@@ -3853,8 +3971,9 @@ enum ResourceFunction {
     Static(Function),
 }
 
-/// Read one `pub fn` of a WIT resource; `&mut self` and `self` are refused.
-fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction> {
+/// Read one resource function with the service's context and transport-result rules; consuming
+/// or mutable receivers are refused.
+fn resource_function(function: &syn::ImplItemFn, facade: &Ident) -> syn::Result<ResourceFunction> {
     let receiver = function.sig.inputs.first().and_then(|input| match input {
         FnArg::Receiver(receiver) => Some(receiver),
         FnArg::Typed(_) => None,
@@ -3867,19 +3986,7 @@ fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction
             "a WIT method borrows `&self`; change a resource through Cell or RefCell",
         ));
     }
-    let read = Function {
-        ident: function.sig.ident.clone(),
-        asynchronous: function.sig.asyncness.is_some(),
-        receiver: receiver.is_some(),
-        docs: wit::docs(&function.attrs)?,
-        params: typed_params(function)?,
-        result: match result(&function.sig.output) {
-            Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
-            None => None,
-        },
-        fallible: false,
-        context: None,
-    };
+    let read = method(function, false, facade)?;
     Ok(match receiver {
         Some(_) => ResourceFunction::Method(read),
         None => ResourceFunction::Static(read),
@@ -3930,7 +4037,7 @@ fn spell_names(
     Ok(())
 }
 
-/// The call of an author's service method as a bridge answers it: the value of a method returning
+/// The call of an author's exported method as a bridge answers it: the value of a method returning
 /// `tembra::Result<T>`, which only a native host links. Such a module builds no component, so the
 /// bridge, which a host build still type-checks, never runs.
 fn answered(function: &Function, call: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
@@ -3979,10 +4086,15 @@ fn check_async(function: &Function, expected: &wit::ConsumedFunction) -> syn::Re
     } else {
         "fn"
     };
+    let guidance = if expected.asynchronous {
+        ""
+    } else {
+        "; awaiting an Orb import requires `async fn` and an `async func` export in the fixed WIT; the macro does not change that contract"
+    };
     Err(syn::Error::new(
         function.ident.span(),
         format!(
-            "`{}` must be `{required}` to match its WIT declaration",
+            "`{}` must be `{required}` to match its WIT declaration{guidance}",
             function.ident
         ),
     ))
@@ -4160,8 +4272,13 @@ fn with_handles(
     module: &proc_macro2::TokenStream,
     modules: &foreign::Modules,
 ) -> proc_macro2::TokenStream {
-    if modules.named(ty, scope).is_some() {
-        return quote! { #ty };
+    if let Some(named) = modules.named(ty, scope) {
+        if !modules.imported_resource(&named) {
+            return quote! { #ty };
+        }
+        let ident = named.ident;
+        let raw = import_module(modules.depth(scope), &hook_path(&named.interface.identity));
+        return quote! { #raw::#ident };
     }
     // Free JSON is the bindings' string of its text, from the `alloc` of the scopes holding it.
     if wit::free_json(ty) {
@@ -4299,7 +4416,10 @@ fn derived_resource(
         let generated = rust_ident(&wit::kebab(name));
         let (params, names) = bridged(&function.params);
         let (asynchronous, await_) = async_bridge(function.asynchronous);
-        let call = quote! { #ident::#name(self, #(#names),*) #await_ };
+        let call = answered(
+            function,
+            quote! { #ident::#name(self, #(#names),*) #await_ },
+        );
         let (result, body) = derived_result(
             &function.result,
             scope,
@@ -4309,6 +4429,10 @@ fn derived_resource(
             modules,
             call,
         );
+        let body = match function.context {
+            Some(_) => native_only(ident, name, function.params.iter().map(|(name, _, _)| name)),
+            None => body,
+        };
         quote! { #asynchronous fn #generated(&self, #(#params),*) #result { #body } }
     });
     let statics = resource.statics.iter().map(|function| {
@@ -4316,7 +4440,7 @@ fn derived_resource(
         let generated = rust_ident(&wit::kebab(name));
         let (params, names) = bridged(&function.params);
         let (asynchronous, await_) = async_bridge(function.asynchronous);
-        let call = quote! { #ident::#name(#(#names),*) #await_ };
+        let call = answered(function, quote! { #ident::#name(#(#names),*) #await_ });
         let (result, body) = derived_result(
             &function.result,
             scope,
@@ -4326,6 +4450,10 @@ fn derived_resource(
             modules,
             call,
         );
+        let body = match function.context {
+            Some(_) => native_only(ident, name, function.params.iter().map(|(name, _, _)| name)),
+            None => body,
+        };
         quote! { #asynchronous fn #generated(#(#params),*) #result { #body } }
     });
     quote! {
@@ -4439,10 +4567,32 @@ fn implemented_service(
     interface: &wit::Consumed,
     resources: &[WitResource],
     modules: &[Vec<Ident>],
+    names: &foreign::Modules,
 ) -> syn::Result<(
     proc_macro2::TokenStream,
     Vec<(usize, proc_macro2::TokenStream)>,
 )> {
+    let resource_names = resources
+        .iter()
+        .map(|resource| {
+            (
+                resource.ident.to_string(),
+                type_ident(&wit::kebab(&resource.ident)),
+            )
+        })
+        .collect();
+    let arguments = |params: &[(Ident, Type, String)], scope: usize, values: &[Ident]| {
+        params
+            .iter()
+            .zip(values)
+            .map(
+                |((_, ty, _), value)| match handles_of(ty, scope, &resource_names, names) {
+                    Some(handles) => resource_params::taken(&handles, quote! { #value }),
+                    None => quote! { #value },
+                },
+            )
+            .collect::<Vec<_>>()
+    };
     let depth = modules[service.scope].len();
     let root = supers(depth);
     let module = export_module(depth, &hook_path(identity));
@@ -4460,13 +4610,14 @@ fn implemented_service(
             handles,
         } = signature(&function.params, function.result.as_ref(), depth)?;
         let (asynchronous, await_) = async_bridge(function.asynchronous);
+        let arguments = arguments(&own.params, service.scope, &names);
         let author = &own.ident;
         let body = match own.context {
             Some(_) => native_only(target, author, &names),
             None => wrapped(
                 handles,
                 &module,
-                answered(own, quote! { #target::#author(#(#names),*) #await_ }),
+                answered(own, quote! { #target::#author(#(#arguments),*) #await_ }),
             ),
         };
         functions.push(quote! { #asynchronous fn #ident(#(#params),*) #result { #body } });
@@ -4490,11 +4641,13 @@ fn implemented_service(
             (
                 Some(params),
                 Some(Constructor {
-                    ident: constructor, ..
+                    ident: constructor,
+                    params: authored,
                 }),
             ) => {
                 let Signature { names, params, .. } = signature(params, None, local)?;
-                quote! { fn new(#(#params),*) -> Self { #ident::#constructor(#(#names),*) } }
+                let arguments = arguments(authored, implementation.scope, &names);
+                quote! { fn new(#(#params),*) -> Self { #ident::#constructor(#(#arguments),*) } }
             }
             _ => quote! {},
         };
@@ -4513,6 +4666,8 @@ fn implemented_service(
             let Some(author) = implementing(own.iter().copied(), &function.name)? else {
                 continue;
             };
+            let authored = &author.params;
+            let authored_function = author;
             let author = &author.ident;
             let name = rust_ident(&function.name);
             let Signature {
@@ -4521,16 +4676,23 @@ fn implemented_service(
                 result,
                 handles,
             } = signature(&function.params, function.result.as_ref(), local)?;
+            let arguments = arguments(authored, implementation.scope, &names);
             let (asynchronous, await_) = async_bridge(function.asynchronous);
             let (receiver, call) = if receiver {
                 (
                     quote! { &self, },
-                    quote! { #ident::#author(self, #(#names),*) #await_ },
+                    quote! { #ident::#author(self, #(#arguments),*) #await_ },
                 )
             } else {
-                (quote! {}, quote! { #ident::#author(#(#names),*) #await_ })
+                (
+                    quote! {},
+                    quote! { #ident::#author(#(#arguments),*) #await_ },
+                )
             };
-            let body = wrapped(handles, &local_module, call);
+            let body = match authored_function.context {
+                Some(_) => native_only(ident, author, &names),
+                None => wrapped(handles, &local_module, answered(authored_function, call)),
+            };
             members
                 .push(quote! { #asynchronous fn #name(#receiver #(#params),*) #result { #body } });
         }
@@ -5324,7 +5486,7 @@ fn declaration_code(
     holding: &BTreeSet<String>,
     defining: Option<&[Ident; 3]>,
     (converted, modules): (&BTreeMap<String, Ident>, &foreign::Modules),
-    depth: usize,
+    (depth, facade): (usize, &Ident),
 ) -> syn::Result<proc_macro2::TokenStream> {
     let path = hook_path(&declaration.hook);
     let root = supers(depth);
@@ -5340,7 +5502,7 @@ fn declaration_code(
                 &import_module(depth, defining),
             ),
             (converted, modules),
-            depth,
+            (depth, facade),
         ));
     }
     let callback = &callbacks[&declaration.hook];
@@ -5379,12 +5541,12 @@ fn declaration_code(
                 ::core::panic!(#message)
             }
         }
-        impl #ident {
+        ::#facade::__guest! { impl #ident {
             #[doc = #doc]
-            pub fn run(input: #input) #result {
+            pub async fn run(input: #input) #result {
                 #import::#name(#argument)
             }
-        }
+        } }
     })
 }
 
@@ -5442,7 +5604,7 @@ fn derived_hook_code(
     (hook_shapes, holding): (&BTreeSet<String>, &BTreeSet<String>),
     (export_types, import_types): (&proc_macro2::TokenStream, &proc_macro2::TokenStream),
     (converted, modules): (&BTreeMap<String, Ident>, &foreign::Modules),
-    depth: usize,
+    (depth, facade): (usize, &Ident),
 ) -> proc_macro2::TokenStream {
     let path = hook_path(&declaration.hook);
     let root = supers(depth);
@@ -5505,13 +5667,13 @@ fn derived_hook_code(
                 ::core::panic!(#message)
             }
         }
-        impl #ident {
+        ::#facade::__guest! { impl #ident {
             #[doc = #doc]
-            pub fn run(input: #input) #result {
+            pub async fn run(input: #input) #result {
                 let input: #import_input = #converted;
                 #body
             }
-        }
+        } }
     }
 }
 

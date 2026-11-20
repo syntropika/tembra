@@ -26,10 +26,10 @@
 //! Without the runtime's `hooks`, which that function needs, `orb(..)` answers an error naming the
 //! feature instead.
 use super::{
-    Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode, kind, refused,
-    spelled,
+    HookScope, Kind, REGISTRY, Refused, Scopes, Uncovered, argument, boundary, decode, encode,
+    kind, refused, spelled,
 };
-use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident};
+use crate::{Analysis, Contribution, hook_path, keyed, rust_ident, type_ident};
 use heck::ToSnakeCase;
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
@@ -165,8 +165,13 @@ pub(super) fn contributions<'a>(
             ))
         };
         let (_, input) = &contribution.param;
-        argument(input, contribution.scope, analysis)
+        let input_kind = argument(input, contribution.scope, analysis)
             .map_err(|uncovered| place("takes", input, uncovered))?;
+        if input_kind.resource().is_some() {
+            return Err(refused(
+                "native hook contributions cannot take resource arguments",
+            ));
+        }
         if let Some(result) = &contribution.result {
             kind(result, contribution.scope, analysis)
                 .map_err(|uncovered| place("returns", result, uncovered))?;
@@ -236,6 +241,10 @@ pub(super) fn contribution(
         resources: (!analysis.resources.is_empty())
             .then(|| quote! { self::#root __tembra_resource::scoped }),
         imports: imported.then(|| quote! { self::#root __tembra_import::scoped }),
+        hooks: (!analysis.declared.is_empty()).then(|| HookScope {
+            object: None,
+            handles: quote! { __tembra_imports.hooks() },
+        }),
     };
     let ident = &contribution.ident;
     let (param, input) = &contribution.param;
@@ -536,7 +545,29 @@ pub(super) fn requirements(
 /// call the method stops awaiting is cancelled, and the method ends once it has ended, unless its
 /// own call is cancelled, as a component's executor joins an import its callback abandons; then it
 /// releases the claims of the views dropped in it. The runtime is the facade named `facade`.
-pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
+pub(super) fn table(imports: &[Import<'_>], facade: &Ident, hooked: bool) -> TokenStream {
+    let providers = (!imports.is_empty()).then(|| quote! { providers: &super::Providers });
+    let hook_type = hooked.then(|| quote! { ::std::rc::Rc<super::__tembra_hooks::Hooks> });
+    let hooks_field = hooked
+        .then(|| quote! { hooks: ::core::cell::RefCell<::core::option::Option<#hook_type>>, });
+    let hooks_initial =
+        hooked.then(|| quote! { hooks: ::core::cell::RefCell::new(::core::option::Option::None), });
+    let hooks_declare = hooked.then(|| quote! {
+        self.hooks.replace(::core::option::Option::Some(::std::rc::Rc::new(super::__tembra_hooks::Hooks::declare(declaration)?)));
+    });
+    let hooks_access = hooked.then(|| {
+        quote! {
+            impl Imports {
+                /// Read the handles bound to the Orb root's declaration.
+                pub(crate) fn hooks(&self) -> #hook_type {
+                    self.hooks.borrow().clone().expect("the Orb's root declared its hooks")
+                }
+            }
+        }
+    });
+    let call_hooks = hooked.then(|| quote! { pub(crate) hooks: #hook_type, });
+    let scoped_hooks = hooked.then(|| quote! { hooks: #hook_type, });
+    let held_hooks = hooked.then(|| quote! { hooks, });
     let (plain, keyed): (Vec<&Import<'_>>, Vec<&Import<'_>>) =
         imports.iter().partition(|import| import.view.is_none());
     let plain_fields: Vec<&Ident> = plain.iter().map(|import| &import.field).collect();
@@ -547,7 +578,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
         let methods = &import.methods;
         quote! { [#(#methods),*] }
     });
-    let plain_items = (!plain.is_empty()).then(|| {
+    let plain_items = (!plain.is_empty() || hooked).then(|| {
         quote! {
             impl Imports {
                 /// Declare the reference of the Orb's root to the `main` object of each plain
@@ -557,6 +588,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                     declaration: &::#facade::Declaration,
                 ) -> ::#facade::Result<()> {
                     #(self.#plain_fields.declare(declaration)?;)*
+                    #hooks_declare
                     ::core::result::Result::Ok(())
                 }
             }
@@ -709,12 +741,14 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
             pub(crate) struct Imports {
                 #(pub(crate) #plain_fields: Plain,)*
                 #(pub(crate) #keyed_fields: Keyed,)*
+                #hooks_field
             }
 
             impl Imports {
                 /// The imports of an Orb whose providers are `providers`.
-                pub(crate) fn new(providers: &super::Providers) -> Self {
+                pub(crate) fn new(#providers) -> Self {
                     Self {
+                        #hooks_initial
                         #(#plain_fields: Plain::new(::std::format!(
                             "{}::{}",
                             providers.#plain_fields.name,
@@ -731,6 +765,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
 
             #plain_items
             #keyed_items
+            #hooks_access
 
             ::std::thread_local! {
                 static CALL: ::core::cell::RefCell<::core::option::Option<::std::rc::Rc<Call>>> =
@@ -744,6 +779,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
             pub(crate) struct Call {
                 pub(crate) context: ::#facade::Context,
                 pub(crate) imports: ::std::rc::Rc<Imports>,
+                #call_hooks
                 failed: ::core::cell::RefCell<::core::option::Option<::#facade::Error>>,
                 abandoned: ::core::cell::RefCell<::std::vec::Vec<::#facade::IssuedCall>>,
                 dropped: ::core::cell::RefCell<::std::vec::Vec<Dropped>>,
@@ -771,6 +807,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
             pub(crate) fn scoped<T, F>(
                 context: ::#facade::Context,
                 imports: ::std::rc::Rc<Imports>,
+                #scoped_hooks
                 future: F,
             ) -> impl ::core::future::Future<Output = ::#facade::Result<T>>
             where
@@ -779,6 +816,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
                 let call = ::std::rc::Rc::new(Call {
                     context,
                     imports,
+                    #held_hooks
                     failed: ::core::cell::RefCell::new(::core::option::Option::None),
                     abandoned: ::core::cell::RefCell::new(::std::vec::Vec::new()),
                     dropped: ::core::cell::RefCell::new(::std::vec::Vec::new()),
@@ -919,7 +957,7 @@ pub(super) fn table(imports: &[Import<'_>], facade: &Ident) -> TokenStream {
 }
 
 /// The module of each import, in the Orb module, in place of the bindings' import module, whose
-/// types it re-exports: a function of a plain import calls the provider's `main` object, and the
+/// data types it re-exports: a function of a plain import calls the provider's `main` object, and the
 /// view of an import by key has `get`, which acquires the object of a key, and the value it
 /// returns, whose methods call that object. Each native function is awaitable and takes owned
 /// parameters, independently of the provider's WIT calling convention.
@@ -931,9 +969,13 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
         let interface = types
             .interface(import.interface)
             .expect("an imported interface is read");
-        let bindings = import_module(1, &hook_path(&import.binding(&analysis.package)));
         let functions = functions::functions(import, analysis);
         let values = values::Values { types, facade };
+        let defining = types.imported_module(import.interface, 1);
+        let data_types = interface.types.iter().filter(|(name, ty)| import.view.is_none_or(|view| view.types.contains(*name)) && super::wit_kind(wit_parser::Type::Id(**ty), types, 1).is_ok()).map(|(name, _)| {
+            let name = type_ident(name);
+            quote! { pub use #defining::#name; }
+        });
         let declarations = interface.types.iter().filter_map(|(name, ty)| values.declaration(name, wit_parser::Type::Id(*ty)));
         let resources = functions::resources(import, analysis);
         let module_doc = match import.view {
@@ -987,8 +1029,7 @@ pub(super) fn modules(imports: &[Import<'_>], analysis: &Analysis) -> TokenStrea
         quote! {
             #[doc = #module_doc]
             pub mod #field {
-                #[allow(unused_imports)]
-                pub use #bindings::*;
+                #(#data_types)*
 
                 #body
             }

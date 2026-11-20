@@ -394,7 +394,7 @@ export class Scope {
         const input = check(this.revision.contract, bound.slot, true, encode(request.args));
         const signature = this.revision.importSignatures.get(binding);
         const capture: CapturedInvocation | undefined = signature
-          ? { signature, input }
+          ? { signature, input, dataResult: true }
           : undefined;
         // The WIT check above already rejects non-list arguments; this narrows the payload.
         if (!Array.isArray(request.args)) throw new Error("Import arguments must be a list");

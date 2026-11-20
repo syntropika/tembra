@@ -43,10 +43,10 @@ pub mod notebook {
             /// Move the notes onto the shelf, tell the contributors to the archive's hook how many,
             /// and return how many there were.
             #[cfg(feature = "archive")]
-            pub fn archive() -> u32 {
+            pub async fn archive() -> u32 {
                 let notes = KEPT.swap(0, Ordering::Relaxed);
                 super::SHELVED.fetch_add(notes, Ordering::Relaxed);
-                super::archiving::Archived::run(notes);
+                super::archiving::Archived::run(notes).await;
                 notes
             }
         }
@@ -103,14 +103,13 @@ mod tests {
         pool.run_until(host.close()).unwrap();
     }
 
-    /// With the `archive` feature, `orb()` holds the hook the feature adds, and answers why a
-    /// native host cannot install it: only a component serves a hook's declaration.
+    /// A native host without hooks compiles the archive and explicitly refuses installation.
     #[cfg(feature = "archive")]
     #[test]
-    fn the_archive_adds_a_hook_only_a_component_declares() {
+    fn the_archive_adds_a_hook_requiring_the_native_hooks_feature() {
         assert_eq!(
             crate::native::refused(notebook::orb()),
-            "the declaration of the hook example:notes/archived@1.0.0 works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook"
+            "native hook declarations need the runtime's `hooks`: enable the facade's `hooks` feature in the host that installs this Orb"
         );
     }
 }

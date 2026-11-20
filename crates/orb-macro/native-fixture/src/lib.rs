@@ -14,9 +14,8 @@
 //! also writes by hand against the runtime's API. `abacus` and `restrung` are one Orb before and
 //! after a reload that gives its root's resource a new version, and `reframed` that Orb after a
 //! reload that gives only its package a new version. `cistern` and `refilled` are one Orb before
-//! and after a reload that gives a resource's dependency a new version. `dice`, `checkpoint` and `desk`
-//! hold what the native side does not cover yet, a WASI import, a hook
-//! declaration and a record holding a resource: they compile here all the same, and their `orb()`
+//! and after a reload that gives a resource's dependency a new version. `dice` and `desk`
+//! hold what the native side does not cover yet, a WASI import and a record holding a resource: they compile here all the same, and their `orb()`
 //! answers an error naming it. `trail` holds its root two private modules down, with a service in a
 //! module below it, and a service whose method is named `clone`, as a method of `Rc`. `hollow`
 //! holds a service in a private module, its state in a module below it and its WIT resource, with a
@@ -1956,9 +1955,6 @@ pub mod turnstile {
         impl Entrance {
             /// Whether the gate lets the value through.
             pub async fn pass(value: i32) -> bool {
-                #[cfg(target_arch = "wasm32")]
-                let admitted = admissions::admit(value);
-                #[cfg(not(target_arch = "wasm32"))]
                 let admitted = admissions::admit(value).await;
                 !admitted.blocked
             }
@@ -1966,9 +1962,7 @@ pub mod turnstile {
     }
 }
 
-/// Declares a hook, whose `run` is synchronous: a native method could not wait for the hook's
-/// contributions, so the declaration works in a component build only, and the module's `orb()`
-/// answers an error naming it.
+/// Declares a hook with an awaitable Rust entry and a synchronous WIT callback.
 #[tembra::orb(package = "example:checkpoint@1.0.0")]
 pub mod checkpoint {
     /// The hook: a waterfall, each contributor may change the inspection, in plan order.
@@ -1990,11 +1984,12 @@ pub mod checkpoint {
 
         impl Inspector {
             /// Run the hook over a fresh inspection of the value.
-            pub fn inspect(value: i32) -> Inspection {
+            pub async fn inspect(value: i32) -> Inspection {
                 Inspect::run(Inspection {
                     value,
                     stopped: false,
                 })
+                .await
             }
         }
     }
@@ -2315,3 +2310,16 @@ pub mod pier {
 }
 
 pub mod codec;
+
+pub mod rpc_consumer;
+/// Shared native/component provider used by actual RPC client tests.
+pub mod rpc_provider;
+
+/// Compose separately owned canonical WIT packages.
+pub mod canonical_packages;
+
+#[path = "hook_gate.rs"]
+pub mod hook_gate;
+
+#[path = "hook_watch.rs"]
+pub mod hook_watch;

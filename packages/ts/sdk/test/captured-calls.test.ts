@@ -39,11 +39,17 @@ test("captured calls follow the admitted handler and exact signature across relo
     expect(await invoke("contract-one", 7)).toEqual({ result: undefined, output: "8" });
     expect(captured).toBe(1);
     expect(ordinary).toBe(0);
-    expect(await invoke("contract-two", 8)).toEqual({ result: 9, output: undefined });
-    expect(ordinary).toBe(1);
-    // A replacement ordinary implementation receives no channel, even with the same service name.
-    await host.reload([definition((_environment, _context, value: number) => ({ value }))]);
-    expect(await invoke("contract-one", 9)).toEqual({ result: { value: 9 }, output: undefined });
+    await expect(invoke("contract-two", 8)).rejects.toThrow("matching WIT capability signature");
+    expect(ordinary).toBe(0);
+    // Reload cannot downgrade a required captured call to an ordinary implementation.
+    await host.reload([
+      definition((_environment, _context, value: number) => {
+        ordinary++;
+        return { value };
+      }),
+    ]);
+    await expect(invoke("contract-one", 9)).rejects.toThrow("matching WIT capability signature");
+    expect(ordinary).toBe(0);
     expect(captured).toBe(1);
   } finally {
     reference.release();
