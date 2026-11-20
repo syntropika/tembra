@@ -190,15 +190,12 @@ pub mod gatehouse {
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    /// Natively, the module compiles and `orb()` answers why a host cannot install it: the
-    /// keyed import of the guard and a hook's `run` are synchronous, and a native method has no
-    /// fiber to suspend while the kernel completes the call or runs the contributions, so only a
-    /// component serves the module. The first part it names is the keyed import.
+    /// Native installation refuses the hook declaration; synchronous imports are supported.
     #[test]
     fn a_hook_declaration_is_refused_natively() {
         assert_eq!(
             crate::native::refused(super::gatehouse::orb()),
-            "the import of example:admission/guard@1.0.0 by key works in a component build only: its function `apply` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`"
+            "the declaration of the hook example:gatehouse/visits@1.0.0 works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook"
         );
     }
 }

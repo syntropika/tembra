@@ -430,10 +430,7 @@ mod guest {
                     let shelf = shelf_ref::get(vec![key]).await?;
                     let mut held = 0;
                     for book in books {
-                        #[cfg(target_arch = "wasm32")]
-                        { held = shelf.shelve(&lent(book)); }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        { held = shelf.shelve(lent(book)).await; }
+                        held = shelf.shelve(&lent(book));
                     }
                     Ok(held)
                 }
