@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "tembra"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "tembra-contracts",
  "tembra-runtime",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-contracts"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "heck",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-core"
-version = "0.2.2"
+version = "0.3.0"
 
 [[package]]
 name = "tembra-example-native-gate"
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-runtime"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "futures",
  "futures-timer",

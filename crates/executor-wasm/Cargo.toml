@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Isolated WebAssembly execution over the Tembra host"
 
 [dependencies]
-tembra = { package = "tembra-runtime", path = "../runtime", version = "=0.2.2", features = [
+tembra = { package = "tembra-runtime", path = "../runtime", version = "=0.3.0", features = [
   "hooks",
 ] }
 tembra-contracts.workspace = true

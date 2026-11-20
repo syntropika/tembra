@@ -5,7 +5,7 @@ The default build contains the native host only; it does not compile Wasmtime, T
 
 ```toml
 [dependencies]
-tembra = "0.2.2"
+tembra = "0.3.0"
 ```
 
 Enable `features = ["wasm"]` to expose `tembra::wasm` on native targets. Other optional features
@@ -21,7 +21,7 @@ Guest crates use the same facade with host execution disabled:
 
 ```toml
 [dependencies]
-tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
+tembra = { version = "0.3.0", default-features = false, features = ["macros"] }
 ```
 
 ```rust,ignore
@@ -128,7 +128,7 @@ WebAssembly, enable the optional backend and load a built `.wasm` artifact:
 
 ```toml
 [dependencies]
-tembra = { version = "0.2.2", features = ["wasm"] }
+tembra = { version = "0.3.0", features = ["wasm"] }
 ```
 
 ```rust,ignore

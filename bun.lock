@@ -5,8 +5,8 @@
     "": {
       "name": "tembra-typescript",
       "dependencies": {
-        "@syntropika/tembra-engine-node": "0.2.2",
-        "@syntropika/tembra-engine-wasm": "0.2.2",
+        "@syntropika/tembra-engine-node": "0.3.0",
+        "@syntropika/tembra-engine-wasm": "0.3.0",
         "enhanced-resolve": "5.26.0",
         "typescript": "5.9.3",
       },
@@ -31,15 +31,15 @@
     },
     "packages/ts/engine-node": {
       "name": "@syntropika/tembra-engine-node",
-      "version": "0.2.2",
+      "version": "0.3.0",
     },
     "packages/ts/engine-wasm": {
       "name": "@syntropika/tembra-engine-wasm",
-      "version": "0.2.2",
+      "version": "0.3.0",
     },
     "packages/ts/react-native": {
       "name": "@syntropika/tembra-react-native",
-      "version": "0.2.2",
+      "version": "0.3.0",
       "devDependencies": {
         "@syntropika/tembra-sdk": "workspace:*",
         "@types/react": "^19.2.0",
@@ -47,14 +47,14 @@
         "react-native": "0.88.1",
       },
       "peerDependencies": {
-        "@syntropika/tembra-sdk": "0.2.2",
+        "@syntropika/tembra-sdk": "0.3.0",
         "react": ">=19.3",
         "react-native": ">=0.88.1 <1",
       },
     },
     "packages/ts/sdk": {
       "name": "@syntropika/tembra-sdk",
-      "version": "0.2.2",
+      "version": "0.3.0",
       "dependencies": {
         "@bytecodealliance/jco-transpile": "0.23.0",
         "@syntropika/tembra-engine-node": "workspace:*",

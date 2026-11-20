@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-contracts"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "heck",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-core"
-version = "0.2.2"
+version = "0.3.0"
 
 [[package]]
 name = "tembra-wasm-arithmetic"

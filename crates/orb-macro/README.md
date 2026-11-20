@@ -49,7 +49,7 @@ without linking the application's host runtime:
 
 ```toml
 [dependencies]
-tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
+tembra = { version = "0.3.0", default-features = false, features = ["macros"] }
 ```
 
 The feature brings the `wit-bindgen` the generated bindings use, pinned to the version whose
@@ -63,7 +63,7 @@ as `::tembra`. With
 
 ```toml
 [dependencies]
-sdk = { package = "tembra", version = "0.2.2", default-features = false, features = ["macros"] }
+sdk = { package = "tembra", version = "0.3.0", default-features = false, features = ["macros"] }
 ```
 
 the module is marked `#[sdk::orb(package = "example:greeter@1.0.0", crate = "sdk")]`. The value is
@@ -1436,10 +1436,10 @@ depends on `tembra` with `host` on native targets and compiles the module only t
 
 ```toml
 [dependencies]
-tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
+tembra = { version = "0.3.0", default-features = false, features = ["macros"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tembra = { version = "0.2.2", default-features = false, features = ["macros", "host"] }
+tembra = { version = "0.3.0", default-features = false, features = ["macros", "host"] }
 ```
 
 `#[service(key = main)]` and `#[service(principal = "name")]`, alone or together, guard the

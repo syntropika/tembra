@@ -63,7 +63,7 @@ telemetry = ["host", "tembra-runtime/telemetry"]
 [dependencies]
 tembra-runtime = { workspace = true, optional = true }
 tembra-contracts = { workspace = true, default-features = false, optional = true }
-tembra-orb-macro = { path = "../orb-macro", version = "=0.2.2", optional = true }
+tembra-orb-macro = { path = "../orb-macro", version = "=0.3.0", optional = true }
 # The version whose derive rules and flags lowering the macro reproduces. `async` serves the
 # bindings of a `pub async fn`, of an import by key, whose `get` is asynchronous, and of a WASI
 # interface that waits.
@@ -74,7 +74,7 @@ wit-bindgen = { version = "=0.63.0", default-features = false, features = [
 ], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2", optional = true }
+tembra-executor-wasm = { path = "../executor-wasm", version = "=0.3.0", optional = true }
 
 [dev-dependencies]
 futures-timer = "3"
