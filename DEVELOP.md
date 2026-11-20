@@ -133,7 +133,7 @@ and outgoing-proxy fixtures through `--http-handler` and `--http-proxy`. Use `--
 CI restores Cargo dependencies and pinned tools separately from the verified interpreter build cache.
 Only runs on `main` save the Cargo caches, and only after a pass. Other runs restore them when their
 keys match.
-Every build and all acceptance suites still run on cache hits. Interpreter cache keys include its
+Every build and all acceptance suites still run on cache hits. Quality matrix jobs disable debug information and incremental output to fit hosted runner disks; debug assertions remain enabled. Interpreter cache keys include its
 sources, private ABI and standard bindings, dependencies and pinned toolchains; the build rechecks
 the upstream source revision and WASI SDK archive checksum before packaging identical engine bytes.
 The test profile optimizes Cranelift's compiler while retaining debug assertions in Tembra, avoiding
@@ -274,7 +274,7 @@ Then run the recipe of the area. Each area below names its crates and its recipe
   `just test-wasm-acceptance`, which sets them.
 
 - The release tooling: `cliff.toml`, `scripts/release*` and the justfile's `changelog` and
-  `install-tools`. Run `bun test scripts/release.test.ts` and `just changelog`.
+  `install-tools`. Run `bun test scripts/release.test.ts scripts/release-workflow.test.ts` and `just changelog`.
 
 ### The full verification
 

@@ -4,6 +4,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: Publish an existing tag with this workflow; leave empty for a build rehearsal
+        type: string
+        default: ""
       check_npm_auth:
         description: Check npm trusted publishers without publishing packages
         type: boolean
@@ -13,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -79,9 +83,11 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      ref: ${{ steps.tag.outputs.ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -91,20 +97,75 @@ jobs:
         id: tag
         env:
           RELEASE_EVENT: ${{ github.event_name }}
-          RELEASE_REF: ${{ github.ref_name }}
+          RELEASE_REF: ${{ inputs.release_tag || github.ref_name }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
         run: |
-          if [ "$RELEASE_EVENT" = push ]; then
-            git merge-base --is-ancestor HEAD origin/main
+          if [ "$RELEASE_EVENT" = push ] || [ -n "$RELEASE_TAG_INPUT" ]; then
+            if [ "$RELEASE_EVENT" = workflow_dispatch ]; then
+              test "$GITHUB_REF" = refs/heads/main
+            fi
             tag="$RELEASE_REF"
+            test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$(git rev-parse HEAD)"
+            git merge-base --is-ancestor HEAD origin/main
           else
             tag="v$(bun -p 'require("./package.json").version')"
           fi
           bun scripts/release.ts validate "$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   quality:
     needs: validate
     uses: ./.github/workflows/quality.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.ref }}
+
+  interpreter:
+    needs: validate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: cargo install just --version 1.21.0 --locked
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ${{ runner.temp }}/wasi-sdk.tar.gz
+            ${{ runner.temp }}/wasi-sdk-34.0-x86_64-linux
+          key: wasi-sdk-34-linux-x64-b761e3a0721dbae9
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/interpreter
+          key: interpreter-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/executor-wasm/guest/**', 'packages/ts/sdk/src/interpreter/**', 'justfile', 'bun.lock', 'rust-toolchain.toml') }}
+      - name: Build the pinned interpreter for every package
+        run: |
+          rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip1
+          if [ ! -f "$RUNNER_TEMP/wasi-sdk.tar.gz" ]; then
+            curl --fail --location --retry 3 https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz --output "$RUNNER_TEMP/wasi-sdk.tar.gz"
+          fi
+          printf '%s  %s\n' b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4 "$RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum --check
+          if [ ! -x "$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux/bin/clang" ]; then
+            tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
+          fi
+          just build-interpreter "$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" "$RUNNER_TEMP/interpreter"
+          mkdir -p packages/ts/react-native/native/interpreter/tembra
+          cp packages/ts/engine-node/dist/interpreter.wasm packages/ts/react-native/native/interpreter/tembra/interpreter.wasm
+          cmp packages/ts/engine-node/dist/interpreter.wasm packages/ts/engine-wasm/dist/interpreter/interpreter.wasm
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: interpreter
+          path: |
+            packages/ts/engine-node/dist/interpreter.wasm
+            packages/ts/engine-wasm/dist/interpreter
+            packages/ts/react-native/native/interpreter
+          if-no-files-found: error
 
   node:
     needs: validate
@@ -129,6 +190,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -143,17 +205,22 @@ jobs:
           if-no-files-found: error
 
   ios:
-    needs: validate
+    needs: [validate, interpreter]
     runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
       - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: interpreter
+          path: packages/ts
       - run: bun run --cwd packages/ts/react-native build:ios
       - run: swift test --package-path packages/swift
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -163,12 +230,13 @@ jobs:
           if-no-files-found: error
 
   android:
-    needs: validate
+    needs: [validate, interpreter]
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -188,6 +256,10 @@ jobs:
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
       - run: cargo install cargo-ndk --locked --version 4.1.2
       - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: interpreter
+          path: packages/ts
       - name: Build all Android ABIs
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
@@ -200,12 +272,13 @@ jobs:
           if-no-files-found: error
 
   package:
-    needs: [validate, quality, node, ios, android]
+    needs: [validate, interpreter, quality, node, ios, android]
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -217,13 +290,13 @@ jobs:
       - run: cargo install wasm-bindgen-cli --locked --version 0.2.129
       - run: bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views,telemetry
       - run: cargo install just --version 1.21.0 --locked
-      - name: Build the reusable interpreter assets and the compiled smoke provider
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: interpreter
+          path: packages/ts
+      - name: Build the compiled smoke providers
         run: |
-          rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip1 --target wasm32-wasip3 --target wasm32-unknown-unknown
-          curl --fail --location --retry 3 https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz --output "$RUNNER_TEMP/wasi-sdk.tar.gz"
-          printf '%s  %s\n' b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4 "$RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
-          just build-interpreter "$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" "$RUNNER_TEMP/interpreter"
+          rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip3 --target wasm32-unknown-unknown
           just build-provider "$RUNNER_TEMP/provider"
           just build-contributor "$RUNNER_TEMP/provider"
       - run: bun run --cwd packages/ts/sdk build
@@ -266,7 +339,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: [validate, package]
     runs-on: ubuntu-22.04
     timeout-minutes: 45
@@ -278,6 +351,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.validate.outputs.ref }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
