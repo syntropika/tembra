@@ -296,9 +296,8 @@ jobs:
           path: packages/ts
       - name: Build the compiled smoke providers
         run: |
-          rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip3 --target wasm32-unknown-unknown
+          rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip3
           just build-provider "$RUNNER_TEMP/provider"
-          just build-contributor "$RUNNER_TEMP/provider"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: node-*
@@ -322,7 +321,32 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: bun scripts/release.ts package-crates "$RELEASE_TAG"
       - name: Build the browser qualification fixture
-        run: bun scripts/test-wasm-fixtures.ts --out "$RUNNER_TEMP/release-fixtures" --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" --contributor "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm"
+        run: |
+          bun --eval '
+          import { copyFile, mkdir, writeFile } from "node:fs/promises";
+          import path from "node:path";
+          import { build } from "./packages/ts/sdk/src/tooling/index.ts";
+          const root = path.join(process.env.RUNNER_TEMP, "release-fixtures");
+          await mkdir(root, { recursive: true });
+          await writeFile(path.join(root, "contract.wit"), `
+            package example:integrated@1.0.0;
+            interface arithmetic { double: func(value: s32) -> s32; }
+            world arithmetic-provider { export arithmetic; }
+          `);
+          const guest = JSON.stringify(path.resolve("packages/ts/sdk/src/guest.ts"));
+          await writeFile(path.join(root, "orb.ts"), `
+            import { orb } from ${guest};
+            export default orb({ name: "arithmetic", apiVersion: 1,
+              services: { arithmetic: { methods: {
+                double(_environment: unknown, _context: unknown, value: number) { return value * 2; }
+              } } }
+            });
+          `);
+          const [artifact] = await build({ root, outDir: root, builds: {
+            "arithmetic-source": { entry: "orb.ts", wit: "contract.wit", world: "arithmetic-provider" }
+          } });
+          await copyFile(artifact.path, path.join(root, "arithmetic-source.wasm"));
+          '
       - name: Install packed packages, typecheck a NodeNext consumer and execute isolated Orbs
         run: |
           google-chrome --version
