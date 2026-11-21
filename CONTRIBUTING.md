@@ -33,6 +33,8 @@ Give every production method a short doc sentence that states its purpose or gua
 
 A change keeps each invariant below. Each one names the tests that guard it, and the recipe in parentheses runs them. A change that adds a case to an invariant adds a test for it. A case that is known to break an invariant is named under it, with the pull request that fixes it, which removes the line.
 
+- RPC preparation failures reject only their request and free its pending slot. After entering the transport, failed acquisition delivery remains uncertain and closes the connection without replay. Cancellation retains cleanup work only for requests that entered the transport.
+  - `packages/ts/sdk/test/rpc-delivery.test.ts`, for local size and serialization failures, transport throws and rejections with the same error code, and cancellation in each delivery phase (`bun run --cwd packages/ts/sdk test`).
 - A build for wasm32 is a component, whatever the facade's features. A guest gets the facade's `host` feature when its `tembra` keeps the default features, or when another crate of the build enables it. Its component still answers each call as the guest built without `host` does.
   - `a_wasm32_guest_with_the_host_feature_answers_as_a_component` in `crates/executor-wasm/tests/orb_macro_runtime.rs`, which builds `crates/orb-macro/host-feature-fixture` both ways, std and `no_std` (`just test-orb-macro`).
   - `the_facade_checks_for_wasm32_with_macros` in `crates/orb-macro/tests/configurations.rs` (`just test-configurations`).

@@ -339,6 +339,62 @@ for (const mode of ["native", "wasm"]) {
     },
   );
 
+  run("a local Get refusal leaves existing resource owners usable", async (codec, connection) => {
+    const decoder = await codec.open(17n);
+    const sent = connection.sent.length;
+    await expect(
+      connection.remote.get(
+        "codec::example:rpc-resources/codec@1.0.0",
+        "x".repeat(connection.remote.channel.maxFrame + 1),
+      ),
+    ).rejects.toMatchObject({ code: "exhausted", reason: "frame_size" });
+    expect(connection.sent).toHaveLength(sent);
+    expect(connection.remote.channel.closed).toBe(false);
+    expect(await decoder.total()).toBe(17n);
+    const reference = await connection.remote.get(
+      "codec::example:rpc-resources/codec@1.0.0",
+      "after-local-failure",
+    );
+    reference.release();
+    decoder.release();
+  });
+
+  run(
+    "a cancelled Get with a failed delivery acknowledgement releases every server claim",
+    async (_codec, connection) => {
+      const controller = new AbortController();
+      connection.hold((frame) => Boolean((frame.ok as { reference?: unknown })?.reference));
+      const send = connection.failSend((frame) => frame.op === "get");
+      const called = connection.remote.get(
+        "codec::example:rpc-resources/codec@1.0.0",
+        "uncertain",
+        { signal: controller.signal },
+      );
+      const outcome = called.catch((error: unknown) => error);
+      await send.started;
+      const id = connection.sent.at(-1)!.id;
+      await until(async () =>
+        connection.received.some(
+          (frame) => frame.id === id && Boolean((frame.ok as { reference?: unknown })?.reference),
+        ),
+      );
+      controller.abort();
+      expect(await outcome).toMatchObject({ name: "AbortError" });
+      send.reject(new Error("Get delivery acknowledgement lost"));
+      await until(async () => connection.remote.channel.closed);
+      expect(
+        connection.sent.filter(
+          (frame) =>
+            frame.op === "get" &&
+            Array.isArray(frame.payload?.key) &&
+            frame.payload.key[0] === "uncertain",
+        ),
+      ).toHaveLength(1);
+      connection.flush();
+      // The run's close receipt requires zero references, calls and roots in the real Rust host.
+    },
+  );
+
   run(
     "a failed send closes uncertain delivery even after cancellation",
     async (codec, connection) => {
