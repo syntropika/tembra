@@ -122,6 +122,13 @@ test("archive reuse requires every prior build gate and matching application sou
       jobs.filter((job) => job.name !== "quality / 7"),
     ])
       expect(invoke(record, refused).status).not.toBe(0);
+    writeFileSync(path.join(directory, "justfile"), 'nightly := "nightly-2099-01-01"\n');
+    git("add", "justfile");
+    git("commit", "--quiet", "-m", "test: change build inputs");
+    expect(invoke().status).not.toBe(0);
+    writeFileSync(path.join(directory, "justfile"), 'nightly := "nightly-2026-10-15"\n');
+    git("add", "justfile");
+    git("commit", "--quiet", "-m", "test: restore build inputs");
     writeFileSync(path.join(directory, "packages/value.ts"), "export const value = 2;\n");
     git("add", "packages/value.ts");
     git("commit", "--quiet", "-m", "test: change application source");

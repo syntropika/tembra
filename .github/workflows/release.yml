@@ -146,7 +146,9 @@ jobs:
           ')
           git fetch --no-tags origin "$previous"
           git diff --exit-code "$previous" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml package.json bun.lock mise.toml .node-version .bun-version crates packages scripts/native.ts
-          test "$(git show "$previous:justfile" | sed -n '/^nightly :=/p')" = "$(sed -n '/^nightly :=/p' justfile)"
+          previous_build=$(git show "$previous:justfile" | sed '/^    bun test scripts\/release/d')
+          current_build=$(sed '/^    bun test scripts\/release/d' justfile)
+          test "$previous_build" = "$current_build"
 
   quality:
     needs: validate

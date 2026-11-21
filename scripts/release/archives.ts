@@ -81,11 +81,13 @@ export async function reusePublishedArchives(
 
 if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2);
-  if (command === "check" && args.length) for (const file of args) checkArchiveSize(file);
-  else if (command === "reuse" && args.length === 2)
+  if (command === "check" && args.length) {
+    for (const file of args) checkArchiveSize(file);
+  } else if (command === "reuse" && args.length === 2) {
     await reusePublishedArchives(args[0]!, args[1]!);
-  else
+  } else {
     throw new Error(
       "Usage: bun archives.ts check <archives...> | reuse <directory> <previous-directory>",
     );
+  }
 }
