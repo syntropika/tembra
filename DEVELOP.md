@@ -274,7 +274,7 @@ Then run the recipe of the area. Each area below names its crates and its recipe
   `just test-wasm-acceptance`, which sets them.
 
 - The release tooling: `cliff.toml`, `scripts/release*` and the justfile's `changelog` and
-  `install-tools`. Run `bun test scripts/release.test.ts scripts/release-workflow.test.ts` and `just changelog`.
+  `install-tools`. Run `bun test scripts/release*.test.ts` and `just changelog`.
 
 ### The full verification
 

@@ -39,7 +39,7 @@ test: build-node build-wasm build-sdk
     just test-no-hooks
     just test-native-fixture
     just test-native-rpc
-    bun test scripts/release.test.ts scripts/release-workflow.test.ts
+    bun test scripts/release*.test.ts
     bun run --cwd packages/ts/sdk test
     bun run --cwd packages/ts/sdk test:node
     bun run --cwd packages/ts/react-native test

@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { manifest, nodePlatforms, npmPackages } from "./metadata.ts";
+import { checkArchiveSize } from "./archives.ts";
 
 /** Require all native outputs before creating an installable release archive. */
 export function checkArtifacts(root: string, version: string): void {
@@ -125,6 +126,7 @@ export function pack(root: string, output: string, version: string): void {
         encoding: "utf8",
       }),
     );
+    checkArchiveSize(path.join(archives, result.filename));
     packages.push({
       name: result.name,
       version,

@@ -12,6 +12,10 @@ on:
         description: Check npm trusted publishers without publishing packages
         type: boolean
         default: false
+      previous_npm_run:
+        description: Reuse already published npm archives from a qualified release run of the same source
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -81,6 +85,9 @@ jobs:
   validate:
     if: github.event_name != 'workflow_dispatch' || !inputs.check_npm_auth
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       ref: ${{ steps.tag.outputs.ref }}
@@ -113,6 +120,35 @@ jobs:
           bun scripts/release.ts validate "$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Qualify previous npm archives before reuse
+        if: inputs.previous_npm_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_RUN: ${{ inputs.previous_npm_run }}
+        run: |
+          [[ "$PREVIOUS_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREVIOUS_RUN" > "$RUNNER_TEMP/previous-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREVIOUS_RUN/jobs?filter=latest&per_page=100" > "$RUNNER_TEMP/previous-jobs.json"
+          previous=$(bun -e '
+          const run = await Bun.file(`${process.env.RUNNER_TEMP}/previous-run.json`).json();
+          const { jobs } = await Bun.file(`${process.env.RUNNER_TEMP}/previous-jobs.json`).json();
+          if (run.repository.full_name !== process.env.GITHUB_REPOSITORY ||
+              run.path !== ".github/workflows/release.yml" || run.status !== "completed")
+            throw new Error("Previous artifacts must come from a completed release workflow in this repository");
+          const required = jobs.filter(job => !["publish", "npm-authentication"].includes(job.name));
+          if (required.some(job => job.conclusion !== "success") ||
+              !["validate", "interpreter", "package", "ios", "android"].every(name => required.some(job => job.name === name)) ||
+              required.filter(job => job.name.startsWith("node (")).length !== 6 ||
+              required.filter(job => job.name.startsWith("quality / ")).length !== 8)
+            throw new Error("Previous release platform, quality and package gates must all pass");
+          console.log(run.head_sha);
+          ')
+          git fetch --no-tags origin "$previous"
+          git diff --exit-code "$previous" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml package.json bun.lock mise.toml .node-version .bun-version crates packages scripts/native.ts
+          previous_build=$(git show "$previous:justfile" | sed '/^    bun test scripts\/release/d')
+          current_build=$(sed '/^    bun test scripts\/release/d' justfile)
+          test "$previous_build" = "$current_build"
 
   quality:
     needs: validate
@@ -222,6 +258,14 @@ jobs:
           name: interpreter
           path: packages/ts
       - run: bun run --cwd packages/ts/react-native build:ios
+      - name: Remove auxiliary bitcode and debug information from Apple libraries
+        run: |
+          rustup component add llvm-tools
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          strip="$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-strip"
+          find packages/swift/native/TembraFFI.xcframework packages/ts/react-native/native/swift/TembraFFI.xcframework \
+            -name '*.a' -exec "$strip" --strip-debug \
+            --remove-section=__LLVM,__bitcode --remove-section=__LLVM,__cmdline {} +
       - run: swift test --package-path packages/swift
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -274,6 +318,9 @@ jobs:
   package:
     needs: [validate, interpreter, quality, node, ios, android]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -316,6 +363,23 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: bun scripts/release.ts pack "$RELEASE_TAG" "$RUNNER_TEMP/release"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.previous_npm_run != ''
+        with:
+          name: npm-release
+          run-id: ${{ inputs.previous_npm_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/previous-npm
+      - name: Retain published archives and check package sizes
+        env:
+          PREVIOUS_RUN: ${{ inputs.previous_npm_run }}
+        run: |
+          git fetch --no-tags origin "$GITHUB_WORKFLOW_SHA"
+          git show "$GITHUB_WORKFLOW_SHA:scripts/release/archives.ts" > "$RUNNER_TEMP/archives.ts"
+          if [ -n "$PREVIOUS_RUN" ]; then
+            bun "$RUNNER_TEMP/archives.ts" reuse "$RUNNER_TEMP/release/npm" "$RUNNER_TEMP/previous-npm"
+          fi
+          bun "$RUNNER_TEMP/archives.ts" check "$RUNNER_TEMP/release/npm/"*.tgz
       - name: Verify standalone crate archives
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
