@@ -32,6 +32,10 @@ tests. Packaging requires all six Node binaries, the Swift distribution and ever
 Android ABI. Each standalone crate archive is compiled with all features. Staging
 replaces each package's previous staged copy, so removed build outputs cannot ship.
 
+The Apple release step strips debug information from the distributed static libraries before
+the Swift tests and artifact upload. npm archives have a compressed size budget of 100 MiB;
+packaging fails before publication when an archive exceeds it.
+
 The packed SDK and engine archives are installed in an empty project with the
 workspace's TypeScript and Node type versions. A consumer compiled with `NodeNext`
 must typecheck against every published SDK entry. It then runs with Node and Bun on
@@ -116,3 +120,12 @@ The publish step does not rebuild Rust libraries: it uploads packages from the s
 checkout after archive verification has passed. Cargo handles dependency ordering and
 registry index availability. npm packages publish in engine, SDK, then React Native order.
 The workflow uploads `npm-release` and `crate-release` artifacts for inspection.
+
+When a release partially published npm packages, set `previous_npm_run` to the qualified release
+run whose archives were published. The workflow requires all of that run's platform, quality and
+package gates to have passed and checks that its application source and pinned tools match the
+current candidate. All current build and acceptance gates still run. Before testing the packed
+consumers, packaging retains the previous bytes only for versions already present in npm with
+matching package identities and SHA-512 integrity. Unpublished packages use the new build. Both
+the retained and rebuilt archives must pass the size budget. The publisher's existing integrity
+checks remain in force; a recovery never replaces a registry version or moves its tag.
