@@ -258,10 +258,14 @@ jobs:
           name: interpreter
           path: packages/ts
       - run: bun run --cwd packages/ts/react-native build:ios
-      - name: Remove debug information from distributed Apple libraries
+      - name: Remove auxiliary bitcode and debug information from Apple libraries
         run: |
+          rustup component add llvm-tools
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          strip="$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-strip"
           find packages/swift/native/TembraFFI.xcframework packages/ts/react-native/native/swift/TembraFFI.xcframework \
-            -name '*.a' -exec xcrun strip -S {} +
+            -name '*.a' -exec "$strip" --strip-debug \
+            --remove-section=__LLVM,__bitcode --remove-section=__LLVM,__cmdline {} +
       - run: swift test --package-path packages/swift
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

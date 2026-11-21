@@ -32,9 +32,10 @@ tests. Packaging requires all six Node binaries, the Swift distribution and ever
 Android ABI. Each standalone crate archive is compiled with all features. Staging
 replaces each package's previous staged copy, so removed build outputs cannot ship.
 
-The Apple release step strips debug information from the distributed static libraries before
-the Swift tests and artifact upload. npm archives have a compressed size budget of 100 MiB;
-packaging fails before publication when an archive exceeds it.
+The Apple release step uses the pinned Rust toolchain's LLVM tools to remove auxiliary
+bitcode and debug information from the distributed static libraries before the Swift tests
+and artifact upload. Native code and linker symbols are retained. npm archives have a
+compressed size budget of 100 MiB; packaging fails before publication when an archive exceeds it.
 
 The packed SDK and engine archives are installed in an empty project with the
 workspace's TypeScript and Node type versions. A consumer compiled with `NodeNext`

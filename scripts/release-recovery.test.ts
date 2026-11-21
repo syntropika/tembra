@@ -22,14 +22,17 @@ test("Apple libraries are stripped before Swift links them and before upload", (
   const steps = workflow.jobs.ios!.steps;
   const build = steps.findIndex((step) => step.run?.includes("build:ios"));
   const strip = steps.findIndex(
-    (step) => step.name === "Remove debug information from distributed Apple libraries",
+    (step) => step.name === "Remove auxiliary bitcode and debug information from Apple libraries",
   );
   const test = steps.findIndex((step) => step.run?.includes("swift test"));
   const upload = steps.findIndex((step) => step.with?.name === "react-native-ios");
   expect(strip).toBeGreaterThan(build);
   expect(test).toBeGreaterThan(strip);
   expect(upload).toBeGreaterThan(test);
-  expect(steps[strip]!.run).toContain("xcrun strip -S");
+  expect(steps[strip]!.run).toContain("rustup component add llvm-tools");
+  expect(steps[strip]!.run).toContain('"$strip" --strip-debug');
+  expect(steps[strip]!.run).toContain("--remove-section=__LLVM,__bitcode");
+  expect(steps[strip]!.run).toContain("--remove-section=__LLVM,__cmdline");
   expect(steps[strip]!.run).toContain("packages/swift/native/TembraFFI.xcframework");
   expect(steps[strip]!.run).toContain(
     "packages/ts/react-native/native/swift/TembraFFI.xcframework",
