@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "tembra"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "tembra-contracts",
  "tembra-orb-macro",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-contracts"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "heck",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-core"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "tembra-orb-host-feature-fixture"
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-orb-macro"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "futures",
  "futures-timer",
