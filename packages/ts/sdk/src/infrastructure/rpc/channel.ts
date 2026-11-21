@@ -79,11 +79,12 @@ export class Channel {
     } catch {}
   }
 
-  /** Encode and size-check a message before transport delivery. */
-  async send(message: Wire): Promise<void> {
+  /** Encode and size-check before invoking the delivery guard and entering the transport. */
+  async send(message: Wire, beforeDelivery?: () => void): Promise<void> {
     if (this.closed) throw new TembraError(Errors.Gone.Connection);
     const frame = this.codec.serialize(message);
     if (frame.length > this.maxFrame) throw new TembraError(Errors.Exhausted.FrameSize);
+    beforeDelivery?.();
     await this.transport.send(frame);
   }
 

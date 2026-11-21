@@ -118,6 +118,7 @@ export class RemoteHost {
     const id = ++this.#next;
     if (!Number.isSafeInteger(id)) throw new TembraError(Errors.Exhausted.RequestIds);
     let abort: (() => void) | undefined;
+    let deliveryStarted = false;
     const result = new Promise((resolve, reject) => {
       const pending = {
         control,
@@ -149,11 +150,12 @@ export class RemoteHost {
       abort = () => {
         if (this.#pending.get(id) !== pending) return;
         if (
-          op === RpcOp.Get ||
-          (op === RpcOp.Call &&
-            typeof payload === "object" &&
-            payload !== null &&
-            "capabilities" in payload)
+          deliveryStarted &&
+          (op === RpcOp.Get ||
+            (op === RpcOp.Call &&
+              typeof payload === "object" &&
+              payload !== null &&
+              "capabilities" in payload))
         ) {
           this.#pending.set(id, {
             control,
@@ -167,23 +169,31 @@ export class RemoteHost {
           this.#pending.delete(id);
         }
         reject(signal?.reason ?? new TembraError(Errors.Cancelled.Request));
-        void this.channel.send({ op: RpcOp.Cancel, payload: { id } }).catch(() => {});
+        if (deliveryStarted)
+          void this.channel.send({ op: RpcOp.Cancel, payload: { id } }).catch(() => {});
       };
       signal?.addEventListener("abort", abort, { once: true });
-      void this.channel.send({ id, op, payload }).catch((error) => {
-        // A rejected send may already have delivered bytes, even if cancellation won first.
-        if (
-          op === RpcOp.Get ||
-          (op === RpcOp.Call &&
-            typeof payload === "object" &&
-            payload !== null &&
-            "capabilities" in payload)
-        )
-          this.channel.close(error);
-        if (this.#pending.get(id) !== pending) return;
-        this.#pending.delete(id);
-        reject(error);
-      });
+      void this.channel
+        .send({ id, op, payload }, () => {
+          // A codec may synchronously cancel while preparing the frame.
+          if (signal) checkSignal(signal);
+          deliveryStarted = true;
+        })
+        .catch((error) => {
+          // A rejected send may already have delivered bytes, even if cancellation won first.
+          if (
+            deliveryStarted &&
+            (op === RpcOp.Get ||
+              (op === RpcOp.Call &&
+                typeof payload === "object" &&
+                payload !== null &&
+                "capabilities" in payload))
+          )
+            this.channel.close(error);
+          if (this.#pending.get(id) !== pending) return;
+          this.#pending.delete(id);
+          reject(error);
+        });
     });
     try {
       return await result;
