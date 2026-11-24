@@ -1338,7 +1338,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "tembra"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "tembra-contracts",
  "tembra-executor-wasm",
@@ -1347,7 +1347,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-contracts"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "heck",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-core"
-version = "0.3.1"
+version = "0.3.2"
 
 [[package]]
 name = "tembra-example-counter-host"
@@ -1374,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-executor-wasm"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-channel",
  "bytes",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-runtime"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "futures",
  "futures-timer",

@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { manifest, releaseVersion, validate } from "./release/metadata.ts";
+import { checkLockfiles, manifest, releaseVersion, validate } from "./release/metadata.ts";
 import { checkArtifacts, stagePackage } from "./release/npm.ts";
 import { packageCrates } from "./release/crates.ts";
 
@@ -37,6 +37,29 @@ test("all checked-in registry versions agree and a different tag is rejected", (
   const version = manifest(root).version;
   expect(validate(root, `v${version}`).version).toBe(version);
   expect(() => validate(root, "v999.0.0")).toThrow("version does not match");
+});
+
+test("release validation rejects stale local packages in tracked fixture lockfiles", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "tembra-release-locks-"));
+  try {
+    const file = path.join(root, "fixture", "Cargo.lock");
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, 'version = 4\n[[package]]\nname = "tembra"\nversion = "0.3.1"\n');
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["add", "fixture/Cargo.lock"], { cwd: root });
+    expect(() => checkLockfiles(root, new Set(["tembra"]), "0.3.2")).toThrow(
+      "fixture/Cargo.lock pins local tembra@0.3.1, expected 0.3.2",
+    );
+    writeFileSync(file, 'version = 4\n[[package]]\nname = "tembra"\nversion = "0.3.2"\n');
+    expect(() => checkLockfiles(root, new Set(["tembra"]), "0.3.2")).not.toThrow();
+    writeFileSync(
+      file,
+      'version = 4\n[[package]]\nname = "tembra"\nversion = "0.3.1"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n',
+    );
+    expect(() => checkLockfiles(root, new Set(["tembra"]), "0.3.2")).not.toThrow();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("crate packaging excludes private helpers with checkout-only dependencies", () => {

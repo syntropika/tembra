@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "tembra"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "tembra-orb-macro",
  "wit-bindgen",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-contracts"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "heck",
@@ -301,11 +301,11 @@ dependencies = [
 
 [[package]]
 name = "tembra-core"
-version = "0.3.1"
+version = "0.3.2"
 
 [[package]]
 name = "tembra-orb-macro"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "heck",
  "proc-macro2",

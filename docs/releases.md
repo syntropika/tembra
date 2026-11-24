@@ -79,8 +79,8 @@ Before creating a tag, update the shared Cargo version, exact internal Cargo dep
 versions, the root npm version, all four npm package versions, internal npm requirements
 and the React Native SDK peer version. Kotlin artifacts and the Android adapter derive
 their version from the React Native manifest; the podspec uses the same version with a
-`v` tag prefix. Refresh both lockfiles, commit the version changes to `main` and push
-`main` before pushing the tag.
+`v` tag prefix. Refresh the root lockfiles and all tracked Cargo lockfiles for standalone fixtures and examples.
+Commit the version changes to `main`. Push `main` before you push the tag.
 
 For example, after setting all versions to `0.2.0`:
 

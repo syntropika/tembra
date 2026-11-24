@@ -52,6 +52,30 @@ export function crates(root: string): Crate[] {
   );
 }
 
+/** Reject stale local release packages in every tracked Cargo lockfile. */
+export function checkLockfiles(root: string, names: ReadonlySet<string>, version: string): void {
+  const files = execFileSync("git", ["ls-files", "-z", "--", "Cargo.lock", "**/Cargo.lock"], {
+    cwd: root,
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter(Boolean);
+  for (const file of files) {
+    const locked: unknown = Bun.TOML.parse(readFileSync(path.join(root, file), "utf8"));
+    if (
+      typeof locked !== "object" ||
+      locked === null ||
+      !("package" in locked) ||
+      !Array.isArray(locked.package)
+    )
+      throw new Error(`${file} has no package list`);
+    for (const item of locked.package) {
+      if (!item.source && names.has(item.name) && item.version !== version)
+        throw new Error(`${file} pins local ${item.name}@${item.version}, expected ${version}`);
+    }
+  }
+}
+
 /** Check every registry package and local dependency against the requested release. */
 export function validate(root: string, tag: string): { version: string; channel: string } {
   const release = releaseVersion(tag);
@@ -74,7 +98,8 @@ export function validate(root: string, tag: string): { version: string; channel:
       }
     }
   }
-  for (const item of crates(root)) {
+  const packages = crates(root);
+  for (const item of packages) {
     if (item.version !== release.version)
       throw new Error(`${item.name} version does not match ${tag}`);
     for (const dependency of item.dependencies) {
@@ -82,5 +107,6 @@ export function validate(root: string, tag: string): { version: string; channel:
         throw new Error(`${item.name} needs an exact registry version for ${dependency.name}`);
     }
   }
+  checkLockfiles(root, new Set(packages.map((item) => item.name)), release.version);
   return release;
 }
