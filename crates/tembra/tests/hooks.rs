@@ -531,3 +531,67 @@ fn roots_keep_their_plan_version_when_new_contributors_are_installed() {
     reference.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }
+
+#[test]
+fn removing_a_contributor_changes_new_hook_plans_and_releases_its_resources() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let hook = Hook::<u32, u32>::waterfall("guard");
+    let bound = hook.clone();
+    let closed = Rc::new(Cell::new(0));
+    let cleanup = closed.clone();
+    host.install(vec![
+        Orb::new("provider", 1).hook(hook.clone()).service(
+            Service::new("provider", move |declaration| declaration.hook(&bound))
+                .method("run", |hook, context, input: u32| async move {
+                    hook.run(&context, input).await
+                }),
+        ),
+        Orb::new("contributor", 1)
+            .requires(requirement(&["guard"]))
+            .create(move |declaration| {
+                let cleanup = cleanup.clone();
+                declaration.resource(
+                    "owned",
+                    1,
+                    || Ok(()),
+                    move |_, _| {
+                        async move {
+                            cleanup.set(cleanup.get() + 1);
+                            Ok(())
+                        }
+                        .boxed_local()
+                    },
+                )?;
+                Ok(())
+            })
+            .contribute(
+                "provider",
+                &hook,
+                0,
+                |_, input| async move { Ok(input + 1) },
+            ),
+    ])
+    .unwrap();
+    let reference = Rc::new(host.get("provider", vec!["main".into()], "alice").unwrap());
+    let called = reference.clone();
+    let before: u32 = pool
+        .run_until(host.root("alice", move |context| {
+            async move { called.call(&context, "run", 1_u32).await }.boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(before, 2);
+    pool.run_until(host.remove(vec!["contributor".into()], 5000))
+        .unwrap();
+    assert_eq!(closed.get(), 1);
+    let called = reference.clone();
+    let after: u32 = pool
+        .run_until(host.root("alice", move |context| {
+            async move { called.call(&context, "run", 1_u32).await }.boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(after, 1);
+    reference.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(closed.get(), 1);
+}

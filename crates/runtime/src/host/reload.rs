@@ -12,9 +12,25 @@ impl Host {
             ));
         }
         let host = self.clone();
-        self.spawn(async move { host.replace(orbs, deadline_ms).await })?
+        self.spawn(async move { host.replace(orbs, vec![], deadline_ms).await })?
             .await
             .map_err(|_| Error::invalid(Reason::Executor, "replacement executor stopped"))?
+    }
+
+    /// Withdraw named Orbs through kernel-owned preparation, publication and physical cleanup.
+    /// Retained roots keep their version.
+    /// The operation remains owned by the host if its observer stops waiting.
+    pub async fn remove(&self, names: Vec<String>, deadline_ms: u64) -> Result<core::Version> {
+        if self.0.external_actions.get() {
+            return Err(Error::invalid(
+                Reason::Driver,
+                "the shared JS adapter owns withdrawal",
+            ));
+        }
+        let host = self.clone();
+        self.spawn(async move { host.replace(vec![], names, deadline_ms).await })?
+            .await
+            .map_err(|_| Error::invalid(Reason::Executor, "withdrawal executor stopped"))?
     }
 
     /// Resolve candidate metadata only while its callbacks are being captured.
@@ -28,13 +44,19 @@ impl Host {
     }
 
     /// Capture native environments before asking the kernel to run replacement effects.
-    async fn replace(&self, orbs: Vec<Orb>, deadline_ms: u64) -> Result<core::Version> {
+    async fn replace(
+        &self,
+        orbs: Vec<Orb>,
+        remove: Vec<String>,
+        deadline_ms: u64,
+    ) -> Result<core::Version> {
         let current = self.kernel().installed_orbs();
         let replacing = current
             .iter()
             .filter(|info| {
                 orbs.iter()
                     .any(|orb| orb.metadata.name == info.declaration.name)
+                    || remove.contains(&info.declaration.name)
             })
             .map(|info| info.id)
             .collect::<BTreeSet<_>>();
@@ -61,7 +83,7 @@ impl Host {
                 return Err(Error::new(
                     core::Code::Conflict,
                     "activation_pending",
-                    "wait for pending object activation before replacing its provider",
+                    "wait for pending object activation before changing its provider",
                 ));
             }
         }
@@ -75,14 +97,14 @@ impl Host {
             return Err(Error::new(
                 core::Code::Unsupported,
                 "task_restart",
-                "reload requires restartable task declarations while native one-shot tasks are active",
+                "replacement or withdrawal requires restartable task declarations while native one-shot tasks are active",
             ));
         }
         #[cfg(feature = "hooks")]
         self.validate_hooks(&orbs)?;
         let reload = self.kernel().prepare(
             orbs.iter().map(|orb| orb.metadata.clone()).collect(),
-            vec![],
+            remove,
         )?;
         let ids = reload.orbs.iter().map(|orb| orb.id).collect::<Vec<_>>();
         self.0

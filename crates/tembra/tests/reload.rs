@@ -238,3 +238,66 @@ fn a_settled_host_lifetime_object_nobody_called_lets_a_reload_through() {
     reference.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }
+
+#[test]
+fn withdrawing_an_orb_removes_its_service_and_allows_a_later_installation() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![counter(1)]).unwrap();
+    let reference = host.get("counter", vec!["main".into()], "alice").unwrap();
+    pool.run_until(reference.ready()).unwrap();
+    reference.release().unwrap();
+    pool.run_until(host.remove(vec!["counter".into()], 5000))
+        .unwrap();
+    assert!(host.kernel().orb_named("counter").is_err());
+    assert!(host.get("counter", vec!["main".into()], "alice").is_err());
+    host.install(vec![counter(2)]).unwrap();
+    let reference = host.get("counter", vec!["main".into()], "alice").unwrap();
+    let answer: u32 = pool
+        .run_until(host.root("alice", move |context| {
+            async move { reference.call(&context, "read", ()).await }.boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(answer, 2);
+    pool.run_until(host.close()).unwrap();
+    let diagnostics = host.kernel().diagnostics();
+    assert_eq!(
+        (
+            diagnostics.objects,
+            diagnostics.calls,
+            diagnostics.resources,
+            diagnostics.roots
+        ),
+        (0, 0, 0, 0)
+    );
+}
+
+#[test]
+fn withdrawing_a_dependency_is_refused_without_changing_the_installed_provider() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        counter(1),
+        Orb::new("consumer", 1).requires(tembra::core::Requirement {
+            orb: "counter".into(),
+            api_version: 1,
+            methods: std::collections::BTreeMap::from([(
+                "counter".into(),
+                std::collections::BTreeSet::from(["read".into()]),
+            )]),
+            signatures: Default::default(),
+            hooks: Default::default(),
+            hook_signatures: Default::default(),
+        }),
+    ])
+    .unwrap();
+    assert!(
+        pool.run_until(host.remove(vec!["counter".into()], 5000))
+            .is_err()
+    );
+    assert!(host.kernel().orb_named("counter").is_ok());
+    pool.run_until(host.remove(vec!["consumer".into(), "counter".into()], 5000))
+        .unwrap();
+    assert!(host.kernel().installed_orbs().is_empty());
+    pool.run_until(host.close()).unwrap();
+}
